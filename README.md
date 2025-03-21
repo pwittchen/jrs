@@ -1,2 +1,2 @@
 # just
-java build system written in rust
+Java build system written in Rust
