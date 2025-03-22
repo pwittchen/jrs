@@ -17,3 +17,11 @@ Java build system written in Rust
 - ❌ executing unit tests
 - ❌ creating a "fat jar" with all dependencies included within it
 - ❌ parallel execution to make build process faster
+
+## Building, testing, running...
+
+```
+cargo build
+cargo test
+cargo run
+```
