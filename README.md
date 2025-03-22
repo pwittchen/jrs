@@ -1,9 +1,11 @@
 # just
 Java build system written in Rust
 
-## Disclaimer
+## ⚠️ Disclaimer
 
-This project is an experiment and does not cover all capabilities of the popular Java build systems like Maven or Gradle. Please don't use it in the production code.
+This project is an experiment and does not cover all capabilities of the popular Java build systems like Maven or Gradle. 
+
+Please, don't use it with the production code.
 
 ## Capabilities
 - ❌ compiling project into a single `*.jar` file
