@@ -9,6 +9,7 @@ Java build system written in Rust
 
 ## Capabilities
 - ❌ compiling project into a single `*.jar` file
+- ❌ handling build flags
 - ❌ compiling project consisting of multiple `*.java` files
 - ❌ downloading dependencies provided in the `*.toml` file
 - ❌ resolving depndendencies available in maven central repository
