@@ -1,4 +1,4 @@
-# just
+# jrs
 Java build system written in Rust
 
 ## Disclaimer
