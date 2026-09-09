@@ -5,7 +5,7 @@ It expands the capability list from [README.md](README.md) into a concrete scope
 so that implementation can start from agreed contracts instead of ad-hoc decisions.
 
 Status: **draft** — nothing here is implemented yet (`src/main.rs` is still the
-Cargo template). Every section is open to change; see [Open questions](#12-open-questions).
+Cargo template). Every section is open to change; see [Open questions](#13-open-questions).
 
 ---
 
@@ -31,7 +31,9 @@ Cargo template). Every section is open to change; see [Open questions](#12-open-
 - Non-Java JVM languages (Kotlin, Scala, Groovy).
 - Android, JPMS module descriptors, annotation-processor configuration,
   code generation, or IDE project file generation.
-- Being a drop-in Maven/Gradle replacement, or consuming their build files.
+- Being a drop-in Maven/Gradle replacement, or *building* from their build files.
+  Reading `pom.xml` / `build.gradle` is confined to the one-shot `jrs migrate`
+  command (§11); jrs never treats them as a build input at compile time.
 
 ### 1.3 Success criterion
 
@@ -160,6 +162,8 @@ reproducible and offline-capable. Regenerated when `jrs.toml` changes or when
 jrs <command> [options]
 ```
 
+### 5.1 Commands
+
 | Command | Behaviour |
 | --- | --- |
 | `jrs build` | Resolve → compile main sources → copy resources. |
@@ -171,8 +175,9 @@ jrs <command> [options]
 | `jrs tree` | Print the resolved dependency graph. |
 | `jrs update` | Re-resolve and rewrite `jrs.lock`. |
 | `jrs init` | Scaffold `jrs.toml` + `src/main/java/Main.java`. |
+| `jrs migrate` | Generate `jrs.toml` from an existing `pom.xml` or Gradle build (§11). |
 
-Global flags:
+### 5.2 Global flags
 
 | Flag | Effect |
 | --- | --- |
@@ -181,9 +186,139 @@ Global flags:
 | `--offline` | Fail rather than hit the network; use cache + lockfile only. |
 | `--jobs <n>` | Cap parallelism; defaults to available cores. |
 | `--manifest-path <p>` | Run against a manifest outside the CWD. |
+| `--progress <auto\|always\|never>` | Live animated output. `auto` = on when stderr is a TTY. |
+| `--color <auto\|always\|never>` | Colour and styling. `auto` = on when stderr is a TTY. |
+| `--charset <auto\|unicode\|ascii>` | Glyph set for spinners, bars and trees. |
 
 Exit codes: `0` success, `1` build/test failure, `2` usage or manifest error,
 `101` internal error (panic).
+
+### 5.3 Terminal output and progress
+
+A build tool spends most of its time waiting — on the network, on `javac` — and
+a static cursor makes a fast tool feel slow. `jrs` therefore ships a real
+terminal UI: animated spinners, live progress bars, and ASCII/Unicode art for
+the dependency graph and the build summary.
+
+The constraint that keeps this from becoming a liability: **the animation is a
+presentation layer over a build that would produce identical results without
+it.** It renders to stderr, degrades to plain lines whenever it is not talking
+to a human, and never delays the work.
+
+#### 5.3.1 Rules
+
+- **stderr only.** Progress, spinners and banners go to stderr; stdout carries
+  only real output (`jrs tree`, `jrs run`'s program output, `--dry-run`
+  manifests), so pipes and redirects stay clean.
+- **Degrade automatically.** Animation is off when stderr is not a TTY, under
+  `--quiet` or `--verbose` (verbose interleaves subprocess output, which would
+  fight the live region), when `NO_COLOR` or `TERM=dumb` is set, or when a CI
+  environment variable is detected. In that mode each phase prints one
+  plain line when it starts and one when it ends — a log, not a canvas.
+- **Never corrupt the terminal.** The cursor is hidden while a live region is
+  active and restored by a guard that runs on normal exit, on error, on panic
+  and on `SIGINT`/`SIGTERM`. Leaving a user with an invisible cursor is a bug
+  of the same severity as a wrong classpath.
+- **Never cost time.** Workers publish counters into shared state; a single
+  render thread ticks at a fixed ~80 ms (12.5 fps) and draws. No worker thread
+  ever writes to the terminal. `--progress never` must not change the build's
+  wall-clock beyond noise.
+- **Never scroll.** The live region is erased before any permanent line is
+  written above it, so scrollback contains a clean transcript with no
+  half-drawn frames. Lines are truncated to the terminal width — the live
+  region must never wrap, since wrapping breaks in-place redraw.
+- **Unicode with an ASCII fallback.** Every glyph has an ASCII twin, selected by
+  `--charset` or probed from the locale. No build output is Unicode-only.
+
+#### 5.3.2 Phase lines
+
+Cargo-style, right-aligned in 12 columns, verb in bold green:
+
+```
+    Resolving 14 dependencies
+  Downloading guava-33.0.0-jre.jar
+    Compiling my-app v1.0.0 (47 source files)
+    Packaging target/my-app-1.0.0.jar
+     Finished build in 2.31s
+```
+
+#### 5.3.3 Spinners
+
+Indeterminate work (POM resolution, `javac`) gets a spinner suffix, frames
+advancing on the render tick:
+
+```
+unicode: ⠋ ⠙ ⠹ ⠸ ⠼ ⠴ ⠦ ⠧ ⠇ ⠏
+ascii:   | / - \
+```
+
+#### 5.3.4 Download bars
+
+Parallel downloads render one bar per in-flight transfer, capped at `--jobs`
+lines (and at a third of the terminal height), redrawn in place:
+
+```
+  Downloading ⠹ 5/14
+  [████████████░░░░░░░░]  61%  guava-33.0.0-jre.jar        1.9/3.1 MB
+  [██████░░░░░░░░░░░░░░]  30%  commons-lang3-3.14.0.jar    0.2/0.6 MB
+  [████████████████████] 100%  checker-qual-3.42.0.jar     verifying…
+```
+
+ASCII fallback uses `[####----]`. Completed transfers collapse into a single
+summary line (`Downloaded 14 crates in 1.12s`) rather than leaving 14 dead bars
+in the scrollback.
+
+#### 5.3.5 Compilation and tests
+
+`javac` reports no progress, so compilation shows a spinner plus the source
+count. Tests do have progress: the runner parses the JUnit launcher's output and
+maintains a live counter, with a bar of per-test result marks.
+
+```
+    Compiling ⠼ 47 source files
+      Testing ⠦ 23/31  ✔✔✔✔✔✔✘✔✔✔✔  (22 passed, 1 failed)
+```
+
+ASCII fallback: `ok` / `FAIL`, and `+`/`x` marks.
+
+#### 5.3.6 Trees and summaries
+
+`jrs tree` draws box-drawing characters (`├──`, `└──`, `│`) with an ASCII
+fallback (`|--`, `` `-- ``), colouring conflict-mediated versions so the
+nearest-wins decision from §8.2 is visible at a glance.
+
+The final summary is a small framed block, printed once:
+
+```
+  ┌─ jrs ────────────────────────────────┐
+  │  build   ok      47 classes          │
+  │  deps    14      3 downloaded        │
+  │  jar     my-app-1.0.0.jar   412 KB   │
+  │  time    2.31s                       │
+  └──────────────────────────────────────┘
+```
+
+#### 5.3.7 Banner
+
+`jrs init` and `jrs migrate` open with a small ASCII wordmark — once, TTY only,
+never in the plain-output mode:
+
+```
+   _
+  (_)_ __ ___
+  | | '__/ __|
+  | | |  \__ \
+  |_|_|  |___/   a Java build system in Rust
+```
+
+No other command prints it. A banner on every `jrs build` would be charming
+exactly twice.
+
+#### 5.3.8 Errors
+
+The live region is torn down before any diagnostic is printed, so `javac`
+errors, resolution failures and panics always land in a clean terminal — §6.2's
+"toolchain output is passed through verbatim" wins over any animation.
 
 ---
 
@@ -209,9 +344,18 @@ src/
 │   ├── pom.rs        # POM XML parsing: deps, parent, properties, dependencyMgmt
 │   ├── repo.rs       # HTTP fetch, URL layout, checksum verification
 │   └── cache.rs      # local artifact store
+├── migrate/
+│   ├── mod.rs        # build-system detection, manifest emission, report
+│   ├── maven.rs      # pom.xml → Manifest (reuses resolve::pom)
+│   └── gradle.rs     # build.gradle[.kts] → Manifest
 ├── package.rs        # jar creation, MANIFEST.MF, fat-jar merging
 ├── runner.rs         # `java` invocation for run + test
 ├── test.rs           # test discovery and engine launch
+├── ui/
+│   ├── mod.rs        # output mode detection (TTY, NO_COLOR, CI), phase lines
+│   ├── render.rs     # render thread, live region, cursor guard
+│   ├── progress.rs   # shared counters, spinners, download bars
+│   └── glyphs.rs     # unicode/ascii glyph sets, tree drawing, banner
 └── error.rs          # error types, user-facing formatting
 ```
 
@@ -242,6 +386,10 @@ Project + Classpath ──► Compiler ──► target/classes/
   layer decides how to render it. No `unwrap()` outside tests.
 - **Toolchain output is passed through verbatim.** `javac` diagnostics are
   already good; jrs does not reformat them.
+- **The UI is a layer, not sprinkled `println!`s.** Build code reports progress
+  by updating shared state; only `ui/` touches the terminal. That is what keeps
+  the animated and the plain modes (§5.3) the same build, and what makes the
+  library testable without a TTY.
 
 ---
 
@@ -368,6 +516,11 @@ v1 rather than silently mishandled.
 - **Unit tests** per module: manifest parsing, coordinate parsing, POM parsing
   (against checked-in fixture XML), version comparison, conflict mediation,
   classpath ordering.
+- **Output tests** render `ui/` into an in-memory buffer with a fixed terminal
+  width and a frozen clock, so both the plain transcript and a sequence of
+  animation frames can be snapshot-asserted without a TTY. Width truncation and
+  the ASCII fallback get their own cases — they are exactly the paths a
+  developer on a Unicode terminal never exercises by hand.
 - **Integration tests** in `tests/`: fixture Java projects under
   `tests/fixtures/`, each built end to end through the library API.
   Network-dependent tests are gated behind a feature flag or run against a
@@ -393,13 +546,135 @@ v1 rather than silently mishandled.
 
 ---
 
-## 11. Roadmap
+## 11. Migration from Maven and Gradle
+
+The fastest way to get a project onto `jrs` is not to write `jrs.toml` by hand.
+`jrs migrate` reads an existing `pom.xml` or Gradle build and emits an
+equivalent manifest.
+
+This is a **one-shot, best-effort translation**, not an ongoing compatibility
+layer: it runs once, writes files, prints a report, and is then out of the
+picture. The original build files are left untouched, so the project can keep
+building with its old tool while the migration is evaluated.
+
+### 11.1 CLI
+
+```
+jrs migrate [--from maven|gradle] [--dry-run] [--force] [--path <dir>]
+```
+
+| Flag | Effect |
+| --- | --- |
+| `--from` | Force the source build system; otherwise auto-detected. |
+| `--dry-run` | Print the manifest that would be written; touch nothing. |
+| `--force` | Overwrite an existing `jrs.toml` (default: refuse). |
+| `--path <dir>` | Project root to migrate; defaults to the CWD. |
+
+Detection order: `pom.xml` → Maven; `build.gradle` / `build.gradle.kts` →
+Gradle; both present → error asking for `--from`; neither → exit `2` with a
+message naming what was looked for.
+
+Exit codes follow §5: `0` when a manifest was written (warnings do not change
+this), `2` when detection or parsing fails.
+
+### 11.2 Maven (`pom.xml`)
+
+The POM parser from `resolve/pom.rs` is reused, so property interpolation,
+parent chains and `<dependencyManagement>` already work.
+
+| POM element | Manifest target |
+| --- | --- |
+| `<artifactId>` | `project.name` |
+| `<version>` (own, after parent inheritance) | `project.version` |
+| `maven.compiler.release` / `.source` / `<release>` | `java.source` |
+| `maven.compiler.target` | `java.target` |
+| `project.build.sourceEncoding` | `java.encoding` |
+| `<sourceDirectory>`, `<testSourceDirectory>`, `<resources><directory>` | `project.source-dir`, `test-dir`, `resource-dir` — only when non-default |
+| `<build><directory>` | `project.target-dir` |
+| `<dependencies>` scope `compile`/`runtime` | `[dependencies]` |
+| `<dependencies>` scope `test` | `[dev-dependencies]` |
+| `<repositories>` | `[repositories]` |
+| `maven-jar-plugin` → `<mainClass>`, or `maven-shade-plugin`'s transformer | `project.main-class` |
+
+Reported, not translated:
+
+- `<modules>` — multi-module builds are out of scope (§1.2). jrs migrates the
+  module it was pointed at and lists the others so they can be migrated
+  individually.
+- `provided`/`system` scopes, `<optional>`, `<classifier>`, `<type>` other
+  than `jar`.
+- Any plugin other than `maven-compiler-plugin`, `maven-jar-plugin`,
+  `maven-surefire-plugin` and `maven-shade-plugin` — each is named in the
+  report as unmigrated.
+- Profiles: only the default-active ones are read; the rest are listed.
+
+### 11.3 Gradle (`build.gradle`, `build.gradle.kts`)
+
+Gradle build scripts are programs, so parsing them exactly would mean running
+Gradle. jrs does not. Instead it does **line-oriented pattern extraction** over
+the conventional declarative subset, and is explicit about the fact:
+
+- `dependencies { }` entries of the form
+  `implementation 'g:a:v'` / `implementation("g:a:v")` (also `api`,
+  `compileOnly`, `runtimeOnly` → `[dependencies]`;
+  `testImplementation`, `testRuntimeOnly` → `[dev-dependencies]`).
+- `group`, `version`, `rootProject.name` (also read from `settings.gradle`).
+- `sourceCompatibility` / `targetCompatibility` /
+  `java { toolchain { languageVersion = JavaLanguageVersion.of(n) } }`.
+- `application { mainClass = "..." }` / `mainClassName`.
+- `repositories { maven { url ... } }`; `mavenCentral()` is implicit.
+
+Anything jrs cannot read confidently is skipped and reported — never guessed:
+
+- Version catalogs (`libs.versions.toml`) are parsed when present, since they
+  are declarative; `libs.foo.bar` references are resolved through them.
+  Unresolvable aliases become a warning with the reference left in a comment.
+- Dependencies built from variables, `ext` blocks, loops or conditionals.
+- Custom tasks, plugins, `subprojects { }` / `allprojects { }`,
+  and multi-project `settings.gradle` includes (listed, not migrated).
+
+The report opens with a plain statement that Gradle migration is approximate
+and the emitted manifest must be reviewed.
+
+### 11.4 Output
+
+1. `jrs.toml` in the project root. Nothing is overwritten without `--force`.
+2. A comment header in the generated manifest naming the source file and the
+   jrs version that produced it.
+3. A migration report on stdout, in three blocks:
+   - **Migrated** — what landed in the manifest.
+   - **Needs review** — translated but lossy (e.g. a version range clamped to
+     its lower bound, a non-default layout).
+   - **Not migrated** — plugins, modules and constructs skipped, each with a
+     one-line reason.
+4. A suggested next step: `jrs build`, then `jrs tree` to compare the resolved
+   graph against `mvn dependency:tree` / `gradle dependencies`.
+
+Migration never runs a build, never deletes files, and never writes outside the
+project root.
+
+### 11.5 Testing
+
+- Fixture `pom.xml` and `build.gradle[.kts]` files under
+  `tests/fixtures/migrate/`, each paired with the expected `jrs.toml`; the test
+  asserts an exact match so translation stays reviewable in diffs.
+- Round-trip check on a fixture project: migrate, then `jrs build`, and assert
+  the resolved classpath matches a checked-in expectation.
+- Fixtures deliberately include unsupported constructs, so the "not migrated"
+  report is tested too.
+
+---
+
+## 12. Roadmap
 
 Milestones map one-to-one onto the README capability list, ordered so each one
 produces something runnable.
 
 ### M1 — Skeleton
 - CLI scaffolding, `manifest.rs`, `toolchain.rs`, `jrs clean`, `jrs init`.
+- `ui/` in its plain form: mode detection, phase lines, the cursor guard.
+  Landing the output layer first means no later milestone has to be retrofitted
+  away from ad-hoc printing; the animated renderer arrives in M5.
 - No README checkbox yet; unblocks everything below.
 
 ### M2 — Compile and package
@@ -417,22 +692,31 @@ produces something runnable.
 - ☐ executing unit tests
 - ☐ creating a "fat jar" with all dependencies included within it
 
-### M5 — Performance
+### M5 — Performance and polish
 - ☐ parallel execution to make build process faster
+- ☐ animated progress output: spinners, live download bars, ASCII summary (§5.3)
 - Benchmark against a fixture project with ~20 transitive dependencies;
-  target: resolution dominated by network, not by jrs.
+  target: resolution dominated by network, not by jrs. Re-run the benchmark with
+  `--progress never` to prove the renderer costs nothing measurable.
+
+### M6 — Migration
+- ☐ migrating a project from Maven (`pom.xml`)
+- ☐ migrating a project from Gradle (`build.gradle`, `build.gradle.kts`)
+- Deliberately last: migration is only useful once every feature it can
+  translate into actually works, and it reuses `resolve/pom.rs` from M3.
 
 Tick the corresponding README boxes as each lands — the README is the
 user-facing progress tracker, this document is the design behind it.
 
 ---
 
-## 12. Open questions
+## 13. Open questions
 
 1. **Dependency crates.** Which to take on? Candidates: `clap` (CLI),
    `serde` + `toml` (manifest), `ureq`/`reqwest` (HTTP), `quick-xml`
    (POM), `zip` (jar), `rayon` (parallelism), `thiserror` (errors),
-   `sha1`/`sha2` (checksums). Each one costs compile time and readability;
+   `sha1`/`sha2` (checksums), `indicatif` + `console` (progress UI).
+   Each one costs compile time and readability;
    the experiment's value argues for a minimal set.
 2. **Async or threads?** `rayon` + blocking `ureq` keeps the code simple and
    is likely fast enough given downloads are the bottleneck; `tokio` +
@@ -451,3 +735,15 @@ user-facing progress tracker, this document is the design behind it.
 8. **Windows support.** Path separators (`;` vs `:`) on the classpath and
    `.exe` suffixes on toolchain binaries need handling from the start if it is
    in scope at all.
+9. **Gradle migration fidelity.** Pattern extraction (§11.3) is honest but
+   limited. The alternative — shelling out to `gradle dependencies` and parsing
+   its output — is far more accurate, at the cost of requiring a working Gradle
+   install and a slow build. Worth offering as an opt-in `--probe` flag?
+10. **Hand-rolled renderer or `indicatif`?** `indicatif` gives multi-bar layout,
+    tick threads and terminal-width handling for free; hand-rolling it is maybe
+    300 lines of ANSI escapes and is more in the spirit of a build system whose
+    value is being readable end to end. The `ui/` boundary (§6.2) means this can
+    be decided late and reversed.
+11. **Should `jrs migrate` offer multi-module output?** A Maven aggregator could
+    emit one `jrs.toml` per module. That is a useful escape hatch, but it edges
+    towards the multi-module support §1.2 rules out.
