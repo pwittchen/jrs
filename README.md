@@ -1,26 +1,37 @@
 # jrs
-Java build system written in Rust
 
-## Disclaimer
+[![Rust](https://github.com/pwittchen/jrs/actions/workflows/rust.yml/badge.svg)](https://github.com/pwittchen/jrs/actions/workflows/rust.yml)
 
-- ⚠️ This project is an experiment
-- ⚠️ It does not cover all capabilities of the popular Java build systems like Maven or Gradle
-- ⚠️ Please, don't use it with the production code
+A Java build system, written in Rust.
 
-## Capabilities
-- ✅ compiling project into a single `*.jar` file
-- ✅ handling build flags
-- ✅ compiling project consisting of multiple `*.java` files
-- ✅ downloading dependencies provided in the `*.toml` file
-- ✅ resolving depndendencies available in maven central repository
-- ✅ resolving transitive dependencies
-- ✅ running compiled project
-- ✅ executing unit tests
-- ✅ creating a "fat jar" with all dependencies included within it
-- ✅ parallel execution to make build process faster
-- ✅ animated progress output: spinners, live download bars, ASCII summary
-- ✅ migrating a project from Maven (`pom.xml`)
-- ✅ migrating a project from Gradle (`build.gradle`, `build.gradle.kts`)
+jrs builds, tests, runs and packages a single-module Java project from one
+`jrs.toml` manifest, resolving dependencies from Maven Central. It aims for the
+ergonomics of Cargo: a small manifest, a committed lockfile, one binary, and no
+build script to write.
+
+## Project status
+
+jrs is an experimental, single-module build system, not a replacement for Maven
+or Gradle. It implements a deliberately narrow subset of what those tools do —
+there is no plugin system, no multi-module reactor, and no custom build
+lifecycle. It is offered as-is under the Apache 2.0 licence; evaluate it against
+your own requirements before adopting it for production builds.
+
+## Features
+
+- Dependency resolution against Maven Central and additional repositories, with
+  transitive dependencies and nearest-wins version mediation
+- Checksum-verified downloads into a shared local cache, plus an `--offline` mode
+- A committed `jrs.lock` for reproducible resolution
+- Compilation of multi-file source trees with configurable `javac` flags
+- JUnit 5 test execution with class-name filtering
+- Packaging to a plain jar or a self-contained fat jar
+- Running the project's main class directly
+- Parallel resolution, download and compilation
+- Progress output that adapts to the terminal: spinners, live download bars and
+  a build summary, with ASCII and no-colour fallbacks
+- One-shot migration from Maven (`pom.xml`) and Gradle (`build.gradle`,
+  `build.gradle.kts`)
 
 See [SPEC.md](SPEC.md) for the design behind them.
 
@@ -28,6 +39,18 @@ See [SPEC.md](SPEC.md) for the design behind them.
 
 A JDK 17 or newer on `PATH`, or pointed at by `JAVA_HOME`. jrs shells out to
 `javac`, `java` and `jar`; it does not bundle a compiler.
+
+Building jrs itself requires a Rust toolchain with edition 2024 support.
+
+## Installation
+
+```
+git clone https://github.com/pwittchen/jrs.git
+cd jrs
+cargo install --path .
+```
+
+This places the `jrs` binary in `~/.cargo/bin`.
 
 ## Getting started
 
@@ -49,7 +72,7 @@ my-project/
 └── target/                   # generated, git-ignored
 ```
 
-### `jrs.toml`
+## The manifest
 
 ```toml
 [project]
@@ -68,26 +91,83 @@ javac-args = ["-Xlint:all", "-Werror"]
 "org.junit.jupiter:junit-jupiter" = "5.10.2"
 ```
 
+### `[project]`
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `name` | — | Required. Also names the packaged jar. |
+| `version` | — | Required. |
+| `main-class` | — | Entry point for `run` and `package --fat`. |
+| `source-dir` | `src/main/java` | Production sources. |
+| `test-dir` | `src/test/java` | Test sources. |
+| `resource-dir` | `src/main/resources` | Copied into the jar. |
+| `target-dir` | `target` | Build output. |
+
+### `[java]`
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `source` | the toolchain's release | `javac --release`. |
+| `target` | — | Set only when it differs from `source`. |
+| `encoding` | `UTF-8` | `javac -encoding`. |
+| `javac-args` | `[]` | Extra flags passed through verbatim. |
+
+### `[dependencies]` and `[dev-dependencies]`
+
+Each entry maps a `"group:artifact"` coordinate to a version string.
+`[dev-dependencies]` are on the test classpath only and are excluded from a fat
+jar.
+
+### `[repositories]`
+
+Additional repositories, tried in declaration order. Maven Central is implicit
+and always tried last.
+
+```toml
+[repositories]
+internal = "https://repo.example.com/maven2"
+```
+
 ## Commands
 
 | Command | Behaviour |
 | --- | --- |
 | `jrs build` | Resolve → compile main sources → copy resources. |
-| `jrs test` | `build` + compile test sources + run JUnit 5. |
+| `jrs test [--filter <pattern>]` | `build` + compile test sources + run JUnit 5. |
 | `jrs run [-- args...]` | `build` + run `main-class` with `args`. |
 | `jrs package` | `build` + produce `target/<name>-<version>.jar`. |
 | `jrs package --fat` | Same, with every runtime dependency unpacked into the jar. |
 | `jrs clean` | Remove `target/`. |
 | `jrs tree` | Print the resolved dependency graph. |
 | `jrs update` | Re-resolve and rewrite `jrs.lock`. |
-| `jrs init` | Scaffold `jrs.toml` + `src/main/java/com/example/Main.java`. |
+| `jrs init [--name <name>] [path]` | Scaffold `jrs.toml` + `src/main/java/com/example/Main.java`. |
 | `jrs migrate` | Generate `jrs.toml` from an existing `pom.xml` or Gradle build. |
 
-Global flags: `-v/--verbose`, `-q/--quiet`, `--offline`, `--jobs <n>`,
-`--manifest-path <p>`, `--progress <auto\|always\|never>`,
-`--color <auto\|always\|never>`, `--charset <auto\|unicode\|ascii>`.
+Global flags: `-v/--verbose`, `-q/--quiet`, `--offline`, `-j/--jobs <n>`,
+`--manifest-path <p>`, `--progress <auto|always|never>`,
+`--color <auto|always|never>`, `--charset <auto|unicode|ascii>`.
 
 Exit codes: `0` success, `1` build or test failure, `2` usage or manifest error.
+
+`jrs package` writes a thin jar whose `Class-Path` points at the cached
+dependency jars, so `java -jar` works without a classpath argument on the
+machine that built it. `--fat` unpacks those dependencies into the jar instead,
+producing an artifact that runs anywhere.
+
+## Dependency cache
+
+Downloaded artifacts are stored in a shared, Maven-layout cache outside the
+project:
+
+| Platform | Location |
+| --- | --- |
+| macOS | `~/Library/Caches/jrs` |
+| Linux and other Unix | `$XDG_CACHE_HOME/jrs`, else `~/.cache/jrs` |
+| Windows | `%LOCALAPPDATA%\jrs\cache` |
+
+Set `JRS_CACHE_DIR` to override it — useful for CI, where the cache is worth
+persisting between runs. Writes are atomic and checksum-verified, so the cache
+is safe to share between concurrent builds.
 
 ## Migrating an existing project
 
@@ -96,12 +176,16 @@ jrs migrate --dry-run      # see the manifest that would be written
 jrs migrate                # write jrs.toml; the original build file is untouched
 ```
 
+`--from <system>` forces the source build system instead of detecting it,
+`--force` overwrites an existing `jrs.toml`, and `--path <dir>` selects a project
+root other than the current directory.
+
 Migration is a one-shot, best-effort translation. It prints a report in three
 blocks — what was migrated, what needs review, and what was skipped, each with a
 reason. Gradle migration in particular reads the declarative subset of a build
 script by pattern rather than by running Gradle, and says so.
 
-## Building, testing, running...
+## Development
 
 ```
 cargo build
@@ -119,3 +203,10 @@ cargo test --features network-tests --test network
 
 The integration tests build real Java fixture projects, so they need a JDK; they
 announce that they were skipped if there is none.
+
+CI runs `cargo fmt --check`, `cargo clippy --all-targets -D warnings`,
+`cargo build` and `cargo test` on every push and pull request against `master`.
+
+## Licence
+
+Apache License 2.0. See [LICENSE](LICENSE).
