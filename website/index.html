@@ -1,0 +1,239 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>jrs, a JVM build system written in Rust</title>
+    <meta
+      name="description"
+      content="jrs builds, tests, runs and packages a Java, Kotlin, Scala or Groovy project from one jrs.toml manifest, resolving dependencies from Maven Central."
+    />
+    <meta name="theme-color" content="#16110d" />
+    <link rel="icon" type="image/png" href="../logo.png" />
+    <link rel="stylesheet" href="./src/style.css" />
+    <script type="module" src="./src/main.ts"></script>
+  </head>
+  <body>
+    <main id="top">
+      <section class="hero wrap">
+        <div class="hero-mark">
+          <img class="hero-logo" src="../logo.png" alt="The jrs logo: a crab sitting in a cup of coffee" width="260" height="260" />
+          <a class="version" data-version href="https://github.com/pwittchen/jrs/releases" title="Release notes"></a>
+        </div>
+        <div class="hero-text">
+          <h1>A JVM build system, written&nbsp;in&nbsp;Rust.</h1>
+          <p class="lede">
+            jrs builds, tests, runs and packages a Java project from one <code>jrs.toml</code>.
+            Kotlin, Scala and Groovy compile alongside. A small manifest, a committed lockfile,
+            one binary, and no build script to write.
+          </p>
+          <div class="cta">
+            <a class="button primary" href="#install">Install jrs</a>
+            <a class="button" href="https://github.com/pwittchen/jrs#readme">Docs</a>
+            <a class="button" href="https://github.com/pwittchen/jrs">GitHub</a>
+          </div>
+        </div>
+      </section>
+
+      <section class="wrap demo" aria-label="A jrs build, replayed">
+        <div class="term">
+          <div class="term-bar">
+            <span class="term-path">~/wordstats</span>
+            <button class="term-replay" type="button" data-replay>Replay</button>
+          </div>
+          <pre class="term-body" data-term aria-live="off"></pre>
+        </div>
+      </section>
+
+      <section class="wrap section">
+        <h2>One manifest, no build script</h2>
+        <p class="section-lede">
+          A project is a <code>jrs.toml</code> and a source tree. Resolution writes
+          <code>jrs.lock</code>, which you commit. Everything under <code>target/</code> can be
+          thrown away and rebuilt.
+        </p>
+        <div class="split">
+          <figure class="code">
+            <figcaption>jrs.toml</figcaption>
+<pre data-lang="toml">[project]
+name = "my-app"
+version = "1.0.0"
+main-class = "com.example.Main"
+
+[java]
+source = 21                    # javac --release 21
+javac-args = ["-Xlint:all"]
+
+[kotlin]                       # optional: Kotlin beside Java
+version = "2.4.20"
+
+[dependencies]
+"com.google.guava:guava" = "33.0.0-jre"
+
+[dev-dependencies]             # test classpath only
+"org.junit.jupiter:junit-jupiter" = "5.10.2"</pre>
+          </figure>
+          <figure class="code">
+            <figcaption>my-app/</figcaption>
+<pre data-lang="tree">my-app/
+├── jrs.toml
+├── jrs.lock               # commit it
+├── src/
+│   ├── main/java/
+│   ├── main/kotlin/
+│   ├── main/resources/
+│   └── test/java/
+└── target/                # disposable</pre>
+          </figure>
+        </div>
+      </section>
+
+      <section class="wrap section">
+        <h2>What it does</h2>
+        <dl class="phases">
+          <div>
+            <dt>Resolving</dt>
+            <dd>
+              Dependencies from Maven Central and your own repositories: transitive graphs,
+              nearest-wins mediation, exclusions, classifiers, compile-only deps and SNAPSHOTs.
+            </dd>
+          </div>
+          <div>
+            <dt>Pinning</dt>
+            <dd>
+              Every version and checksum in a committed <code>jrs.lock</code>. Downloads are
+              verified into a shared cache, and <code>--offline</code> builds use only that cache.
+            </dd>
+          </div>
+          <div>
+            <dt>Compiling</dt>
+            <dd>
+              Java, with Kotlin, Scala or Groovy beside it, calling each other both ways. Each
+              compiler is fetched from Maven Central, pinned, and run on your JDK.
+            </dd>
+          </div>
+          <div>
+            <dt>Testing</dt>
+            <dd>
+              JUnit 5 and 6, JUnit 4, Spock, Kotest, ScalaTest and MUnit. Filter by class, tag or
+              method; get JUnit XML reports and JaCoCo coverage.
+            </dd>
+          </div>
+          <div>
+            <dt>Packaging</dt>
+            <dd>
+              A plain, portable or fat jar with byte-identical output on every build, a trimmed
+              <code>jlink</code> runtime, or a native installer via <code>jpackage</code>.
+            </dd>
+          </div>
+          <div>
+            <dt>Running</dt>
+            <dd>Your main class, directly. Add <code>--watch</code> to rebuild on every change.</dd>
+          </div>
+          <div>
+            <dt>Tasks</dt>
+            <dd>
+              Code generators, checksums and chores declared in <code>jrs.toml</code>, run as
+              subprocesses at fixed hooks. They can extend the build but never reorder it.
+            </dd>
+          </div>
+          <div>
+            <dt>Migrating</dt>
+            <dd>
+              A one-shot <code>jrs.toml</code> from <code>pom.xml</code>, <code>build.gradle</code>
+              or <code>build.gradle.kts</code>, with a report of what needs review.
+            </dd>
+          </div>
+          <div>
+            <dt>Inspecting</dt>
+            <dd>
+              <code>jrs tree --why</code>, <code>jrs outdated</code>, <code>jrs classpath</code>,
+              and <code>jrs add</code> / <code>remove</code> that keep your comments intact.
+            </dd>
+          </div>
+        </dl>
+      </section>
+
+      <section class="wrap section" id="install">
+        <h2>Install</h2>
+        <p class="section-lede">
+          jrs is one binary. It needs a JDK 17 or newer on <code>PATH</code> or at
+          <code>JAVA_HOME</code>, and fetches the Kotlin, Scala and Groovy compilers itself.
+        </p>
+
+        <div class="tabs" role="tablist" aria-label="Installation method">
+          <button role="tab" id="tab-unix" aria-controls="panel-unix" aria-selected="true">macOS &amp; Linux</button>
+          <button role="tab" id="tab-windows" aria-controls="panel-windows" aria-selected="false" tabindex="-1">Windows</button>
+          <button role="tab" id="tab-source" aria-controls="panel-source" aria-selected="false" tabindex="-1">Source</button>
+        </div>
+
+        <div class="panel" role="tabpanel" id="panel-unix" aria-labelledby="tab-unix">
+          <label class="target">
+            <span>Platform</span>
+            <select data-target>
+              <option value="aarch64-apple-darwin">macOS, Apple Silicon</option>
+              <option value="x86_64-apple-darwin">macOS, Intel</option>
+              <option value="x86_64-unknown-linux-musl">Linux, x86_64</option>
+              <option value="aarch64-unknown-linux-musl">Linux, ARM64</option>
+            </select>
+          </label>
+          <div class="shell">
+            <pre><code data-unix-install></code></pre>
+            <button class="copy" type="button">Copy</button>
+          </div>
+          <p class="note">Installs into <code>~/.local/bin</code>, which must be on your <code>PATH</code>. The Linux binaries are static and run on any distribution.</p>
+        </div>
+
+        <div class="panel" role="tabpanel" id="panel-windows" aria-labelledby="tab-windows" hidden>
+          <div class="shell">
+            <pre><code>curl.exe -fsSLO https://github.com/pwittchen/jrs/releases/latest/download/jrs-x86_64-pc-windows-msvc.zip
+tar -xf jrs-x86_64-pc-windows-msvc.zip jrs.exe</code></pre>
+            <button class="copy" type="button">Copy</button>
+          </div>
+          <p class="note">Run in PowerShell, then move <code>jrs.exe</code> to a directory on your <code>PATH</code>.</p>
+        </div>
+
+        <div class="panel" role="tabpanel" id="panel-source" aria-labelledby="tab-source" hidden>
+          <div class="shell">
+            <pre><code>git clone https://github.com/pwittchen/jrs.git
+cd jrs
+cargo install --path .</code></pre>
+            <button class="copy" type="button">Copy</button>
+          </div>
+          <p class="note">Needs a Rust toolchain with edition 2024 support. The binary lands in <code>~/.cargo/bin</code>.</p>
+        </div>
+
+        <p class="note">Each <a href="https://github.com/pwittchen/jrs/releases">release</a> also ships a <code>SHA256SUMS</code> file for verifying the downloads.</p>
+
+        <h3>Then</h3>
+        <div class="shell">
+<pre><code>jrs init            <span class="c"># scaffold jrs.toml, a main class and its test</span>
+jrs run
+jrs test
+jrs migrate         <span class="c"># or start from an existing pom.xml / build.gradle</span></code></pre>
+          <button class="copy" type="button">Copy</button>
+        </div>
+      </section>
+
+      <section class="wrap section status">
+        <h2>Status</h2>
+        <p>
+          jrs is experimental, and it is not a replacement for Maven or Gradle. It builds
+          single-module projects and implements a deliberately narrow subset of what those tools
+          do: no plugin system, no build DSL, no multi-module reactor. Evaluate it against your
+          own requirements before adopting it for production builds.
+        </p>
+        <p>
+          The <a href="https://github.com/pwittchen/jrs/blob/master/ROADMAP.md">roadmap</a> lists
+          the known gaps, and the <a href="https://github.com/pwittchen/jrs/blob/master/specs/INITIAL_SPEC.md">spec</a>
+          explains the design behind them.
+        </p>
+      </section>
+    </main>
+
+    <footer class="wrap foot">
+      <span>Apache License 2.0</span>
+      <a href="https://github.com/pwittchen/jrs">github.com/pwittchen/jrs</a>
+    </footer>
+  </body>
+</html>
