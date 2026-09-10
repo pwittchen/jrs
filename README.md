@@ -722,10 +722,10 @@ git push origin v0.2.0
 ```
 
 CI runs the same checks, writes the version into `Cargo.toml` and `Cargo.lock`,
-commits that to `master` and moves the tag onto the new commit, then builds the
-binaries for every platform above and publishes them as a GitHub release. Run
-`git pull` and `git fetch --tags --force` afterwards to pick up the version commit
-and the moved tag.
+commits that to `master`, then builds the binaries for every platform above from
+that commit and publishes them as a GitHub release under the tag. The tag stays on
+the commit you pushed it on; run `git pull` afterwards to pick up the version
+commit.
 
 ## Licence
 

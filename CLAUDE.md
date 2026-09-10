@@ -31,9 +31,9 @@ Windows (`fmt` on Linux only), plus the network tests on Linux, on push and PR
 against `master`. Changes that only touch `*.md` or `LICENSE` are excluded
 via `paths-ignore` — they cannot break the build, so they do not run it. A `v*` tag
 push runs the same checks, then `bump` writes the tag's version into `Cargo.toml`
-and `Cargo.lock`, commits it to `master` and moves the tag onto that commit, the
-`dist` matrix builds release binaries for Linux (musl), macOS and Windows from it,
-and `release` publishes them. The tag must point at the tip of `master`. Don't
+and `Cargo.lock` and commits it to `master` (the tag itself is never moved), the
+`dist` matrix builds release binaries for Linux (musl), macOS and Windows from that
+commit, and `release` publishes them. The tag must point at the tip of `master`. Don't
 bump the version by hand — tagging is the release process.
 
 Single tests and single suites:
