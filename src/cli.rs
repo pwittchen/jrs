@@ -7,6 +7,7 @@
 
 use std::cell::OnceCell;
 use std::collections::{HashMap, HashSet};
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -25,7 +26,7 @@ use crate::migrate;
 use crate::package::{self, JarManifest};
 use crate::project::{self, Project, Snapshot};
 use crate::resolve::cache::{Cache, Prune};
-use crate::resolve::coord::Ga;
+use crate::resolve::coord::{Coord, Ga};
 use crate::resolve::metadata;
 use crate::resolve::repo::{Fetcher, Network};
 use crate::resolve::{self, Classpath, Resolution, UiReporter};
@@ -125,6 +126,7 @@ impl GlobalFlags {
         self.jobs.filter(|j| *j > 0).unwrap_or_else(default_jobs)
     }
 
+    #[must_use]
     pub fn ui_options(&self) -> UiOptions {
         UiOptions {
             verbose: self.verbose,
@@ -148,7 +150,7 @@ fn effective_jobs(flag: Option<usize>, config: Option<usize>) -> usize {
 /// beats one even on a single-core machine (SPEC §8.4).
 fn default_jobs() -> usize {
     std::thread::available_parallelism()
-        .map(|n| n.get())
+        .map(std::num::NonZero::get)
         .unwrap_or(4)
         .max(4)
 }
@@ -282,16 +284,16 @@ pub struct TestArgs {
     /// Only run classes matching this regular expression.
     #[arg(long, value_name = "PATTERN")]
     pub filter: Option<String>,
-    /// Only run tests with this tag (a JUnit tag expression); repeatable.
+    /// Only run tests with this tag (a `JUnit` tag expression); repeatable.
     #[arg(long, value_name = "TAG")]
     pub include_tag: Vec<String>,
-    /// Skip tests with this tag (a JUnit tag expression); repeatable.
+    /// Skip tests with this tag (a `JUnit` tag expression); repeatable.
     #[arg(long, value_name = "TAG")]
     pub exclude_tag: Vec<String>,
     /// Run one test method, as `com.example.FooTest#bar`; repeatable.
     #[arg(long, value_name = "CLASS#METHOD")]
     pub method: Vec<String>,
-    /// Record coverage with JaCoCo; the report lands in target/coverage.
+    /// Record coverage with `JaCoCo`; the report lands in target/coverage.
     #[arg(long)]
     pub coverage: bool,
     /// Test again whenever a source, a resource or jrs.toml changes.
@@ -333,6 +335,7 @@ pub enum CacheCommand {
 }
 
 /// Parse arguments, run the command, and turn the result into an exit code.
+#[must_use]
 pub fn main() -> i32 {
     let cli = match Cli::try_parse() {
         Ok(cli) => cli,
@@ -385,6 +388,10 @@ fn dispatch(cli: &Cli, ui: &Ui) -> Result<i32> {
             compile_only,
         } => return add_command(cli, ui, coordinates, *dev, *compile_only),
         Command::Remove { keys, dev } => return remove_command(cli, ui, keys, *dev),
+        #[allow(
+            clippy::redundant_closure_for_method_calls,
+            reason = "`Session::build_command` does not satisfy watch's higher-ranked bound"
+        )]
         Command::Build { watch: true } => return watch(cli, ui, |s| s.build_command()),
         Command::Test(args) if args.watch => return watch(cli, ui, |s| s.test_command(args)),
         _ => {}
@@ -795,22 +802,7 @@ impl<'a> Session<'a> {
             internal.push((junit::jacoco_agent(&jacoco), "coverage agent"));
             internal.push((junit::jacoco_cli(&jacoco), "coverage report"));
         }
-        let fetcher = self.fetcher()?;
-        let missing: Vec<_> = internal
-            .iter()
-            .filter(|(c, _)| !fetcher.cache().contains(c, "jar"))
-            .collect();
-        for (coord, what) in &missing {
-            self.ui
-                .phase("Downloading", format!("{} ({what})", coord.artifact));
-        }
-        let scope = self.ui.downloads(missing.len());
-        let fetched: Result<Vec<PathBuf>> = internal
-            .iter()
-            .map(|(coord, _)| fetcher.jar(coord).map(|(path, _)| path))
-            .collect();
-        scope.finish();
-        let fetched = fetched?;
+        let fetched = self.fetch_internal(&internal)?;
 
         let mut test_classpath = vec![project.test_classes_dir()];
         test_classpath.extend(classpath);
@@ -848,30 +840,7 @@ impl<'a> Session<'a> {
         // Coverage is reported for a failing run too: which code the failing
         // tests reached is part of working out why.
         if args.coverage && exec.is_file() {
-            let html = project.target_dir().join("coverage");
-            if html.exists() {
-                std::fs::remove_dir_all(&html).path(&html)?;
-            }
-            std::fs::create_dir_all(&html).path(&html)?;
-            self.ui
-                .phase("Reporting", format!("coverage into {}", html.display()));
-            let report = junit::CoverageReport {
-                exec,
-                classes: project.classes_dir(),
-                sources: self.manifest.source_path(),
-                xml: html.join("jacoco.xml"),
-                html: html.clone(),
-                name: self.manifest.name.clone(),
-            };
-            let coverage = junit::report_coverage(&toolchain, &report, &fetched[2], self.ui)?;
-            self.ui.phase(
-                "Coverage",
-                format!(
-                    "{} ({})",
-                    coverage.describe(),
-                    html.join("index.html").display()
-                ),
-            );
+            self.coverage_report(&project, &toolchain, exec, &fetched[2])?;
         }
 
         self.ui.phase(
@@ -885,6 +854,62 @@ impl<'a> Session<'a> {
             // them, only say that the run failed.
             Err(JrsError::test("tests failed"))
         }
+    }
+
+    /// Fetch jrs's own test-time tools, announcing the ones not cached yet.
+    /// The jars come back in the order of `internal`.
+    fn fetch_internal(&self, internal: &[(Coord, &str)]) -> Result<Vec<PathBuf>> {
+        let fetcher = self.fetcher()?;
+        let missing: Vec<_> = internal
+            .iter()
+            .filter(|(c, _)| !fetcher.cache().contains(c, "jar"))
+            .collect();
+        for (coord, what) in &missing {
+            self.ui
+                .phase("Downloading", format!("{} ({what})", coord.artifact));
+        }
+        let scope = self.ui.downloads(missing.len());
+        let jars: Result<Vec<PathBuf>> = internal
+            .iter()
+            .map(|(coord, _)| fetcher.jar(coord).map(|(path, _)| path))
+            .collect();
+        scope.finish();
+        jars
+    }
+
+    /// Render `exec` into `target/coverage`, with the report tool at `cli_jar`.
+    fn coverage_report(
+        &self,
+        project: &Project<'_>,
+        toolchain: &Toolchain,
+        exec: PathBuf,
+        cli_jar: &Path,
+    ) -> Result<()> {
+        let html = project.target_dir().join("coverage");
+        if html.exists() {
+            std::fs::remove_dir_all(&html).path(&html)?;
+        }
+        std::fs::create_dir_all(&html).path(&html)?;
+        self.ui
+            .phase("Reporting", format!("coverage into {}", html.display()));
+        let report = junit::CoverageReport {
+            exec,
+            classes: project.classes_dir(),
+            sources: self.manifest.source_path(),
+            xml: html.join("jacoco.xml"),
+            html: html.clone(),
+            name: self.manifest.name.clone(),
+        };
+        let coverage = junit::report_coverage(toolchain, &report, cli_jar, self.ui)?;
+        self.ui.phase(
+            "Coverage",
+            format!(
+                "{} ({})",
+                coverage.describe(),
+                html.join("index.html").display()
+            ),
+        );
+        Ok(())
     }
 
     fn doc_command(&self) -> Result<i32> {
@@ -1148,9 +1173,10 @@ impl<'a> Session<'a> {
         }
         let mut message = format!("{verified} artifacts against {}", lock_path.display());
         if not_cached > 0 {
-            message.push_str(&format!(
+            let _ = write!(
+                message,
                 " ({not_cached} not cached; checked when they are downloaded)"
-            ));
+            );
         }
         self.ui.phase("Verified", message);
         Ok(exit::SUCCESS)
@@ -1346,13 +1372,12 @@ impl<'a> Session<'a> {
         let mut seen = Vec::new();
         for ga in resolution.roots.iter().chain(&resolution.test_roots) {
             root.children
-                .push(self.tree_node(resolution, ga, &mut seen, 0, limit));
+                .push(Self::tree_node(resolution, ga, &mut seen, 0, limit));
         }
         root
     }
 
     fn tree_node(
-        &self,
         resolution: &Resolution,
         ga: &Ga,
         seen: &mut Vec<Ga>,
@@ -1376,7 +1401,7 @@ impl<'a> Session<'a> {
         if limit.is_none_or(|l| depth + 1 < l) {
             for child in &package.dependencies {
                 node.children
-                    .push(self.tree_node(resolution, child, seen, depth + 1, limit));
+                    .push(Self::tree_node(resolution, child, seen, depth + 1, limit));
             }
         }
         node
@@ -1398,7 +1423,7 @@ impl<'a> Session<'a> {
                 }
                 None => p.coord.artifact == target,
             })
-            .map(|p| p.ga())
+            .map(resolve::ResolvedPackage::ga)
             .collect();
         if matches.is_empty() {
             return Err(JrsError::usage(format!(
@@ -1587,21 +1612,20 @@ fn add_command(
             [g, a, v, c] => (*g, *a, Some(v.to_string()), Some(c.to_string())),
             _ => return Err(bad()),
         };
-        let version = match version {
-            Some(v) => v,
-            None => {
-                ui.phase(
-                    "Looking up",
-                    format!("the newest release of {group}:{artifact}"),
-                );
-                let known = fetcher.metadata(group, artifact)?;
-                metadata::newest_release(&known).ok_or_else(|| {
-                    JrsError::resolve(format!(
-                        "`{group}:{artifact}` has no stable release to add\n\n\
-                         name a version: `jrs add {group}:{artifact}:<version>`"
-                    ))
-                })?
-            }
+        let version = if let Some(v) = version {
+            v
+        } else {
+            ui.phase(
+                "Looking up",
+                format!("the newest release of {group}:{artifact}"),
+            );
+            let known = fetcher.metadata(group, artifact)?;
+            metadata::newest_release(&known).ok_or_else(|| {
+                JrsError::resolve(format!(
+                    "`{group}:{artifact}` has no stable release to add\n\n\
+                     name a version: `jrs add {group}:{artifact}:<version>`"
+                ))
+            })?
         };
         let mut dep = Dependency::new(group, artifact, version);
         dep.classifier = classifier;
@@ -1617,7 +1641,7 @@ fn add_command(
             match &edited {
                 edit::Edited::Added(_) => ui.phase("Adding", format!("{dep} to [{section}]")),
                 edit::Edited::Replaced { previous, .. } => {
-                    ui.phase("Updating", format!("{key} from {previous} to {value}"))
+                    ui.phase("Updating", format!("{key} from {previous} to {value}"));
                 }
             }
             text = edited.text().to_string();
@@ -1816,7 +1840,7 @@ fn completions_command(ui: &Ui, shell: &str) -> Result<i32> {
 
 // ---- init ------------------------------------------------------------------
 
-/// The JUnit a new project starts with: the newest 5.x, which still compiles
+/// The `JUnit` a new project starts with: the newest 5.x, which still compiles
 /// for every `java.source` a project might lower itself to.
 const STARTER_JUNIT: &str = "5.13.4";
 
@@ -1875,9 +1899,7 @@ class LibraryTest {
 fn init(ui: &Ui, name: Option<&str>, lib: bool, path: Option<&Path>) -> Result<i32> {
     ui.banner();
 
-    let root = path
-        .map(Path::to_path_buf)
-        .unwrap_or_else(|| PathBuf::from("."));
+    let root = path.map_or_else(|| PathBuf::from("."), Path::to_path_buf);
     std::fs::create_dir_all(&root).path(&root)?;
 
     let name = match name {
@@ -1952,9 +1974,7 @@ fn migrate_command(
 ) -> Result<i32> {
     ui.banner();
 
-    let root = path
-        .map(Path::to_path_buf)
-        .unwrap_or_else(|| PathBuf::from("."));
+    let root = path.map_or_else(|| PathBuf::from("."), Path::to_path_buf);
     let source = from.map(migrate::Source::parse).transpose()?;
     let migration = migrate::plan(&root, source)?;
 

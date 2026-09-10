@@ -35,6 +35,12 @@ static DISCOVERED: OnceLock<std::result::Result<Toolchain, String>> = OnceLock::
 
 impl Toolchain {
     /// Locate the JDK, caching the result for the process lifetime (SPEC §7.1).
+    ///
+    /// # Errors
+    ///
+    /// [`JrsError::Toolchain`] if `javac` can't be found at `JAVA_HOME` or on
+    /// `PATH`, `java` or `jar` is missing beside it, its version can't be read,
+    /// or it is older than [`MINIMUM_JDK`].
     pub fn discover() -> Result<Toolchain> {
         DISCOVERED
             .get_or_init(|| Toolchain::probe().map_err(|e| e.to_string()))
@@ -49,6 +55,13 @@ impl Toolchain {
     /// at `JAVA_HOME` / `PATH`, then among the JDKs installed where installers
     /// and version managers put them. When several patch releases of it are
     /// installed, the newest wins.
+    ///
+    /// # Errors
+    ///
+    /// [`JrsError::Toolchain`] if the configured home for the pinned version is
+    /// not a JDK or is another version, if the pinned version is installed
+    /// nowhere jrs looks, and, without a pin, whatever [`Toolchain::discover`]
+    /// returns.
     pub fn select(pin: Option<&JdkPin>, configured: &BTreeMap<u32, PathBuf>) -> Result<Toolchain> {
         let Some(pin) = pin else {
             return Toolchain::discover();
@@ -86,7 +99,7 @@ impl Toolchain {
             .filter_map(|(v, _)| feature_version(v))
             .chain(default.as_ref().map(|t| t.version))
             .collect();
-        versions.sort();
+        versions.sort_unstable();
         versions.dedup();
         let seen = if versions.is_empty() {
             "found no JDK at all".to_string()
@@ -98,15 +111,20 @@ impl Toolchain {
             "{} pins JDK {v}, but none is installed where jrs looks ({seen})\n\n\
              install JDK {v}, or say where it is in {}:\n\n    [jdks]\n    {v} = \"/path/to/jdk-{v}\"",
             pin.from,
-            crate::config::default_path()
-                .map(|p| p.display().to_string())
-                .unwrap_or_else(|| "the jrs config file".to_string()),
+            crate::config::default_path().map_or_else(
+                || "the jrs config file".to_string(),
+                |p| p.display().to_string()
+            ),
             v = pin.version,
         )))
     }
 
     /// Another JDK tool — `javadoc`, `jdeps`, `jlink`, `jpackage` — beside
     /// `javac`, or an error naming the JDK that lacks it.
+    ///
+    /// # Errors
+    ///
+    /// [`JrsError::Toolchain`] if there is no `name` beside `javac`.
     pub fn tool(&self, name: &str) -> Result<PathBuf> {
         let path = self
             .javac
@@ -220,6 +238,10 @@ impl Toolchain {
     }
 
     /// The `--release` to compile against: the manifest's, or this JDK's.
+    ///
+    /// # Errors
+    ///
+    /// [`JrsError::Toolchain`] if `requested` is newer than this JDK.
     pub fn release(&self, requested: Option<u32>) -> Result<u32> {
         match requested {
             None => Ok(self.version),
@@ -234,11 +256,13 @@ impl Toolchain {
     }
 
     /// The classpath separator: `:` everywhere but Windows.
+    #[must_use]
     pub fn classpath_separator() -> &'static str {
         if cfg!(windows) { ";" } else { ":" }
     }
 
     /// Join paths into one `-cp` argument.
+    #[must_use]
     pub fn classpath(entries: &[PathBuf]) -> String {
         entries
             .iter()
@@ -249,6 +273,7 @@ impl Toolchain {
 }
 
 /// Parse `javac 23.0.2`, `javac 21`, or the pre-9 `javac 1.8.0_292`.
+#[must_use]
 pub fn parse_javac_version(text: &str) -> Option<u32> {
     let token = text
         .split_whitespace()
@@ -304,6 +329,7 @@ pub fn project_pin(manifest_jdk: Option<u32>, root: &Path) -> Option<JdkPin> {
 
 /// The feature version in a version manager's spelling of a JDK: `21`,
 /// `21.0.2`, `temurin-21.0.2+13`, `21.0.2-tem`, `corretto-17`, `1.8`.
+#[must_use]
 pub fn pinned_feature(spec: &str) -> Option<u32> {
     let token = spec
         .split(['-', '_', '+'])
@@ -422,6 +448,7 @@ fn exe(name: &str) -> String {
 }
 
 /// Find an executable on `PATH`, so errors can name an absolute path.
+#[must_use]
 pub fn which(name: &str) -> Option<PathBuf> {
     let path = std::env::var_os("PATH")?;
     std::env::split_paths(&path)
@@ -439,6 +466,7 @@ pub struct CapturedOutput {
 }
 
 impl CapturedOutput {
+    #[must_use]
     pub fn ok(&self) -> bool {
         self.status == 0
     }
@@ -457,6 +485,11 @@ fn describe(program: &Path, args: &[impl AsRef<OsStr>]) -> String {
 ///
 /// Capturing is what lets the live region come down before a `javac` diagnostic
 /// is printed (SPEC §5.3.8); the caller replays the output verbatim afterwards.
+///
+/// # Errors
+///
+/// [`JrsError::Build`] if `program` cannot be started. A non-zero exit is not an
+/// error: it is in [`CapturedOutput::status`].
 pub fn run_captured(ui: &Ui, program: &Path, args: &[impl AsRef<OsStr>]) -> Result<CapturedOutput> {
     ui.verbose(describe(program, args));
     let output = Command::new(program)
@@ -477,6 +510,11 @@ pub fn run_captured(ui: &Ui, program: &Path, args: &[impl AsRef<OsStr>]) -> Resu
 ///
 /// Used for `jrs run`: the user's program owns stdin and stdout, and jrs is not
 /// in the middle of them. The live region is torn down first.
+///
+/// # Errors
+///
+/// [`JrsError::Build`] if `program` cannot be started. A non-zero exit is not an
+/// error: the code is returned.
 pub fn run_inherited(ui: &Ui, program: &Path, args: &[impl AsRef<OsStr>]) -> Result<i32> {
     ui.verbose(describe(program, args));
     ui.suspend();
@@ -493,6 +531,11 @@ pub fn run_inherited(ui: &Ui, program: &Path, args: &[impl AsRef<OsStr>]) -> Res
 ///
 /// The callback sees every line before it is printed, which is how `jrs test`
 /// keeps a live counter without ever writing to the terminal itself.
+///
+/// # Errors
+///
+/// [`JrsError::Build`] if `program` cannot be started or waited for. A non-zero
+/// exit is not an error: the code is returned.
 pub fn run_streaming(
     ui: &Ui,
     program: &Path,

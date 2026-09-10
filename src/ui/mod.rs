@@ -40,7 +40,7 @@ pub enum CharsetChoice {
     Ascii,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub struct UiOptions {
     pub verbose: bool,
     pub quiet: bool,
@@ -77,6 +77,7 @@ pub enum Mode {
 }
 
 impl Mode {
+    #[must_use]
     pub fn animates(self) -> bool {
         self == Mode::Animated
     }
@@ -168,6 +169,7 @@ pub struct Ui {
 }
 
 impl Ui {
+    #[must_use]
     pub fn new(opts: UiOptions) -> Ui {
         let stderr_tty = std::io::stderr().is_terminal();
         let mode = decide_mode(&opts, stderr_tty);
@@ -189,6 +191,7 @@ impl Ui {
 
     /// A `Ui` that draws into memory, with a fixed terminal size and a clock
     /// that only advances when a test says so.
+    #[must_use]
     pub fn captured(opts: UiOptions, geometry: Geometry) -> (Ui, Capture) {
         let capture = Capture::new();
         let mode = decide_mode(&opts, true);
@@ -213,26 +216,32 @@ impl Ui {
         (ui, capture)
     }
 
+    #[must_use]
     pub fn mode(&self) -> Mode {
         self.inner.mode
     }
 
+    #[must_use]
     pub fn is_verbose(&self) -> bool {
         self.inner.mode == Mode::Verbose
     }
 
+    #[must_use]
     pub fn is_quiet(&self) -> bool {
         self.inner.mode == Mode::Quiet
     }
 
+    #[must_use]
     pub fn color(&self) -> bool {
         self.inner.color
     }
 
+    #[must_use]
     pub fn glyphs(&self) -> &GlyphSet {
         &self.inner.glyphs
     }
 
+    #[must_use]
     pub fn jobs(&self) -> usize {
         self.inner.jobs
     }
@@ -263,6 +272,10 @@ impl Ui {
 
     /// Mutate the live region's state. Workers call this; nothing here touches
     /// the terminal.
+    ///
+    /// # Panics
+    ///
+    /// If a thread panicked while holding the live-state lock.
     pub fn update_live(&self, f: impl FnOnce(&mut Live)) {
         let mut live = self.inner.live.lock().unwrap();
         f(&mut live);
@@ -320,6 +333,10 @@ impl Ui {
     }
 
     /// Verbatim toolchain output, replayed after the live region is down.
+    ///
+    /// # Panics
+    ///
+    /// If a thread panicked while holding the renderer lock.
     pub fn passthrough(&self, stream: Stream, text: &str) {
         if text.is_empty() {
             return;
@@ -333,6 +350,10 @@ impl Ui {
 
     /// Tear the live region down. Called before anything writes to the terminal
     /// behind jrs's back — a subprocess inheriting stdio, or a diagnostic.
+    ///
+    /// # Panics
+    ///
+    /// If a thread panicked while holding the renderer lock.
     pub fn suspend(&self) {
         self.inner.renderer.lock().unwrap().clear_live();
     }
@@ -356,6 +377,10 @@ impl Ui {
     // the same transcript and differ only in what moves.
 
     /// Begin an indeterminate phase: a verb, a message, and a spinner.
+    ///
+    /// # Panics
+    ///
+    /// If a thread panicked while holding the live-state or renderer lock.
     pub fn spinner(&self, verb: &str, msg: impl std::fmt::Display) -> LiveScope {
         if !self.inner.mode.animates() {
             return LiveScope::inert();
@@ -368,6 +393,11 @@ impl Ui {
     }
 
     /// Begin the download phase. Workers publish transfers into the live state.
+    ///
+    /// # Panics
+    ///
+    /// If a thread panicked while holding the live-state or renderer lock.
+    #[must_use]
     pub fn downloads(&self, total: usize) -> LiveScope {
         if !self.inner.mode.animates() {
             return LiveScope::inert();
@@ -381,6 +411,11 @@ impl Ui {
     }
 
     /// Begin the test phase.
+    ///
+    /// # Panics
+    ///
+    /// If a thread panicked while holding the live-state or renderer lock.
+    #[must_use]
     pub fn tests(&self) -> LiveScope {
         if !self.inner.mode.animates() {
             return LiveScope::inert();
@@ -508,6 +543,7 @@ impl TreeNode {
     }
 }
 
+#[must_use]
 pub fn render_tree(root: &TreeNode, g: &GlyphSet, color: bool) -> Vec<String> {
     let mut out = vec![glyphs::paint(color, root.style, &root.label)];
     push_children(&root.children, "", g, color, &mut out);
@@ -533,6 +569,7 @@ fn push_children(
     }
 }
 
+#[must_use]
 pub fn render_summary(rows: &[(&str, String)], g: &GlyphSet, color: bool) -> Vec<String> {
     let label_width = rows
         .iter()
@@ -579,6 +616,7 @@ pub fn render_summary(rows: &[(&str, String)], g: &GlyphSet, color: bool) -> Vec
 }
 
 /// `2.31s`, or `412ms` for the quick ones.
+#[must_use]
 pub fn format_duration(d: Duration) -> String {
     let secs = d.as_secs_f64();
     if secs < 1.0 {
@@ -586,14 +624,25 @@ pub fn format_duration(d: Duration) -> String {
     } else if secs < 60.0 {
         format!("{secs:.2}s")
     } else {
-        format!("{}m {:.0}s", (secs / 60.0) as u64, secs % 60.0)
+        #[allow(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "secs is at least 60 here, so the floored minute count is positive and small"
+        )]
+        let minutes = (secs / 60.0) as u64;
+        format!("{minutes}m {:.0}s", secs % 60.0)
     }
 }
 
 /// `412 KB`, for the packaged jar.
+#[must_use]
 pub fn format_bytes(bytes: u64) -> String {
     const KB: f64 = 1024.0;
     const MB: f64 = KB * 1024.0;
+    #[allow(
+        clippy::cast_precision_loss,
+        reason = "a displayed size to at most one decimal; precision past 2^52 bytes is invisible"
+    )]
     let b = bytes as f64;
     if b >= MB {
         format!("{:.1} MB", b / MB)

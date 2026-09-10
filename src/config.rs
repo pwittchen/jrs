@@ -89,6 +89,10 @@ const CREDENTIAL_KEYS: &[&str] = &["username", "password", "password-env", "toke
 impl Config {
     /// Read the user's configuration, applying credentials from the process
     /// environment.
+    ///
+    /// # Errors
+    ///
+    /// As [`Config::load_from`], for the file at [`default_path`].
     pub fn load() -> Result<Config> {
         let env = |name: &str| std::env::var(name).ok().filter(|v| !v.is_empty());
         match default_path() {
@@ -99,6 +103,11 @@ impl Config {
 
     /// Read `path` if it exists. `env` looks up environment variables, so tests
     /// never have to mutate the real environment.
+    ///
+    /// # Errors
+    ///
+    /// [`JrsError::Io`] if `path` exists but cannot be read, and whatever
+    /// [`Config::parse`] returns for its contents.
     pub fn load_from(path: &Path, env: &dyn Fn(&str) -> Option<String>) -> Result<Config> {
         match std::fs::read_to_string(path) {
             Ok(text) => Config::parse(&text, Some(path), env),
@@ -107,14 +116,20 @@ impl Config {
         }
     }
 
+    /// Parse the text of a configuration file. `path` is only for messages.
+    ///
+    /// # Errors
+    ///
+    /// [`JrsError::Usage`], naming the file and the key, if `text` is not valid
+    /// TOML, a setting has the wrong type, `jobs` is not a positive integer, a
+    /// credential is incomplete or names an unset environment variable, or a
+    /// `jdks` key is not a Java feature version.
     pub fn parse(
         text: &str,
         path: Option<&Path>,
         env: &dyn Fn(&str) -> Option<String>,
     ) -> Result<Config> {
-        let shown = path
-            .map(|p| p.display().to_string())
-            .unwrap_or_else(|| "config.toml".to_string());
+        let shown = path.map_or_else(|| "config.toml".to_string(), |p| p.display().to_string());
         let fail = |msg: String| JrsError::usage(format!("{shown}: {msg}"));
 
         let table: toml::Table = toml::from_str(text).map_err(|e| fail(e.message().to_string()))?;
@@ -125,8 +140,8 @@ impl Config {
         warn_unknown(&table, TOP_KEYS, "", &shown, &mut config.warnings);
 
         if let Some(value) = table.get("jobs") {
-            match value.as_integer() {
-                Some(n) if n > 0 => config.jobs = Some(n as usize),
+            match value.as_integer().and_then(|n| usize::try_from(n).ok()) {
+                Some(n) if n > 0 => config.jobs = Some(n),
                 _ => return Err(fail("`jobs` must be a positive integer".into())),
             }
         }
@@ -176,51 +191,7 @@ impl Config {
                     &shown,
                     &mut config.warnings,
                 );
-                let field = |key: &str| -> Result<Option<String>> {
-                    let direct = match entry.get(key) {
-                        None => None,
-                        Some(v) => Some(
-                            v.as_str()
-                                .ok_or_else(|| fail(format!("`{prefix}{key}` must be a string")))?
-                                .to_string(),
-                        ),
-                    };
-                    let indirect_key = format!("{key}-env");
-                    let indirect = match entry.get(&indirect_key) {
-                        None => None,
-                        Some(v) => {
-                            let var = v.as_str().ok_or_else(|| {
-                                fail(format!("`{prefix}{indirect_key}` must be a string"))
-                            })?;
-                            Some(env(var).ok_or_else(|| {
-                                fail(format!(
-                                    "`{prefix}{indirect_key}` names `{var}`, which is not set"
-                                ))
-                            })?)
-                        }
-                    };
-                    Ok(direct.or(indirect))
-                };
-                let username = entry
-                    .get("username")
-                    .map(|v| {
-                        v.as_str()
-                            .map(str::to_string)
-                            .ok_or_else(|| fail(format!("`{prefix}username` must be a string")))
-                    })
-                    .transpose()?;
-                let credentials = match (username, field("password")?, field("token")?) {
-                    (_, _, Some(token)) => Credentials::Bearer(token),
-                    (Some(username), Some(password), None) => {
-                        Credentials::Basic { username, password }
-                    }
-                    _ => {
-                        return Err(fail(format!(
-                            "`credentials.{repo}` needs `username` and `password` (or \
-                             `password-env`), or a `token` (or `token-env`)"
-                        )));
-                    }
-                };
+                let credentials = parse_credentials(repo, entry, &prefix, env, &fail)?;
                 config.credentials.insert(repo.clone(), credentials);
             }
         }
@@ -277,12 +248,12 @@ impl Config {
         self.mirrors
             .get(repository)
             .or_else(|| self.mirrors.get("*"))
-            .map(String::as_str)
-            .unwrap_or(url)
+            .map_or(url, String::as_str)
     }
 }
 
 /// `my-repo.internal` → `MY_REPO_INTERNAL`.
+#[must_use]
 pub fn env_name(repository: &str) -> String {
     repository
         .chars()
@@ -297,6 +268,7 @@ pub fn env_name(repository: &str) -> String {
 }
 
 /// Where the configuration file lives on this platform.
+#[must_use]
 pub fn default_path() -> Option<PathBuf> {
     if let Some(p) = std::env::var_os(CONFIG_ENV).filter(|p| !p.is_empty()) {
         return Some(PathBuf::from(p));
@@ -314,6 +286,58 @@ pub fn default_path() -> Option<PathBuf> {
             .join("jrs")
             .join("config.toml")
     })
+}
+
+/// One `[credentials.<repo>]` table. `prefix` is `credentials.<repo>.`, and
+/// `fail` turns a message into an error naming the file.
+fn parse_credentials(
+    repo: &str,
+    entry: &toml::Table,
+    prefix: &str,
+    env: &dyn Fn(&str) -> Option<String>,
+    fail: &dyn Fn(String) -> JrsError,
+) -> Result<Credentials> {
+    let field = |key: &str| -> Result<Option<String>> {
+        let direct = match entry.get(key) {
+            None => None,
+            Some(v) => Some(
+                v.as_str()
+                    .ok_or_else(|| fail(format!("`{prefix}{key}` must be a string")))?
+                    .to_string(),
+            ),
+        };
+        let indirect_key = format!("{key}-env");
+        let indirect = match entry.get(&indirect_key) {
+            None => None,
+            Some(v) => {
+                let var = v
+                    .as_str()
+                    .ok_or_else(|| fail(format!("`{prefix}{indirect_key}` must be a string")))?;
+                Some(env(var).ok_or_else(|| {
+                    fail(format!(
+                        "`{prefix}{indirect_key}` names `{var}`, which is not set"
+                    ))
+                })?)
+            }
+        };
+        Ok(direct.or(indirect))
+    };
+    let username = entry
+        .get("username")
+        .map(|v| {
+            v.as_str()
+                .map(str::to_string)
+                .ok_or_else(|| fail(format!("`{prefix}username` must be a string")))
+        })
+        .transpose()?;
+    match (username, field("password")?, field("token")?) {
+        (_, _, Some(token)) => Ok(Credentials::Bearer(token)),
+        (Some(username), Some(password), None) => Ok(Credentials::Basic { username, password }),
+        _ => Err(fail(format!(
+            "`credentials.{repo}` needs `username` and `password` (or \
+             `password-env`), or a `token` (or `token-env`)"
+        ))),
+    }
 }
 
 fn string_list(t: &toml::Table, key: &str) -> std::result::Result<Vec<String>, ()> {

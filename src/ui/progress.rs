@@ -5,10 +5,13 @@
 //! plus a tick plus a width, in; strings, out — is what makes the animated output
 //! testable without a TTY.
 
+use std::fmt::Write as _;
+
 use super::glyphs::{self, GlyphSet, Outcome, Style};
 use super::render::Geometry;
 
 /// A right-aligned Cargo-style phase prefix: 12 columns, then the message.
+#[must_use]
 pub fn phase_line(color: bool, style: Style, verb: &str, msg: &str) -> String {
     let painted = glyphs::paint(color, style, verb);
     let pad = 12usize.saturating_sub(verb.chars().count());
@@ -60,6 +63,7 @@ impl Live {
     ///
     /// `jobs` caps the number of download bars, as does a third of the terminal
     /// height — a build with 64 parallel fetches must not own the whole screen.
+    #[must_use]
     pub fn lines(
         &self,
         g: &GlyphSet,
@@ -112,12 +116,21 @@ fn download_lines(
         .min(32);
 
     for t in d.active.iter().take(cap) {
+        #[allow(
+            clippy::cast_precision_loss,
+            reason = "a progress-bar fraction; precision past 2^52 bytes is invisible"
+        )]
         let fraction = match t.total {
             Some(total) if total > 0 => t.done as f64 / total as f64,
             _ => 0.0,
         };
         let bar = g.bar(if t.verifying { 1.0 } else { fraction }, 20);
         let bar = glyphs::paint(color, Style::Green, bar);
+        #[allow(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "a displayed percentage of a non-negative fraction; far below u32::MAX"
+        )]
         let pct = if t.verifying {
             100
         } else {
@@ -142,10 +155,10 @@ fn test_lines(t: &TestState, g: &GlyphSet, color: bool, tick: u64, geom: Geometr
 
     let mut tally = format!("({} passed", t.passed);
     if t.failed > 0 {
-        tally.push_str(&format!(", {} failed", t.failed));
+        let _ = write!(tally, ", {} failed", t.failed);
     }
     if t.skipped > 0 {
-        tally.push_str(&format!(", {} skipped", t.skipped));
+        let _ = write!(tally, ", {} skipped", t.skipped);
     }
     tally.push(')');
 
@@ -175,6 +188,11 @@ fn test_lines(t: &TestState, g: &GlyphSet, color: bool, tick: u64, geom: Geometr
 }
 
 /// `1.9/3.1 MB`, or just the transferred amount when the length is unknown.
+#[must_use]
+#[allow(
+    clippy::cast_precision_loss,
+    reason = "a displayed size to one decimal; precision past 2^52 bytes is invisible"
+)]
 pub fn size_pair(done: u64, total: Option<u64>) -> String {
     match total {
         Some(total) if total > 0 => {
@@ -191,9 +209,9 @@ pub fn size_pair(done: u64, total: Option<u64>) -> String {
 fn unit_for(bytes: u64) -> (&'static str, f64) {
     const KB: f64 = 1024.0;
     const MB: f64 = 1024.0 * 1024.0;
-    if bytes as f64 >= MB {
+    if bytes >= 1024 * 1024 {
         ("MB", MB)
-    } else if bytes as f64 >= KB {
+    } else if bytes >= 1024 {
         ("KB", KB)
     } else {
         ("B", 1.0)

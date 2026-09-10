@@ -22,6 +22,11 @@ pub struct Cache {
 
 impl Cache {
     /// The platform cache directory, overridable with `JRS_CACHE_DIR`.
+    ///
+    /// # Errors
+    ///
+    /// [`JrsError::Resolve`] when `JRS_CACHE_DIR` is unset and the platform
+    /// gives no cache directory (no `HOME`, say).
     pub fn discover() -> Result<Cache> {
         if let Some(dir) = std::env::var_os("JRS_CACHE_DIR") {
             return Ok(Cache::with_root(PathBuf::from(dir)));
@@ -38,11 +43,13 @@ impl Cache {
         Cache { root: root.into() }
     }
 
+    #[must_use]
     pub fn root(&self) -> &Path {
         &self.root
     }
 
     /// Where `coord`'s `.jar` / `.pom` / `.sha1` lives.
+    #[must_use]
     pub fn path_for(&self, coord: &Coord, ext: &str) -> PathBuf {
         self.root.join(
             coord
@@ -51,16 +58,26 @@ impl Cache {
         )
     }
 
+    #[must_use]
     pub fn contains(&self, coord: &Coord, ext: &str) -> bool {
         self.path_for(coord, ext).is_file()
     }
 
+    /// The cached bytes of `coord`'s `ext` file.
+    ///
+    /// # Errors
+    ///
+    /// [`JrsError::Io`] when the file is not cached or cannot be read.
     pub fn read(&self, coord: &Coord, ext: &str) -> Result<Vec<u8>> {
         let path = self.path_for(coord, ext);
         std::fs::read(&path).path(&path)
     }
 
     /// Write bytes into the cache atomically, returning the final path.
+    ///
+    /// # Errors
+    ///
+    /// As for [`write_atomic`].
     pub fn store(&self, coord: &Coord, ext: &str, bytes: &[u8]) -> Result<PathBuf> {
         let path = self.path_for(coord, ext);
         write_atomic(&path, bytes)?;
@@ -82,6 +99,7 @@ impl Cache {
 
     /// Which build of a snapshot the cache holds, from where, and when that was
     /// last confirmed.
+    #[must_use]
     pub fn snapshot_record(&self, coord: &Coord, ext: &str) -> Option<SnapshotRecord> {
         let path = self.snapshot_record_path(coord, ext);
         let text = std::fs::read_to_string(&path).ok()?;
@@ -95,6 +113,10 @@ impl Cache {
 
     /// Record that the cached `coord` is snapshot build `file_version` from
     /// `repo`, as of now.
+    ///
+    /// # Errors
+    ///
+    /// As for [`write_atomic`].
     pub fn record_snapshot(
         &self,
         coord: &Coord,
@@ -137,6 +159,10 @@ impl Cache {
     ///
     /// The record is machine-local bookkeeping inside the cache, which is why it
     /// may hold absolute paths when `jrs.lock` itself never does.
+    ///
+    /// # Errors
+    ///
+    /// [`JrsError::Io`] when the project registry cannot be written.
     pub fn register_project(&self, lock: &Path) -> Result<()> {
         let lock = lock.canonicalize().unwrap_or_else(|_| lock.to_path_buf());
         let mut known = self.projects();
@@ -158,6 +184,10 @@ impl Cache {
     }
 
     /// Drop the projects whose lockfile is gone, returning the rest.
+    ///
+    /// # Errors
+    ///
+    /// [`JrsError::Io`] when the project registry cannot be rewritten.
     pub fn forget_missing_projects(&self) -> Result<Vec<PathBuf>> {
         let known = self.projects();
         let existing: Vec<PathBuf> = known.iter().filter(|p| p.is_file()).cloned().collect();
@@ -181,6 +211,11 @@ impl Cache {
 
     /// Remove whole version directories — an artifact's jar, POM, checksums
     /// and snapshot records go together — according to `rule`.
+    ///
+    /// # Errors
+    ///
+    /// [`JrsError::Io`] when the cache cannot be walked, a file's metadata
+    /// cannot be read, or a version directory cannot be removed.
     pub fn prune(&self, rule: &Prune, dry_run: bool) -> Result<Pruned> {
         let mut groups: BTreeMap<PathBuf, (u64, SystemTime)> = BTreeMap::new();
         let bookkeeping = self.root.join(".jrs");
@@ -277,6 +312,11 @@ const USE_GRANULARITY: Duration = Duration::from_secs(24 * 60 * 60);
 /// Write to a sibling temp file, then rename. Rename is atomic within a
 /// filesystem, which is why the temp file goes next to the destination rather
 /// than in `/tmp`.
+///
+/// # Errors
+///
+/// [`JrsError::Io`] when the destination directory cannot be created, or the
+/// temp file cannot be written or renamed into place.
 pub fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).path(parent)?;

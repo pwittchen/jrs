@@ -15,40 +15,61 @@ pub struct Project<'a> {
 }
 
 impl<'a> Project<'a> {
+    #[must_use]
     pub fn new(manifest: &'a Manifest) -> Project<'a> {
         Project { manifest }
     }
 
+    #[must_use]
     pub fn target_dir(&self) -> PathBuf {
         self.manifest.target_path()
     }
 
+    #[must_use]
     pub fn classes_dir(&self) -> PathBuf {
         self.target_dir().join("classes")
     }
 
+    #[must_use]
     pub fn test_classes_dir(&self) -> PathBuf {
         self.target_dir().join("test-classes")
     }
 
     /// jrs's own scratch space: argfiles, fingerprints, fat-jar staging.
+    #[must_use]
     pub fn work_dir(&self) -> PathBuf {
         self.target_dir().join(".jrs")
     }
 
+    #[must_use]
     pub fn jar_path(&self) -> PathBuf {
         self.target_dir().join(self.manifest.jar_name())
     }
 
+    /// Every `.java` file under the main source root, sorted.
+    ///
+    /// # Errors
+    ///
+    /// [`JrsError::Io`] if a directory under the source root cannot be read.
     pub fn main_sources(&self) -> Result<Vec<PathBuf>> {
         find_by_extension(&self.manifest.source_path(), "java")
     }
 
+    /// Every `.java` file under the test source root, sorted.
+    ///
+    /// # Errors
+    ///
+    /// [`JrsError::Io`] if a directory under the test root cannot be read.
     pub fn test_sources(&self) -> Result<Vec<PathBuf>> {
         find_by_extension(&self.manifest.test_path(), "java")
     }
 
     /// Remove `target/`. Returns whether there was anything to remove.
+    ///
+    /// # Errors
+    ///
+    /// [`JrsError::Manifest`] if the target directory is the project root, and
+    /// [`JrsError::Io`] if it cannot be removed.
     pub fn clean(&self) -> Result<bool> {
         let dir = self.target_dir();
         if !dir.exists() {
@@ -69,6 +90,10 @@ impl<'a> Project<'a> {
 /// Every file under `root` with the given extension, sorted for determinism.
 ///
 /// A missing root is not an error: a project with no tests is a normal project.
+///
+/// # Errors
+///
+/// [`JrsError::Io`] if a directory under `root` cannot be read.
 pub fn find_by_extension(root: &Path, extension: &str) -> Result<Vec<PathBuf>> {
     let mut out = Vec::new();
     if !root.exists() {
@@ -84,6 +109,10 @@ pub fn find_by_extension(root: &Path, extension: &str) -> Result<Vec<PathBuf>> {
 }
 
 /// Every file under `root`, whatever its name.
+///
+/// # Errors
+///
+/// [`JrsError::Io`] if a directory under `root` cannot be read.
 pub fn find_all(root: &Path) -> Result<Vec<PathBuf>> {
     let mut out = Vec::new();
     if !root.exists() {
@@ -119,6 +148,11 @@ fn walk(dir: &Path, visit: &mut impl FnMut(&Path)) -> Result<()> {
 ///
 /// Files whose size and mtime already match are skipped, which is what keeps a
 /// no-op `jrs build` from rewriting a resource tree (SPEC §7.3).
+///
+/// # Errors
+///
+/// [`JrsError::Io`] if `from` cannot be walked, a file's metadata cannot be
+/// read, or a directory or file under `to` cannot be written.
 pub fn copy_tree(from: &Path, to: &Path) -> Result<usize> {
     if !from.is_dir() {
         return Ok(0);
@@ -153,6 +187,11 @@ pub struct Synced {
 /// Instead `record` lists the paths this function put there last time, and only
 /// those are ever deleted — a class file, or anything an annotation processor
 /// generated, is never touched.
+///
+/// # Errors
+///
+/// [`JrsError::Io`] if a stale file cannot be removed (one already gone is
+/// fine), copying fails as in [`copy_tree`], or `record` cannot be written.
 pub fn sync_resources(from: &Path, to: &Path, record: &Path) -> Result<Synced> {
     let mut current: Vec<String> = if from.is_dir() {
         find_all(from)?
@@ -199,6 +238,7 @@ pub fn sync_resources(from: &Path, to: &Path, record: &Path) -> Result<Synced> {
 }
 
 /// A relative path with `/` separators on every platform.
+#[must_use]
 pub fn slash_path(p: &Path) -> String {
     p.components()
         .map(|c| c.as_os_str().to_string_lossy().into_owned())
@@ -227,6 +267,7 @@ pub struct Snapshot(Vec<(PathBuf, u64, Option<SystemTime>)>);
 
 impl Snapshot {
     /// Every file under `roots` (a root may itself be a file, or not exist).
+    #[must_use]
     pub fn take(roots: &[PathBuf]) -> Snapshot {
         let mut files = Vec::new();
         for root in roots {
@@ -250,6 +291,7 @@ impl Snapshot {
     }
 
     /// The first path that differs between two pictures, for the message.
+    #[must_use]
     pub fn first_difference<'a>(&'a self, other: &'a Snapshot) -> Option<&'a Path> {
         for (a, b) in self.0.iter().zip(&other.0) {
             if a != b {
@@ -269,6 +311,7 @@ impl Snapshot {
 }
 
 /// The most recent mtime among `paths`, or `None` if there are none.
+#[must_use]
 pub fn newest_mtime(paths: &[PathBuf]) -> Option<SystemTime> {
     paths
         .iter()
@@ -277,6 +320,7 @@ pub fn newest_mtime(paths: &[PathBuf]) -> Option<SystemTime> {
 }
 
 /// The most recent mtime of any file under `dir`.
+#[must_use]
 pub fn newest_mtime_under(dir: &Path) -> Option<SystemTime> {
     newest_mtime(&find_all(dir).ok()?)
 }

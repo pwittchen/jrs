@@ -62,6 +62,7 @@ impl Dependency {
     }
 
     /// `group:artifact`, or `group:artifact:classifier` — unique within a table.
+    #[must_use]
     pub fn key(&self) -> String {
         match &self.classifier {
             Some(c) => format!("{}:{}:{c}", self.group, self.artifact),
@@ -70,6 +71,7 @@ impl Dependency {
     }
 
     /// True when the short `"g:a" = "version"` form says everything.
+    #[must_use]
     pub fn is_plain(&self) -> bool {
         self.exclusions.is_empty() && !self.compile_only
     }
@@ -134,7 +136,7 @@ pub struct RunConfig {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct TestConfig {
     pub jvm_args: Vec<String>,
-    /// The JaCoCo release `jrs test --coverage` uses, for a JDK newer than
+    /// The `JaCoCo` release `jrs test --coverage` uses, for a JDK newer than
     /// jrs's default knows about.
     pub jacoco_version: Option<String>,
 }
@@ -213,6 +215,11 @@ const TOP_KEYS: &[&str] = &[
 
 impl Manifest {
     /// Read and parse the manifest at `path`.
+    ///
+    /// # Errors
+    ///
+    /// [`JrsError::Manifest`] when there is no file at `path`, or as for
+    /// [`Manifest::parse`]; [`JrsError::Io`] when it exists but cannot be read.
     pub fn load(path: impl AsRef<Path>) -> Result<Manifest> {
         let path = path.as_ref();
         let text = std::fs::read_to_string(path).map_err(|e| {
@@ -235,6 +242,12 @@ impl Manifest {
     }
 
     /// Find the manifest for `dir`, walking up until one is found.
+    ///
+    /// # Errors
+    ///
+    /// [`JrsError::Manifest`] when neither `start` nor any parent holds one;
+    /// [`JrsError::Io`] when `start` is relative and the working directory
+    /// cannot be read.
     pub fn discover(start: &Path) -> Result<PathBuf> {
         let start = if start.is_absolute() {
             start.to_path_buf()
@@ -273,15 +286,31 @@ impl Manifest {
         }
     }
 
+    /// Parse manifest `text`. `path` is where it was read from and `root` the
+    /// project directory its relative paths are resolved against.
+    ///
+    /// Unknown keys are not errors; they end up in `warnings`.
+    ///
+    /// # Errors
+    ///
+    /// [`JrsError::Manifest`] when `text` is not TOML, `[project]` or one of
+    /// its required keys is missing, or any value has the wrong type or an
+    /// invalid form (a name, class name, path, release, dependency or
+    /// repository).
+    #[allow(
+        clippy::similar_names,
+        reason = "`test` is the `[test]` table, named like `run` and `package` beside it; \
+                  `text` is the manifest source"
+    )]
     pub fn parse(text: &str, path: &Path, root: &Path) -> Result<Manifest> {
         let table: toml::Table = toml::from_str(text).map_err(|e| {
-            let where_ = e
-                .span()
-                .map(|s| {
+            let where_ = e.span().map_or_else(
+                || format!("{}: ", path.display()),
+                |s| {
                     let (line, col) = locate(text, s.start);
                     format!("{}:{line}:{col}: ", path.display())
-                })
-                .unwrap_or_else(|| format!("{}: ", path.display()));
+                },
+            );
             JrsError::manifest(format!("{where_}{}", e.message()))
         })?;
 
@@ -316,32 +345,9 @@ impl Manifest {
             None => default_test_resource_dir(&test_dir),
         };
 
-        let java = match table.get("java") {
+        let java = match section(&table, "java", JAVA_KEYS, &mut warnings)? {
             None => JavaConfig::default(),
-            Some(v) => {
-                let t = v
-                    .as_table()
-                    .ok_or_else(|| JrsError::manifest("`java` must be a table"))?;
-                warn_unknown(t, JAVA_KEYS, "java.", &mut warnings);
-                let source = optional_release(t, "source")?;
-                // `target` only means anything when it differs from `source`
-                // (SPEC §4.2); normalising here keeps the rest of the codebase
-                // from having to compare the two.
-                let target = optional_release(t, "target")?.filter(|t| Some(*t) != source);
-                let encoding =
-                    optional_string(t, "encoding", "java")?.unwrap_or_else(|| "UTF-8".into());
-                let javac_args = string_array(t, "javac-args", "java")?;
-                let javadoc_args = string_array(t, "javadoc-args", "java")?;
-                let jdk = optional_release(t, "jdk")?;
-                JavaConfig {
-                    source,
-                    target,
-                    encoding,
-                    javac_args,
-                    javadoc_args,
-                    jdk,
-                }
-            }
+            Some(t) => java_config(t)?,
         };
 
         let run = match section(&table, "run", RUN_KEYS, &mut warnings)? {
@@ -408,31 +414,42 @@ impl Manifest {
 
     // ---- resolved paths ---------------------------------------------------
 
+    #[must_use]
     pub fn source_path(&self) -> PathBuf {
         self.root.join(&self.source_dir)
     }
+    #[must_use]
     pub fn test_path(&self) -> PathBuf {
         self.root.join(&self.test_dir)
     }
+    #[must_use]
     pub fn resource_path(&self) -> PathBuf {
         self.root.join(&self.resource_dir)
     }
+    #[must_use]
     pub fn test_resource_path(&self) -> PathBuf {
         self.root.join(&self.test_resource_dir)
     }
+    #[must_use]
     pub fn target_path(&self) -> PathBuf {
         self.root.join(&self.target_dir)
     }
+    #[must_use]
     pub fn lock_path(&self) -> PathBuf {
         self.root.join(LOCK_FILE)
     }
 
     /// `my-app-1.0.0.jar`
+    #[must_use]
     pub fn jar_name(&self) -> String {
         format!("{}-{}.jar", self.name, self.version)
     }
 
     /// The main class, or an error naming the command that needs it.
+    ///
+    /// # Errors
+    ///
+    /// [`JrsError::Manifest`] when the manifest names no `main-class`.
     pub fn require_main_class(&self, command: &str) -> Result<&str> {
         self.main_class.as_deref().ok_or_else(|| {
             JrsError::manifest(format!(
@@ -447,6 +464,7 @@ impl Manifest {
     ///
     /// Used by `jrs init` and `jrs migrate`; the output is deliberately
     /// hand-formatted, since a generated manifest is something a human reads.
+    #[must_use]
     pub fn render(&self, header: Option<&str>) -> String {
         let mut s = String::new();
         if let Some(h) = header {
@@ -553,6 +571,7 @@ impl Manifest {
 }
 
 /// A manifest with nothing but the required fields, used by `init` and `migrate`.
+#[must_use]
 pub fn blank(name: &str, version: &str, root: &Path) -> Manifest {
     Manifest {
         path: root.join(MANIFEST_FILE),
@@ -604,7 +623,7 @@ fn parse_dependencies(table: &toml::Table, section: &str) -> Result<Vec<Dependen
         dep.classifier = key_classifier;
         let name = |k: &str| format!("`{section}.\"{key}\".{k}`");
         match value {
-            toml::Value::String(v) => dep.version = v.clone(),
+            toml::Value::String(v) => dep.version.clone_from(v),
             toml::Value::Table(t) => {
                 for k in t.keys() {
                     if !DEPENDENCY_KEYS.contains(&k.as_str()) {
@@ -710,6 +729,27 @@ fn split_coordinate(key: &str, section: &str) -> Result<(String, String, Option<
     }
 }
 
+/// The `[java]` table, its unknown keys already warned about.
+fn java_config(t: &toml::Table) -> Result<JavaConfig> {
+    let source = optional_release(t, "source")?;
+    // `target` only means anything when it differs from `source` (SPEC §4.2);
+    // normalising here keeps the rest of the codebase from having to compare
+    // the two.
+    let target = optional_release(t, "target")?.filter(|t| Some(*t) != source);
+    let encoding = optional_string(t, "encoding", "java")?.unwrap_or_else(|| "UTF-8".into());
+    let javac_args = string_array(t, "javac-args", "java")?;
+    let javadoc_args = string_array(t, "javadoc-args", "java")?;
+    let jdk = optional_release(t, "jdk")?;
+    Ok(JavaConfig {
+        source,
+        target,
+        encoding,
+        javac_args,
+        javadoc_args,
+        jdk,
+    })
+}
+
 /// An optional sub-table, with its unknown keys turned into warnings.
 fn section<'a>(
     table: &'a toml::Table,
@@ -749,6 +789,7 @@ fn render_dependency(d: &Dependency) -> String {
 
 /// A dependency as a table entry: its key, unquoted, and its value as TOML.
 /// `jrs add` writes exactly this, so an added line reads like a generated one.
+#[must_use]
 pub fn dependency_entry(d: &Dependency) -> (String, String) {
     // The classifier goes in the key when it can, so two classifiers of one
     // artifact stay two distinct keys.
@@ -769,7 +810,7 @@ pub fn dependency_entry(d: &Dependency) -> (String, String) {
         fields.push(format!("classifier = {}", quote(c)));
     }
     if !d.exclusions.is_empty() {
-        let patterns: Vec<String> = d.exclusions.iter().map(|e| e.to_string()).collect();
+        let patterns: Vec<String> = d.exclusions.iter().map(ToString::to_string).collect();
         fields.push(format!("exclusions = {}", quote_list(&patterns)));
     }
     if d.compile_only {
@@ -848,7 +889,11 @@ fn path_or(t: &toml::Table, key: &str, default: &str, section: &str) -> Result<P
 fn optional_release(t: &toml::Table, key: &str) -> Result<Option<u32>> {
     match t.get(key) {
         None => Ok(None),
-        Some(toml::Value::Integer(n)) if *n > 0 => Ok(Some(*n as u32)),
+        // Past `u32::MAX` a release used to wrap silently into a small one;
+        // it gets the error an unparseable string gets instead.
+        Some(toml::Value::Integer(n)) if *n > 0 => u32::try_from(*n).map(Some).map_err(|_| {
+            JrsError::manifest(format!("`java.{key}`: `{n}` is not a Java release number"))
+        }),
         Some(toml::Value::String(s)) => s
             .trim()
             .trim_start_matches("1.")
@@ -904,12 +949,7 @@ fn validate_class_name(class: &str) -> Result<()> {
 fn locate(text: &str, offset: usize) -> (usize, usize) {
     let head = &text[..offset.min(text.len())];
     let line = head.matches('\n').count() + 1;
-    let col = head
-        .rsplit('\n')
-        .next()
-        .map(|l| l.chars().count())
-        .unwrap_or(0)
-        + 1;
+    let col = head.rsplit('\n').next().map_or(0, |l| l.chars().count()) + 1;
     (line, col)
 }
 

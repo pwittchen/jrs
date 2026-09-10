@@ -15,6 +15,7 @@ pub enum Charset {
 
 impl Charset {
     /// Probe the locale. UTF-8 locales get Unicode; everything else gets ASCII.
+    #[must_use]
     pub fn probe() -> Charset {
         if cfg!(windows) {
             // Modern Windows terminals are UTF-8 capable, but the legacy console
@@ -113,6 +114,7 @@ const ASCII: GlyphSet = GlyphSet {
 };
 
 impl GlyphSet {
+    #[must_use]
     pub fn for_charset(charset: Charset) -> GlyphSet {
         match charset {
             Charset::Unicode => UNICODE,
@@ -120,13 +122,25 @@ impl GlyphSet {
         }
     }
 
+    #[must_use]
+    #[allow(
+        clippy::cast_possible_truncation,
+        reason = "the tick only picks a frame; wrapping on a 32-bit target just restarts the cycle"
+    )]
     pub fn spinner_frame(&self, tick: u64) -> &'static str {
         self.spinner[(tick as usize) % self.spinner.len()]
     }
 
     /// A `[####----]` style bar of `width` cells at the given fraction.
+    #[must_use]
     pub fn bar(&self, fraction: f64, width: usize) -> String {
         let fraction = fraction.clamp(0.0, 1.0);
+        #[allow(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            clippy::cast_precision_loss,
+            reason = "fraction is clamped to 0..=1, so the result is a cell count in 0..=width"
+        )]
         let filled = (fraction * width as f64).round() as usize;
         let filled = filled.min(width);
         let mut s = String::with_capacity(width * 3);
@@ -140,6 +154,7 @@ impl GlyphSet {
     }
 
     /// Test result marks, ASCII or Unicode.
+    #[must_use]
     pub fn mark(&self, outcome: Outcome) -> &'static str {
         match outcome {
             Outcome::Pass => self.pass,
@@ -209,6 +224,7 @@ pub const BANNER: &str = concat!(
 ///
 /// jrs only ever draws its own glyphs, all of which are single-width, so a
 /// codepoint count is an accurate width here.
+#[must_use]
 pub fn display_width(s: &str) -> usize {
     let mut width = 0;
     let mut in_escape = false;
@@ -231,6 +247,7 @@ pub fn display_width(s: &str) -> usize {
 /// Truncate to `width` columns, preserving escape sequences and resetting style.
 ///
 /// The live region must never wrap: wrapping breaks in-place redraw (SPEC §5.3.1).
+#[must_use]
 pub fn truncate(s: &str, width: usize) -> String {
     if width == 0 {
         return String::new();

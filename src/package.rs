@@ -39,6 +39,7 @@ pub struct JarManifest {
 
 impl JarManifest {
     /// Render `META-INF/MANIFEST.MF`, wrapped the way the jar spec requires.
+    #[must_use]
     pub fn render(&self) -> String {
         let mut s = String::new();
         s.push_str("Manifest-Version: 1.0\n");
@@ -85,6 +86,7 @@ fn wrap_header(name: &str, value: &str) -> String {
 /// `/Users/Ada Lovelace/Library/Caches/jrs/...` — cannot go in verbatim: it would
 /// read as two entries, and the classpath would silently lose a jar. Emitting a
 /// `file:` URL with the reserved characters percent-encoded avoids that.
+#[must_use]
 pub fn class_path_entry(path: &Path) -> String {
     format!("file:{}", url_encode(&path.to_string_lossy()))
 }
@@ -94,10 +96,20 @@ fn url_encode(text: &str) -> String {
     let mut out = String::new();
     for byte in text.bytes() {
         match byte {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' => out.push(byte as char),
-            b'/' | b'-' | b'_' | b'.' | b'~' | b'+' | b':' => out.push(byte as char),
+            b'A'..=b'Z'
+            | b'a'..=b'z'
+            | b'0'..=b'9'
+            | b'/'
+            | b'-'
+            | b'_'
+            | b'.'
+            | b'~'
+            | b'+'
+            | b':' => out.push(byte as char),
             b'\\' if cfg!(windows) => out.push('/'),
-            other => out.push_str(&format!("%{other:02X}")),
+            other => {
+                let _ = write!(out, "%{other:02X}");
+            }
         }
     }
     out
@@ -115,6 +127,11 @@ fn url_encode(text: &str) -> String {
 ///
 /// `libraries` are `(group, jar)` pairs in classpath order, and the entries
 /// come back in the same order.
+///
+/// # Errors
+///
+/// `JrsError::Io` if `lib_dir` cannot be emptied or created, or a jar cannot be
+/// copied into it.
 pub fn copy_libraries(
     libraries: &[(String, PathBuf)],
     lib_dir: &Path,
@@ -159,6 +176,11 @@ pub struct PackageOutcome {
 }
 
 /// A thin jar: just this project's classes and resources (SPEC §9.1).
+///
+/// # Errors
+///
+/// `JrsError::Io` if `classes_dir` cannot be walked or read, or the jar cannot
+/// be written; `JrsError::Build` if the zip writer rejects an entry.
 pub fn write_thin_jar(
     classes_dir: &Path,
     output: &Path,
@@ -166,7 +188,7 @@ pub fn write_thin_jar(
 ) -> Result<PackageOutcome> {
     let mut plan: BTreeMap<String, Entry> = BTreeMap::new();
     collect_directory(classes_dir, &mut plan)?;
-    write_jar(output, manifest, plan, no_archives(), Vec::new())
+    write_jar(output, manifest, &plan, no_archives(), Vec::new())
 }
 
 /// A fat jar: this project's classes plus every runtime dependency, unpacked.
@@ -174,6 +196,12 @@ pub fn write_thin_jar(
 /// Dependencies are read straight into the output rather than through a staging
 /// directory — the resulting jar is identical, and a build that packages 40 MB of
 /// dependencies should not write 40 MB to disk twice.
+///
+/// # Errors
+///
+/// `JrsError::Manifest` if `manifest` has no main class; `JrsError::Build` if
+/// a dependency is not a readable jar or the zip writer fails; `JrsError::Io`
+/// if a file cannot be read or the jar cannot be written.
 pub fn write_fat_jar(
     classes_dir: &Path,
     dependency_jars: &[PathBuf],
@@ -220,6 +248,10 @@ pub fn write_fat_jar(
                 continue;
             }
             match plan.get(&name) {
+                #[allow(
+                    clippy::case_sensitive_file_extension_comparisons,
+                    reason = "jar entry names are case-sensitive; `Foo.CLASS` is not a class"
+                )]
                 Some(existing) => {
                     if name.ends_with(".class") {
                         warnings.push(format!(
@@ -238,7 +270,7 @@ pub fn write_fat_jar(
         archives.push(archive);
     }
 
-    write_jar(output, manifest, plan, archives, warnings)
+    write_jar(output, manifest, &plan, archives, warnings)
 }
 
 /// Where an entry's bytes come from.
@@ -253,16 +285,14 @@ impl Entry {
     fn describe(&self, classes_dir: &Path, jars: &[PathBuf]) -> String {
         let jar = |index: &usize| {
             jars.get(*index)
-                .map(|p| p.display().to_string())
-                .unwrap_or_else(|| "an earlier jar".to_string())
+                .map_or_else(|| "an earlier jar".to_string(), |p| p.display().to_string())
         };
         match self {
             Entry::File(_) => classes_dir.display().to_string(),
             Entry::Jar(index, _) => jar(index),
             Entry::Services(sources) => sources
                 .first()
-                .map(|(index, _)| jar(index))
-                .unwrap_or_else(|| "an earlier jar".to_string()),
+                .map_or_else(|| "an earlier jar".to_string(), |(index, _)| jar(index)),
         }
     }
 }
@@ -285,6 +315,10 @@ fn collect_directory(dir: &Path, plan: &mut BTreeMap<String, Entry>) -> Result<(
 }
 
 /// Signature files no longer describe the merged jar's contents (SPEC §9.2).
+#[allow(
+    clippy::case_sensitive_file_extension_comparisons,
+    reason = "compares an upper-cased copy, so the match is already case-insensitive"
+)]
 fn is_dropped(name: &str) -> bool {
     if name == "META-INF/MANIFEST.MF" || name == "META-INF/INDEX.LIST" {
         return true;
@@ -313,7 +347,7 @@ fn no_archives() -> Vec<zip::ZipArchive<std::fs::File>> {
 fn write_jar<R: Read + Seek>(
     output: &Path,
     manifest: &JarManifest,
-    plan: BTreeMap<String, Entry>,
+    plan: &BTreeMap<String, Entry>,
     mut archives: Vec<zip::ZipArchive<R>>,
     warnings: Vec<String>,
 ) -> Result<PackageOutcome> {
@@ -333,7 +367,7 @@ fn write_jar<R: Read + Seek>(
         .path(output)?;
     let mut entries = 1;
 
-    for (name, entry) in &plan {
+    for (name, entry) in plan {
         writer
             .start_file(name.as_str(), options)
             .map_err(|e| JrsError::build(format!("{}: {e}", output.display())))?;

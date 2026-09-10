@@ -43,6 +43,7 @@ pub enum Classpath {
 }
 
 impl Classpath {
+    #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
             Classpath::Compile => "compile",
@@ -51,6 +52,7 @@ impl Classpath {
         }
     }
 
+    #[must_use]
     pub fn parse(s: &str) -> Classpath {
         match s {
             "test" => Classpath::Test,
@@ -82,6 +84,7 @@ pub struct ResolvedPackage {
 }
 
 impl ResolvedPackage {
+    #[must_use]
     pub fn ga(&self) -> Ga {
         self.coord.ga()
     }
@@ -98,6 +101,7 @@ pub struct Resolution {
 }
 
 impl Resolution {
+    #[must_use]
     pub fn get(&self, ga: &Ga) -> Option<&ResolvedPackage> {
         self.packages.iter().find(|p| p.ga() == *ga)
     }
@@ -108,12 +112,14 @@ impl Resolution {
     /// `Compile` (or `Provided`) is what the main sources compile against, so
     /// it includes `compile-only` jars; `Test` is everything. What a program
     /// runs with is [`Resolution::runtime_classpath`].
+    #[must_use]
     pub fn classpath(&self, which: Classpath) -> Vec<PathBuf> {
         self.ordered(|p| which == Classpath::Test || p.classpath != Classpath::Test)
     }
 
     /// Jars for `java -cp` and for packaging: the compile classpath without
     /// anything `compile-only`.
+    #[must_use]
     pub fn runtime_classpath(&self) -> Vec<PathBuf> {
         self.ordered(|p| p.classpath == Classpath::Compile)
     }
@@ -175,6 +181,23 @@ struct Selected {
 ///
 /// This fetches POMs (cheap, and cached), not jars; [`fetch_jars`] does that so
 /// the two phases can own different live regions.
+///
+/// # Errors
+///
+/// [`JrsError::Resolve`] when a manifest or POM dependency asks for a version
+/// range, a POM cannot be fetched or parsed, the worker pool cannot start, or
+/// the graph is more than 64 levels deep; [`JrsError::Io`] when the cache
+/// cannot be read or written.
+///
+/// # Panics
+///
+/// If a worker thread panicked while holding the warnings or POM lock,
+/// poisoning it.
+#[allow(
+    clippy::too_many_lines,
+    reason = "one breadth-first walk over shared state (`selected`, `edges`, \
+              `packaging`); split up, every piece would take all of it"
+)]
 pub fn resolve(manifest: &Manifest, fetcher: &Fetcher, jobs: usize) -> Result<Resolution> {
     for dep in manifest
         .dependencies
@@ -220,39 +243,36 @@ pub fn resolve(manifest: &Manifest, fetcher: &Fetcher, jobs: usize) -> Result<Re
         let mut admitted: Vec<&Pending> = Vec::new();
         for item in &level {
             let ga = item.coord.ga();
-            match selected.get_mut(&ga) {
-                Some(existing) => {
-                    let differs = compare_versions(&existing.coord.version, &item.coord.version)
-                        != std::cmp::Ordering::Equal;
-                    if differs {
-                        existing.mediated = true;
-                        ctx.warn(format!(
-                            "`{ga}` is requested at both {} and {}; nearest-wins picked {} \
-                             (depth {})",
-                            existing.coord.version,
-                            item.coord.version,
-                            existing.coord.version,
-                            existing.depth
-                        ));
-                    }
-                    // A package reached from the compile graph must end up on the
-                    // compile classpath even if a test path found it first.
-                    existing.classpath = existing.classpath.min(item.classpath);
-                    existing.direct |= item.depth == 1;
+            if let Some(existing) = selected.get_mut(&ga) {
+                let differs = compare_versions(&existing.coord.version, &item.coord.version)
+                    != std::cmp::Ordering::Equal;
+                if differs {
+                    existing.mediated = true;
+                    ctx.warn(format!(
+                        "`{ga}` is requested at both {} and {}; nearest-wins picked {} \
+                         (depth {})",
+                        existing.coord.version,
+                        item.coord.version,
+                        existing.coord.version,
+                        existing.depth
+                    ));
                 }
-                None => {
-                    selected.insert(
-                        ga.clone(),
-                        Selected {
-                            coord: item.coord.clone(),
-                            depth: item.depth,
-                            classpath: item.classpath,
-                            direct: item.depth == 1,
-                            mediated: false,
-                        },
-                    );
-                    admitted.push(item);
-                }
+                // A package reached from the compile graph must end up on the
+                // compile classpath even if a test path found it first.
+                existing.classpath = existing.classpath.min(item.classpath);
+                existing.direct |= item.depth == 1;
+            } else {
+                selected.insert(
+                    ga.clone(),
+                    Selected {
+                        coord: item.coord.clone(),
+                        depth: item.depth,
+                        classpath: item.classpath,
+                        direct: item.depth == 1,
+                        mediated: false,
+                    },
+                );
+                admitted.push(item);
             }
             if let Some(parent) = &item.parent {
                 edges.entry(parent.clone()).or_default().push(ga.clone());
@@ -532,13 +552,19 @@ impl Context<'_> {
 type FetchedJar = (usize, Option<PathBuf>, Option<String>);
 
 /// Download every resolved jar, in parallel, filling in `jar` and `checksum`.
+///
+/// # Errors
+///
+/// [`JrsError::Resolve`] when the worker pool cannot start, a jar cannot be
+/// found or downloaded, or it does not match its repository or locked
+/// checksum; [`JrsError::Io`] when the cache cannot be read or written.
 pub fn fetch_jars(resolution: &mut Resolution, fetcher: &Fetcher, jobs: usize) -> Result<()> {
     let pool = rayon::ThreadPoolBuilder::new()
         .num_threads(jobs.max(1))
         .build()
         .map_err(|e| JrsError::resolve(format!("could not start a worker pool: {e}")))?;
 
-    let fetched: Vec<Result<FetchedJar>> = pool.install(|| {
+    let jars: Vec<Result<FetchedJar>> = pool.install(|| {
         resolution
             .packages
             .par_iter()
@@ -570,7 +596,7 @@ pub fn fetch_jars(resolution: &mut Resolution, fetcher: &Fetcher, jobs: usize) -
             .collect()
     });
 
-    for result in fetched {
+    for result in jars {
         let (i, path, checksum) = result?;
         resolution.packages[i].jar = path;
         resolution.packages[i].checksum = checksum;
@@ -609,6 +635,11 @@ pub struct Checked {
 ///
 /// Builds deliberately never do this for jars already in the cache — it would
 /// make a no-op build hash megabytes — so it is its own command.
+///
+/// # Errors
+///
+/// [`JrsError::Resolve`] when the worker pool cannot start; [`JrsError::Io`]
+/// when a cached jar cannot be read.
 pub fn verify_cached(
     resolution: &Resolution,
     cache: &cache::Cache,
@@ -670,6 +701,7 @@ pub struct UiReporter {
 }
 
 impl UiReporter {
+    #[must_use]
     pub fn new(ui: Ui) -> UiReporter {
         UiReporter {
             ui,

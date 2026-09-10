@@ -35,6 +35,12 @@ pub struct SnapshotVersion {
 }
 
 impl Metadata {
+    /// Read a `maven-metadata.xml`. Elements it does not know are ignored.
+    ///
+    /// # Errors
+    ///
+    /// [`JrsError::Resolve`](crate::error::JrsError::Resolve) when the bytes
+    /// are not well-formed XML with a root element.
     pub fn parse(bytes: &[u8]) -> Result<Metadata> {
         let root = parse_xml(bytes)?;
         let versioning = root.child("versioning");
@@ -84,6 +90,7 @@ impl Metadata {
     ///
     /// `None` means the plain `-SNAPSHOT` name: a locally installed snapshot, or
     /// metadata that names no build.
+    #[must_use]
     pub fn snapshot_file_version(
         &self,
         version: &str,
@@ -108,6 +115,7 @@ impl Metadata {
 
 /// Whether a version is a pre-release: an alpha, beta, milestone, release
 /// candidate, snapshot, or an early-access / preview build.
+#[must_use]
 pub fn is_prerelease(version: &str) -> bool {
     let lower = version.to_ascii_lowercase();
     let mut word = String::new();
@@ -156,6 +164,7 @@ fn flavour(version: &str) -> String {
 /// The newest version worth moving to from `current`, if it is newer.
 ///
 /// Pre-releases are only offered to a project that is already on one.
+#[must_use]
 pub fn newest(versions: &[String], current: &str) -> Option<String> {
     let allow_prerelease = is_prerelease(current);
     let current_flavour = flavour(current);
@@ -169,6 +178,7 @@ pub fn newest(versions: &[String], current: &str) -> Option<String> {
 }
 
 /// The newest stable version, for adding a dependency with no version given.
+#[must_use]
 pub fn newest_release(metadata: &Metadata) -> Option<String> {
     metadata
         .versions

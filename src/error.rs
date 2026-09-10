@@ -83,6 +83,7 @@ impl JrsError {
     }
 
     /// The process exit code this error should produce.
+    #[must_use]
     pub fn exit_code(&self) -> i32 {
         match self {
             JrsError::Usage(_) | JrsError::Manifest(_) => exit::USAGE,
@@ -93,6 +94,11 @@ impl JrsError {
 
 /// Convenience for `std::io` results that know their own path.
 pub trait IoResultExt<T> {
+    /// Attach `path` to an I/O error.
+    ///
+    /// # Errors
+    ///
+    /// [`JrsError::Io`] naming `path`, when `self` is an error.
     fn path(self, path: impl AsRef<Path>) -> Result<T>;
 }
 

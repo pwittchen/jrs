@@ -1,15 +1,16 @@
-//! Running the user's tests through the JUnit Platform Console Launcher.
+//! Running the user's tests through the `JUnit` Platform Console Launcher.
 //!
-//! JUnit 5 and 6 run on the Jupiter engine; JUnit 4 runs on the Vintage engine,
+//! `JUnit` 5 and 6 run on the Jupiter engine; `JUnit` 4 runs on the Vintage engine,
 //! which the same launcher bundles (SPEC §10.2). The launcher is an internal
 //! dependency: jrs resolves it itself, at the platform version that matches the
 //! Jupiter version the user declared, and puts it last on the classpath so the
-//! user's own JUnit jars win every conflict.
+//! user's own `JUnit` jars win every conflict.
 //!
 //! The launcher's output is passed through verbatim; jrs only reads it to keep a
 //! live counter, and takes its authoritative numbers from the summary block the
 //! launcher prints at the end.
 
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
 use crate::error::{IoResultExt, JrsError, Result};
@@ -22,18 +23,19 @@ pub const LAUNCHER_GROUP: &str = "org.junit.platform";
 pub const LAUNCHER_ARTIFACT: &str = "junit-platform-console-standalone";
 pub const LAUNCHER_MAIN: &str = "org.junit.platform.console.ConsoleLauncher";
 
-/// The launcher a JUnit 4 project runs on. The Vintage engine is bundled in
+/// The launcher a `JUnit` 4 project runs on. The Vintage engine is bundled in
 /// it, so the project needs nothing but `junit:junit`; this is the last 1.x
 /// release, which supports every JDK jrs does.
 pub const VINTAGE_LAUNCHER: &str = "1.14.4";
 
-/// The JaCoCo release `jrs test --coverage` uses unless `[test] jacoco-version`
-/// says otherwise. JaCoCo has to understand the class files the JDK writes, so
+/// The `JaCoCo` release `jrs test --coverage` uses unless `[test] jacoco-version`
+/// says otherwise. `JaCoCo` has to understand the class files the JDK writes, so
 /// a JDK newer than this release may need a newer one.
 pub const JACOCO_VERSION: &str = "0.8.15";
 
-/// The JUnit Platform version that ships with a Jupiter version: `5.X.Y` with
-/// `1.X.Y`; from JUnit 6 on, the versions are one and the same.
+/// The `JUnit` Platform version that ships with a Jupiter version: `5.X.Y` with
+/// `1.X.Y`; from `JUnit` 6 on, the versions are one and the same.
+#[must_use]
 pub fn platform_version(jupiter: &str) -> Option<String> {
     if let Some(rest) = jupiter.strip_prefix("5.") {
         return Some(format!("1.{rest}"));
@@ -47,7 +49,19 @@ pub fn platform_version(jupiter: &str) -> Option<String> {
 /// An explicit `junit-platform-console-standalone` in `dev-dependencies` wins;
 /// otherwise the version is derived from whichever Jupiter artifact is
 /// declared, and a project on `junit:junit` alone gets the Vintage launcher.
+///
+/// # Errors
+///
+/// [`JrsError::Test`] if no `JUnit` is declared, or a Jupiter artifact is at a
+/// version that is not a `JUnit` 5 or 6 release.
 pub fn launcher_coordinate(manifest: &Manifest) -> Result<Coord> {
+    const JUPITER_ARTIFACTS: &[&str] = &[
+        "junit-jupiter",
+        "junit-jupiter-api",
+        "junit-jupiter-engine",
+        "junit-jupiter-params",
+    ];
+
     if let Some(d) = manifest
         .dev_dependencies
         .iter()
@@ -56,12 +70,6 @@ pub fn launcher_coordinate(manifest: &Manifest) -> Result<Coord> {
         return Ok(Coord::new(&d.group, &d.artifact, &d.version));
     }
 
-    const JUPITER_ARTIFACTS: &[&str] = &[
-        "junit-jupiter",
-        "junit-jupiter-api",
-        "junit-jupiter-engine",
-        "junit-jupiter-params",
-    ];
     let jupiter = manifest.dev_dependencies.iter().find(|d| {
         d.group == "org.junit.jupiter" && JUPITER_ARTIFACTS.contains(&d.artifact.as_str())
     });
@@ -131,12 +139,12 @@ pub struct TestRun {
     pub scan_dir: PathBuf,
     /// `jrs test --filter <pattern>` maps onto `--include-classname`.
     pub filter: Option<String>,
-    /// `--include-tag` / `--exclude-tag`, JUnit's tag expressions.
+    /// `--include-tag` / `--exclude-tag`, `JUnit`'s tag expressions.
     pub include_tags: Vec<String>,
     pub exclude_tags: Vec<String>,
     /// `com.example.FooTest#bar`: run these methods instead of scanning.
     pub methods: Vec<String>,
-    /// Where the launcher writes JUnit XML, which is what CI systems read.
+    /// Where the launcher writes `JUnit` XML, which is what CI systems read.
     pub reports_dir: Option<PathBuf>,
     pub color: bool,
     pub ascii: bool,
@@ -147,6 +155,7 @@ pub struct TestRun {
 }
 
 impl TestRun {
+    #[must_use]
     pub fn args(&self) -> Vec<String> {
         let mut args = self.jvm_args.clone();
         args.extend([
@@ -203,6 +212,7 @@ impl TestRun {
 
     /// Where the colour palette goes, when this run is coloured and the launcher
     /// is new enough to accept one. Older launchers keep their own defaults.
+    #[must_use]
     pub fn palette(&self) -> Option<PathBuf> {
         let supported = compare_versions(&self.launcher_version, COLOR_PALETTE_SINCE)
             != std::cmp::Ordering::Less;
@@ -220,24 +230,32 @@ pub struct TestOutcome {
 }
 
 impl TestOutcome {
+    #[must_use]
     pub fn ok(&self) -> bool {
         self.exit_code == 0
     }
 
     /// `31 tests, 30 passed, 1 failed`
+    #[must_use]
     pub fn describe(&self) -> String {
         let mut s = format!("{} tests, {} passed", self.found, self.passed);
         if self.failed > 0 {
-            s.push_str(&format!(", {} failed", self.failed));
+            let _ = write!(s, ", {} failed", self.failed);
         }
         if self.skipped > 0 {
-            s.push_str(&format!(", {} skipped", self.skipped));
+            let _ = write!(s, ", {} skipped", self.skipped);
         }
         s
     }
 }
 
 /// Launch the console launcher and follow along.
+///
+/// # Errors
+///
+/// [`JrsError::Io`] if the colour palette cannot be written or an earlier run's
+/// reports cannot be removed, and [`JrsError::Build`] if `java` cannot be
+/// started. Failing tests are not an error: they are in the [`TestOutcome`].
 pub fn run(toolchain: &Toolchain, run: &TestRun, ui: &Ui) -> Result<TestOutcome> {
     if let Some(palette) = run.palette() {
         std::fs::create_dir_all(&run.work_dir).path(&run.work_dir)?;
@@ -294,6 +312,7 @@ pub fn run(toolchain: &Toolchain, run: &TestRun, ui: &Ui) -> Result<TestOutcome>
 /// is what separates a test from the class that holds it. A live counter that is
 /// occasionally off by a container is fine — the authoritative numbers come from
 /// the launcher's own summary.
+#[must_use]
 pub fn test_mark(line: &str) -> Option<Outcome> {
     if !line.contains("()") {
         return None;
@@ -317,6 +336,7 @@ pub fn test_mark(line: &str) -> Option<Outcome> {
 
 /// Parse one line of the launcher's closing summary, e.g.
 /// `[         2 tests successful      ]`.
+#[must_use]
 pub fn summary_entry(line: &str) -> Option<(u64, String)> {
     let trimmed = line.trim();
     let inner = trimmed.strip_prefix('[')?.strip_suffix(']')?;
@@ -331,21 +351,24 @@ pub fn summary_entry(line: &str) -> Option<(u64, String)> {
 
 // ---- coverage --------------------------------------------------------------
 
-/// JaCoCo's agent, which instruments classes as the test JVM loads them.
+/// `JaCoCo`'s agent, which instruments classes as the test JVM loads them.
+#[must_use]
 pub fn jacoco_agent(version: &str) -> Coord {
     Coord::new("org.jacoco", "org.jacoco.agent", version).with_classifier(Some("runtime".into()))
 }
 
-/// JaCoCo's command-line tool, with its own dependencies bundled, which turns
+/// `JaCoCo`'s command-line tool, with its own dependencies bundled, which turns
 /// the agent's execution data into a report.
+#[must_use]
 pub fn jacoco_cli(version: &str) -> Coord {
     Coord::new("org.jacoco", "org.jacoco.cli", version).with_classifier(Some("nodeps".into()))
 }
 
 /// The `-javaagent` argument that records coverage into `exec`.
 ///
-/// JaCoCo's option syntax splits on `,` and `=`, so neither may appear in the
+/// `JaCoCo`'s option syntax splits on `,` and `=`, so neither may appear in the
 /// path; jrs's own cache and target paths do not have them.
+#[must_use]
 pub fn agent_argument(agent: &Path, exec: &Path) -> String {
     format!(
         "-javaagent:{}=destfile={},append=false",
@@ -354,7 +377,7 @@ pub fn agent_argument(agent: &Path, exec: &Path) -> String {
     )
 }
 
-/// One JaCoCo report: execution data and classes in, HTML and XML out.
+/// One `JaCoCo` report: execution data and classes in, HTML and XML out.
 #[derive(Debug)]
 pub struct CoverageReport {
     pub exec: PathBuf,
@@ -366,6 +389,7 @@ pub struct CoverageReport {
 }
 
 impl CoverageReport {
+    #[must_use]
     pub fn args(&self, cli: &Path) -> Vec<String> {
         let path = |p: &Path| p.display().to_string();
         vec![
@@ -387,7 +411,7 @@ impl CoverageReport {
     }
 }
 
-/// Covered and total counts, as JaCoCo counts them.
+/// Covered and total counts, as `JaCoCo` counts them.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Coverage {
     pub lines: (u64, u64),
@@ -396,7 +420,12 @@ pub struct Coverage {
 
 impl Coverage {
     /// `83.1% of lines, 71.0% of branches`
+    #[must_use]
     pub fn describe(&self) -> String {
+        #[allow(
+            clippy::cast_precision_loss,
+            reason = "a percentage shown to one decimal place; line counts are nowhere near 2^52"
+        )]
         let percent = |(covered, total): (u64, u64)| {
             if total == 0 {
                 "n/a".to_string()
@@ -412,8 +441,13 @@ impl Coverage {
     }
 }
 
-/// Write the coverage report, passing JaCoCo's output through, and read the
+/// Write the coverage report, passing `JaCoCo`'s output through, and read the
 /// project-wide totals back out of its XML.
+///
+/// # Errors
+///
+/// [`JrsError::Build`] if `JaCoCo` cannot be started or fails, and
+/// [`JrsError::Io`] if the XML report it wrote cannot be read.
 pub fn report_coverage(
     toolchain: &Toolchain,
     report: &CoverageReport,
@@ -430,11 +464,12 @@ pub fn report_coverage(
     Ok(coverage_summary(&xml).unwrap_or_default())
 }
 
-/// The report-level counters of a JaCoCo XML report.
+/// The report-level counters of a `JaCoCo` XML report.
 ///
 /// They are the `<counter>` elements after the last package (or group), so a
 /// scan of the tail finds them without a full parse — and without the external
-/// DTD JaCoCo's doctype points at.
+/// DTD `JaCoCo`'s doctype points at.
+#[must_use]
 pub fn coverage_summary(xml: &str) -> Option<Coverage> {
     let start = ["</package>", "</group>", "<report"]
         .iter()

@@ -27,6 +27,7 @@ pub struct Element {
 }
 
 impl Element {
+    #[must_use]
     pub fn child(&self, name: &str) -> Option<&Element> {
         self.children.iter().find(|c| c.name == name)
     }
@@ -36,6 +37,7 @@ impl Element {
     }
 
     /// Descend through a chain of single children.
+    #[must_use]
     pub fn path(&self, names: &[&str]) -> Option<&Element> {
         let mut cur = self;
         for n in names {
@@ -45,6 +47,7 @@ impl Element {
     }
 
     /// The trimmed text of a child element, if it has any.
+    #[must_use]
     pub fn text_of(&self, name: &str) -> Option<&str> {
         self.child(name)
             .map(|c| c.text.trim())
@@ -52,6 +55,7 @@ impl Element {
     }
 
     /// All `<x>` elements under `<xs>`, the Maven plural convention.
+    #[must_use]
     pub fn list<'a>(&'a self, plural: &str, singular: &'a str) -> Vec<&'a Element> {
         self.child(plural)
             .map(|c| c.children_named(singular).collect())
@@ -60,6 +64,10 @@ impl Element {
 }
 
 /// Parse an XML document into an [`Element`] tree.
+///
+/// # Errors
+///
+/// [`JrsError::Resolve`] when the XML is malformed or has no root element.
 pub fn parse_xml(bytes: &[u8]) -> Result<Element> {
     let mut reader = quick_xml::Reader::from_reader(bytes);
     let config = reader.config_mut();
@@ -146,18 +154,17 @@ pub struct PomDependency {
 }
 
 impl PomDependency {
+    #[must_use]
     pub fn ga(&self) -> Ga {
         Ga::new(&self.group, &self.artifact)
     }
 
     pub fn scope(&self) -> Scope {
-        self.scope
-            .as_deref()
-            .map(Scope::parse)
-            .unwrap_or(Scope::Compile)
+        self.scope.as_deref().map_or(Scope::Compile, Scope::parse)
     }
 
     /// Exclusion wildcards (`*`) match everything, as in Maven.
+    #[must_use]
     pub fn excludes(&self, ga: &Ga) -> bool {
         self.exclusions.iter().any(|e| {
             (e.group == "*" || e.group == ga.group)
@@ -212,6 +219,12 @@ pub struct Pom {
 }
 
 impl Pom {
+    /// Parse a POM, exactly as written.
+    ///
+    /// # Errors
+    ///
+    /// [`JrsError::Resolve`] when the XML is malformed or its root element is
+    /// not `<project>`.
     pub fn parse(bytes: &[u8]) -> Result<Pom> {
         let root = parse_xml(bytes)?;
         if root.name != "project" {
@@ -244,8 +257,7 @@ impl Pom {
                 id: p.text_of("id").unwrap_or("").to_string(),
                 active_by_default: p
                     .path(&["activation", "activeByDefault"])
-                    .map(|e| e.text.trim() == "true")
-                    .unwrap_or(false),
+                    .is_some_and(|e| e.text.trim() == "true"),
                 element: p.clone(),
             })
             .collect();
@@ -277,18 +289,21 @@ impl Pom {
 
     /// The declared group, falling back to the parent's — Maven's inheritance
     /// rule for the two coordinates a child may omit.
+    #[must_use]
     pub fn group_id(&self) -> Option<&str> {
         self.group
             .as_deref()
             .or(self.parent.as_ref().map(|p| p.group.as_str()))
     }
 
+    #[must_use]
     pub fn version_id(&self) -> Option<&str> {
         self.version
             .as_deref()
             .or(self.parent.as_ref().map(|p| p.version.as_str()))
     }
 
+    #[must_use]
     pub fn coord(&self) -> Option<Coord> {
         Some(Coord::new(
             self.group_id()?,
@@ -319,7 +334,7 @@ fn read_dependencies(parent: &Element) -> Vec<PomDependency> {
                 artifact: d.text_of("artifactId")?.to_string(),
                 version: d.text_of("version").map(str::to_string),
                 scope: d.text_of("scope").map(str::to_string),
-                optional: d.text_of("optional").map(|o| o == "true").unwrap_or(false),
+                optional: d.text_of("optional").is_some_and(|o| o == "true"),
                 kind: d.text_of("type").unwrap_or("jar").to_string(),
                 classifier: d.text_of("classifier").map(str::to_string),
                 exclusions: d
@@ -407,6 +422,11 @@ pub struct Effective {
 ///
 /// `chain[0]` is the POM itself; each subsequent entry is its parent. Properties
 /// and managed versions from nearer POMs win, which is Maven's inheritance rule.
+///
+/// # Errors
+///
+/// [`JrsError::Resolve`] when `chain` is empty, or no POM in it gives a
+/// groupId and version.
 pub fn effective(chain: &[Pom]) -> Result<Effective> {
     let pom = chain
         .first()
@@ -502,14 +522,15 @@ pub fn effective(chain: &[Pom]) -> Result<Effective> {
 impl Effective {
     /// Apply `<dependencyManagement>` to a dependency that omits its version or
     /// scope, and merge in any managed exclusions (SPEC §8.2 step 3).
+    #[must_use]
     pub fn manage(&self, dep: &PomDependency) -> PomDependency {
         let mut out = dep.clone();
         if let Some(m) = self.managed.get(&dep.ga()) {
             if out.version.is_none() {
-                out.version = m.version.clone();
+                out.version.clone_from(&m.version);
             }
             if out.scope.is_none() {
-                out.scope = m.scope.clone();
+                out.scope.clone_from(&m.scope);
             }
             for e in &m.exclusions {
                 if !out.exclusions.contains(e) {
@@ -560,6 +581,7 @@ fn interpolate_dep(d: &PomDependency, props: &BTreeMap<String, String>) -> PomDe
 ///
 /// Unresolvable placeholders are left verbatim: a `${...}` in an error message is
 /// far more diagnosable than an empty string silently becoming a coordinate.
+#[must_use]
 pub fn interpolate(text: &str, props: &BTreeMap<String, String>) -> String {
     const MAX_DEPTH: usize = 8;
     let mut out = text.to_string();
@@ -573,22 +595,19 @@ pub fn interpolate(text: &str, props: &BTreeMap<String, String>) -> String {
         while let Some(start) = rest.find("${") {
             next.push_str(&rest[..start]);
             let after = &rest[start + 2..];
-            match after.find('}') {
-                Some(end) => {
-                    let key = &after[..end];
-                    match props.get(key) {
-                        Some(value) => {
-                            next.push_str(value);
-                            changed = true;
-                        }
-                        None => next.push_str(&rest[start..start + 2 + end + 1]),
+            if let Some(end) = after.find('}') {
+                let key = &after[..end];
+                match props.get(key) {
+                    Some(value) => {
+                        next.push_str(value);
+                        changed = true;
                     }
-                    rest = &after[end + 1..];
+                    None => next.push_str(&rest[start..=(start + 2 + end)]),
                 }
-                None => {
-                    next.push_str(rest);
-                    rest = "";
-                }
+                rest = &after[end + 1..];
+            } else {
+                next.push_str(rest);
+                rest = "";
             }
         }
         next.push_str(rest);

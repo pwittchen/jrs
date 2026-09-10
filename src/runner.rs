@@ -14,6 +14,7 @@ use crate::ui::Ui;
 ///
 /// JVM arguments (`[run] jvm-args`) go first: anything after the main class
 /// belongs to the program.
+#[must_use]
 pub fn java_args(
     jvm_args: &[String],
     classpath: &[PathBuf],
@@ -32,6 +33,11 @@ pub fn java_args(
 }
 
 /// Run the project's main class, returning its exit code.
+///
+/// # Errors
+///
+/// [`JrsError::Build`](crate::error::JrsError::Build) if `java` cannot be
+/// started. A program that exits non-zero is not an error: its code is returned.
 pub fn run_main(
     toolchain: &Toolchain,
     jvm_args: &[String],

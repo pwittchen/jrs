@@ -6,6 +6,7 @@
 //! `javac`'s output is passed through verbatim — its diagnostics are already good,
 //! and jrs reformatting them would only make them worse.
 
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
 use crate::error::{IoResultExt, JrsError, Result};
@@ -100,7 +101,7 @@ impl CompileUnit {
                     .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
                     .map(|d| d.as_nanos())
                     .unwrap_or_default();
-                s.push_str(&format!("jar {} {modified}\n", meta.len()));
+                let _ = writeln!(s, "jar {} {modified}", meta.len());
             }
         }
         for source in &self.sources {
@@ -115,6 +116,11 @@ impl CompileUnit {
 ///
 /// v1 is deliberately coarse: all-or-nothing, because `javac` needs the full
 /// source set anyway when types are interdependent (SPEC §7.2).
+///
+/// # Errors
+///
+/// None today: a fingerprint or class tree that cannot be read counts as
+/// stale rather than as a failure.
 pub fn is_stale(unit: &CompileUnit) -> Result<bool> {
     if unit.sources.is_empty() {
         return Ok(false);
@@ -136,6 +142,12 @@ pub fn is_stale(unit: &CompileUnit) -> Result<bool> {
 }
 
 /// Compile, unless nothing changed.
+///
+/// # Errors
+///
+/// `JrsError::Build` if `javac` cannot be started or reports a failure;
+/// `JrsError::Io` if the output or work directory, the argfile, the
+/// fingerprint or the compiled classes cannot be written or read.
 pub fn compile(toolchain: &Toolchain, unit: &CompileUnit, ui: &Ui) -> Result<Outcome> {
     if unit.sources.is_empty() {
         return Ok(Outcome::UpToDate);
@@ -231,6 +243,12 @@ impl DocUnit {
 /// The output directory is emptied first, so a class that was deleted does not
 /// keep its page. Nothing is skipped on a rerun: `javadoc` is fast next to the
 /// question of which pages a change touched.
+///
+/// # Errors
+///
+/// `JrsError::Build` if `javadoc` cannot be started or reports a failure;
+/// `JrsError::Io` if the output or work directory or the argfile cannot be
+/// written.
 pub fn javadoc(javadoc: &Path, unit: &DocUnit, ui: &Ui) -> Result<()> {
     if unit.output_dir.exists() {
         std::fs::remove_dir_all(&unit.output_dir).path(&unit.output_dir)?;
@@ -260,6 +278,7 @@ pub fn javadoc(javadoc: &Path, unit: &DocUnit, ui: &Ui) -> Result<()> {
 ///
 /// The format is one argument per line; anything with whitespace or a backslash
 /// is quoted, because Windows paths contain both.
+#[must_use]
 pub fn render_argfile(flags: &[String], sources: &[PathBuf]) -> String {
     let mut s = String::new();
     for flag in flags {
@@ -281,6 +300,7 @@ fn quote_argument(arg: &str) -> String {
 }
 
 /// Where a class file for `class_name` would land under `dir`.
+#[must_use]
 pub fn class_file(dir: &Path, class_name: &str) -> PathBuf {
     let mut path = dir.to_path_buf();
     for part in class_name.split('.') {

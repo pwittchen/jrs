@@ -33,6 +33,7 @@ impl Ga {
         }
     }
 
+    #[must_use]
     pub fn with_classifier(mut self, classifier: Option<String>) -> Ga {
         self.classifier = classifier;
         self
@@ -49,6 +50,7 @@ impl Ga {
 
     /// Whether an exclusion pattern (`*` wildcards allowed) covers this artifact.
     /// Exclusions name a group and artifact only, so they match every classifier.
+    #[must_use]
     pub fn excluded_by(&self, pattern: &Ga) -> bool {
         (pattern.group == "*" || pattern.group == self.group)
             && (pattern.artifact == "*" || pattern.artifact == self.artifact)
@@ -90,12 +92,18 @@ impl Coord {
         }
     }
 
+    #[must_use]
     pub fn with_classifier(mut self, classifier: Option<String>) -> Coord {
         self.classifier = classifier;
         self
     }
 
     /// `group:artifact:version`, or Gradle's `group:artifact:version:classifier`.
+    ///
+    /// # Errors
+    ///
+    /// [`JrsError::Resolve`] unless `s` is three or four non-empty,
+    /// colon-separated parts.
     pub fn parse(s: &str) -> Result<Coord> {
         let parts: Vec<&str> = s.split(':').collect();
         if !(3..=4).contains(&parts.len()) || parts.iter().any(|p| p.is_empty()) {
@@ -104,20 +112,23 @@ impl Coord {
             )));
         }
         Ok(Coord::new(parts[0], parts[1], parts[2])
-            .with_classifier(parts.get(3).map(|c| c.to_string())))
+            .with_classifier(parts.get(3).map(ToString::to_string)))
     }
 
+    #[must_use]
     pub fn ga(&self) -> Ga {
         Ga::new(&self.group, &self.artifact).with_classifier(self.classifier.clone())
     }
 
     /// The coordinate whose POM describes this one: a classified artifact shares
     /// the POM of the artifact it sits beside.
+    #[must_use]
     pub fn pom_coord(&self) -> Coord {
         Coord::new(&self.group, &self.artifact, &self.version)
     }
 
     /// `1.0-SNAPSHOT`: a version that may be republished under the same name.
+    #[must_use]
     pub fn is_snapshot(&self) -> bool {
         self.version.ends_with(SNAPSHOT_SUFFIX)
     }
@@ -126,6 +137,7 @@ impl Coord {
     ///
     /// A POM has no classifier: a classified artifact is an extra file published
     /// beside the main one, described by the same POM.
+    #[must_use]
     pub fn file_name(&self, ext: &str) -> String {
         self.file_name_as(ext, &self.version)
     }
@@ -133,6 +145,7 @@ impl Coord {
     /// Like [`Coord::file_name`], with the version in the file name replaced —
     /// a timestamped snapshot lives in the `-SNAPSHOT` directory under a name like
     /// `lib-1.0-20240101.120000-3.jar`.
+    #[must_use]
     pub fn file_name_as(&self, ext: &str, file_version: &str) -> String {
         match &self.classifier {
             Some(c) if ext != "pom" && !ext.starts_with("pom.") => {
@@ -143,10 +156,12 @@ impl Coord {
     }
 
     /// `com/google/guava/guava/33.0.0-jre/guava-33.0.0-jre.jar` (SPEC §8.1).
+    #[must_use]
     pub fn repo_path(&self, ext: &str) -> String {
         self.repo_path_as(ext, &self.version)
     }
 
+    #[must_use]
     pub fn repo_path_as(&self, ext: &str, file_version: &str) -> String {
         format!(
             "{}/{}",
@@ -156,6 +171,7 @@ impl Coord {
     }
 
     /// `com/google/guava/guava/33.0.0-jre`, where every file of a version lives.
+    #[must_use]
     pub fn version_dir(&self) -> String {
         format!(
             "{}/{}/{}",
@@ -207,6 +223,7 @@ pub enum Scope {
 }
 
 impl Scope {
+    #[must_use]
     pub fn parse(s: &str) -> Scope {
         match s.trim().to_ascii_lowercase().as_str() {
             "runtime" => Scope::Runtime,
@@ -218,6 +235,7 @@ impl Scope {
         }
     }
 
+    #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
             Scope::Compile => "compile",
@@ -231,6 +249,7 @@ impl Scope {
 
     /// Whether a dependency in this scope is walked transitively and put on the
     /// classpath (SPEC §8.2 step 4).
+    #[must_use]
     pub fn is_transitive(self) -> bool {
         matches!(self, Scope::Compile | Scope::Runtime)
     }
@@ -239,6 +258,7 @@ impl Scope {
 /// True for Maven version ranges like `[1.0,2.0)` or `[1.5,]`.
 ///
 /// jrs rejects these rather than silently mishandling them (SPEC §8.2).
+#[must_use]
 pub fn is_range(version: &str) -> bool {
     let v = version.trim();
     v.starts_with('[') || v.starts_with('(')
@@ -275,10 +295,6 @@ fn qualifier_rank(s: &str) -> Option<usize> {
 /// Split a version into numeric and qualifier items, breaking on `.`, `-`, `_`
 /// and on every digit/letter transition.
 fn tokenize(version: &str) -> Vec<Item> {
-    let mut items = Vec::new();
-    let mut buf = String::new();
-    let mut buf_is_digit = false;
-
     fn flush(buf: &mut String, is_digit: bool, items: &mut Vec<Item>) {
         if buf.is_empty() {
             return;
@@ -292,6 +308,10 @@ fn tokenize(version: &str) -> Vec<Item> {
         }
         buf.clear();
     }
+
+    let mut items = Vec::new();
+    let mut buf = String::new();
+    let mut buf_is_digit = false;
 
     for ch in version.trim().to_ascii_lowercase().chars() {
         if ch == '.' || ch == '-' || ch == '_' || ch == '+' {
@@ -338,6 +358,7 @@ fn compare_qualifiers(a: &str, b: &str) -> Ordering {
 }
 
 /// Compare two Maven versions.
+#[must_use]
 pub fn compare_versions(a: &str, b: &str) -> Ordering {
     if a == b {
         return Ordering::Equal;

@@ -22,6 +22,13 @@ const UNDERSTOOD_PLUGINS: &[&str] = &[
     "maven-shade-plugin",
 ];
 
+/// Translate the POM at `pom_path`, and the parents beside it on disk.
+///
+/// # Errors
+///
+/// [`JrsError::Io`] if a POM in the chain cannot be read,
+/// [`JrsError::Usage`] if one is not a well-formed POM, and
+/// [`JrsError::Resolve`] if the project's groupId or version cannot be worked out.
 pub fn migrate(pom_path: &Path, root: &Path) -> Result<Migration> {
     let mut report = Report::default();
     let chain = read_chain(pom_path, &mut report)?;
@@ -61,8 +68,7 @@ fn read_chain(pom_path: &Path, report: &mut Report) -> Result<Vec<Pom>> {
         let parent = parsed.parent.clone();
         let dir = current
             .parent()
-            .map(Path::to_path_buf)
-            .unwrap_or_else(|| PathBuf::from("."));
+            .map_or_else(|| PathBuf::from("."), Path::to_path_buf);
         chain.push(parsed);
 
         let Some(parent) = parent else { break };
@@ -499,14 +505,14 @@ fn read_the_rest(pom: &Pom, report: &mut Report) {
         }
     }
     for profile in &pom.profiles {
-        if !profile.active_by_default {
-            report.skipped(format!(
-                "<profile> {} — only default-active profiles are read",
+        if profile.active_by_default {
+            report.review(format!(
+                "<profile> {} is active by default; its contents were not merged",
                 profile.id
             ));
         } else {
-            report.review(format!(
-                "<profile> {} is active by default; its contents were not merged",
+            report.skipped(format!(
+                "<profile> {} — only default-active profiles are read",
                 profile.id
             ));
         }

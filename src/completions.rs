@@ -23,6 +23,8 @@
 //!
 //! Hidden arguments, subcommands and possible values are skipped throughout.
 
+use std::fmt::Write as _;
+
 use clap::{Arg, Command, ValueHint};
 
 /// A shell `generate` can write a script for.
@@ -37,12 +39,14 @@ impl Shell {
     pub const ALL: [Shell; 3] = [Shell::Bash, Shell::Zsh, Shell::Fish];
 
     /// The shell named `s`, as spelled by [`Shell::as_str`], ignoring case.
+    #[must_use]
     pub fn parse(s: &str) -> Option<Shell> {
         Shell::ALL
             .into_iter()
             .find(|shell| shell.as_str().eq_ignore_ascii_case(s))
     }
 
+    #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
             Shell::Bash => "bash",
@@ -53,6 +57,7 @@ impl Shell {
 }
 
 /// The complete completion script for `cmd` in `shell`.
+#[must_use]
 pub fn generate(shell: Shell, cmd: &Command) -> String {
     // `build` is what adds `--help`/`--version` and copies global args down
     // into every subcommand; before it, a subcommand only knows its own args.
@@ -139,9 +144,7 @@ impl Node {
 
 impl Opt {
     fn new(arg: &Arg) -> Opt {
-        let value = if !arg.get_action().takes_values() {
-            Value::None
-        } else {
+        let value = if arg.get_action().takes_values() {
             let choices: Vec<String> = (arg.get_possible_values().iter())
                 .filter(|value| !value.is_hide_set())
                 .map(|value| value.get_name().to_string())
@@ -153,6 +156,8 @@ impl Opt {
             } else {
                 Value::Free
             }
+        } else {
+            Value::None
         };
         Opt {
             short: arg.get_short(),
@@ -160,7 +165,7 @@ impl Opt {
             help: one_line(arg.get_help()),
             value_name: (arg.get_value_names().and_then(|names| names.first())).map_or_else(
                 || arg.get_id().to_string().to_uppercase(),
-                |n| n.to_string(),
+                ToString::to_string,
             ),
             value,
             global: arg.is_global_set(),
@@ -251,9 +256,12 @@ fn zsh_value(s: &str) -> String {
 /// options match under any command, since `clap` accepts them at every level.
 fn bash_patterns(node: &Node, opt: &Opt) -> String {
     let patterns: Vec<String> = (opt.spellings().iter())
-        .map(|flag| match opt.global {
-            true => format!("*{}", sh_quote(&format!(",{flag}"))),
-            false => sh_quote(&format!("{},{flag}", node.id())),
+        .map(|flag| {
+            if opt.global {
+                format!("*{}", sh_quote(&format!(",{flag}")))
+            } else {
+                sh_quote(&format!("{},{flag}", node.id()))
+            }
         })
         .collect();
     patterns.join("|")
@@ -269,6 +277,10 @@ fn push_unique(lines: &mut Vec<String>, line: String) {
 ///
 /// Written for bash 3.2, which macOS still ships: no associative arrays, no
 /// `mapfile`, and `compopt` only where it exists.
+#[allow(
+    clippy::too_many_lines,
+    reason = "most of it is the bash script itself, which reads best in one piece"
+)]
 fn bash(root: &Node) -> Vec<String> {
     let bin = root.name();
     let func = format!("_{bin}");
@@ -540,32 +552,33 @@ fn fish(root: &Node) -> Vec<String> {
         for opt in &node.opts {
             let mut line = head.clone();
             if let Some(c) = opt.short {
-                line.push_str(&format!(
+                let _ = write!(
+                    line,
                     " -s {}",
                     word_list([c.to_string().as_str()], fish_quote)
-                ));
+                );
             }
             if let Some(long) = &opt.long {
-                line.push_str(&format!(" -l {}", word_list([long.as_str()], fish_quote)));
+                let _ = write!(line, " -l {}", word_list([long.as_str()], fish_quote));
             }
             match &opt.value {
                 Value::None => {}
                 Value::Choices(choices) => {
                     let list = word_list(choices.iter().map(String::as_str), fish_quote);
-                    line.push_str(&format!(" -x -a {}", fish_quote(&list)));
+                    let _ = write!(line, " -x -a {}", fish_quote(&list));
                 }
                 Value::Path => line.push_str(" -r -F"),
                 Value::Free => line.push_str(" -x"),
             }
             if !opt.help.is_empty() {
-                line.push_str(&format!(" -d {}", fish_quote(&opt.help)));
+                let _ = write!(line, " -d {}", fish_quote(&opt.help));
             }
             out.push(line);
         }
         for sub in &node.subs {
             let mut line = format!("{head} -a {}", fish_quote(sub.name()));
             if !sub.about.is_empty() {
-                line.push_str(&format!(" -d {}", fish_quote(&sub.about)));
+                let _ = write!(line, " -d {}", fish_quote(&sub.about));
             }
             out.push(line);
         }

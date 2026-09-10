@@ -49,6 +49,13 @@ const REPORTED_CONFIGS: &[&str] = &[
     "providedRuntime",
 ];
 
+/// Translate `build_file`, with `settings.gradle` and a version catalog from
+/// `root` when they are there.
+///
+/// # Errors
+///
+/// [`JrsError::Io`](crate::error::JrsError::Io) if `build_file` cannot be read.
+/// Everything jrs cannot read in it goes into the report, not an error.
 pub fn migrate(build_file: &Path, root: &Path) -> Result<Migration> {
     let mut report = Report {
         preamble: Some(PREAMBLE.to_string()),
@@ -70,17 +77,12 @@ pub fn migrate(build_file: &Path, root: &Path) -> Result<Migration> {
         })
         .unwrap_or_else(|| "app".to_string());
 
-    let version = match assignment(&script, "version") {
-        Some(v) => {
-            report.migrated(format!("project.version = {v}"));
-            v
-        }
-        None => {
-            report.review(
-                "project.version — no `version = ...` found; defaulted to 0.1.0".to_string(),
-            );
-            "0.1.0".to_string()
-        }
+    let version = if let Some(v) = assignment(&script, "version") {
+        report.migrated(format!("project.version = {v}"));
+        v
+    } else {
+        report.review("project.version — no `version = ...` found; defaulted to 0.1.0".to_string());
+        "0.1.0".to_string()
     };
 
     let mut out = manifest::blank(&name, &version, root);
@@ -185,18 +187,17 @@ fn read_catalog(root: &Path, report: &mut Report) -> Catalog {
             continue;
         };
 
-        let (group, artifact) = match entry.get("module").and_then(|v| v.as_str()) {
-            Some(module) => match module.split_once(':') {
+        let (group, artifact) = if let Some(module) = entry.get("module").and_then(|v| v.as_str()) {
+            match module.split_once(':') {
                 Some((g, a)) => (g.to_string(), a.to_string()),
                 None => continue,
-            },
-            None => {
-                let group = entry.get("group").and_then(|v| v.as_str());
-                let name = entry.get("name").and_then(|v| v.as_str());
-                match (group, name) {
-                    (Some(g), Some(a)) => (g.to_string(), a.to_string()),
-                    _ => continue,
-                }
+            }
+        } else {
+            let group = entry.get("group").and_then(|v| v.as_str());
+            let name = entry.get("name").and_then(|v| v.as_str());
+            match (group, name) {
+                (Some(g), Some(a)) => (g.to_string(), a.to_string()),
+                _ => continue,
             }
         };
 
@@ -246,7 +247,7 @@ fn read_java(script: &str, out: &mut Manifest, report: &mut Report) {
             let digits: String = rest
                 .trim_start_matches(['(', ' '])
                 .chars()
-                .take_while(|c| c.is_ascii_digit())
+                .take_while(char::is_ascii_digit)
                 .collect();
             digits.parse::<u32>().ok()
         });
@@ -316,8 +317,7 @@ fn read_dependencies(script: &str, catalog: &Catalog, out: &mut Manifest, report
             Target::Test
         } else if REPORTED_CONFIGS.contains(&config.as_str()) {
             report.skipped(format!(
-                "`{}` — the `{config}` configuration has no equivalent in jrs.toml",
-                trimmed
+                "`{trimmed}` — the `{config}` configuration has no equivalent in jrs.toml"
             ));
             continue;
         } else {
@@ -613,6 +613,7 @@ fn report_the_unreadable(script: &str, settings: &Settings, report: &mut Report)
 // ---- text helpers ----------------------------------------------------------
 
 /// Remove `//` and `/* */` comments, leaving line structure intact.
+#[must_use]
 pub fn strip_comments(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut chars = text.chars().peekable();
@@ -664,6 +665,7 @@ pub fn strip_comments(text: &str) -> String {
 }
 
 /// Every single- or double-quoted literal on a line.
+#[must_use]
 pub fn quoted(line: &str) -> Vec<String> {
     let mut out = Vec::new();
     let mut chars = line.chars().peekable();
@@ -684,6 +686,7 @@ pub fn quoted(line: &str) -> Vec<String> {
 }
 
 /// The lines inside a top-level `name { ... }` block, brace-balanced.
+#[must_use]
 pub fn block_lines<'a>(script: &'a str, name: &str) -> Vec<&'a str> {
     blocks_where(script, |header| header.starts_with(name))
 }
@@ -717,6 +720,7 @@ fn blocks_where(script: &str, header: impl Fn(&str) -> bool) -> Vec<&str> {
 }
 
 /// The value of a `name = <literal>` assignment anywhere in the script.
+#[must_use]
 pub fn assignment(script: &str, name: &str) -> Option<String> {
     script.lines().find_map(|line| {
         let trimmed = line.trim();
@@ -770,7 +774,7 @@ fn parse_gav(text: &str) -> Option<Dependency> {
         return None;
     }
     let mut dep = Dependency::new(parts[0], parts[1], parts[2]);
-    dep.classifier = parts.get(3).map(|c| c.to_string());
+    dep.classifier = parts.get(3).map(ToString::to_string);
     Some(dep)
 }
 
@@ -809,6 +813,7 @@ fn repository_name(url: &str) -> String {
 }
 
 /// Kept so `migrate::mod` can name the file it looked for.
+#[must_use]
 pub fn build_file_names() -> [&'static str; 2] {
     ["build.gradle", "build.gradle.kts"]
 }

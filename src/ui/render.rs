@@ -31,14 +31,27 @@ pub struct Capture {
 }
 
 impl Capture {
+    #[must_use]
     pub fn new() -> Capture {
         Capture::default()
     }
 
+    /// Everything written to stdout so far.
+    ///
+    /// # Panics
+    ///
+    /// If a thread panicked while holding the captured stdout's lock.
+    #[must_use]
     pub fn stdout(&self) -> String {
         String::from_utf8_lossy(&self.out.lock().unwrap()).into_owned()
     }
 
+    /// Everything written to stderr so far.
+    ///
+    /// # Panics
+    ///
+    /// If a thread panicked while holding the captured stderr's lock.
+    #[must_use]
     pub fn stderr(&self) -> String {
         String::from_utf8_lossy(&self.err.lock().unwrap()).into_owned()
     }
@@ -115,7 +128,7 @@ fn install_signal_handlers() {
             unsafe {
                 libc::write(
                     libc::STDERR_FILENO,
-                    SHOW_CURSOR.as_ptr() as *const libc::c_void,
+                    SHOW_CURSOR.as_ptr().cast::<libc::c_void>(),
                     SHOW_CURSOR.len(),
                 );
             }
@@ -177,6 +190,7 @@ pub struct Renderer {
 }
 
 impl Renderer {
+    #[must_use]
     pub fn terminal(animate: bool) -> Renderer {
         Renderer {
             sink: Sink::Terminal,
@@ -189,6 +203,7 @@ impl Renderer {
     }
 
     /// A renderer that draws into memory with a known terminal size.
+    #[must_use]
     pub fn captured(capture: Capture, animate: bool, geometry: Geometry) -> Renderer {
         Renderer {
             sink: Sink::Capture(capture),
@@ -208,6 +223,7 @@ impl Renderer {
         self.fixed.or_else(probe_geometry).unwrap_or_default()
     }
 
+    #[must_use]
     pub fn animates(&self) -> bool {
         self.animate
     }

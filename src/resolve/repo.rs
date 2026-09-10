@@ -136,10 +136,12 @@ fn build_proxy(proxy: &ProxyConfig) -> Result<ureq::Proxy> {
 }
 
 impl Fetcher {
+    #[must_use]
     pub fn new(repos: Vec<Repository>, cache: Cache, offline: bool) -> Fetcher {
         Fetcher::with_reporter(repos, cache, offline, Box::new(SilentReporter))
     }
 
+    #[must_use]
     pub fn with_reporter(
         repos: Vec<Repository>,
         cache: Cache,
@@ -162,6 +164,7 @@ impl Fetcher {
 
     /// Ask the repositories about every cached snapshot again, however recently
     /// it was checked.
+    #[must_use]
     pub fn refreshing_snapshots(mut self, refresh: bool) -> Fetcher {
         self.refresh_snapshots = refresh;
         self
@@ -169,6 +172,10 @@ impl Fetcher {
 
     /// Reach remote repositories with `network`'s proxy, credentials and retry
     /// policy.
+    ///
+    /// # Errors
+    ///
+    /// [`JrsError::Usage`] when the configured proxy URL is not usable.
     pub fn with_network(mut self, network: Network) -> Result<Fetcher> {
         self.agent = build_agent(network.proxy.as_ref())?;
         self.network = network;
@@ -184,6 +191,11 @@ impl Fetcher {
         self.downloaded.load(Ordering::Relaxed)
     }
 
+    /// The warnings collected so far, leaving none behind.
+    ///
+    /// # Panics
+    ///
+    /// If a thread panicked while recording a warning, poisoning the lock.
     pub fn take_warnings(&self) -> Vec<String> {
         std::mem::take(&mut self.warnings.lock().unwrap())
     }
@@ -196,12 +208,23 @@ impl Fetcher {
     }
 
     /// A POM's bytes. Small, so they are read whole and not reported on.
+    ///
+    /// # Errors
+    ///
+    /// [`JrsError::Resolve`] when the POM is not cached and `--offline` was
+    /// given, no repository has it, a repository fails or refuses the request,
+    /// or its checksum does not match; [`JrsError::Io`] when the cache cannot be
+    /// read or written.
     pub fn pom(&self, coord: &Coord) -> Result<Vec<u8>> {
         let (path, _) = self.artifact(&coord.pom_coord(), "pom", false, None)?;
         std::fs::read(&path).path(&path)
     }
 
     /// A jar's cached path, downloading it with progress if it is not there yet.
+    ///
+    /// # Errors
+    ///
+    /// As for [`Fetcher::pom`].
     pub fn jar(&self, coord: &Coord) -> Result<(PathBuf, Origin)> {
         self.artifact(coord, "jar", true, None)
     }
@@ -213,6 +236,11 @@ impl Fetcher {
     /// lockfile from a record into an integrity pin: a repository that starts
     /// serving different bytes under the same coordinate fails the build. A jar
     /// already in the cache is not re-hashed; `jrs verify` does that on demand.
+    ///
+    /// # Errors
+    ///
+    /// As for [`Fetcher::jar`], plus [`JrsError::Resolve`] when a download does
+    /// not match `pin`.
     pub fn jar_pinned(&self, coord: &Coord, pin: Option<&str>) -> Result<(PathBuf, Origin)> {
         self.artifact(coord, "jar", true, pin)
     }
@@ -388,6 +416,12 @@ impl Fetcher {
     ///
     /// Never cached: the answer changes whenever anything is published, and the
     /// commands that ask (`jrs outdated`, `jrs add`) are asking precisely that.
+    ///
+    /// # Errors
+    ///
+    /// [`JrsError::Resolve`] when `--offline` was given, no repository lists
+    /// the artifact, or a repository fails or refuses the request;
+    /// [`JrsError::Io`] when a `file://` repository cannot be read.
     pub fn metadata(&self, group: &str, artifact: &str) -> Result<Metadata> {
         if self.offline {
             return Err(JrsError::resolve(format!(
@@ -549,7 +583,9 @@ impl Fetcher {
             .with_config()
             .limit(MAX_ARTIFACT_BYTES)
             .reader();
-        let mut out = Vec::with_capacity(total.unwrap_or(64 * 1024) as usize);
+        // `total` is at most `MAX_ARTIFACT_BYTES` here, so it always fits; the
+        // capacity is only a hint either way.
+        let mut out = Vec::with_capacity(usize::try_from(total.unwrap_or(64 * 1024)).unwrap_or(0));
         let mut chunk = vec![0u8; 64 * 1024];
         loop {
             // A connection that dies halfway through a body is as transient as
@@ -584,11 +620,11 @@ impl Fetcher {
             ("sha1", sha1_hex as fn(&[u8]) -> String),
             ("sha256", sha256_hex as fn(&[u8]) -> String),
         ] {
-            let published = match self.fetch_one(repo, &format!("{remote}.{suffix}"), false, 0) {
-                Ok(Some(raw)) => raw,
-                // A checksum file that will not download is not a reason to fail
-                // the build; it is a reason to say the artifact went unverified.
-                Ok(None) | Err(_) => continue,
+            // A checksum file that will not download is not a reason to fail
+            // the build; it is a reason to say the artifact went unverified.
+            let Ok(Some(published)) = self.fetch_one(repo, &format!("{remote}.{suffix}"), false, 0)
+            else {
+                continue;
             };
             let Some(expected) = parse_checksum(&published) else {
                 continue;
@@ -653,9 +689,10 @@ fn credentials_hint(repository: &str, had_credentials: bool) -> String {
         return format!("the credentials configured for `{repository}` were refused");
     }
     let var = crate::config::env_name(repository);
-    let file = crate::config::default_path()
-        .map(|p| p.display().to_string())
-        .unwrap_or_else(|| "the jrs config file".to_string());
+    let file = crate::config::default_path().map_or_else(
+        || "the jrs config file".to_string(),
+        |p| p.display().to_string(),
+    );
     format!(
         "it may need credentials: set JRS_REPO_{var}_USERNAME and \
          JRS_REPO_{var}_PASSWORD (or JRS_REPO_{var}_TOKEN), or add a \
@@ -708,6 +745,7 @@ fn check_pin(coord: &Coord, ext: &str, pin: Option<&str>, bytes: &[u8]) -> Resul
 /// returning the digest in the same `<algorithm>:<hex>` form.
 ///
 /// `None` when the prefix is not an algorithm jrs knows.
+#[must_use]
 pub fn digest_as(pin: &str, bytes: &[u8]) -> Option<String> {
     let (algorithm, _) = pin.split_once(':')?;
     match algorithm {
@@ -733,10 +771,7 @@ fn local_repo_root(url: &str) -> Option<PathBuf> {
 fn parse_checksum(raw: &[u8]) -> Option<String> {
     let text = String::from_utf8_lossy(raw);
     let token = text.split_whitespace().next()?;
-    let hex: String = token
-        .chars()
-        .take_while(|c| c.is_ascii_hexdigit())
-        .collect();
+    let hex: String = token.chars().take_while(char::is_ascii_hexdigit).collect();
     if hex.len() == 40 || hex.len() == 64 {
         Some(hex)
     } else {
@@ -744,12 +779,14 @@ fn parse_checksum(raw: &[u8]) -> Option<String> {
     }
 }
 
+#[must_use]
 pub fn sha1_hex(bytes: &[u8]) -> String {
     let mut h = sha1::Sha1::new();
     h.update(bytes);
     hex(&h.finalize())
 }
 
+#[must_use]
 pub fn sha256_hex(bytes: &[u8]) -> String {
     let mut h = sha2::Sha256::new();
     h.update(bytes);
@@ -769,6 +806,7 @@ fn hex(bytes: &[u8]) -> String {
 ///
 /// Separators are always `/`, so the URL can sit in a TOML string: a Windows
 /// path's backslashes would read as escapes there.
+#[must_use]
 pub fn file_url(dir: &Path) -> String {
     let path = dir.display().to_string().replace('\\', "/");
     if path.starts_with('/') {

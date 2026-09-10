@@ -36,6 +36,7 @@ pub enum Edited {
 
 impl Edited {
     /// The edited manifest text.
+    #[must_use]
     pub fn text(&self) -> &str {
         match self {
             Edited::Added(text) | Edited::Replaced { text, .. } => text,
@@ -50,6 +51,12 @@ impl Edited {
 /// `{ version = "1", compile-only = true }`). An existing entry keeps its key
 /// quoting, its spacing around `=` and its trailing comment; only the value is
 /// swapped. A missing section is created.
+///
+/// # Errors
+///
+/// [`JrsError::Manifest`] when the edit cannot be made safely by rewriting
+/// one line: `value` spans several lines, the existing entry does, or the
+/// key or section is declared in a form this editor does not rewrite.
 pub fn upsert(text: &str, section: &str, key: &str, value: &str) -> Result<Edited> {
     let target = Target {
         section,
@@ -94,6 +101,11 @@ pub fn upsert(text: &str, section: &str, key: &str, value: &str) -> Result<Edite
 ///
 /// Only the entry's own line (or lines, for a value spanning several) goes;
 /// comments elsewhere stay, and a section left empty keeps its header.
+///
+/// # Errors
+///
+/// [`JrsError::Manifest`] when the key or section is declared in a form this
+/// editor does not rewrite.
 pub fn remove(text: &str, section: &str, key: &str) -> Result<Option<String>> {
     let target = Target {
         section,

@@ -35,6 +35,10 @@ const ARG_BUDGET: usize = 24_000;
 ///
 /// Some JDK packages (headless Linux ones in particular) leave these tools out,
 /// so their absence is a toolchain problem to report, not an assumption to make.
+///
+/// # Errors
+///
+/// [`JrsError::Toolchain`] if there is no `name` beside `javac`.
 pub fn tool(toolchain: &Toolchain, name: &str) -> Result<PathBuf> {
     toolchain.tool(name)
 }
@@ -47,6 +51,11 @@ pub fn tool(toolchain: &Toolchain, name: &str) -> Result<PathBuf> {
 /// so modules used only by a dependency are included too. What `jdeps` cannot
 /// see (reflection, `ServiceLoader` lookups of JDK services) is what `extra` is
 /// for.
+///
+/// # Errors
+///
+/// [`JrsError::Toolchain`] if the JDK has no `jdeps`, and [`JrsError::Build`]
+/// if one of `jars` does not exist or `jdeps` cannot be started or fails.
 pub fn modules(
     toolchain: &Toolchain,
     jars: &[PathBuf],
@@ -183,6 +192,10 @@ pub struct App<'a> {
 impl App<'_> {
     /// Every jar the application runs with: its own, then `lib/`'s, sorted —
     /// what [`modules`] wants to see.
+    ///
+    /// # Errors
+    ///
+    /// [`JrsError::Io`] if the `lib/` directory cannot be read.
     pub fn jars(&self) -> Result<Vec<PathBuf>> {
         let mut jars = vec![self.jar.to_path_buf()];
         if let Some(lib) = self.lib_dir {
@@ -233,6 +246,13 @@ pub struct ImageOutcome {
 ///
 /// `output` is removed first: jlink refuses an existing directory, and it lives
 /// under `target/`, which is disposable by contract.
+///
+/// # Errors
+///
+/// [`JrsError::Toolchain`] if the JDK has no `jlink`; [`JrsError::Build`] if the
+/// app jar's name is not UTF-8, `jlink` cannot be started or fails, or a
+/// launcher would overwrite one of the runtime's own; [`JrsError::Io`] if
+/// `output` cannot be cleared or written.
 pub fn jlink(
     toolchain: &Toolchain,
     app: &App,
@@ -422,6 +442,13 @@ fn bat_quote(arg: &str) -> String {
 /// `--app-version` is derived by [`app_version`]; where jpackage still rejects
 /// it (macOS refuses a version starting with 0), jpackage's own error is passed
 /// through verbatim.
+///
+/// # Errors
+///
+/// [`JrsError::Manifest`] if the app has no main class; [`JrsError::Toolchain`]
+/// if the JDK has no `jpackage`; [`JrsError::Build`] if the app jar's name is
+/// not UTF-8, or `jpackage` cannot be started, fails, or leaves nothing in
+/// `dest`; [`JrsError::Io`] if the input or `dest` cannot be staged.
 pub fn jpackage(
     toolchain: &Toolchain,
     app: &App,
@@ -513,6 +540,7 @@ pub fn jpackage(
 /// numbers, taken from the front of the project version (`0.1.0-SNAPSHOT` →
 /// `0.1.0`, `2.3.1.Final` → `2.3.1`, `1.2.3.4` → `1.2.3`). `None` when the
 /// version does not start with a number, and the flag is then left out.
+#[must_use]
 pub fn app_version(version: &str) -> Option<String> {
     let mut parts: Vec<&str> = Vec::new();
     let mut rest = version;
