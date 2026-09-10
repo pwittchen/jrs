@@ -1,8 +1,14 @@
-# jrs
+<p align="center">
+  <img src="jrs_logo.png" alt="jrs logo" width="180">
+</p>
 
-[![Rust](https://github.com/pwittchen/jrs/actions/workflows/rust.yml/badge.svg)](https://github.com/pwittchen/jrs/actions/workflows/rust.yml)
+<h1 align="center">jrs</h1>
 
-A Java build system, written in Rust.
+<p align="center">A Java build system, written in Rust.</p>
+
+<p align="center">
+  <a href="https://github.com/pwittchen/jrs/actions/workflows/rust.yml"><img src="https://github.com/pwittchen/jrs/actions/workflows/rust.yml/badge.svg" alt="Rust"></a>
+</p>
 
 jrs builds, tests, runs and packages a single-module Java project from one
 `jrs.toml` manifest, resolving dependencies from Maven Central. It aims for the
