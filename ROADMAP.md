@@ -164,7 +164,6 @@ listed so the discussion has a home, not because they are planned.
 | Idea | What it crosses |
 | --- | --- |
 | Multi-module builds / workspaces | Non-goal: one module per manifest |
-| `jrs publish` to a Maven repository | Non-goal: no publishing |
 | Annotation-processor path in the manifest | Non-goal: no annotation-processor configuration |
 | JPMS (`module-info.java`, module path) | Non-goal |
 | Kotlin or other JVM languages | Non-goal |
