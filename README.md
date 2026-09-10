@@ -4,7 +4,7 @@
 
 <h1 align="center">jrs</h1>
 
-<p align="center">A Java build system, written in Rust.</p>
+<p align="center">A JVM build system, written in Rust.</p>
 
 <p align="center">
   <a href="https://github.com/pwittchen/jrs/actions/workflows/rust.yml"><img src="https://github.com/pwittchen/jrs/actions/workflows/rust.yml/badge.svg" alt="Rust"></a>
