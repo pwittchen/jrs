@@ -28,13 +28,18 @@ cargo clippy --all-targets -- -D warnings
 
 CI (`.github/workflows/rust.yml`) runs exactly those four on Linux, macOS and
 Windows (`fmt` on Linux only), plus the network tests on Linux, on push and PR
-against `master`. Changes that only touch `*.md` or `LICENSE` are excluded
-via `paths-ignore` — they cannot break the build, so they do not run it. A `v*` tag
+against `master`. Changes that only touch `*.md`, `LICENSE` or `website/` are
+excluded via `paths-ignore` — they cannot break the build, so they do not run it. A `v*` tag
 push runs the same checks, then `bump` writes the tag's version into `Cargo.toml`
 and `Cargo.lock` and commits it to `master` (the tag itself is never moved), the
 `dist` matrix builds release binaries for Linux (musl), macOS and Windows from that
 commit, and `release` publishes them. The tag must point at the tip of `master`. Don't
 bump the version by hand — tagging is the release process.
+
+`.github/workflows/website.yml` builds `website/` with Bun and deploys it to GitHub
+Pages on pushes to `master` that touch `website/` or `logo.png`. `rust.yml` also calls
+it after `release`, with the version commit, since that commit is pushed with the
+workflow token and triggers nothing itself — so the site's version stays current.
 
 Single tests and single suites:
 

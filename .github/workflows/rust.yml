@@ -1,20 +1,23 @@
 name: Rust
 
 on:
-  # Documentation-only changes cannot break the build, so they do not run it.
-  # Path filters are not evaluated for tag pushes, so a version tag always
-  # runs the full pipeline and then publishes a release (see `dist`).
+  # Documentation-only and website-only changes cannot break the build, so they
+  # do not run it; website.yml publishes the site. Path filters are not
+  # evaluated for tag pushes, so a version tag always runs the full pipeline
+  # and then publishes a release (see `dist`).
   push:
     branches: [ "master" ]
     tags: [ "v*" ]
     paths-ignore:
       - '**/*.md'
       - 'LICENSE'
+      - 'website/**'
   pull_request:
     branches: [ "master" ]
     paths-ignore:
       - '**/*.md'
       - 'LICENSE'
+      - 'website/**'
 
 env:
   CARGO_TERM_COLOR: always
@@ -222,3 +225,18 @@ jobs:
       env:
         GH_TOKEN: ${{ github.token }}
       run: gh release create "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME" --generate-notes --verify-tag
+
+  # The website shows the crate version, and the version commit pushed by
+  # `bump` triggers no workflow of its own, so the site is republished from it
+  # here, once the release it links to exists.
+  website:
+    needs: [ bump, release ]
+
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+
+    uses: ./.github/workflows/website.yml
+    with:
+      ref: ${{ needs.bump.outputs.sha }}

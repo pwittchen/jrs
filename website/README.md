@@ -9,8 +9,13 @@ bun run build      # static site in dist/
 bun run preview    # build, then serve dist/ on http://localhost:4173
 ```
 
-`dist/` is self-contained and can be served from any static host (GitHub Pages,
-Netlify, a bucket).
+`dist/` is self-contained, with relative links, so it can be served from any
+static host and from any path.
+
+It is published to GitHub Pages by `.github/workflows/website.yml`: on every
+push to `master` that touches `website/` or `logo.png`, and after each release,
+when `rust.yml` calls it with the version commit so the header shows the new
+version. It can also be run by hand from the Actions tab.
 
 - `index.html` is the page and the build entry point. Bun follows its links to
   `src/style.css`, `src/main.ts` and the repository's own `../logo.png`, and
