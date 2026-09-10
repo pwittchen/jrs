@@ -636,11 +636,15 @@ Following CLAUDE.md's test layout:
    execution shows up in a benchmark.
 4. **Glob inputs.** `src/**/*.proto` instead of `src/main/proto`. Needs a
    matcher. Proposed: wait for a case directories can't express.
-5. **Migration.** `jrs migrate` lists Gradle custom tasks and Maven's
-   `exec-maven-plugin` / `maven-antrun-plugin` as "not migrated". An
-   `exec:java` or `exec:exec` execution bound to `generate-sources` maps
-   cleanly onto a `pre-compile` task; that one translation could be worth
-   doing. Proposed: after T2, as a migration-fidelity item.
+5. **Migration.** Gradle tasks are translated where they are literal
+   (`migrate/gradle_tasks.rs`, SPEC §11.3): `Exec` → `run`, `JavaExec` over
+   the main runtime classpath → `java @{classpath-argfile} <main>` depending
+   on `build`, `dependsOn`-only tasks → aggregates, and `dependsOn` /
+   `finalizedBy` on `compileJava`, `test`, `jar` and `run` → hooks. The rest
+   is listed as "not migrated", task by task. Maven's `exec-maven-plugin` /
+   `maven-antrun-plugin` still are, whole; an `exec:java` or `exec:exec`
+   execution bound to `generate-sources` maps cleanly onto a `pre-compile`
+   task, and is the next translation worth doing.
 6. **Lockfile compatibility for T3.** An older jrs ignores `[[tool]]` blocks
    and would drop them when it rewrites the lockfile. Bump `LOCK_VERSION`
    only when a manifest declares task dependencies, so projects without them

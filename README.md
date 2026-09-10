@@ -655,6 +655,14 @@ blocks — what was migrated, what needs review, and what was skipped, each with
 reason. Gradle migration in particular reads the declarative subset of a build
 script by pattern rather than by running Gradle, and says so.
 
+Gradle tasks that say everything in literals become `[tasks]`: an `Exec` task
+a `run` command, a `JavaExec` over the main runtime classpath a `java` command
+over jrs's classpath, and a task with only `dependsOn` an aggregate.
+`compileJava.dependsOn`, `test.dependsOn`, `run.dependsOn` and `jar.finalizedBy`
+become `[hooks]`. A task with a `doLast { }` closure, another type such as
+`Copy`, or a value built from a variable is listed with the reason, to rewrite
+by hand as a `run`, `shell` or `script` task.
+
 Kotlin, Scala and Groovy builds migrate too. The Kotlin Gradle plugin,
 `id 'groovy'` and `id 'scala'`, and Maven's `kotlin-maven-plugin`,
 `scala-maven-plugin` and `gmavenplus-plugin` become language tables. An

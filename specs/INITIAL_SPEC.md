@@ -1157,8 +1157,17 @@ Anything jrs cannot read confidently is skipped and reported — never guessed:
   are declarative; `libs.foo.bar` references are resolved through them.
   Unresolvable aliases become a warning with the reference left in a comment.
 - Dependencies built from variables, `ext` blocks, loops or conditionals.
-- Custom tasks, plugins, `subprojects { }` / `allprojects { }`,
-  and multi-project `settings.gradle` includes (listed, not migrated).
+- Plugins, `subprojects { }` / `allprojects { }`, and multi-project
+  `settings.gradle` includes (listed, not migrated).
+- Custom tasks, except those that say everything in literals (§7.6,
+  [TASKS.md §12](TASKS.md#12-open-questions) item 5): an `Exec` task becomes
+  a `run` task, a `JavaExec` over `sourceSets.main.runtimeClasspath` becomes
+  `java @{classpath-argfile} <main>` depending on `build`, and a task with only
+  `dependsOn` becomes an aggregate. `compileJava.dependsOn`, `test.dependsOn`,
+  `run.dependsOn` and `finalizedBy` on `compileJava`, `test` or `jar` become
+  `[hooks]`. A task with a `doLast { }` closure, another type, an interpolated
+  value or a dependency on a task left out is listed with the reason, whole:
+  half a task would run and do the wrong thing.
 
 The report opens with a plain statement that Gradle migration is approximate
 and the emitted manifest must be reviewed.

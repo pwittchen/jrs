@@ -99,6 +99,7 @@ pub fn migrate(build_file: &Path, root: &Path) -> Result<Migration> {
     read_library_languages(&plugins, &mut out, &mut report);
     read_jvm_args(&script, &mut out, &mut report);
     read_repositories(&script, &mut out, &mut report);
+    super::gradle_tasks::read(&script, &mut out, &mut report);
     report_the_unreadable(&script, &settings, &plugins, &mut report);
 
     Ok(Migration {
@@ -603,8 +604,6 @@ fn report_the_unreadable(
             "`allprojects { }` — per-project configuration",
         ),
         ("ext {", "`ext { }` — script variables jrs cannot evaluate"),
-        ("tasks.register", "custom tasks — jrs has no task graph"),
-        ("task ", "custom tasks — jrs has no task graph"),
         (
             "sourceSets",
             "`sourceSets { }` — use project.source-dir instead",

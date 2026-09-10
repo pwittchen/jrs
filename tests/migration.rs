@@ -154,6 +154,36 @@ fn the_gradle_groovy_fixture_translates_exactly() {
     assert!(!skipped.contains("no plugin system"), "{skipped}");
 }
 
+/// Exec, JavaExec and aggregate tasks become [tasks]; `compileJava.dependsOn`
+/// and `jar.finalizedBy` become hooks; the rest is reported, task by task.
+#[test]
+fn the_gradle_tasks_fixture_translates_exactly() {
+    let (migration, dir) = migrate_fixture("gradle-tasks");
+    assert_eq!(migration.manifest.render(None), expected(&dir));
+
+    let skipped = migration.report.not_migrated.join("\n");
+    assert!(
+        skipped.contains("task `printVersion` — `doLast { }`"),
+        "{skipped}"
+    );
+    assert!(
+        skipped.contains("task `copyDocs` — its type `Copy`"),
+        "{skipped}"
+    );
+    assert!(
+        skipped.contains("task `deploy` — it depends on `copyDocs`"),
+        "{skipped}"
+    );
+    assert!(
+        skipped.contains("`build.dependsOn 'printVersion'`"),
+        "{skipped}"
+    );
+
+    let review = migration.report.needs_review.join("\n");
+    assert!(review.contains("Gradle's output directory"), "{review}");
+    assert!(review.contains("`jrs task checksum` alone"), "{review}");
+}
+
 #[test]
 fn every_expected_manifest_is_a_manifest_jrs_can_read() {
     for name in [
@@ -165,6 +195,7 @@ fn every_expected_manifest_is_a_manifest_jrs_can_read() {
         "maven-scala",
         "gradle-kotlin",
         "gradle-groovy",
+        "gradle-tasks",
     ] {
         let (migration, dir) = migrate_fixture(name);
         let text = migration.render_manifest();
@@ -212,7 +243,7 @@ fn the_gradle_report_opens_by_admitting_it_is_approximate() {
     assert!(skipped.contains("does.not.exist"), "{skipped}");
     assert!(skipped.contains("core, web"), "{skipped}");
     assert!(skipped.contains("checkstyle"), "{skipped}");
-    assert!(skipped.contains("custom tasks"), "{skipped}");
+    assert!(skipped.contains("task `customThing`"), "{skipped}");
 }
 
 #[test]

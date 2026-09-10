@@ -6,6 +6,7 @@
 //! tool while the migration is evaluated.
 
 pub mod gradle;
+mod gradle_tasks;
 pub mod maven;
 
 use std::path::{Path, PathBuf};

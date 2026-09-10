@@ -1,0 +1,62 @@
+plugins {
+    id 'java'
+    id 'application'
+}
+
+version = '1.0.0'
+
+application {
+    mainClass = 'com.example.App'
+}
+
+// Translated: an Exec task, with inputs and outputs.
+tasks.register('generateBuildInfo', Exec) {
+    description = 'Write BuildInfo.java'
+    commandLine 'sh', 'scripts/build-info.sh', 'target/generated/sources'
+    inputs.file 'scripts/build-info.sh'
+    outputs.dir 'target/generated/sources'
+}
+
+// Translated: a JavaExec over the main runtime classpath.
+task seedDatabase(type: JavaExec) {
+    description 'Load the fixtures into the dev database'
+    classpath = sourceSets.main.runtimeClasspath
+    mainClass = 'com.example.tools.Seed'
+    jvmArgs '-Xmx512m'
+    args 'fixtures/dev.sql'
+    environment 'DB_URL', 'jdbc:h2:mem:dev'
+}
+
+// Translated, with a review line: it names Gradle's build/ directory.
+tasks.register('checksum', Exec) {
+    dependsOn 'jar'
+    executable 'shasum'
+    args '-a', '256', 'build/libs/tasks-app-1.0.0.jar'
+}
+
+// Translated: an aggregate, over a built-in and a task.
+tasks.register('release') {
+    description = 'Package, then checksum'
+    dependsOn 'build', 'checksum'
+}
+
+// Not translated: Gradle code.
+tasks.register('printVersion') {
+    doLast { println version }
+}
+
+// Not translated: a type jrs has no equivalent of.
+tasks.register('copyDocs', Copy) {
+    from 'docs'
+    into 'build/docs'
+}
+
+// Not translated: it depends on a task that was left out.
+tasks.register('deploy', Exec) {
+    dependsOn 'copyDocs'
+    commandLine 'rsync', '-a', 'target/docs/', 'server:/srv/docs'
+}
+
+compileJava.dependsOn generateBuildInfo
+jar.finalizedBy 'checksum'
+build.dependsOn 'printVersion'

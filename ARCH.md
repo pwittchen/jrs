@@ -100,7 +100,8 @@ src/
 ├── migrate/
 │   ├── mod.rs         detection, report, manifest emission
 │   ├── maven.rs       pom.xml → Manifest (reuses resolve::pom)
-│   └── gradle.rs      build.gradle[.kts] → Manifest (pattern extraction)
+│   ├── gradle.rs      build.gradle[.kts] → Manifest (pattern extraction)
+│   └── gradle_tasks.rs  Gradle tasks → [tasks] and [hooks], literal ones only
 ├── completions.rs     bash/zsh/fish scripts generated from the clap definition
 └── ui/
     ├── mod.rs         Ui handle: mode detection, phase lines, live scopes

@@ -1,0 +1,27 @@
+[project]
+name = "tasks-app"
+version = "1.0.0"
+main-class = "com.example.App"
+
+[tasks.generate-build-info]
+description = "Write BuildInfo.java"
+run = ["sh", "scripts/build-info.sh", "target/generated/sources"]
+inputs = ["scripts/build-info.sh"]
+outputs = ["target/generated/sources"]
+
+[tasks.seed-database]
+description = "Load the fixtures into the dev database"
+run = ["java", "-Xmx512m", "@{classpath-argfile}", "com.example.tools.Seed", "fixtures/dev.sql"]
+depends-on = ["build"]
+env = { "DB_URL" = "jdbc:h2:mem:dev" }
+
+[tasks.checksum]
+run = ["shasum", "-a", "256", "build/libs/tasks-app-1.0.0.jar"]
+
+[tasks.release]
+description = "Package, then checksum"
+depends-on = ["test", "package", "checksum"]
+
+[hooks]
+pre-compile = ["generate-build-info"]
+post-package = ["checksum"]
