@@ -207,6 +207,11 @@ blocks — what was migrated, what needs review, and what was skipped, each with
 reason. Gradle migration in particular reads the declarative subset of a build
 script by pattern rather than by running Gradle, and says so.
 
+## Roadmap
+
+Known gaps and features worth building next are tracked in
+[ROADMAP.md](ROADMAP.md).
+
 ## Development
 
 ```
