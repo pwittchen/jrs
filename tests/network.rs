@@ -185,6 +185,7 @@ fn a_project_with_dependencies_compiles_tests_and_runs_them() {
             color: false,
             ascii: true,
             launcher_version: launcher.version.clone(),
+            work_dir: project.work_dir(),
         },
         &silent_ui(),
     )

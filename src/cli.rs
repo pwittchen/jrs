@@ -482,6 +482,7 @@ impl<'a> Session<'a> {
             color: self.ui.color(),
             ascii: self.ui.glyphs().charset == ui::Charset::Ascii,
             launcher_version: launcher.version.clone(),
+            work_dir: project.work_dir(),
         };
 
         self.ui

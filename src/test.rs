@@ -11,7 +11,7 @@
 
 use std::path::PathBuf;
 
-use crate::error::{JrsError, Result};
+use crate::error::{IoResultExt, JrsError, Result};
 use crate::manifest::Manifest;
 use crate::resolve::coord::{Coord, compare_versions};
 use crate::toolchain::{Toolchain, run_streaming};
@@ -77,6 +77,23 @@ pub fn launcher_coordinate(manifest: &Manifest) -> Result<Coord> {
 /// launcher without it is deprecated from here on, and prints a warning.
 const EXECUTE_SUBCOMMAND_SINCE: &str = "1.10";
 
+/// The platform release that introduced `--color-palette`.
+const COLOR_PALETTE_SINCE: &str = "1.9";
+
+/// Overrides for the launcher's ANSI palette, keyed by its `Style` names.
+///
+/// The defaults paint test names blue (34), which is close to unreadable on a
+/// dark terminal, and reported output white (37), which vanishes on a light one.
+/// Both get the terminal's own foreground instead, and containers get it in bold
+/// so the tree keeps its hierarchy. The status colours are left alone: green,
+/// red, yellow and magenta read on either background.
+const COLOR_PALETTE: &str = "\
+# Written by jrs before each `jrs test`, see src/test.rs
+CONTAINER=1
+TEST=39
+REPORTED=39
+";
+
 #[derive(Debug)]
 pub struct TestRun {
     /// The test classpath, launcher jar last.
@@ -89,6 +106,8 @@ pub struct TestRun {
     pub ascii: bool,
     /// The console launcher's own version, which decides its calling convention.
     pub launcher_version: String,
+    /// jrs's scratch space, where the colour palette is written.
+    pub work_dir: PathBuf,
 }
 
 impl TestRun {
@@ -114,12 +133,22 @@ impl TestRun {
         ]);
         if !self.color {
             args.push("--disable-ansi-colors".to_string());
+        } else if let Some(palette) = self.palette() {
+            args.push(format!("--color-palette={}", palette.display()));
         }
         if let Some(filter) = &self.filter {
             args.push("--include-classname".to_string());
             args.push(filter.clone());
         }
         args
+    }
+
+    /// Where the colour palette goes, when this run is coloured and the launcher
+    /// is new enough to accept one. Older launchers keep their own defaults.
+    pub fn palette(&self) -> Option<PathBuf> {
+        let supported = compare_versions(&self.launcher_version, COLOR_PALETTE_SINCE)
+            != std::cmp::Ordering::Less;
+        (self.color && supported).then(|| self.work_dir.join("junit-palette.properties"))
     }
 }
 
@@ -152,6 +181,11 @@ impl TestOutcome {
 
 /// Launch the console launcher and follow along.
 pub fn run(toolchain: &Toolchain, run: &TestRun, ui: &Ui) -> Result<TestOutcome> {
+    if let Some(palette) = run.palette() {
+        std::fs::create_dir_all(&run.work_dir).path(&run.work_dir)?;
+        std::fs::write(&palette, COLOR_PALETTE).path(&palette)?;
+    }
+
     // The launcher's output is always streamed, even with nothing animated: the
     // counts jrs reports come from the summary block it prints, and reading them
     // costs nothing.
@@ -295,6 +329,7 @@ mod tests {
             color: true,
             ascii: false,
             launcher_version: "1.10.2".into(),
+            work_dir: PathBuf::from("/target/.jrs"),
         };
         let args = run.args();
         assert_eq!(args[0], "-cp");
@@ -316,6 +351,7 @@ mod tests {
             color: false,
             ascii: true,
             launcher_version: "1.10.2".into(),
+            work_dir: PathBuf::from("/target/.jrs"),
         };
         let args = run.args();
         assert!(args.contains(&"--details-theme=ascii".to_string()));
@@ -331,6 +367,7 @@ mod tests {
             color: false,
             ascii: false,
             launcher_version: "1.9.3".into(),
+            work_dir: PathBuf::from("/target/.jrs"),
         };
         let args = run.args();
         assert!(!args.contains(&"execute".to_string()));
@@ -346,6 +383,7 @@ mod tests {
             color: false,
             ascii: false,
             launcher_version: "1.10.2".into(),
+            work_dir: PathBuf::from("/target/.jrs"),
         };
         let args = run.args();
         let i = args
@@ -353,6 +391,61 @@ mod tests {
             .position(|a| a == "--include-classname")
             .unwrap();
         assert_eq!(args[i + 1], ".*ServiceTest");
+    }
+
+    fn coloured_run(launcher_version: &str) -> TestRun {
+        TestRun {
+            classpath: vec![],
+            scan_dir: PathBuf::from("/t"),
+            filter: None,
+            color: true,
+            ascii: false,
+            launcher_version: launcher_version.into(),
+            work_dir: PathBuf::from("/target/.jrs"),
+        }
+    }
+
+    #[test]
+    fn a_coloured_run_gets_a_palette_readable_on_any_background() {
+        let args = coloured_run("1.10.2").args();
+        assert!(
+            args.contains(&"--color-palette=/target/.jrs/junit-palette.properties".to_string()),
+            "{args:?}"
+        );
+        // Blue is unreadable on dark terminals and white on light ones; neither
+        // may come back through the overrides.
+        for style in ["CONTAINER", "TEST", "REPORTED"] {
+            let value = COLOR_PALETTE
+                .lines()
+                .find_map(|l| l.strip_prefix(&format!("{style}=")))
+                .unwrap_or_else(|| panic!("{style} is not overridden"));
+            assert!(
+                !value.split(';').any(|c| c == "34" || c == "37"),
+                "{style}={value}"
+            );
+        }
+    }
+
+    #[test]
+    fn launchers_without_palette_support_keep_their_defaults() {
+        assert_eq!(coloured_run("1.8.2").palette(), None);
+        assert!(
+            !coloured_run("1.8.2")
+                .args()
+                .iter()
+                .any(|a| a.starts_with("--color-palette"))
+        );
+        assert!(coloured_run("1.9.0").palette().is_some());
+    }
+
+    #[test]
+    fn a_colourless_run_gets_no_palette() {
+        let run = TestRun {
+            color: false,
+            ..coloured_run("1.10.2")
+        };
+        assert_eq!(run.palette(), None);
+        assert!(!run.args().iter().any(|a| a.starts_with("--color-palette")));
     }
 
     #[test]
