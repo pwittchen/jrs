@@ -71,6 +71,12 @@ macOS) when experimenting.
 
 ## Architecture
 
+**`ARCH.md` is the full architecture map** — module layers, the `Session` spine,
+resolution, compile units, the output layer, on-disk layout, with ASCII diagrams.
+Read it before a change that crosses module boundaries, and keep it in step when
+one moves a boundary, a phase or a file under `target/`. What follows is the
+summary.
+
 Library-first: everything lives in `src/lib.rs` modules; `main.rs` is five lines of
 `std::process::exit(jrs::cli::main())`. Every phase can be driven from a test without
 spawning the CLI, and the integration tests do exactly that.

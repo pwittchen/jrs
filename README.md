@@ -56,7 +56,8 @@ your own requirements before adopting it for production builds.
   `build.gradle.kts`)
 - Shell completions for bash, zsh and fish
 
-See [specs/INITIAL_SPEC.md](specs/INITIAL_SPEC.md) for the design behind them.
+See [specs/INITIAL_SPEC.md](specs/INITIAL_SPEC.md) for the design behind them,
+and [ARCH.md](ARCH.md) for how the code is put together.
 
 ## Requirements
 
@@ -670,6 +671,11 @@ cargo build
 cargo test
 cargo run
 ```
+
+[ARCH.md](ARCH.md) describes the architecture: the modules and how they
+depend on each other, how a command flows through them, dependency resolution,
+compile units, the output layer, and the invariants the code is organised
+around.
 
 `cargo test` is hermetic: dependency resolution is exercised against a `file://`
 repository fixture rather than the network. The tests that do reach Maven Central
