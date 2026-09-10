@@ -317,6 +317,20 @@ impl Template {
         })
     }
 
+    /// A template that is all text: braces in `text` are escaped, so nothing
+    /// in it reads as a placeholder.
+    #[must_use]
+    pub fn literal(text: &str) -> Template {
+        Template {
+            raw: text.replace('{', "{{").replace('}', "}}"),
+            segments: if text.is_empty() {
+                Vec::new()
+            } else {
+                vec![Segment::Text(text.to_string())]
+            },
+        }
+    }
+
     pub fn placeholders(&self) -> impl Iterator<Item = Placeholder> + '_ {
         self.segments.iter().filter_map(|s| match s {
             Segment::Placeholder(p) => Some(*p),
@@ -528,6 +542,25 @@ impl Hooks {
 
     pub fn iter(&self) -> impl Iterator<Item = (Hook, &[String])> + '_ {
         self.0.iter().map(|(h, names)| (*h, names.as_slice()))
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    /// Append `task` to `hook`'s list, unless it is there already. The hooks
+    /// stay in [`Hook::ALL`] order, as the parser leaves them.
+    pub fn add(&mut self, hook: Hook, task: &str) {
+        if let Some((_, names)) = self.0.iter_mut().find(|(h, _)| *h == hook) {
+            if !names.iter().any(|n| n == task) {
+                names.push(task.to_string());
+            }
+            return;
+        }
+        self.0.push((hook, vec![task.to_string()]));
+        self.0
+            .sort_by_key(|(h, _)| Hook::ALL.iter().position(|a| a == h));
     }
 }
 
@@ -1095,8 +1128,70 @@ impl Manifest {
                 let _ = writeln!(s, "{} = {}", quote(&r.name), quote(&r.url));
             }
         }
+        for task in &self.tasks {
+            render_task(&mut s, task);
+        }
+        if !self.hooks.is_empty() {
+            let _ = writeln!(s, "\n[hooks]");
+            for (hook, names) in self.hooks.iter() {
+                let _ = writeln!(s, "{hook} = {}", quote_list(names));
+            }
+        }
         s
     }
+}
+
+/// One `[tasks.<name>]` table, its keys in the order TASKS.md §4.1 lists them.
+fn render_task(s: &mut String, task: &TaskDef) {
+    let _ = writeln!(s, "\n[tasks.{}]", task.name);
+    if let Some(d) = &task.description {
+        let _ = writeln!(s, "description = {}", quote(d));
+    }
+    match &task.action {
+        Some(Action::Run(argv)) => {
+            let _ = writeln!(s, "run = {}", quote_templates(argv));
+        }
+        Some(Action::Shell(script)) => {
+            let _ = writeln!(s, "shell = {}", quote(script));
+        }
+        Some(Action::Script(file)) => {
+            let _ = writeln!(s, "script = {}", quote(&file.raw));
+        }
+        None => {}
+    }
+    if !task.args.is_empty() {
+        let _ = writeln!(s, "args = {}", quote_templates(&task.args));
+    }
+    if !task.depends_on.is_empty() {
+        let names: Vec<String> = task.depends_on.iter().map(ToString::to_string).collect();
+        let _ = writeln!(s, "depends-on = {}", quote_list(&names));
+    }
+    if !task.env.is_empty() {
+        let vars: Vec<String> = task
+            .env
+            .iter()
+            .map(|(k, v)| format!("{} = {}", quote(k), quote(&v.raw)))
+            .collect();
+        let _ = writeln!(s, "env = {{ {} }}", vars.join(", "));
+    }
+    if let Some(cwd) = &task.cwd {
+        let _ = writeln!(s, "cwd = {}", quote(&cwd.raw));
+    }
+    for (key, list) in [
+        ("inputs", &task.inputs),
+        ("outputs", &task.outputs),
+        ("source-outputs", &task.source_outputs),
+        ("resource-outputs", &task.resource_outputs),
+    ] {
+        if !list.is_empty() {
+            let _ = writeln!(s, "{key} = {}", quote_templates(list));
+        }
+    }
+}
+
+fn quote_templates(items: &[Template]) -> String {
+    let raw: Vec<String> = items.iter().map(|t| t.raw.clone()).collect();
+    quote_list(&raw)
 }
 
 /// A manifest with nothing but the required fields, used by `init` and `migrate`.
@@ -2293,6 +2388,40 @@ post-package = ["checksum"]
         assert_eq!(t.raw, "{root}/a-{{b}}-{jar}");
         let plain = Template::parse("no braces").unwrap();
         assert_eq!(plain.segments, [Segment::Text("no braces".into())]);
+    }
+
+    #[test]
+    fn rendering_keeps_tasks_and_hooks() {
+        let text = r#"
+[project]
+name = "a"
+version = "1"
+
+[tasks.gen]
+description = "Generate"
+run = ["java", "@{classpath-argfile}", "Gen", "{{literal}}"]
+env = { "MODE" = "fast", "OUT" = "{target}/gen" }
+cwd = "tools"
+inputs = ["src/gen"]
+outputs = ["target/gen"]
+source-outputs = ["target/gen"]
+
+[tasks.check-all]
+depends-on = ["test", "gen"]
+
+[tasks.sh]
+shell = "echo \"$JRS_JAR\""
+depends-on = ["build"]
+
+[hooks]
+pre-compile = ["gen"]
+post-package = ["sh"]
+"#;
+        let manifest = parse(text).unwrap();
+        let again = parse(&manifest.render(None)).unwrap();
+        assert_eq!(again.tasks, manifest.tasks);
+        assert_eq!(again.hooks, manifest.hooks);
+        assert!(again.warnings.is_empty(), "{:?}", again.warnings);
     }
 
     #[test]
