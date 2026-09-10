@@ -11,6 +11,7 @@
 
 pub mod cli;
 pub mod compile;
+pub mod config;
 pub mod error;
 pub mod lockfile;
 pub mod manifest;

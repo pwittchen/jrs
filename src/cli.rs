@@ -11,15 +11,16 @@ use std::time::Instant;
 use clap::{Args, Parser, Subcommand, ValueEnum};
 
 use crate::compile::{self, CompileUnit};
+use crate::config::Config;
 use crate::error::{IoResultExt, JrsError, Result, exit};
 use crate::lockfile::Lockfile;
-use crate::manifest::{MANIFEST_FILE, Manifest};
+use crate::manifest::{MANIFEST_FILE, Manifest, Repository};
 use crate::migrate;
 use crate::package::{self, JarManifest};
 use crate::project::{self, Project};
 use crate::resolve::cache::Cache;
 use crate::resolve::coord::Ga;
-use crate::resolve::repo::Fetcher;
+use crate::resolve::repo::{Fetcher, Network};
 use crate::resolve::{self, Classpath, Resolution, UiReporter};
 use crate::runner;
 use crate::test as junit;
@@ -129,6 +130,13 @@ impl GlobalFlags {
     }
 }
 
+/// `--jobs` beats the config file's `jobs`, which beats [`default_jobs`].
+fn effective_jobs(flag: Option<usize>, config: Option<usize>) -> usize {
+    flag.filter(|j| *j > 0)
+        .or(config)
+        .unwrap_or_else(default_jobs)
+}
+
 /// Cores, with a floor of 4: resolution is network-bound, and four in flight
 /// beats one even on a single-core machine (SPEC §8.4).
 fn default_jobs() -> usize {
@@ -172,6 +180,9 @@ pub enum Command {
 
     /// Re-resolve dependencies and rewrite jrs.lock.
     Update,
+
+    /// Re-hash the cached dependency jars against the checksums in jrs.lock.
+    Verify,
 
     /// Scaffold jrs.toml and a starter main class.
     Init {
@@ -250,14 +261,17 @@ fn dispatch(cli: &Cli, ui: &Ui) -> Result<i32> {
         Command::Clean => session.clean_command(),
         Command::Tree => session.tree_command(),
         Command::Update => session.update_command(),
+        Command::Verify => session.verify_command(),
         Command::Init { .. } | Command::Migrate { .. } => unreachable!("handled above"),
     }
 }
 
-/// One command's worth of state: the manifest, the UI, and the clock.
+/// One command's worth of state: the manifest, the user's configuration, the
+/// UI, and the clock.
 struct Session<'a> {
     manifest: Manifest,
     ui: &'a Ui,
+    config: Config,
     jobs: usize,
     offline: bool,
     started: Instant,
@@ -274,10 +288,15 @@ impl<'a> Session<'a> {
         for warning in &manifest.warnings {
             ui.warn(warning);
         }
+        let config = Config::load()?;
+        for warning in &config.warnings {
+            ui.warn(warning);
+        }
         Ok(Session {
             manifest,
             ui,
-            jobs: cli.global.jobs(),
+            jobs: effective_jobs(cli.global.jobs, config.jobs),
+            config,
             offline: cli.global.offline,
             started: Instant::now(),
         })
@@ -451,9 +470,10 @@ impl<'a> Session<'a> {
             scope.finish();
             result?;
         }
-        project::copy_tree(
+        project::sync_resources(
             &self.manifest.test_resource_path(),
             &project.test_classes_dir(),
+            &project.work_dir().join("resources-test.list"),
         )?;
 
         // The launcher is an internal dependency: resolved by jrs, and placed
@@ -530,15 +550,115 @@ impl<'a> Session<'a> {
         Ok(exit::SUCCESS)
     }
 
+    fn verify_command(&self) -> Result<i32> {
+        let lock_path = self.manifest.lock_path();
+        let lock = Lockfile::load(&lock_path)?.ok_or_else(|| {
+            JrsError::usage(format!(
+                "{} does not exist\n\nrun `jrs build` or `jrs update` to resolve and pin \
+                 the dependencies first",
+                lock_path.display()
+            ))
+        })?;
+        if !lock.matches(&self.manifest) {
+            self.ui.warn(format!(
+                "{} is out of date with {}; verifying what it records \
+                 (run `jrs update` to re-resolve)",
+                lock_path.display(),
+                self.manifest.path.display()
+            ));
+        }
+
+        let resolution = lock.to_resolution();
+        let count = resolution
+            .packages
+            .iter()
+            .filter(|p| p.packaging != "pom")
+            .count();
+        self.ui
+            .phase("Verifying", format!("{count} locked artifacts"));
+        let scope = self
+            .ui
+            .spinner("Verifying", format!("{count} locked artifacts"));
+        let checked = resolve::verify_cached(&resolution, &Cache::discover()?, self.jobs);
+        scope.finish();
+
+        let mut verified = 0;
+        let mut not_cached = 0;
+        let mut mismatches = Vec::new();
+        for c in checked? {
+            match c.integrity {
+                resolve::Integrity::Verified => verified += 1,
+                resolve::Integrity::NotCached => {
+                    not_cached += 1;
+                    self.ui.verbose(format!("{} is not cached", c.coord));
+                }
+                resolve::Integrity::Unpinned => self.ui.warn(format!(
+                    "`{}` has no checksum in {}; it was not verified",
+                    c.coord,
+                    lock_path.display()
+                )),
+                resolve::Integrity::Mismatch { expected, actual } => mismatches.push(format!(
+                    "  {}\n    locked {expected}\n    cached {actual}",
+                    c.path.display()
+                )),
+            }
+        }
+
+        if !mismatches.is_empty() {
+            return Err(JrsError::build(format!(
+                "{} cached artifacts do not match {}:\n\n{}\n\n\
+                 delete them and build again to re-download them; if it is jrs.lock \
+                 that changed, run `jrs update`",
+                mismatches.len(),
+                lock_path.display(),
+                mismatches.join("\n")
+            )));
+        }
+        let mut message = format!("{verified} artifacts against {}", lock_path.display());
+        if not_cached > 0 {
+            message.push_str(&format!(
+                " ({not_cached} not cached; checked when they are downloaded)"
+            ));
+        }
+        self.ui.phase("Verified", message);
+        Ok(exit::SUCCESS)
+    }
+
     // ---- the build pipeline -----------------------------------------------
 
     fn fetcher(&self) -> Result<Fetcher> {
-        Ok(Fetcher::with_reporter(
-            self.manifest.repositories.clone(),
+        let env = |name: &str| std::env::var(name).ok().filter(|v| !v.is_empty());
+        // A mirror changes where bytes come from, not what the project is: the
+        // manifest keeps its own URLs, so `jrs.lock` does not depend on it.
+        let repositories = self
+            .manifest
+            .repositories
+            .iter()
+            .map(|r| Repository {
+                name: r.name.clone(),
+                url: self.config.mirror_for(&r.name, &r.url).to_string(),
+            })
+            .collect();
+        let credentials = self
+            .manifest
+            .repositories
+            .iter()
+            .filter_map(|r| {
+                let c = self.config.credentials_for(&r.name, &env)?;
+                Some((r.name.clone(), c))
+            })
+            .collect();
+        Fetcher::with_reporter(
+            repositories,
             Cache::discover()?,
             self.offline,
             Box::new(UiReporter::new(self.ui.clone())),
-        ))
+        )
+        .with_network(Network {
+            credentials,
+            proxy: self.config.proxy.clone(),
+            ..Network::default()
+        })
     }
 
     /// Resolve, download, compile, copy resources.
@@ -593,9 +713,18 @@ impl<'a> Session<'a> {
             compile::Outcome::UpToDate
         };
 
-        let copied = project::copy_tree(&self.manifest.resource_path(), &project.classes_dir())?;
-        if copied > 0 {
-            self.ui.verbose(format!("copied {copied} resources"));
+        let synced = project::sync_resources(
+            &self.manifest.resource_path(),
+            &project.classes_dir(),
+            &project.work_dir().join("resources-main.list"),
+        )?;
+        if synced.copied > 0 {
+            self.ui
+                .verbose(format!("copied {} resources", synced.copied));
+        }
+        if synced.removed > 0 {
+            self.ui
+                .verbose(format!("removed {} deleted resources", synced.removed));
         }
 
         let classes = match outcome {
@@ -872,6 +1001,7 @@ mod tests {
             vec!["jrs", "clean"],
             vec!["jrs", "tree"],
             vec!["jrs", "update"],
+            vec!["jrs", "verify"],
             vec!["jrs", "init"],
             vec!["jrs", "migrate"],
         ] {
@@ -900,6 +1030,14 @@ mod tests {
             default_jobs(),
             "a zero job count falls back to the default rather than deadlocking"
         );
+    }
+
+    #[test]
+    fn the_flag_beats_the_config_file_which_beats_the_default() {
+        assert_eq!(effective_jobs(Some(2), Some(8)), 2);
+        assert_eq!(effective_jobs(None, Some(8)), 8);
+        assert_eq!(effective_jobs(Some(0), Some(8)), 8);
+        assert_eq!(effective_jobs(None, None), default_jobs());
     }
 
     #[test]

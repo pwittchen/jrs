@@ -15,43 +15,12 @@ before it needs code.
 
 Things jrs currently gets wrong or leaves loose. These come before new features.
 
-- **Stale class files survive a source deletion.** When a `.java` file is
-  deleted or renamed, the fingerprint change triggers a recompile, but
-  `target/classes/` is not cleared first — the orphaned `.class` stays on the
-  classpath and ends up in the packaged jar. When the source *set* changes,
-  `compile.rs` should wipe the output directory before invoking `javac`.
-- **Deleted resources linger too.** `project::copy_tree` only adds and updates;
-  it never prunes files that no longer exist under `src/main/resources/` (or
-  `src/test/resources/`), so they keep shipping in the jar until `jrs clean`.
-- **Lockfile checksums are recorded but not enforced.** When `jrs.lock` is
-  reused and a jar is missing from the cache, the fresh download is verified
-  against the repository's `.sha1`/`.sha256` only — never against the checksum
-  pinned in the lockfile. Comparing a new download with the locked checksum
-  costs nothing (the bytes are already in memory) and makes the lockfile an
-  integrity pin rather than a record. A `jrs verify` command could also re-hash
-  the cached jars on demand, since doing that on every build is deliberately
-  avoided.
-- **The test resource directory is not configurable.** It is derived from
-  `test-dir`'s parent, and there is no `project.test-resource-dir` key to
-  match `resource-dir`.
 - **Windows is handled but untested.** Classpath separators, `.exe` suffixes
   and `%LOCALAPPDATA%` are implemented (SPEC §13.8), but CI runs on Linux only.
   Add `windows-latest` and `macos-latest` to the CI matrix.
 
 ## 2. Dependency resolution
 
-- **Authenticated repositories.** Private repositories (Nexus, Artifactory,
-  GitHub Packages) need basic or bearer auth. Credentials should come from
-  environment variables or a user-level config file, never from `jrs.toml`,
-  which is committed.
-- **HTTP proxies.** `HTTPS_PROXY` / `NO_PROXY` are not honoured, which rules
-  jrs out on most corporate networks.
-- **Retries.** A transient 5xx or a connection reset fails the build outright.
-  A small bounded retry with backoff on idempotent GETs would fix most flaky CI
-  runs.
-- **Mirrors of Central.** Maven Central is implicit and always tried last, and
-  there is no way to replace it with a mirror. Air-gapped and corporate setups
-  need a user-level override that redirects Central.
 - **SNAPSHOT dependencies.** There is no `maven-metadata.xml` handling, so
   timestamped snapshots published to a remote repository cannot be resolved,
   and nothing re-checks a snapshot once it is cached.
@@ -140,9 +109,6 @@ Things jrs currently gets wrong or leaves loose. These come before new features.
   JUnit test, so `jrs test` works straight after scaffolding.
 - **Shell completions.** Generated from the clap definition. This adds
   `clap_complete` (see §8).
-- **A user-level config file.** A single place (for example
-  `~/.config/jrs/config.toml`) for credentials, mirrors, proxy and a default
-  `--jobs`. Several items above depend on it, so it is worth designing once.
 
 ## 7. jrs itself
 

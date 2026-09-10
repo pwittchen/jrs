@@ -139,6 +139,73 @@ pub fn copy_tree(from: &Path, to: &Path) -> Result<usize> {
     Ok(copied)
 }
 
+/// What [`sync_resources`] did.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Synced {
+    pub copied: usize,
+    pub removed: usize,
+}
+
+/// Mirror `from` into `to`: copy what is new or changed, and delete what an
+/// earlier run copied but has since disappeared from `from`.
+///
+/// `to` is shared with `javac`'s output, so it cannot simply be emptied first.
+/// Instead `record` lists the paths this function put there last time, and only
+/// those are ever deleted — a class file, or anything an annotation processor
+/// generated, is never touched.
+pub fn sync_resources(from: &Path, to: &Path, record: &Path) -> Result<Synced> {
+    let mut current: Vec<String> = if from.is_dir() {
+        find_all(from)?
+            .iter()
+            .map(|p| slash_path(p.strip_prefix(from).unwrap_or(p)))
+            .collect()
+    } else {
+        Vec::new()
+    };
+    current.sort();
+
+    let previous = std::fs::read_to_string(record).unwrap_or_default();
+    let mut removed = 0;
+    for name in previous.lines() {
+        // The record is jrs's own file, but a path that climbs out of `to` is
+        // never followed, whoever wrote it.
+        if name.is_empty() || name.split('/').any(|c| c == "..") {
+            continue;
+        }
+        if current.binary_search_by(|c| c.as_str().cmp(name)).is_ok() {
+            continue;
+        }
+        let stale = to.join(name);
+        match std::fs::remove_file(&stale) {
+            Ok(()) => removed += 1,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(JrsError::io(&stale, e)),
+        }
+    }
+
+    let copied = copy_tree(from, to)?;
+
+    if current.is_empty() {
+        let _ = std::fs::remove_file(record);
+    } else {
+        if let Some(parent) = record.parent() {
+            std::fs::create_dir_all(parent).path(parent)?;
+        }
+        let mut text = current.join("\n");
+        text.push('\n');
+        std::fs::write(record, text).path(record)?;
+    }
+    Ok(Synced { copied, removed })
+}
+
+/// A relative path with `/` separators on every platform.
+pub fn slash_path(p: &Path) -> String {
+    p.components()
+        .map(|c| c.as_os_str().to_string_lossy().into_owned())
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
 fn up_to_date(source: &Path, destination: &Path) -> Result<bool> {
     let Ok(dest_meta) = std::fs::metadata(destination) else {
         return Ok(false);
@@ -281,6 +348,58 @@ mod tests {
         // A changed file is copied again: the size differs.
         tree.write("res/app.properties", "k=v2");
         assert_eq!(copy_tree(&from, &to).unwrap(), 1);
+    }
+
+    #[test]
+    fn a_deleted_resource_is_removed_from_the_output() {
+        let tree = Tree::new("resource-prune");
+        tree.write("res/keep.properties", "k=v");
+        tree.write("res/nested/gone.properties", "x=y");
+        // Something that did not come from the resource directory — a class, or
+        // a processor's output — must survive the sync.
+        tree.write("out/Main.class", "bytes");
+        let (from, to) = (tree.root.join("res"), tree.root.join("out"));
+        let record = tree.root.join(".jrs/resources.list");
+
+        let first = sync_resources(&from, &to, &record).unwrap();
+        assert_eq!(
+            first,
+            Synced {
+                copied: 2,
+                removed: 0
+            }
+        );
+
+        std::fs::remove_file(from.join("nested/gone.properties")).unwrap();
+        let second = sync_resources(&from, &to, &record).unwrap();
+        assert_eq!(
+            second,
+            Synced {
+                copied: 0,
+                removed: 1
+            }
+        );
+        assert!(!to.join("nested/gone.properties").exists());
+        assert!(to.join("keep.properties").exists());
+        assert!(to.join("Main.class").exists());
+
+        // Removing the whole directory removes everything it contributed.
+        std::fs::remove_dir_all(&from).unwrap();
+        let third = sync_resources(&from, &to, &record).unwrap();
+        assert_eq!(third.removed, 1);
+        assert!(!to.join("keep.properties").exists());
+        assert!(to.join("Main.class").exists());
+        assert!(!record.exists());
+    }
+
+    #[test]
+    fn a_resource_record_cannot_reach_outside_the_output() {
+        let tree = Tree::new("resource-escape");
+        let outside = tree.write("precious.txt", "keep me");
+        let record = tree.write(".jrs/resources.list", "../precious.txt\n");
+        std::fs::create_dir_all(tree.root.join("out")).unwrap();
+        sync_resources(&tree.root.join("res"), &tree.root.join("out"), &record).unwrap();
+        assert!(outside.exists());
     }
 
     #[test]

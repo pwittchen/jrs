@@ -161,6 +161,7 @@ javac-args = ["-Xlint:all", "-Werror"]
 | `source-dir` | `src/main/java` | Production sources. |
 | `test-dir` | `src/test/java` | Test sources. |
 | `resource-dir` | `src/main/resources` | Copied into the jar. |
+| `test-resource-dir` | beside `test-dir` (`src/test/resources`) | On the test classpath only. |
 | `target-dir` | `target` | Build output. |
 
 ### `[java]`
@@ -188,6 +189,9 @@ and always tried last.
 internal = "https://repo.example.com/maven2"
 ```
 
+`jrs.toml` is committed, so credentials for a private repository never go in it
+— see [User configuration](#user-configuration).
+
 ## Commands
 
 | Command | Behaviour |
@@ -200,6 +204,7 @@ internal = "https://repo.example.com/maven2"
 | `jrs clean` | Remove `target/`. |
 | `jrs tree` | Print the resolved dependency graph. |
 | `jrs update` | Re-resolve and rewrite `jrs.lock`. |
+| `jrs verify` | Re-hash the cached dependency jars against the checksums in `jrs.lock`. |
 | `jrs init [--name <name>] [path]` | Scaffold `jrs.toml` + `src/main/java/com/example/Main.java`. |
 | `jrs migrate` | Generate `jrs.toml` from an existing `pom.xml` or Gradle build. |
 
@@ -228,6 +233,55 @@ project:
 Set `JRS_CACHE_DIR` to override it — useful for CI, where the cache is worth
 persisting between runs. Writes are atomic and checksum-verified, so the cache
 is safe to share between concurrent builds.
+
+`jrs.lock` pins a checksum for every jar. A download is checked against it as
+well as against the repository's own `.sha1`, so a repository that starts
+serving different bytes under the same version fails the build. Jars already in
+the cache are not re-hashed on every build; `jrs verify` does that on demand.
+
+## User configuration
+
+Settings that belong to a person or a machine rather than to the project live
+in one file per user:
+
+| Platform | Location |
+| --- | --- |
+| Linux, macOS and other Unix | `$XDG_CONFIG_HOME/jrs/config.toml`, else `~/.config/jrs/config.toml` |
+| Windows | `%APPDATA%\jrs\config.toml` |
+
+Set `JRS_CONFIG` to use another file. Every setting is optional, and a missing
+file is not an error.
+
+```toml
+jobs = 8                                  # default for --jobs
+
+[proxy]
+url = "http://proxy.example.com:3128"
+no-proxy = ["localhost", ".internal.example.com"]
+
+[mirrors]                                 # repository name → URL to use instead
+central = "https://nexus.example.com/repository/maven-central"
+
+[credentials.internal]                    # a repository name from jrs.toml
+username = "ci"
+password-env = "NEXUS_PASSWORD"           # or `password`, `token`, `token-env`
+```
+
+- **Credentials** are sent as HTTP basic auth (`username` + `password`) or as a
+  bearer token (`token`). The `-env` variants read the secret from an
+  environment variable instead of the file. `JRS_REPO_<NAME>_USERNAME` and
+  `JRS_REPO_<NAME>_PASSWORD`, or `JRS_REPO_<NAME>_TOKEN`, take precedence over
+  the file — `<NAME>` is the repository name upper-cased, with every other
+  character turned into `_` (`my-repo` → `JRS_REPO_MY_REPO_TOKEN`).
+- **Mirrors** redirect a repository, Maven Central included, to another URL.
+  The key `*` mirrors every repository that has no mirror of its own. Mirrors
+  do not change `jrs.lock`.
+- **Proxy**: without a `[proxy]` table, `HTTPS_PROXY`, `HTTP_PROXY`,
+  `ALL_PROXY` and `NO_PROXY` from the environment apply.
+
+A dropped connection or an HTTP 429/5xx from a repository is retried twice,
+with a backoff, before the build fails. A 404 or a 401 is believed the first
+time.
 
 ## Migrating an existing project
 

@@ -5,6 +5,7 @@
 //! integration tests can run against a repository fixture on disk and stay
 //! hermetic (SPEC §10.1).
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -14,8 +15,35 @@ use sha1::Digest;
 
 use super::cache::Cache;
 use super::coord::Coord;
+use crate::config::{Credentials, ProxyConfig};
 use crate::error::{IoResultExt, JrsError, Result};
 use crate::manifest::Repository;
+
+/// How a fetcher reaches remote repositories, beyond their URLs. Built from the
+/// user's configuration file and environment, never from `jrs.toml`.
+#[derive(Debug, Clone)]
+pub struct Network {
+    /// Credentials by repository name.
+    pub credentials: BTreeMap<String, Credentials>,
+    /// An explicit proxy. `None` leaves ureq's own reading of `HTTPS_PROXY`,
+    /// `HTTP_PROXY`, `ALL_PROXY` and `NO_PROXY` in charge.
+    pub proxy: Option<ProxyConfig>,
+    /// Tries per request, the first one included.
+    pub attempts: u32,
+    /// The wait before the first retry; it doubles for each one after.
+    pub backoff: Duration,
+}
+
+impl Default for Network {
+    fn default() -> Self {
+        Network {
+            credentials: BTreeMap::new(),
+            proxy: None,
+            attempts: 3,
+            backoff: Duration::from_millis(500),
+        }
+    }
+}
 
 /// Jars larger than this are almost certainly a misconfigured mirror serving an
 /// HTML error page or a tarball; refuse rather than fill the disk.
@@ -34,6 +62,8 @@ pub trait TransferReporter: Send + Sync {
     /// Bytes are in; the checksum is being checked.
     fn verifying(&self, id: u64);
     fn finish(&self, id: u64);
+    /// A failed attempt is being retried; the byte count starts over.
+    fn restart(&self, _id: u64) {}
 }
 
 /// The reporter used when nothing is watching.
@@ -64,6 +94,39 @@ pub struct Fetcher {
     reporter: Box<dyn TransferReporter>,
     downloaded: AtomicU64,
     warnings: Mutex<Vec<String>>,
+    network: Network,
+}
+
+/// An HTTP agent that reports statuses as values, through `proxy` when given.
+fn build_agent(proxy: Option<&ProxyConfig>) -> Result<ureq::Agent> {
+    let mut config = ureq::Agent::config_builder()
+        .http_status_as_error(false)
+        .user_agent(concat!("jrs/", env!("CARGO_PKG_VERSION")))
+        .timeout_connect(Some(Duration::from_secs(30)))
+        .timeout_global(Some(Duration::from_secs(600)));
+    if let Some(proxy) = proxy {
+        config = config.proxy(Some(build_proxy(proxy)?));
+    }
+    Ok(ureq::Agent::new_with_config(config.build()))
+}
+
+fn build_proxy(proxy: &ProxyConfig) -> Result<ureq::Proxy> {
+    // The URL may carry a password, so it is never echoed back.
+    let bad = |e: ureq::Error| JrsError::usage(format!("the configured proxy is not usable: {e}"));
+    let parsed = ureq::Proxy::new(&proxy.url).map_err(bad)?;
+    let mut builder = ureq::Proxy::builder(parsed.protocol())
+        .host(parsed.host())
+        .port(parsed.port());
+    if let Some(username) = parsed.username() {
+        builder = builder.username(username);
+    }
+    if let Some(password) = parsed.password() {
+        builder = builder.password(password);
+    }
+    for host in &proxy.no_proxy {
+        builder = builder.no_proxy(host);
+    }
+    builder.build().map_err(bad)
 }
 
 impl Fetcher {
@@ -77,21 +140,25 @@ impl Fetcher {
         offline: bool,
         reporter: Box<dyn TransferReporter>,
     ) -> Fetcher {
-        let config = ureq::Agent::config_builder()
-            .http_status_as_error(false)
-            .user_agent(concat!("jrs/", env!("CARGO_PKG_VERSION")))
-            .timeout_connect(Some(Duration::from_secs(30)))
-            .timeout_global(Some(Duration::from_secs(600)))
-            .build();
         Fetcher {
-            agent: ureq::Agent::new_with_config(config),
+            // Without a proxy to parse there is nothing that can fail.
+            agent: build_agent(None).unwrap_or_else(|_| ureq::Agent::new_with_defaults()),
             repos,
             cache,
             offline,
             reporter,
             downloaded: AtomicU64::new(0),
             warnings: Mutex::new(Vec::new()),
+            network: Network::default(),
         }
+    }
+
+    /// Reach remote repositories with `network`'s proxy, credentials and retry
+    /// policy.
+    pub fn with_network(mut self, network: Network) -> Result<Fetcher> {
+        self.agent = build_agent(network.proxy.as_ref())?;
+        self.network = network;
+        Ok(self)
     }
 
     pub fn cache(&self) -> &Cache {
@@ -116,16 +183,33 @@ impl Fetcher {
 
     /// A POM's bytes. Small, so they are read whole and not reported on.
     pub fn pom(&self, coord: &Coord) -> Result<Vec<u8>> {
-        let (path, _) = self.artifact(coord, "pom", false)?;
+        let (path, _) = self.artifact(coord, "pom", false, None)?;
         std::fs::read(&path).path(&path)
     }
 
     /// A jar's cached path, downloading it with progress if it is not there yet.
     pub fn jar(&self, coord: &Coord) -> Result<(PathBuf, Origin)> {
-        self.artifact(coord, "jar", true)
+        self.artifact(coord, "jar", true, None)
     }
 
-    fn artifact(&self, coord: &Coord, ext: &str, report: bool) -> Result<(PathBuf, Origin)> {
+    /// Like [`Fetcher::jar`], but a download must also match `pin` — the
+    /// `sha1:<hex>` / `sha256:<hex>` checksum `jrs.lock` recorded for it.
+    ///
+    /// The bytes are already in memory, so this costs one hash, and it turns the
+    /// lockfile from a record into an integrity pin: a repository that starts
+    /// serving different bytes under the same coordinate fails the build. A jar
+    /// already in the cache is not re-hashed; `jrs verify` does that on demand.
+    pub fn jar_pinned(&self, coord: &Coord, pin: Option<&str>) -> Result<(PathBuf, Origin)> {
+        self.artifact(coord, "jar", true, pin)
+    }
+
+    fn artifact(
+        &self,
+        coord: &Coord,
+        ext: &str,
+        report: bool,
+        pin: Option<&str>,
+    ) -> Result<(PathBuf, Origin)> {
         let cached = self.cache.path_for(coord, ext);
         if cached.is_file() {
             return Ok((cached, Origin::Cache));
@@ -151,7 +235,15 @@ impl Fetcher {
                     if report {
                         self.reporter.verifying(id);
                     }
-                    self.verify(repo, coord, ext, &bytes)?;
+                    let verified = self
+                        .verify(repo, coord, ext, &bytes)
+                        .and_then(|()| check_pin(coord, ext, pin, &bytes));
+                    if let Err(e) = verified {
+                        if report {
+                            self.reporter.finish(id);
+                        }
+                        return Err(e);
+                    }
                     let path = self.cache.store(coord, ext, &bytes)?;
                     if ext == "jar" {
                         // POMs and checksum files are traffic, not artifacts;
@@ -207,20 +299,76 @@ impl Fetcher {
         }
 
         let url = format!("{}/{}", repo.url.trim_end_matches('/'), path);
-        let mut response = self
-            .agent
-            .get(&url)
-            .call()
-            .map_err(|e| JrsError::resolve(format!("{url}\n\n{e}")))?;
+        // A dropped connection or a briefly unwell server is the commonest way a
+        // CI build fails for no reason of its own, so those are retried, with a
+        // backoff that doubles. Anything the repository said on purpose — a 404,
+        // a 401 — is believed the first time.
+        let mut attempt = 1;
+        loop {
+            match self.get(repo, &url, report, id) {
+                Ok(found) => return Ok(found),
+                Err(Attempt::Transient(_)) if attempt < self.network.attempts => {
+                    if report {
+                        self.reporter.restart(id);
+                    }
+                    std::thread::sleep(self.network.backoff * 2u32.pow(attempt - 1));
+                    attempt += 1;
+                }
+                Err(Attempt::Transient(reason)) => {
+                    let tries = if attempt > 1 {
+                        format!(" (gave up after {attempt} attempts)")
+                    } else {
+                        String::new()
+                    };
+                    return Err(JrsError::resolve(format!("{url}\n\n{reason}{tries}")));
+                }
+                Err(Attempt::Fatal(e)) => return Err(e),
+            }
+        }
+    }
+
+    /// One HTTP GET. `Ok(None)` means the repository does not have it.
+    fn get(
+        &self,
+        repo: &Repository,
+        url: &str,
+        report: bool,
+        id: u64,
+    ) -> std::result::Result<Option<Vec<u8>>, Attempt> {
+        let credentials = self.network.credentials.get(&repo.name);
+        let mut request = self.agent.get(url);
+        if let Some(c) = credentials {
+            request = request.header("Authorization", authorization(c));
+        }
+        let mut response = request.call().map_err(|e| {
+            if is_transient(&e) {
+                Attempt::Transient(e.to_string())
+            } else {
+                Attempt::Fatal(JrsError::resolve(format!("{url}\n\n{e}")))
+            }
+        })?;
         let status = response.status().as_u16();
         match status {
             200 => {}
             404 | 410 => return Ok(None),
-            _ => {
-                return Err(JrsError::resolve(format!(
-                    "{url}\n\nrepository `{}` answered HTTP {status}",
+            429 | 500 | 502 | 503 | 504 => {
+                return Err(Attempt::Transient(format!(
+                    "repository `{}` answered HTTP {status}",
                     repo.name
                 )));
+            }
+            401 | 403 => {
+                return Err(Attempt::Fatal(JrsError::resolve(format!(
+                    "{url}\n\nrepository `{}` answered HTTP {status}\n\n{}",
+                    repo.name,
+                    credentials_hint(&repo.name, credentials.is_some())
+                ))));
+            }
+            _ => {
+                return Err(Attempt::Fatal(JrsError::resolve(format!(
+                    "{url}\n\nrepository `{}` answered HTTP {status}",
+                    repo.name
+                ))));
             }
         }
 
@@ -233,9 +381,9 @@ impl Fetcher {
         if let Some(len) = total
             && len > MAX_ARTIFACT_BYTES
         {
-            return Err(JrsError::resolve(format!(
+            return Err(Attempt::Fatal(JrsError::resolve(format!(
                 "{url}\n\nrefusing a {len}-byte artifact; that is not a jar"
-            )));
+            ))));
         }
 
         let mut reader = response
@@ -246,8 +394,10 @@ impl Fetcher {
         let mut out = Vec::with_capacity(total.unwrap_or(64 * 1024) as usize);
         let mut chunk = vec![0u8; 64 * 1024];
         loop {
+            // A connection that dies halfway through a body is as transient as
+            // one that never opened.
             let n = std::io::Read::read(&mut reader, &mut chunk)
-                .map_err(|e| JrsError::resolve(format!("{url}\n\n{e}")))?;
+                .map_err(|e| Attempt::Transient(e.to_string()))?;
             if n == 0 {
                 break;
             }
@@ -297,6 +447,109 @@ impl Fetcher {
             repo.name
         ));
         Ok(())
+    }
+}
+
+/// Why one HTTP attempt failed.
+enum Attempt {
+    /// Worth another try: the connection dropped, or the server was unwell.
+    Transient(String),
+    Fatal(JrsError),
+}
+
+fn is_transient(e: &ureq::Error) -> bool {
+    matches!(
+        e,
+        ureq::Error::Io(_)
+            | ureq::Error::Timeout(_)
+            | ureq::Error::HostNotFound
+            | ureq::Error::ConnectionFailed
+            | ureq::Error::Protocol(_)
+            | ureq::Error::BodyStalled
+            | ureq::Error::ConnectProxyFailed(_)
+    )
+}
+
+/// The `Authorization` header value for `credentials`.
+fn authorization(credentials: &Credentials) -> String {
+    match credentials {
+        Credentials::Basic { username, password } => {
+            format!(
+                "Basic {}",
+                base64(format!("{username}:{password}").as_bytes())
+            )
+        }
+        Credentials::Bearer(token) => format!("Bearer {token}"),
+    }
+}
+
+/// What to tell someone whose repository refused them.
+fn credentials_hint(repository: &str, had_credentials: bool) -> String {
+    if had_credentials {
+        return format!("the credentials configured for `{repository}` were refused");
+    }
+    let var = crate::config::env_name(repository);
+    let file = crate::config::default_path()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|| "the jrs config file".to_string());
+    format!(
+        "it may need credentials: set JRS_REPO_{var}_USERNAME and \
+         JRS_REPO_{var}_PASSWORD (or JRS_REPO_{var}_TOKEN), or add a \
+         [credentials.{repository}] table to {file}"
+    )
+}
+
+/// Standard base64, with padding — all HTTP basic auth needs.
+fn base64(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let b = [
+            chunk[0],
+            *chunk.get(1).unwrap_or(&0),
+            *chunk.get(2).unwrap_or(&0),
+        ];
+        let n = (u32::from(b[0]) << 16) | (u32::from(b[1]) << 8) | u32::from(b[2]);
+        for i in 0..4 {
+            if i <= chunk.len() {
+                out.push(ALPHABET[(n >> (18 - 6 * i)) as usize & 63] as char);
+            } else {
+                out.push('=');
+            }
+        }
+    }
+    out
+}
+
+/// Fail unless `bytes` match the lockfile's `pin`, when there is one.
+fn check_pin(coord: &Coord, ext: &str, pin: Option<&str>, bytes: &[u8]) -> Result<()> {
+    let Some(pin) = pin else { return Ok(()) };
+    let Some(actual) = digest_as(pin, bytes) else {
+        // An algorithm this jrs does not know cannot be checked; the repository
+        // checksum has already been, so this is not worth failing a build over.
+        return Ok(());
+    };
+    if actual.eq_ignore_ascii_case(pin) {
+        return Ok(());
+    }
+    Err(JrsError::resolve(format!(
+        "checksum mismatch for `{coord}` ({ext}) against jrs.lock\n\n  \
+         locked {pin}\n  got    {actual}\n\n\
+         the download was discarded; if the artifact was legitimately republished, \
+         run `jrs update` to pin the new one"
+    )))
+}
+
+/// Hash `bytes` with the algorithm `pin` names (`sha1:` or `sha256:`),
+/// returning the digest in the same `<algorithm>:<hex>` form.
+///
+/// `None` when the prefix is not an algorithm jrs knows.
+pub fn digest_as(pin: &str, bytes: &[u8]) -> Option<String> {
+    let (algorithm, _) = pin.split_once(':')?;
+    match algorithm {
+        "sha1" => Some(format!("sha1:{}", sha1_hex(bytes))),
+        "sha256" => Some(format!("sha256:{}", sha256_hex(bytes))),
+        _ => None,
     }
 }
 
@@ -496,6 +749,271 @@ mod tests {
         );
         let (path, _) = fetcher.jar(&coord).unwrap();
         assert_eq!(std::fs::read(path).unwrap(), b"from second");
+    }
+
+    // ---- over HTTP, against a throwaway local server ----------------------
+
+    use std::io::Write as _;
+    use std::net::TcpStream;
+    use std::sync::Arc;
+
+    /// A one-thread HTTP server: each connection gets the next canned
+    /// response, and every request head it sees is recorded. A `CONNECT` is
+    /// accepted and the tunnelled request served on the same socket, so the
+    /// server doubles as a proxy.
+    struct Server {
+        url: String,
+        requests: Arc<Mutex<Vec<String>>>,
+    }
+
+    fn serve(responses: Vec<(u16, Vec<u8>)>) -> Server {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let seen = requests.clone();
+        std::thread::spawn(move || {
+            let mut responses = responses.into_iter();
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { break };
+                let mut head = read_head(&mut stream);
+                // `read_head` lower-cases what it reads.
+                if head.starts_with("connect ") {
+                    seen.lock().unwrap().push(head);
+                    let _ = stream.write_all(b"HTTP/1.1 200 Connection established\r\n\r\n");
+                    head = read_head(&mut stream);
+                }
+                seen.lock().unwrap().push(head);
+                let Some((status, body)) = responses.next() else {
+                    break;
+                };
+                let reply = format!(
+                    "HTTP/1.1 {status} Canned\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                let _ = stream.write_all(reply.as_bytes());
+                let _ = stream.write_all(&body);
+            }
+        });
+        Server { url, requests }
+    }
+
+    fn read_head(stream: &mut TcpStream) -> String {
+        let mut head = Vec::new();
+        let mut byte = [0u8; 1];
+        while !head.ends_with(b"\r\n\r\n") {
+            match std::io::Read::read(stream, &mut byte) {
+                Ok(1) => head.push(byte[0]),
+                _ => break,
+            }
+        }
+        String::from_utf8_lossy(&head).to_ascii_lowercase()
+    }
+
+    impl Server {
+        fn requests(&self) -> Vec<String> {
+            self.requests.lock().unwrap().clone()
+        }
+    }
+
+    fn http_fetcher(fx: &Fixture, url: &str, network: Network) -> Fetcher {
+        Fetcher::new(
+            vec![Repository {
+                name: "remote".into(),
+                url: url.to_string(),
+            }],
+            fx.cache(),
+            false,
+        )
+        .with_network(network)
+        .unwrap()
+    }
+
+    fn quick(attempts: u32) -> Network {
+        Network {
+            attempts,
+            backoff: Duration::ZERO,
+            ..Network::default()
+        }
+    }
+
+    fn jar_and_checksum(bytes: &[u8]) -> Vec<(u16, Vec<u8>)> {
+        vec![(200, bytes.to_vec()), (200, sha1_hex(bytes).into_bytes())]
+    }
+
+    #[test]
+    fn a_transient_failure_is_retried() {
+        let fx = Fixture::new("http-retry");
+        let mut responses = vec![(503, Vec::new())];
+        responses.extend(jar_and_checksum(b"jar bytes"));
+        let server = serve(responses);
+
+        let coord = Coord::new("org.example", "thing", "1.0");
+        let (path, _) = http_fetcher(&fx, &server.url, quick(3))
+            .jar(&coord)
+            .unwrap();
+        assert_eq!(std::fs::read(path).unwrap(), b"jar bytes");
+        let requests = server.requests();
+        assert_eq!(requests.len(), 3, "{requests:?}");
+        assert!(requests[0].starts_with("get /org/example/thing/1.0/thing-1.0.jar "));
+        assert!(!requests[0].contains("authorization"), "{}", requests[0]);
+    }
+
+    #[test]
+    fn retries_are_bounded() {
+        let fx = Fixture::new("http-give-up");
+        let server = serve(vec![(503, Vec::new()); 3]);
+        let err = http_fetcher(&fx, &server.url, quick(3))
+            .jar(&Coord::new("org.example", "thing", "1.0"))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("HTTP 503"), "{err}");
+        assert!(err.contains("gave up after 3 attempts"), "{err}");
+    }
+
+    #[test]
+    fn a_missing_artifact_is_not_retried() {
+        let fx = Fixture::new("http-404");
+        let server = serve(vec![(404, Vec::new()); 3]);
+        let err = http_fetcher(&fx, &server.url, quick(3))
+            .jar(&Coord::new("org.example", "thing", "1.0"))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("could not find"), "{err}");
+        assert_eq!(server.requests().len(), 1);
+    }
+
+    #[test]
+    fn credentials_are_sent_to_their_repository() {
+        let fx = Fixture::new("http-auth");
+        let server = serve(jar_and_checksum(b"private jar"));
+        let mut network = quick(1);
+        network.credentials.insert(
+            "remote".into(),
+            Credentials::Basic {
+                username: "u".into(),
+                password: "p".into(),
+            },
+        );
+        http_fetcher(&fx, &server.url, network)
+            .jar(&Coord::new("org.example", "thing", "1.0"))
+            .unwrap();
+        for request in server.requests() {
+            assert!(
+                request.contains("authorization: basic dtpw\r\n"),
+                "{request}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_refusal_says_where_credentials_go() {
+        let fx = Fixture::new("http-401");
+        let server = serve(vec![(401, Vec::new())]);
+        let err = http_fetcher(&fx, &server.url, quick(3))
+            .jar(&Coord::new("org.example", "thing", "1.0"))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("HTTP 401"), "{err}");
+        assert!(err.contains("JRS_REPO_REMOTE_USERNAME"), "{err}");
+        assert!(err.contains("[credentials.remote]"), "{err}");
+        assert_eq!(server.requests().len(), 1, "a refusal is not retried");
+    }
+
+    #[test]
+    fn a_configured_proxy_carries_the_traffic() {
+        let fx = Fixture::new("http-proxy");
+        let proxy = serve(jar_and_checksum(b"proxied jar"));
+        let network = Network {
+            proxy: Some(ProxyConfig {
+                url: proxy.url.clone(),
+                no_proxy: vec![],
+            }),
+            ..quick(1)
+        };
+        // `.invalid` never resolves, so only a proxy can reach it.
+        let (path, _) = http_fetcher(&fx, "http://repo.invalid/maven2", network)
+            .jar(&Coord::new("org.example", "thing", "1.0"))
+            .unwrap_or_else(|e| panic!("{e}\n\nthe proxy saw {:?}", proxy.requests()));
+        assert_eq!(std::fs::read(path).unwrap(), b"proxied jar");
+        assert!(
+            proxy
+                .requests()
+                .iter()
+                .any(|r| r.starts_with("connect repo.invalid:80")),
+            "{:?}",
+            proxy.requests()
+        );
+    }
+
+    #[test]
+    fn no_proxy_hosts_go_direct() {
+        let fx = Fixture::new("http-no-proxy");
+        let proxy = serve(jar_and_checksum(b"proxied jar"));
+        let network = Network {
+            proxy: Some(ProxyConfig {
+                url: proxy.url.clone(),
+                no_proxy: vec!["repo.invalid".into()],
+            }),
+            ..quick(1)
+        };
+        assert!(
+            http_fetcher(&fx, "http://repo.invalid/maven2", network)
+                .jar(&Coord::new("org.example", "thing", "1.0"))
+                .is_err()
+        );
+        assert!(proxy.requests().is_empty(), "{:?}", proxy.requests());
+    }
+
+    #[test]
+    fn base64_matches_the_rfc_vectors() {
+        for (input, expected) in [
+            ("", ""),
+            ("f", "Zg=="),
+            ("fo", "Zm8="),
+            ("foo", "Zm9v"),
+            ("foob", "Zm9vYg=="),
+            ("fooba", "Zm9vYmE="),
+            ("foobar", "Zm9vYmFy"),
+        ] {
+            assert_eq!(base64(input.as_bytes()), expected, "{input}");
+        }
+    }
+
+    #[test]
+    fn a_download_must_match_its_lockfile_pin() {
+        let fx = Fixture::new("pinned");
+        let coord = Coord::new("org.example", "thing", "1.0");
+        fx.publish(&coord, "jar", b"republished bytes", true);
+
+        // The repository's own checksum matches; the lockfile's does not.
+        let pin = format!("sha1:{}", sha1_hex(b"the bytes that were locked"));
+        let fetcher = fx.fetcher(false);
+        let err = fetcher
+            .jar_pinned(&coord, Some(&pin))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("against jrs.lock"), "{err}");
+        assert!(err.contains("jrs update"), "{err}");
+        assert!(!fetcher.cache().contains(&coord, "jar"));
+
+        let good = format!("sha1:{}", sha1_hex(b"republished bytes"));
+        fetcher.jar_pinned(&coord, Some(&good)).unwrap();
+        assert!(fetcher.cache().contains(&coord, "jar"));
+    }
+
+    #[test]
+    fn pins_name_their_algorithm() {
+        assert_eq!(
+            digest_as("sha1:whatever", b"abc").as_deref(),
+            Some("sha1:a9993e364706816aba3e25717850c26c9cd0d89d")
+        );
+        assert!(
+            digest_as("sha256:x", b"abc")
+                .unwrap()
+                .starts_with("sha256:ba7816bf")
+        );
+        assert_eq!(digest_as("md5:x", b"abc"), None);
+        assert_eq!(digest_as("no-prefix", b"abc"), None);
     }
 
     #[test]

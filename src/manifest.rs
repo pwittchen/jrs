@@ -99,6 +99,7 @@ const PROJECT_KEYS: &[&str] = &[
     "source-dir",
     "test-dir",
     "resource-dir",
+    "test-resource-dir",
     "target-dir",
 ];
 const JAVA_KEYS: &[&str] = &["source", "target", "encoding", "javac-args"];
@@ -209,10 +210,10 @@ impl Manifest {
         let test_dir = path_or(project, "test-dir", "src/test/java", "project")?;
         let resource_dir = path_or(project, "resource-dir", "src/main/resources", "project")?;
         let target_dir = path_or(project, "target-dir", "target", "project")?;
-        // Not a manifest key: test resources simply sit beside the test sources.
-        let test_resource_dir = match test_dir.parent() {
-            Some(p) if !p.as_os_str().is_empty() => p.join("resources"),
-            _ => PathBuf::from("src/test/resources"),
+        // By default test resources sit beside the test sources.
+        let test_resource_dir = match project.get("test-resource-dir") {
+            Some(_) => path_or(project, "test-resource-dir", "", "project")?,
+            None => default_test_resource_dir(&test_dir),
         };
 
         let java = match table.get("java") {
@@ -351,6 +352,10 @@ impl Manifest {
                 let _ = writeln!(s, "{key} = {}", quote(&value));
             }
         }
+        let test_resources = to_slash(&self.test_resource_dir);
+        if test_resources != to_slash(&default_test_resource_dir(&self.test_dir)) {
+            let _ = writeln!(s, "test-resource-dir = {}", quote(&test_resources));
+        }
 
         let java = &self.java;
         if java.source.is_some()
@@ -428,6 +433,14 @@ pub fn blank(name: &str, version: &str, root: &Path) -> Manifest {
 }
 
 // ---- parsing helpers -------------------------------------------------------
+
+/// `src/test/resources` for `src/test/java`: the directory beside the tests.
+fn default_test_resource_dir(test_dir: &Path) -> PathBuf {
+    match test_dir.parent() {
+        Some(p) if !p.as_os_str().is_empty() => p.join("resources"),
+        _ => PathBuf::from("src/test/resources"),
+    }
+}
 
 fn parse_dependencies(table: &toml::Table, section: &str) -> Result<Vec<Dependency>> {
     let Some(value) = table.get(section) else {
@@ -761,6 +774,23 @@ version = "1"
             parse("[project]\nname='a'\nversion='1'\nsource-dir='src'\ntest-dir='test'").unwrap();
         assert_eq!(m.source_path(), PathBuf::from("/p/src"));
         assert_eq!(m.test_path(), PathBuf::from("/p/test"));
+    }
+
+    #[test]
+    fn the_test_resource_directory_is_configurable() {
+        let derived = parse("[project]\nname='a'\nversion='1'\ntest-dir='test/java'").unwrap();
+        assert_eq!(derived.test_resource_dir, PathBuf::from("test/resources"));
+
+        let explicit =
+            parse("[project]\nname='a'\nversion='1'\ntest-resource-dir='fixtures'").unwrap();
+        assert_eq!(explicit.test_resource_path(), PathBuf::from("/p/fixtures"));
+        assert!(explicit.warnings.is_empty(), "{:?}", explicit.warnings);
+        let text = explicit.render(None);
+        assert!(text.contains("test-resource-dir = \"fixtures\""), "{text}");
+        assert!(!derived.render(None).contains("test-resource-dir"));
+
+        let err = parse("[project]\nname='a'\nversion='1'\ntest-resource-dir='/abs'").unwrap_err();
+        assert!(err.to_string().contains("relative path"), "{err}");
     }
 
     #[test]

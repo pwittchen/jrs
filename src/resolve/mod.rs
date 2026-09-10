@@ -472,8 +472,9 @@ pub fn fetch_jars(resolution: &mut Resolution, fetcher: &Fetcher, jobs: usize) -
                     // its place in the graph by contributing dependencies.
                     return Ok((i, None, None));
                 }
-                let (path, _origin) = fetcher.jar(&p.coord)?;
-                // A checksum carried over from the lockfile is not recomputed:
+                // A checksum carried over from the lockfile pins any download.
+                let (path, _origin) = fetcher.jar_pinned(&p.coord, p.checksum.as_deref())?;
+                // It is not recomputed for a jar that was already cached:
                 // hashing every cached jar on every build would be the slowest
                 // thing an up-to-date build does.
                 let checksum = p.checksum.clone().or_else(|| {
@@ -494,6 +495,73 @@ pub fn fetch_jars(resolution: &mut Resolution, fetcher: &Fetcher, jobs: usize) -
     resolution.downloaded = fetcher.downloaded();
     resolution.warnings.extend(fetcher.take_warnings());
     Ok(())
+}
+
+/// What `jrs verify` found for one locked jar.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Integrity {
+    /// The cached jar hashes to the checksum the lockfile pins.
+    Verified,
+    /// Not cached; the next build downloads it and checks it against the pin.
+    NotCached,
+    /// The lockfile records no checksum jrs can check.
+    Unpinned,
+    Mismatch {
+        expected: String,
+        actual: String,
+    },
+}
+
+#[derive(Debug, Clone)]
+pub struct Checked {
+    pub coord: Coord,
+    pub path: PathBuf,
+    pub integrity: Integrity,
+}
+
+/// Re-hash every cached jar the resolution names against its recorded checksum.
+///
+/// Builds deliberately never do this for jars already in the cache — it would
+/// make a no-op build hash megabytes — so it is its own command.
+pub fn verify_cached(
+    resolution: &Resolution,
+    cache: &cache::Cache,
+    jobs: usize,
+) -> Result<Vec<Checked>> {
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(jobs.max(1))
+        .build()
+        .map_err(|e| JrsError::resolve(format!("could not start a worker pool: {e}")))?;
+    pool.install(|| {
+        resolution
+            .packages
+            .par_iter()
+            .filter(|p| p.packaging != "pom")
+            .map(|p| {
+                let path = cache.path_for(&p.coord, "jar");
+                let integrity = match p.checksum.as_deref() {
+                    _ if !path.is_file() => Integrity::NotCached,
+                    None => Integrity::Unpinned,
+                    Some(pin) => {
+                        let bytes = std::fs::read(&path).map_err(|e| JrsError::io(&path, e))?;
+                        match repo::digest_as(pin, &bytes) {
+                            None => Integrity::Unpinned,
+                            Some(actual) if actual.eq_ignore_ascii_case(pin) => Integrity::Verified,
+                            Some(actual) => Integrity::Mismatch {
+                                expected: pin.to_string(),
+                                actual,
+                            },
+                        }
+                    }
+                };
+                Ok(Checked {
+                    coord: p.coord.clone(),
+                    path,
+                    integrity,
+                })
+            })
+            .collect()
+    })
 }
 
 /// Report the classpath jars that are already cached, without downloading.
@@ -561,6 +629,14 @@ impl TransferReporter for UiReporter {
 
     fn verifying(&self, id: u64) {
         self.with_transfer(id, |t| t.verifying = true);
+    }
+
+    fn restart(&self, id: u64) {
+        self.with_transfer(id, |t| {
+            t.done = 0;
+            t.total = None;
+            t.verifying = false;
+        });
     }
 
     fn finish(&self, id: u64) {
@@ -945,6 +1021,45 @@ mod tests {
             1,
             "an aggregate contributes dependencies, not a classpath entry"
         );
+    }
+
+    #[test]
+    fn verification_rehashes_the_cache_against_the_recorded_checksums() {
+        let repo = Repo::new("verify");
+        repo.publish("g:a:1.0", "");
+        repo.publish("g:b:1.0", "");
+        repo.publish("g:c:1.0", "");
+        let m = repo.manifest("[dependencies]\n'g:a'='1.0'\n'g:b'='1.0'\n'g:c'='1.0'");
+        let fetcher = repo.fetcher();
+        let mut r = resolve(&m, &fetcher, 4).unwrap();
+        fetch_jars(&mut r, &fetcher, 4).unwrap();
+
+        // Corrupt one cached jar and evict another.
+        std::fs::write(
+            fetcher
+                .cache()
+                .path_for(&Coord::new("g", "b", "1.0"), "jar"),
+            b"bad",
+        )
+        .unwrap();
+        fetcher.cache().evict(&Coord::new("g", "c", "1.0"), "jar");
+
+        let checked = verify_cached(&r, fetcher.cache(), 2).unwrap();
+        let of = |artifact: &str| {
+            checked
+                .iter()
+                .find(|c| c.coord.artifact == artifact)
+                .unwrap()
+                .integrity
+                .clone()
+        };
+        assert_eq!(of("a"), Integrity::Verified);
+        assert!(
+            matches!(of("b"), Integrity::Mismatch { .. }),
+            "{:?}",
+            of("b")
+        );
+        assert_eq!(of("c"), Integrity::NotCached);
     }
 
     #[test]

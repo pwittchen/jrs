@@ -205,6 +205,35 @@ fn a_second_build_is_up_to_date_and_a_touched_source_is_not() {
 }
 
 #[test]
+fn a_deleted_source_leaves_no_class_behind() {
+    let toolchain = require_jdk!();
+    let scratch = Scratch::new("build-deleted-source");
+    let manifest = hello_project(&scratch);
+    let project = Project::new(&manifest);
+
+    let extra = manifest.source_path().join("com/example/Extra.java");
+    std::fs::write(&extra, "package com.example;\nclass Extra {}\n").unwrap();
+    assert_eq!(compile_main(&manifest, &toolchain, Vec::new()), 3);
+    assert!(
+        project
+            .classes_dir()
+            .join("com/example/Extra.class")
+            .is_file()
+    );
+
+    // Deleting the source changes the source set, which forces a rebuild — and
+    // the rebuild must not leave the orphaned class on the classpath.
+    std::fs::remove_file(&extra).unwrap();
+    assert_eq!(compile_main(&manifest, &toolchain, Vec::new()), 2);
+    assert!(
+        !project
+            .classes_dir()
+            .join("com/example/Extra.class")
+            .exists()
+    );
+}
+
+#[test]
 fn a_compilation_error_fails_the_build_and_leaves_no_fingerprint() {
     let toolchain = require_jdk!();
     let scratch = Scratch::new("build-broken");

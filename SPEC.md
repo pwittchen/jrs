@@ -135,6 +135,7 @@ central = "https://repo1.maven.org/maven2"
 | `project.source-dir` | no | `src/main/java` | Override for flat layouts. |
 | `project.test-dir` | no | `src/test/java` | |
 | `project.resource-dir` | no | `src/main/resources` | |
+| `project.test-resource-dir` | no | beside `test-dir` | `src/test/resources` for the default `test-dir`. |
 | `project.target-dir` | no | `target` | |
 | `java.source` | no | detected JDK | Passed as `--release`. |
 | `java.target` | no | `java.source` | Only used when it differs from `source`. |
@@ -157,6 +158,10 @@ coordinate with its exact version and a SHA-1/SHA-256 checksum, so builds are
 reproducible and offline-capable. Regenerated when `jrs.toml` changes or when
 `jrs update` is run. Format: TOML, `[[package]]` array (Cargo-like).
 
+The checksums are pins, not only a record: a jar downloaded while the lockfile
+is in use must match its recorded checksum as well as the repository's, or the
+download is discarded and the build fails (§8.3).
+
 ---
 
 ## 5. CLI surface
@@ -177,6 +182,7 @@ jrs <command> [options]
 | `jrs clean` | Remove `target/`. |
 | `jrs tree` | Print the resolved dependency graph. |
 | `jrs update` | Re-resolve and rewrite `jrs.lock`. |
+| `jrs verify` | Re-hash the cached jars against the checksums in `jrs.lock`; exit `1` on a mismatch. |
 | `jrs init` | Scaffold `jrs.toml` + `src/main/java/Main.java`. |
 | `jrs migrate` | Generate `jrs.toml` from an existing `pom.xml` or Gradle build (§11). |
 
@@ -187,7 +193,7 @@ jrs <command> [options]
 | `-v, --verbose` | Echo every subprocess command line and its exit status. |
 | `-q, --quiet` | Errors only. |
 | `--offline` | Fail rather than hit the network; use cache + lockfile only. |
-| `--jobs <n>` | Cap parallelism; defaults to available cores. |
+| `--jobs <n>` | Cap parallelism; defaults to the user config's `jobs` (§8.5), else available cores. |
 | `--manifest-path <p>` | Run against a manifest outside the CWD. |
 | `--progress <auto\|always\|never>` | Live animated output. `auto` = on when stderr is a TTY. |
 | `--color <auto\|always\|never>` | Colour and styling. `auto` = on when stderr is a TTY. |
@@ -415,6 +421,8 @@ Result is cached for the process lifetime.
   (v1 is coarse-grained, all-or-nothing; per-file incremental compilation is
   explicitly out of scope — `javac` needs the full source set for correctness
   anyway when types are interdependent.)
+- A recompile empties `target/classes/` first, so a class whose source was
+  deleted or renamed cannot survive onto the classpath or into the jar.
 - Invoke:
   ```
   javac --release <n> -encoding <enc> -d target/classes \
@@ -425,7 +433,13 @@ Result is cached for the process lifetime.
 ### 7.3 Resource handling
 
 Copy `src/main/resources/**` into `target/classes/`, preserving structure,
-skipping files whose mtime and size match the destination.
+skipping files whose mtime and size match the destination. Test resources go to
+`target/test-classes/` the same way.
+
+A resource deleted from the source tree is deleted from the output too. Since
+the output directory is shared with `javac`, jrs records the resources it
+copied (`target/.jrs/resources-main.list`, `resources-test.list`) and only ever
+removes paths from that record — never a class file or a processor's output.
 
 ---
 
@@ -468,7 +482,9 @@ v1 rather than silently mishandled.
   `%LOCALAPPDATA%\jrs\cache` (Windows). Override via `JRS_CACHE_DIR`.
 - Layout mirrors the Maven repository path, so the cache is inspectable.
 - Every download is checksum-verified against the `.sha1` sibling file;
-  mismatch → delete and fail loudly.
+  mismatch → delete and fail loudly. When the jar is pinned in `jrs.lock`, the
+  download must match the pin too. A jar already in the cache is not re-hashed
+  on every build; `jrs verify` does that on demand.
 - Downloads are written to a temp file and atomically renamed, so an
   interrupted run cannot leave a corrupt jar.
 - `--offline` uses the cache exclusively and errors on a miss.
@@ -480,6 +496,31 @@ v1 rather than silently mishandled.
 - Resolution is breadth-first by level so each level's fetches batch together.
 - Resource copying parallelises trivially; `javac` is invoked once and
   parallelises internally.
+
+### 8.5 Network access and user configuration
+
+`jrs.toml` is committed, so nothing that belongs to a person or a machine may
+live in it. Those settings go in a per-user file: `$XDG_CONFIG_HOME/jrs/config.toml`
+(`~/.config/jrs/config.toml`) on Unix and macOS, `%APPDATA%\jrs\config.toml` on
+Windows, or wherever `JRS_CONFIG` points. It is parsed like the manifest —
+unknown keys warn, errors name the key — and a missing file means every default.
+
+| Key | Effect |
+| --- | --- |
+| `jobs` | Default for `--jobs`. |
+| `proxy.url`, `proxy.no-proxy` | An explicit HTTP proxy. Without it, `HTTPS_PROXY` / `HTTP_PROXY` / `ALL_PROXY` / `NO_PROXY` apply. |
+| `mirrors.<repo>` | Fetch repository `<repo>` (Central included) from another URL; `*` covers every repository without a mirror of its own. `file://` repositories are never mirrored. |
+| `credentials.<repo>` | `username` + `password`, or `token`; each secret may instead be read from a variable named by `password-env` / `token-env`. |
+
+- Credentials from `JRS_REPO_<NAME>_USERNAME` + `JRS_REPO_<NAME>_PASSWORD` or
+  `JRS_REPO_<NAME>_TOKEN` override the file. They are sent only to the
+  repository they are named for, and never appear in `{:?}` output.
+- A mirror changes where bytes come from, not what the project is: the
+  manifest checksum in `jrs.lock` is computed from `jrs.toml`'s own URLs.
+- A failed connection, a dropped body, or an HTTP 429/500/502/503/504 is
+  retried up to three attempts in total with a doubling backoff. A 404 or 410
+  moves on to the next repository; a 401 or 403 fails at once and says where
+  credentials go.
 
 ---
 

@@ -126,6 +126,12 @@ pub fn compile(toolchain: &Toolchain, unit: &CompileUnit, ui: &Ui) -> Result<Out
         return Ok(Outcome::UpToDate);
     }
 
+    // Compilation is all-or-nothing, so the output starts empty: a class whose
+    // source was deleted or renamed must not survive onto the classpath and
+    // into the jar. Resources are copied in again afterwards.
+    if unit.output_dir.exists() {
+        std::fs::remove_dir_all(&unit.output_dir).path(&unit.output_dir)?;
+    }
     std::fs::create_dir_all(&unit.output_dir).path(&unit.output_dir)?;
     std::fs::create_dir_all(&unit.work_dir).path(&unit.work_dir)?;
 

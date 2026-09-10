@@ -191,6 +191,32 @@ fn a_corrupt_artifact_is_refused_and_not_cached() {
 }
 
 #[test]
+fn a_republished_jar_is_refused_against_the_lockfile() {
+    let scratch = Scratch::new("resolve-pinned");
+    let fixture = FixtureRepo::new(&scratch);
+    let manifest = manifest(&fixture, "[dependencies]\n\"org.example:lib\" = \"1.0.0\"");
+
+    let fetcher = fixture.fetcher();
+    let mut resolution = resolve::resolve(&manifest, &fetcher, 4).unwrap();
+    resolve::fetch_jars(&mut resolution, &fetcher, 4).unwrap();
+    let lock = Lockfile::from_resolution(&manifest, &resolution);
+
+    // The same coordinate is republished with different bytes — and a checksum
+    // that matches them, so only the lockfile can tell — and the cache is cold.
+    let coord = jrs::resolve::coord::Coord::new("org.example", "lib", "1.0.0");
+    fixture.publish_jar(&coord, b"different bytes, same version");
+    std::fs::remove_dir_all(&fixture.cache).unwrap();
+
+    let fetcher = fixture.fetcher();
+    let mut from_lock = lock.to_resolution();
+    let error = resolve::fetch_jars(&mut from_lock, &fetcher, 4)
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("against jrs.lock"), "{error}");
+    assert!(!fetcher.cache().contains(&coord, "jar"));
+}
+
+#[test]
 fn resolution_is_deterministic_across_runs() {
     let scratch = Scratch::new("resolve-deterministic");
     let fixture = FixtureRepo::new(&scratch);
