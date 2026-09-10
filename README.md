@@ -58,6 +58,18 @@ cargo install --path .
 
 This places the `jrs` binary in `~/.cargo/bin`.
 
+## Uninstallation
+
+```
+cargo uninstall jrs
+```
+
+This removes the binary but not the downloaded dependencies. To reclaim that
+space too, delete the [dependency cache](#dependency-cache) (for example
+`rm -rf ~/Library/Caches/jrs` on macOS, or whatever `JRS_CACHE_DIR` points at).
+Each project's `target/` directory is disposable and can be removed with
+`jrs clean` before uninstalling, or deleted by hand afterwards.
+
 ## Getting started
 
 ```
