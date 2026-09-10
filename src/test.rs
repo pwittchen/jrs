@@ -644,9 +644,11 @@ mod tests {
 
     #[test]
     fn a_coloured_run_gets_a_palette_readable_on_any_background() {
-        let args = coloured_run("1.10.2").args();
+        let run = coloured_run("1.10.2");
+        let palette = run.work_dir.join("junit-palette.properties");
+        let args = run.args();
         assert!(
-            args.contains(&"--color-palette=/target/.jrs/junit-palette.properties".to_string()),
+            args.contains(&format!("--color-palette={}", palette.display())),
             "{args:?}"
         );
         // Blue is unreadable on dark terminals and white on light ones; neither

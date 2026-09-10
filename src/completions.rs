@@ -715,12 +715,16 @@ mod tests {
         assert!(fish.contains(r"-l mode -x -a 'fast' -d 'It\'s [odd]: $HOME `x`'"));
     }
 
+    /// A shell that starts is not enough: on Windows `bash` resolves to the
+    /// WSL stub in System32, which runs and then fails when no distribution
+    /// is installed.
     fn have(shell: &str) -> bool {
         let probe = std::process::Command::new(shell).arg("--version").output();
-        if probe.is_err() {
-            eprintln!("SKIPPED {}: no {shell} on PATH", module_path!());
+        let usable = probe.is_ok_and(|out| out.status.success());
+        if !usable {
+            eprintln!("SKIPPED {}: no usable {shell} on PATH", module_path!());
         }
-        probe.is_ok()
+        usable
     }
 
     fn scratch(name: &str, text: &str) -> PathBuf {

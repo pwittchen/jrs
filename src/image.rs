@@ -910,7 +910,10 @@ mod tests {
             program.display(),
             String::from_utf8_lossy(&output.stderr)
         );
-        String::from_utf8(output.stdout).unwrap()
+        // println ends lines with \r\n on Windows.
+        String::from_utf8(output.stdout)
+            .unwrap()
+            .replace("\r\n", "\n")
     }
 
     #[test]
