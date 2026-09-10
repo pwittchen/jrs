@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="jrs_logo.png" alt="jrs logo" width="180">
+  <img src="logo.png" alt="jrs logo" width="180">
 </p>
 
 <h1 align="center">jrs</h1>
