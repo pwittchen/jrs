@@ -53,7 +53,40 @@ spec change before it needs code.
   ([TASKS.md §8](specs/TASKS.md#8-tool-dependencies-a-later-milestone)). Deferred
   until tasks and hooks have seen real use; it changes the lockfile format.
 
-## 4. Needs a spec decision first
+## 4. Benchmarks against Maven and Gradle
+
+The M5 benchmark (`benches/resolution.rs`) measures jrs against itself and the
+network floor. It does not say how jrs compares to the tools people would
+otherwise use. The next benchmark does: jrs, Maven and Gradle building, running
+and testing the same projects, with the results written up in a report.
+
+- **Identical projects.** Each benchmark project has a `jrs.toml`, a `pom.xml`
+  and a `build.gradle.kts` that describe the same build: the same sources, the
+  same dependencies at the same versions, the same JDK and `--release`, and
+  JUnit 5 for the tests. The set runs from the small `examples/` projects up to
+  a generated project with a few hundred classes and a few dozen dependencies,
+  so both start-up cost and throughput show. Before any timing, the harness
+  checks that the three builds match: the same resolved classpath, the same
+  number of tests run and passed, the same `run` output.
+- **Scenarios.** A clean build with a cold dependency cache, a clean build with
+  a warm cache, a no-op rebuild, an incremental rebuild after touching one
+  source file, `test`, `run` and `package`, each timed as its own command.
+- **A fair setup.** Pinned Maven and Gradle versions with a default
+  configuration and no build cache or tuning that jrs has no counterpart for.
+  Gradle is measured both with a warm daemon and with `--no-daemon`, since the
+  daemon is its answer to start-up cost. Dependencies come from a local mirror
+  (as in M5), not Maven Central, so network latency does not swamp the numbers.
+  Every scenario has warm-up runs and repeated measured runs, and the report
+  gives the median and the spread, not a single best time.
+- **The report.** A generated `benchmarks/REPORT.md`, one table per scenario,
+  with the machine, the OS, the JDK and every tool's version recorded next to
+  the numbers. Where jrs is slower, the report says so.
+- **Where it runs.** Maven and Gradle are not something `cargo test` or `cargo
+  bench` can assume, so the harness lives outside the default test run and skips
+  a tool that is not installed, as `require_jdk!` does. It adds no crate to jrs.
+  A manually triggered CI workflow can regenerate the report on a fixed runner.
+
+## 5. Needs a spec decision first
 
 These cross a line drawn in SPEC §1.2 or §13 (or the dependency list). They are
 listed so the discussion has a home, not because they are planned.
