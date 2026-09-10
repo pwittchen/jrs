@@ -1,0 +1,6 @@
+[alias]
+# Lints the workspace's default-members (CLI, core, server). `aictl-desktop`
+# is intentionally excluded — it is macOS-only and pulls Tauri/GTK system
+# deps that Linux CI does not install. To lint the desktop crate, run
+# `cargo clippy -p aictl-desktop` on macOS.
+lint = "clippy -- -W clippy::all -W clippy::pedantic"
