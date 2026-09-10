@@ -63,6 +63,43 @@ spec change before it needs code.
   and anything computed still do not. An `exec-maven-plugin` execution bound
   to `generate-sources` would map cleanly onto a `pre-compile` task
   ([TASKS.md §12](specs/TASKS.md#12-open-questions)).
+- **Spring Boot projects from Gradle.** Spring Boot is the most common kind of
+  Java project, and `jrs migrate` cannot migrate it yet. A `start.spring.io`
+  build applies the `org.springframework.boot` and
+  `io.spring.dependency-management` plugins and declares its starters with no
+  version (`implementation 'org.springframework.boot:spring-boot-starter-web'`).
+  The versions come from the `spring-boot-dependencies` BOM that the plugins
+  import. The Gradle reader needs `g:a:v`, so every starter is listed as not
+  migrated, both plugins get "jrs has no plugin system", and the manifest ends up
+  with an empty `[dependencies]`. Getting this working takes three pieces:
+  - *Versions from a BOM.* The resolver already folds imported BOMs into a
+    POM's managed versions (`absorb_import` in `resolve/pom.rs`), but a
+    manifest cannot declare a BOM, and it rejects a dependency with an empty
+    version. Migration should read the Boot plugin's version,
+    `dependencyManagement { imports { mavenBom '...' } }` and
+    `implementation platform('...')` as the BOM to use. There are two ways to
+    apply it. The first writes a BOM key into the manifest and lets starters
+    stay versionless, so upgrading Boot means editing one line. That is a new
+    manifest key, and it touches the lockfile's `manifest-checksum`, `jrs add`
+    and `jrs outdated`. The second writes every version out in full at migrate
+    time, which is simpler but means migration fetches the BOM, and migration
+    never touches the network today (`migrate/maven.rs`). Either way it needs a spec
+    decision. Maven's `spring-boot-starter-parent` has the same problem: it is a
+    parent in a repository, so it is reported and its managed versions are lost.
+  - *A fat jar that boots.* The merge rules concatenate only
+    `META-INF/services/*`. Spring Boot also keeps
+    `META-INF/spring.factories`, a properties file whose keys repeat across jars
+    with comma-separated values, and
+    `META-INF/spring/*.AutoConfiguration.imports`. When those files overwrite
+    each other, auto-configuration disappears without an error, the same way a
+    lost service file breaks `ServiceLoader`. `spring.handlers` and
+    `spring.schemas` need merging too. jrs builds a flat fat jar, not Boot's
+    nested `bootJar` layout, and that is fine as long as these files merge.
+  - *Proof.* Add Groovy and Kotlin DSL fixtures under `tests/fixtures/migrate/`,
+    taken unchanged from `start.spring.io`. Add a `network-tests` case that
+    migrates one of them, then builds it, runs its tests and runs the packaged
+    jar up to a started application context. Kotlin on Spring also needs the
+    `allopen` compiler plugin, which is still a non-goal (see the last section).
 - **Task tool dependencies (T3).** Java tools from Maven Central —
   `google-java-format`, Checkstyle, Flyway — as a task's own dependencies,
   resolved as a graph separate from the project's and pinned in `jrs.lock`
