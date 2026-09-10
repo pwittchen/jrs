@@ -3,11 +3,11 @@
 Design proposal for compiling Kotlin, Scala and Groovy sources alongside Java,
 in the same single-module project and from the same `jrs.toml`.
 
-Status: **proposal**. This removes a line drawn in [SPEC §1.2](../SPEC.md#12-non-goals)
+Status: **proposal**. This removes a line drawn in [SPEC §1.2](INITIAL_SPEC.md#12-non-goals)
 ("Non-Java JVM languages (Kotlin, Scala, Groovy)"), so per
-[ROADMAP §4](../ROADMAP.md#4-needs-a-spec-decision-first) it needs a SPEC.md
+[ROADMAP §4](../ROADMAP.md#4-needs-a-spec-decision-first) it needs an INITIAL_SPEC.md
 change before it needs code. §2 below is that argument; §12 lists the exact
-SPEC.md edits it implies.
+INITIAL_SPEC.md edits it implies.
 
 Where this document states how a third-party compiler behaves, the claim is
 checked by the L0 spike (§13.2) before code depends on it. Those claims are
@@ -514,7 +514,7 @@ an input build paired with its expected `jrs.toml`.
 
 ---
 
-## 12. SPEC.md changes
+## 12. INITIAL_SPEC.md changes
 
 1. **§1.2**, replace "Non-Java JVM languages (Kotlin, Scala, Groovy)" with:
    > - JVM languages beyond Java, Kotlin, Scala and Groovy; and for those three,
@@ -578,7 +578,7 @@ terminals, only `ui/` prints, and phase lines come from `cli.rs`.
 
 **L1 — Kotlin.** `[kotlin]`, the implied stdlib, kotlinc invocation, mixed
 Kotlin/Java both ways, the test unit with friend paths, the `MainKt` hint, the
-UTF-8 warning, the network test, and the SPEC.md changes. Kotlin comes first
+UTF-8 warning, the network test, and the INITIAL_SPEC.md changes. Kotlin comes first
 because it is the most asked-for.
 
 **L2 — Groovy.** `[groovy]`, joint compilation, the fat-jar descriptor merge,

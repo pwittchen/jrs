@@ -47,7 +47,7 @@ your own requirements before adopting it for production builds.
   `build.gradle.kts`)
 - Shell completions for bash, zsh and fish
 
-See [SPEC.md](SPEC.md) for the design behind them.
+See [specs/INITIAL_SPEC.md](specs/INITIAL_SPEC.md) for the design behind them.
 
 ## Requirements
 
@@ -437,7 +437,7 @@ them. `[test] jvm-args` sets the test JVM's arguments.
 ## Annotation processors
 
 jrs has no separate processor path. Configuring processors is a
-[non-goal](SPEC.md#12-non-goals). But `javac` runs any processor it finds on
+[non-goal](specs/INITIAL_SPEC.md#12-non-goals). But `javac` runs any processor it finds on
 the compile classpath, so Lombok, MapStruct, Dagger and the like work as
 compile-only dependencies:
 

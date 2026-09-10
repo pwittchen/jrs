@@ -9,10 +9,10 @@ single-module Java project from one `jrs.toml` manifest, resolving dependencies 
 Maven Central. It shells out to `javac`, `java` and `jar` — it is a driver, not a
 reimplementation of the JDK.
 
-`SPEC.md` is the design document the implementation follows, and module doc comments
-cite it by section (`SPEC §8.2`). Read the relevant section before changing behaviour;
-**§12.1 lists the four places where the code deliberately diverges from the spec** —
-those divergences are intentional, don't "fix" them back.
+`specs/INITIAL_SPEC.md` is the design document the implementation follows, and module
+doc comments cite it by section (`SPEC §8.2`). Read the relevant section before changing
+behaviour; **§12.1 lists the four places where the code deliberately diverges from the
+spec** — those divergences are intentional, don't "fix" them back.
 
 ## Commands
 

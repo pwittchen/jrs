@@ -1,15 +1,15 @@
 # jrs — Roadmap
 
-Every milestone in [SPEC.md §12](SPEC.md#12-roadmap) has landed, and so has
+Every milestone in [SPEC §12](specs/INITIAL_SPEC.md#12-roadmap) has landed, and so has
 most of what this document used to list: Windows and macOS in CI, SNAPSHOT
 dependencies, the long dependency form, cache maintenance, JVM arguments, JDK
 pinning, watch mode, Javadoc, test reports and selection, JUnit 4, coverage,
 the portable layout, runtime images, `add`/`remove`/`outdated`, `tree` filters,
 `classpath`, `init` templates, shell completions and the M5 benchmark.
 
-What is left is below. Anything that touches a [non-goal](SPEC.md#12-non-goals)
+What is left is below. Anything that touches a [non-goal](specs/INITIAL_SPEC.md#12-non-goals)
 or adds a crate is a spec-level decision (see the last section) — it needs a
-SPEC.md change before it needs code.
+spec change before it needs code.
 
 ---
 

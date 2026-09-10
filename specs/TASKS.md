@@ -3,11 +3,11 @@
 Design proposal for user-defined tasks and build hooks, in the spirit of
 Gradle's `tasks.register` / `dependsOn` / `doLast`, but declarative and small.
 
-Status: **proposal**. This crosses a line drawn in [SPEC §1.2](SPEC.md#12-non-goals)
+Status: **proposal**. This crosses a line drawn in [SPEC §1.2](INITIAL_SPEC.md#12-non-goals)
 ("plugin systems, custom task graphs, or a build DSL"), so per
-[ROADMAP §4](ROADMAP.md#4-needs-a-spec-decision-first) it needs a SPEC.md
+[ROADMAP §4](../ROADMAP.md#4-needs-a-spec-decision-first) it needs an INITIAL_SPEC.md
 change before it needs code. §2 below is that argument; §10 lists the exact
-SPEC.md edits it implies.
+INITIAL_SPEC.md edits it implies.
 
 ---
 
@@ -497,7 +497,7 @@ project with `jrs tree` or `jrs classpath` is always safe.
 
 ---
 
-## 10. SPEC.md changes
+## 10. INITIAL_SPEC.md changes
 
 1. **§1.2**, replace the first bullet with:
    > - Plugin systems or a build DSL (Groovy/Kotlin/XML). Configuration is
@@ -543,7 +543,7 @@ without a TTY, as `resolve/` is. `ui` keeps depending on nothing.
 **T1 — Tasks and hooks.** `[tasks]` with `run` / `shell` / `script`, `args`,
 `env`, `cwd`, `description`, `depends-on` (tasks and built-ins), `[hooks]`,
 placeholders and environment, `jrs task` and `jrs task --list`, serial
-execution, streamed output, the SPEC.md changes. Tasks always run.
+execution, streamed output, the INITIAL_SPEC.md changes. Tasks always run.
 
 **T2 — Incremental and generated code.** `inputs` / `outputs` and the
 fingerprint, `Fresh` lines, `source-outputs` / `resource-outputs` wired into
