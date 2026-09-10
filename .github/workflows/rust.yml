@@ -25,12 +25,12 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v7
 
     # The integration tests build fixture Java projects, so they need a JDK.
     # jrs itself requires 17 or newer.
     - name: Set up the JDK
-      uses: actions/setup-java@v4
+      uses: actions/setup-java@v6
       with:
         distribution: temurin
         java-version: '21'
@@ -69,7 +69,7 @@ jobs:
       sha: ${{ steps.commit.outputs.sha }}
 
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v7
       with:
         fetch-depth: 0
 
@@ -133,7 +133,7 @@ jobs:
         shell: bash
 
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v7
       with:
         ref: ${{ needs.bump.outputs.sha }}
 
@@ -171,7 +171,7 @@ jobs:
           tar -czf "$GITHUB_WORKSPACE/dist/jrs-$TARGET.tar.gz" jrs LICENSE
         fi
 
-    - uses: actions/upload-artifact@v4
+    - uses: actions/upload-artifact@v7
       with:
         name: jrs-${{ matrix.target }}
         path: dist/*
@@ -185,7 +185,7 @@ jobs:
       contents: write
 
     steps:
-    - uses: actions/download-artifact@v4
+    - uses: actions/download-artifact@v8
       with:
         path: dist
         merge-multiple: true
