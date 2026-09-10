@@ -4,8 +4,11 @@ Working design document for `jrs`, a Java build system written in Rust.
 It expands the capability list from [README.md](README.md) into a concrete scope,
 so that implementation can start from agreed contracts instead of ad-hoc decisions.
 
-Status: **draft** — nothing here is implemented yet (`src/main.rs` is still the
-Cargo template). Every section is open to change; see [Open questions](#13-open-questions).
+Status: **implemented** — every milestone in the [Roadmap](#12-roadmap) has
+landed. The document still describes the design rather than the code, so where
+the two differ the code is authoritative; the deliberate divergences are listed
+in [§12.1](#121-where-the-implementation-diverges), and the decisions taken on
+[Open questions](#13-open-questions) are recorded there.
 
 ---
 
@@ -678,39 +681,67 @@ produces something runnable.
 - No README checkbox yet; unblocks everything below.
 
 ### M2 — Compile and package
-- ☐ compiling project consisting of multiple `*.java` files
-- ☐ compiling project into a single `*.jar` file
-- ☐ handling build flags
-- ☐ running compiled project
+- ☑ compiling project consisting of multiple `*.java` files
+- ☑ compiling project into a single `*.jar` file
+- ☑ handling build flags
+- ☑ running compiled project
 
 ### M3 — Dependencies
-- ☐ downloading dependencies provided in the `*.toml` file
-- ☐ resolving dependencies available in maven central repository
-- ☐ resolving transitive dependencies
+- ☑ downloading dependencies provided in the `*.toml` file
+- ☑ resolving dependencies available in maven central repository
+- ☑ resolving transitive dependencies
 
 ### M4 — Tests and distribution
-- ☐ executing unit tests
-- ☐ creating a "fat jar" with all dependencies included within it
+- ☑ executing unit tests
+- ☑ creating a "fat jar" with all dependencies included within it
 
 ### M5 — Performance and polish
-- ☐ parallel execution to make build process faster
-- ☐ animated progress output: spinners, live download bars, ASCII summary (§5.3)
+- ☑ parallel execution to make build process faster
+- ☑ animated progress output: spinners, live download bars, ASCII summary (§5.3)
 - Benchmark against a fixture project with ~20 transitive dependencies;
   target: resolution dominated by network, not by jrs. Re-run the benchmark with
   `--progress never` to prove the renderer costs nothing measurable.
 
 ### M6 — Migration
-- ☐ migrating a project from Maven (`pom.xml`)
-- ☐ migrating a project from Gradle (`build.gradle`, `build.gradle.kts`)
+- ☑ migrating a project from Maven (`pom.xml`)
+- ☑ migrating a project from Gradle (`build.gradle`, `build.gradle.kts`)
 - Deliberately last: migration is only useful once every feature it can
   translate into actually works, and it reuses `resolve/pom.rs` from M3.
 
 Tick the corresponding README boxes as each lands — the README is the
 user-facing progress tracker, this document is the design behind it.
 
+### 12.1 Where the implementation diverges
+
+Four places where the code deliberately does something other than what is
+written above. Each is a smaller deviation than the alternative would have been.
+
+1. **The console launcher's flag is `--scan-class-path`, not
+   `--select-class-path`** (§10.2). The latter is not an option the JUnit
+   Platform Console Launcher has; the invocation as specified would not run.
+   On launchers from 1.10 onwards the `execute` subcommand is passed too,
+   since going without it is deprecated and prints a warning.
+2. **The live test counter shows a running count, not `23/31`** (§5.3.5). The
+   launcher does not announce a total before it starts, and a discovery pass to
+   learn one would double JVM startup for a cosmetic gain. The marks bar carries
+   the same information; the authoritative totals come from the launcher's own
+   summary, which jrs parses and reports on the `Finished` line.
+3. **The fat jar is written straight from the dependency jars, with no staging
+   directory** (§9.2). The resulting archive is identical — first-wins ordering
+   is preserved by reading in classpath order — and a build that packages 40 MB
+   of dependencies does not write 40 MB to disk twice.
+4. **Phase lines are emitted by the command layer, not by the live scopes.** The
+   spec's plain mode "prints one line when a phase starts" (§5.3.1); doing that
+   inside `spinner()` would have made the animated and plain transcripts
+   diverge. Instead every phase line is unconditional and a live scope adds only
+   motion, which is what makes the two modes provably the same build.
+
 ---
 
 ## 13. Open questions
+
+Answered by the implementation. The questions are kept because the reasoning is
+still the interesting part; the **decision** lines record what was settled on.
 
 1. **Dependency crates.** Which to take on? Candidates: `clap` (CLI),
    `serde` + `toml` (manifest), `ureq`/`reqwest` (HTTP), `quick-xml`
@@ -718,32 +749,57 @@ user-facing progress tracker, this document is the design behind it.
    `sha1`/`sha2` (checksums), `indicatif` + `console` (progress UI).
    Each one costs compile time and readability;
    the experiment's value argues for a minimal set.
+   **Decision:** `clap`, `toml` (with `serde` for its derives), `ureq`,
+   `quick-xml`, `zip`, `rayon`, `thiserror`, `sha1`/`sha2`, `terminal_size`,
+   and `libc` on unix for the signal handler. No `indicatif`, no `console`,
+   no `walkdir` — see 10.
 2. **Async or threads?** `rayon` + blocking `ureq` keeps the code simple and
    is likely fast enough given downloads are the bottleneck; `tokio` +
    `reqwest` scales better but colours the whole codebase.
+   **Decision:** threads. `rayon` with a pool sized to `--jobs`, and blocking
+   `ureq`. Downloads dominate, and nothing in the codebase is `async`.
 3. **JDK version floor.** `--release` requires JDK 9+. Is JDK 17 a reasonable
    minimum, given the manifest's `edition = "2024"` posture?
+   **Decision:** 17. `toolchain::MINIMUM_JDK` enforces it with an actionable
+   error naming the JDK it found.
 4. **Should `jrs.lock` be committed?** Cargo says yes for binaries, no for
    libraries. Java has no such split — proposal: always commit.
+   **Decision:** always commit. The generated file says so in its header, and
+   it records no absolute paths, so it is machine-independent.
 5. **Fat-jar shading.** Package relocation (Maven Shade-style) is a real need
    for dependency conflicts but a large chunk of work. Out of scope for v1?
+   **Decision:** out of scope. Duplicate classes are reported by name, with
+   both sources, rather than relocated.
 6. **Nearest-wins vs. highest-wins** for version conflicts. Maven does
    nearest, Gradle does highest. Nearest is specified above; highest surprises
    users less in practice. Worth revisiting once real projects exercise it.
+   **Decision:** nearest-wins, as specified, with a warning naming both
+   versions and the depth the winner came from.
 7. **Test engines beyond JUnit 5.** JUnit 4 and TestNG are still common —
    pluggable engine selection, or JUnit 5 only?
+   **Decision:** JUnit 5 only. A project on JUnit 4 gets an error that says so
+   rather than a launcher that silently finds no tests.
 8. **Windows support.** Path separators (`;` vs `:`) on the classpath and
    `.exe` suffixes on toolchain binaries need handling from the start if it is
    in scope at all.
+   **Decision:** in scope, and handled — `Toolchain::classpath_separator`, the
+   `.exe` suffix, and `%LOCALAPPDATA%` for the cache. Untested on Windows: CI
+   runs on Linux only.
 9. **Gradle migration fidelity.** Pattern extraction (§11.3) is honest but
    limited. The alternative — shelling out to `gradle dependencies` and parsing
    its output — is far more accurate, at the cost of requiring a working Gradle
    install and a slow build. Worth offering as an opt-in `--probe` flag?
+   **Decision:** no `--probe`. Pattern extraction it is, and the report opens
+   by saying the translation is approximate.
 10. **Hand-rolled renderer or `indicatif`?** `indicatif` gives multi-bar layout,
     tick threads and terminal-width handling for free; hand-rolling it is maybe
     300 lines of ANSI escapes and is more in the spirit of a build system whose
     value is being readable end to end. The `ui/` boundary (§6.2) means this can
     be decided late and reversed.
+    **Decision:** hand-rolled. `ui/render.rs` is the only module that writes an
+    escape sequence, and it is about 200 lines.
 11. **Should `jrs migrate` offer multi-module output?** A Maven aggregator could
     emit one `jrs.toml` per module. That is a useful escape hatch, but it edges
     towards the multi-module support §1.2 rules out.
+    **Decision:** no. `<modules>` and `include` are listed in the report with a
+    suggestion to run `jrs migrate --path <module>` on each.

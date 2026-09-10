@@ -1,0 +1,42 @@
+plugins {
+    id 'java'
+    id 'application'
+    id 'checkstyle'
+}
+
+group = 'com.example'
+version = '3.0.0'
+
+java {
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(21)
+    }
+}
+
+repositories {
+    mavenCentral()
+    maven { url 'https://nexus.example.com/repository/maven-public/' }
+    // maven { url 'https://commented.example.com' }
+}
+
+def sharedVersion = '1.2.3'
+
+dependencies {
+    implementation libs.guava
+    implementation 'org.apache.commons:commons-lang3:3.14.0'
+    api group: 'org.slf4j', name: 'slf4j-api', version: '2.0.12'
+    testImplementation libs.junit.jupiter
+
+    // things jrs deliberately refuses to guess at
+    annotationProcessor 'org.projectlombok:lombok:1.18.30'
+    implementation "com.example:computed:$sharedVersion"
+    implementation libs.does.not.exist
+}
+
+application {
+    mainClass = 'com.example.GradleMain'
+}
+
+tasks.register('customThing') {
+    doLast { println 'nope' }
+}

@@ -1,0 +1,18 @@
+[project]
+name = "gradle-app"
+version = "3.0.0"
+main-class = "com.example.GradleMain"
+
+[java]
+source = 21
+
+[dependencies]
+"com.google.guava:guava" = "33.0.0-jre"
+"org.apache.commons:commons-lang3" = "3.14.0"
+"org.slf4j:slf4j-api" = "2.0.12"
+
+[dev-dependencies]
+"org.junit.jupiter:junit-jupiter" = "5.10.2"
+
+[repositories]
+"nexus" = "https://nexus.example.com/repository/maven-public"

@@ -16,7 +16,29 @@ jobs:
 
     steps:
     - uses: actions/checkout@v4
+
+    # The integration tests build fixture Java projects, so they need a JDK.
+    # jrs itself requires 17 or newer.
+    - name: Set up the JDK
+      uses: actions/setup-java@v4
+      with:
+        distribution: temurin
+        java-version: '21'
+
+    - name: Check formatting
+      run: cargo fmt --check
+
+    - name: Lint
+      run: cargo clippy --all-targets -- -D warnings
+
     - name: Build
       run: cargo build --verbose
+
+    # The default test run is hermetic: dependency resolution is exercised
+    # against a file:// repository fixture, not Maven Central.
     - name: Run tests
       run: cargo test --verbose
+
+    # The tests that do reach Maven Central are gated behind a feature flag.
+    - name: Run the network tests
+      run: cargo test --verbose --features network-tests --test network

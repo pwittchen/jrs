@@ -1,0 +1,7 @@
+[project]
+name = "hello"
+version = "1.0.0"
+main-class = "com.example.Hello"
+
+[java]
+javac-args = ["-Xlint:all"]

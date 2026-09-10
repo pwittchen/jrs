@@ -1,0 +1,20 @@
+[project]
+name = "legacy-app"
+version = "2.3.1"
+main-class = "com.example.Legacy"
+
+[java]
+source = 17
+encoding = "ISO-8859-1"
+javac-args = ["-Xlint:all", "-Werror"]
+
+[dependencies]
+"com.google.guava:guava" = "33.0.0-jre"
+"org.apache.commons:commons-lang3" = "3.14.0"
+"org.example:ranged" = "1.2"
+
+[dev-dependencies]
+"org.junit.jupiter:junit-jupiter" = "5.10.2"
+
+[repositories]
+"internal" = "https://nexus.example.com/repository/maven-public"
