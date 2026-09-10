@@ -15,7 +15,8 @@ use std::time::{Duration, Instant};
 use clap::{Args, CommandFactory, Parser, Subcommand, ValueEnum};
 use rayon::prelude::*;
 
-use crate::compile::{self, CompileUnit, DocUnit};
+use crate::compile::lang;
+use crate::compile::{self, CompileUnit, DocUnit, ForeignCompiler, Language};
 use crate::completions;
 use crate::config::Config;
 use crate::edit;
@@ -23,11 +24,12 @@ use crate::error::{IoResultExt, JrsError, Result, exit};
 use crate::image;
 use crate::lockfile::Lockfile;
 use crate::manifest::{
-    self, Builtin, Dependency, Hook, MANIFEST_FILE, Manifest, Repository, TaskDef, TaskRef,
+    self, Builtin, Dependency, Hook, LanguageConfig, MANIFEST_FILE, Manifest, Repository, TaskDef,
+    TaskRef,
 };
 use crate::migrate;
 use crate::package::{self, JarManifest};
-use crate::project::{self, Project, Snapshot};
+use crate::project::{self, Project, Snapshot, Sources, Unit};
 use crate::resolve::cache::{Cache, Prune};
 use crate::resolve::coord::{Coord, Ga};
 use crate::resolve::metadata;
@@ -103,6 +105,26 @@ pub enum CharsetArg {
     Auto,
     Unicode,
     Ascii,
+}
+
+/// `jrs init --lang`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum LangArg {
+    Java,
+    Kotlin,
+    Scala,
+    Groovy,
+}
+
+impl From<LangArg> for Language {
+    fn from(l: LangArg) -> Language {
+        match l {
+            LangArg::Java => Language::Java,
+            LangArg::Kotlin => Language::Kotlin,
+            LangArg::Scala => Language::Scala,
+            LangArg::Groovy => Language::Groovy,
+        }
+    }
 }
 
 impl From<WhenArg> for When {
@@ -198,6 +220,10 @@ pub enum Command {
         /// Show why a dependency is in the graph: every path that leads to it.
         #[arg(long, value_name = "ARTIFACT")]
         why: Option<String>,
+        /// Show a compiler's own graph instead: `kotlin-compiler`,
+        /// `scala-compiler` or `groovy-compiler`.
+        #[arg(long, value_name = "NAME", conflicts_with = "why")]
+        tool: Option<String>,
     },
 
     /// Print the resolved classpath, for editors and ad-hoc `java` runs.
@@ -258,6 +284,9 @@ pub enum Command {
         /// A library: no main class, and a starter library class instead.
         #[arg(long)]
         lib: bool,
+        /// The language of the starter code and its test.
+        #[arg(long, value_name = "LANG", default_value = "java")]
+        lang: LangArg,
         /// Where to scaffold. Defaults to the current directory.
         #[arg(value_name = "PATH")]
         path: Option<PathBuf>,
@@ -416,8 +445,13 @@ fn report(ui: &Ui, error: &JrsError) {
 fn dispatch(cli: &Cli, ui: &Ui) -> Result<i32> {
     // Commands that need no manifest, or that manage their own sessions.
     match &cli.command {
-        Command::Init { name, lib, path } => {
-            return init(ui, name.as_deref(), *lib, path.as_deref());
+        Command::Init {
+            name,
+            lib,
+            lang,
+            path,
+        } => {
+            return init(ui, name.as_deref(), *lib, (*lang).into(), path.as_deref());
         }
         Command::Migrate {
             from,
@@ -454,7 +488,9 @@ fn dispatch(cli: &Cli, ui: &Ui) -> Result<i32> {
         Command::Doc => session.doc_command(),
         Command::Task(args) => session.task_command(args),
         Command::Clean => session.clean_command(),
-        Command::Tree { depth, why } => session.tree_command(*depth, why.as_deref()),
+        Command::Tree { depth, why, tool } => {
+            session.tree_command(*depth, why.as_deref(), tool.as_deref())
+        }
         Command::Classpath { test, runtime } => session.classpath_command(*test, *runtime),
         Command::Update => session.update_command(),
         Command::Verify => session.verify_command(),
@@ -491,6 +527,8 @@ struct Session<'a> {
     started: Instant,
     toolchain: OnceCell<Toolchain>,
     resolution: OnceCell<Resolution>,
+    /// Each language's compiler graph, resolved and pinned with the project's.
+    tools: OnceCell<Vec<Tool>>,
     built: OnceCell<Built>,
     /// Tasks already run (or found fresh) in this invocation.
     ran: RefCell<HashSet<String>>,
@@ -519,6 +557,7 @@ impl<'a> Session<'a> {
             started: Instant::now(),
             toolchain: OnceCell::new(),
             resolution: OnceCell::new(),
+            tools: OnceCell::new(),
             built: OnceCell::new(),
             ran: RefCell::new(HashSet::new()),
             done: RefCell::new(HashSet::new()),
@@ -562,6 +601,10 @@ impl<'a> Session<'a> {
             self.manifest.test_path(),
             self.manifest.test_resource_path(),
         ];
+        for config in &self.manifest.languages {
+            paths.push(self.manifest.root.join(&config.source_dir));
+            paths.push(self.manifest.root.join(&config.test_dir));
+        }
         paths.extend(task::watched_inputs(&self.manifest));
         paths
     }
@@ -595,6 +638,7 @@ impl<'a> Session<'a> {
     fn run_command(&self, args: &[String]) -> Result<i32> {
         let main_class = self.manifest.require_main_class("run")?.to_string();
         let built = self.build()?;
+        self.check_main_class(&main_class)?;
         self.hook(Hook::PreRun)?;
         let toolchain = self.toolchain()?;
 
@@ -615,6 +659,27 @@ impl<'a> Session<'a> {
                 .phase("Finished", format!("{main_class} exited with {code}"));
         }
         Ok(code)
+    }
+
+    /// A Kotlin `main` at file level compiles to `<File>Kt`, so a `main-class`
+    /// naming the file's class instead is the likeliest slip in a Kotlin
+    /// project. When there is no such class but there is its `Kt` one, say so
+    /// rather than let `java` report a missing class.
+    fn check_main_class(&self, main_class: &str) -> Result<()> {
+        let classes = self.project().classes_dir();
+        let kt = format!("{main_class}Kt");
+        if compile::class_file(&classes, main_class).is_file()
+            || !compile::class_file(&classes, &kt).is_file()
+        {
+            return Ok(());
+        }
+        Err(JrsError::manifest(format!(
+            "there is no class `{main_class}` in {}, but there is `{kt}`: a Kotlin `main` \
+             function at file level compiles to a class named after its file\n\n\
+             set it in {}:\n\n    [project]\n    main-class = \"{kt}\"",
+            classes.display(),
+            self.manifest.path.display()
+        )))
     }
 
     fn package_command(&self, args: &PackageArgs) -> Result<i32> {
@@ -843,39 +908,33 @@ impl<'a> Session<'a> {
         let toolchain = self.toolchain()?;
 
         let generated = task::generated(&self.manifest, Hook::PreTest)?;
-        let sources = with_generated(project.test_sources()?, &generated.sources)?;
+        let sources = project.sources(Unit::Test, &generated.sources)?;
         if sources.is_empty() {
             self.ui.phase(
                 "Testing",
                 format!(
                     "no tests found under {}",
-                    self.manifest.test_path().display()
+                    display_roots(&project.roots(Unit::Test))
                 ),
             );
             return Ok(None);
         }
 
-        // Tests compile against the main classes plus the test classpath.
+        // Tests compile against the main classes plus the test classpath, and
+        // Kotlin tests may use the main module's `internal` declarations.
         let mut classpath = vec![project.classes_dir()];
         classpath.extend(built.resolution.classpath(Classpath::Test));
-
-        let unit = CompileUnit {
-            label: "test".into(),
-            sources: sources.clone(),
-            output_dir: project.test_classes_dir(),
-            classpath: classpath.clone(),
-            release: toolchain.release(self.manifest.java.source)?,
-            target: self.manifest.java.target,
-            encoding: self.manifest.java.encoding.clone(),
-            extra_args: self.manifest.java.javac_args.clone(),
-            work_dir: project.work_dir(),
-        };
+        let unit = self.compile_unit(
+            "test",
+            &sources,
+            project.test_classes_dir(),
+            classpath.clone(),
+            vec![project.classes_dir()],
+        )?;
         if compile::is_stale(&unit)? {
-            self.ui
-                .phase("Compiling", format!("{} test sources", sources.len()));
-            let scope = self
-                .ui
-                .spinner("Compiling", format!("{} test sources", sources.len()));
+            let what = sources.describe("test sources");
+            self.ui.phase("Compiling", &what);
+            let scope = self.ui.spinner("Compiling", &what);
             let result = compile::compile(&toolchain, &unit, self.ui);
             scope.finish();
             result?;
@@ -889,7 +948,7 @@ impl<'a> Session<'a> {
 
         // The launcher, and JaCoCo when coverage is on, are internal
         // dependencies: resolved by jrs, never on the user's own classpath.
-        let launcher = junit::launcher_coordinate(&self.manifest)?;
+        let launcher = junit::launcher_coordinate(&self.manifest, &built.resolution)?;
         let jacoco = self
             .manifest
             .test
@@ -904,7 +963,10 @@ impl<'a> Session<'a> {
         let fetched = self.fetch_internal(&internal)?;
 
         let mut test_classpath = vec![project.test_classes_dir()];
-        test_classpath.extend(classpath);
+        test_classpath.extend(junit::without_bundled_launcher(
+            classpath,
+            &built.resolution,
+        ));
         test_classpath.push(fetched[0].clone());
 
         let mut jvm_args = self.manifest.test.jvm_args.clone();
@@ -918,7 +980,7 @@ impl<'a> Session<'a> {
             jvm_args,
             classpath: test_classpath,
             scan_dir: project.test_classes_dir(),
-            filter: args.filter.clone(),
+            filter: junit::class_name_filter(args.filter.as_deref(), sources.foreign().is_some()),
             include_tags: args.include_tag.clone(),
             exclude_tags: args.exclude_tag.clone(),
             methods: args.method.clone(),
@@ -929,8 +991,7 @@ impl<'a> Session<'a> {
             work_dir: project.work_dir(),
         };
 
-        self.ui
-            .phase("Testing", format!("{} test sources", sources.len()));
+        self.ui.phase("Testing", sources.describe("test sources"));
         let scope = self.ui.tests();
         let outcome = junit::run(&toolchain, &run, self.ui);
         scope.finish();
@@ -987,7 +1048,7 @@ impl<'a> Session<'a> {
         let report = junit::CoverageReport {
             exec,
             classes: project.classes_dir(),
-            sources: self.manifest.source_path(),
+            sources: project.roots(Unit::Main),
             xml: html.join("jacoco.xml"),
             html: html.clone(),
             name: self.manifest.name.clone(),
@@ -1013,8 +1074,12 @@ impl<'a> Session<'a> {
         Ok(exit::SUCCESS)
     }
 
-    /// Document the main sources, generated ones included, so the
+    /// Document the main Java sources, generated ones included, so the
     /// `pre-compile` hook runs first. Returns the index page.
+    ///
+    /// Only Java is documented (`JVM_LANGUAGES.md` §9). In a project with
+    /// another language the build runs first, since the Java sources may use
+    /// its classes and `javadoc` has to find them on the classpath.
     fn doc(&self) -> Result<PathBuf> {
         let toolchain = self.toolchain()?;
         let javadoc = toolchain.tool("javadoc")?;
@@ -1022,17 +1087,32 @@ impl<'a> Session<'a> {
         self.hook(Hook::PreCompile)?;
         let project = self.project();
         let generated = task::generated(&self.manifest, Hook::PreCompile)?;
-        let sources = with_generated(project.main_sources()?, &generated.sources)?;
+        let all = project.sources(Unit::Main, &generated.sources)?;
+        let mut classpath = resolution.classpath(Classpath::Compile);
+        if let Some(language) = all.foreign() {
+            self.ui.warn(format!(
+                "jrs doc documents Java sources only; {} {language} source files were left out",
+                all.count(language)
+            ));
+            self.build()?;
+            classpath.insert(0, project.classes_dir());
+        }
+        let sources: Vec<PathBuf> = all
+            .files
+            .iter()
+            .filter(|p| Language::of(p) == Some(Language::Java))
+            .cloned()
+            .collect();
         if sources.is_empty() {
             return Err(JrsError::build(format!(
                 "no .java files under {} to document",
-                self.manifest.source_path().display()
+                display_roots(&project.roots(Unit::Main))
             )));
         }
         let unit = DocUnit {
             sources: sources.clone(),
             output_dir: project.target_dir().join("doc"),
-            classpath: resolution.classpath(Classpath::Compile),
+            classpath,
             release: toolchain.release(self.manifest.java.source)?,
             encoding: self.manifest.java.encoding.clone(),
             extra_args: self.manifest.java.javadoc_args.clone(),
@@ -1057,11 +1137,17 @@ impl<'a> Session<'a> {
         Ok(unit.output_dir.join("index.html"))
     }
 
-    fn tree_command(&self, depth: Option<usize>, why: Option<&str>) -> Result<i32> {
+    fn tree_command(
+        &self,
+        depth: Option<usize>,
+        why: Option<&str>,
+        tool: Option<&str>,
+    ) -> Result<i32> {
         let resolution = self.dependencies(false)?;
-        let trees = match why {
-            Some(target) => self.why(&resolution, target)?,
-            None => vec![self.tree(&resolution, depth)],
+        let trees = match (tool, why) {
+            (Some(name), _) => vec![self.tool_tree(name, depth)?],
+            (None, Some(target)) => self.why(&resolution, target)?,
+            (None, None) => vec![self.tree(&resolution, depth)],
         };
         self.ui.suspend();
         for tree in &trees {
@@ -1104,14 +1190,37 @@ impl<'a> Session<'a> {
         Ok(exit::SUCCESS)
     }
 
-    fn outdated_command(&self) -> Result<i32> {
-        let declared: Vec<(&Dependency, bool)> = self
+    /// What `jrs outdated` checks, as (row name, group, artifact, current
+    /// version): the declared dependencies, then each language's compiler.
+    fn outdated_checks(&self) -> Vec<(String, String, String, String)> {
+        let mut checks: Vec<(String, String, String, String)> = self
             .manifest
             .dependencies
             .iter()
-            .map(|d| (d, false))
-            .chain(self.manifest.dev_dependencies.iter().map(|d| (d, true)))
+            .map(|d| (d.key(), d))
+            .chain(
+                self.manifest
+                    .dev_dependencies
+                    .iter()
+                    .map(|d| (format!("{} (dev)", d.key()), d)),
+            )
+            .map(|(name, d)| (name, d.group.clone(), d.artifact.clone(), d.version.clone()))
             .collect();
+        for config in &self.manifest.languages {
+            if let Some(compiler) = config.language.compiler(&config.version) {
+                checks.push((
+                    format!("{}.version", config.language.key()),
+                    compiler.coord.group,
+                    compiler.coord.artifact,
+                    config.version.clone(),
+                ));
+            }
+        }
+        checks
+    }
+
+    fn outdated_command(&self) -> Result<i32> {
+        let declared = self.outdated_checks();
         if declared.is_empty() {
             self.ui.phase("Finished", "no dependencies are declared");
             return Ok(exit::SUCCESS);
@@ -1131,22 +1240,17 @@ impl<'a> Session<'a> {
         let answers: Vec<Result<metadata::Metadata>> = pool.install(|| {
             declared
                 .par_iter()
-                .map(|(d, _)| fetcher.metadata(&d.group, &d.artifact))
+                .map(|(_, group, artifact, _)| fetcher.metadata(group, artifact))
                 .collect()
         });
         scope.finish();
 
         let mut rows = Vec::new();
-        for ((dep, dev), answer) in declared.iter().zip(answers) {
+        for ((name, _, _, version), answer) in declared.iter().zip(answers) {
             match answer {
                 Ok(m) => {
-                    if let Some(newer) = metadata::newest(&m.versions, &dep.version) {
-                        let name = if *dev {
-                            format!("{} (dev)", dep.key())
-                        } else {
-                            dep.key()
-                        };
-                        rows.push([name, dep.version.clone(), newer]);
+                    if let Some(newer) = metadata::newest(&m.versions, version) {
+                        rows.push([name.clone(), version.clone(), newer]);
                     }
                 }
                 // One unreachable artifact should not hide the rest.
@@ -1218,7 +1322,11 @@ impl<'a> Session<'a> {
             ));
         }
 
-        let resolution = lock.to_resolution();
+        // The compilers' pins are checked with the project's.
+        let resolution = Resolution {
+            packages: lock.all_packages().cloned().collect(),
+            ..lock.to_resolution()
+        };
         let count = resolution
             .packages
             .iter()
@@ -1332,41 +1440,37 @@ impl<'a> Session<'a> {
         // all generated still builds.
         self.hook(Hook::PreCompile)?;
         let generated = task::generated(&self.manifest, Hook::PreCompile)?;
-        let sources = with_generated(project.main_sources()?, &generated.sources)?;
+        let sources = project.sources(Unit::Main, &generated.sources)?;
         if sources.is_empty() {
             return Err(JrsError::build(format!(
-                "no .java files under {}\n\n\
+                "no source files under {}\n\n\
                  check `project.source-dir` in {}, or run `jrs init` to scaffold one",
-                self.manifest.source_path().display(),
+                display_roots(&project.roots(Unit::Main)),
                 self.manifest.path.display()
             )));
         }
 
-        let unit = CompileUnit {
-            label: "main".into(),
-            sources: sources.clone(),
-            output_dir: project.classes_dir(),
-            classpath: resolution.classpath(Classpath::Compile),
-            release: toolchain.release(self.manifest.java.source)?,
-            target: self.manifest.java.target,
-            encoding: self.manifest.java.encoding.clone(),
-            extra_args: self.manifest.java.javac_args.clone(),
-            work_dir: project.work_dir(),
-        };
+        let unit = self.compile_unit(
+            "main",
+            &sources,
+            project.classes_dir(),
+            resolution.classpath(Classpath::Compile),
+            Vec::new(),
+        )?;
 
         let outcome = if compile::is_stale(&unit)? {
             self.ui.phase(
                 "Compiling",
                 format!(
-                    "{} v{} ({} source files)",
+                    "{} v{} ({})",
                     self.manifest.name,
                     self.manifest.version,
-                    sources.len()
+                    sources.describe("source files")
                 ),
             );
             let scope = self
                 .ui
-                .spinner("Compiling", format!("{} source files", sources.len()));
+                .spinner("Compiling", sources.describe("source files"));
             let result = compile::compile(&toolchain, &unit, self.ui);
             scope.finish();
             result?
@@ -1435,6 +1539,67 @@ impl<'a> Session<'a> {
         }
         let resolution = self.dependencies(false)?;
         Ok(self.resolution.get_or_init(|| resolution).clone())
+    }
+
+    /// The compilers' graphs, resolved with the project's.
+    fn tools(&self) -> Result<Vec<Tool>> {
+        self.resolved()?;
+        Ok(self.tools.get().cloned().unwrap_or_default())
+    }
+
+    /// A compile unit for `sources`: `javac`'s settings, and the compiler of
+    /// the unit's other language when it has sources in one.
+    fn compile_unit(
+        &self,
+        label: &str,
+        sources: &Sources,
+        output_dir: PathBuf,
+        classpath: Vec<PathBuf>,
+        friend_paths: Vec<PathBuf>,
+    ) -> Result<CompileUnit> {
+        let toolchain = self.toolchain()?;
+        let foreign = match sources.foreign() {
+            None => None,
+            Some(language) => {
+                let config = self.manifest.language(language).ok_or_else(|| {
+                    JrsError::manifest(format!("{language} is not turned on in jrs.toml"))
+                })?;
+                let tool = self
+                    .tools()?
+                    .into_iter()
+                    .find(|t| t.language == language)
+                    .ok_or_else(|| {
+                        JrsError::build(format!("the {language} compiler was not resolved"))
+                    })?;
+                let name = &self.manifest.name;
+                Some(ForeignCompiler {
+                    language,
+                    version: config.version.clone(),
+                    classpath: tool.resolution.runtime_classpath(),
+                    jvm_args: config.compiler_jvm_args.clone(),
+                    extra_args: config.compiler_args.clone(),
+                    module_name: if label == "test" {
+                        format!("{name}_test")
+                    } else {
+                        name.clone()
+                    },
+                    friend_paths,
+                    color: self.ui.color(),
+                })
+            }
+        };
+        Ok(CompileUnit {
+            label: label.to_string(),
+            sources: sources.files.clone(),
+            output_dir,
+            classpath,
+            release: toolchain.release(self.manifest.java.source)?,
+            target: self.manifest.java.target,
+            encoding: self.manifest.java.encoding.clone(),
+            extra_args: self.manifest.java.javac_args.clone(),
+            work_dir: self.project().work_dir(),
+            foreign,
+        })
     }
 
     // ---- tasks and hooks --------------------------------------------------
@@ -1647,10 +1812,14 @@ impl<'a> Session<'a> {
         })
     }
 
-    /// The resolved graph, from the lockfile when it still matches the manifest.
+    /// The resolved graph, from the lockfile when it still matches the
+    /// manifest — and with it each language's compiler graph, which
+    /// `jrs.lock` pins beside the project's (`JVM_LANGUAGES.md` §5.2).
     fn dependencies(&self, force_update: bool) -> Result<Resolution> {
         let manifest = &self.manifest;
-        if manifest.dependencies.is_empty() && manifest.dev_dependencies.is_empty() {
+        let declared = manifest.dependencies.len() + manifest.dev_dependencies.len();
+        if declared == 0 && manifest.languages.is_empty() {
+            let _ = self.tools.set(Vec::new());
             return Ok(Resolution::default());
         }
 
@@ -1659,21 +1828,38 @@ impl<'a> Session<'a> {
         let lock_path = manifest.lock_path();
         let existing = Lockfile::load(&lock_path)?;
 
-        let (mut resolution, fresh) = match existing {
+        let (mut resolution, mut tools, fresh) = match existing {
             Some(lock) if lock.matches(manifest) && !force_update => {
                 self.ui.verbose(format!("reusing {}", lock_path.display()));
-                (lock.to_resolution(), false)
+                let tools = manifest
+                    .languages
+                    .iter()
+                    .filter_map(|c| {
+                        Some(Tool {
+                            language: c.language,
+                            resolution: lock.tool(&c.language.tool_name())?,
+                        })
+                    })
+                    .collect();
+                (lock.to_resolution(), tools, false)
             }
             _ => {
-                let declared = manifest.dependencies.len() + manifest.dev_dependencies.len();
-                self.ui
-                    .phase("Resolving", format!("{declared} declared dependencies"));
-                let scope = self
-                    .ui
-                    .spinner("Resolving", format!("{declared} declared dependencies"));
-                let resolved = resolve::resolve(manifest, &fetcher, self.jobs);
+                let mut what = format!("{declared} declared dependencies");
+                if !manifest.languages.is_empty() {
+                    let names: Vec<&str> = manifest
+                        .languages
+                        .iter()
+                        .map(|c| c.language.name())
+                        .collect();
+                    let plural = if names.len() > 1 { "s" } else { "" };
+                    let _ = write!(what, " and the {} compiler{plural}", names.join(" and "));
+                }
+                self.ui.phase("Resolving", &what);
+                let scope = self.ui.spinner("Resolving", &what);
+                let resolved = self.resolve_with_tools(&fetcher);
                 scope.finish();
-                (resolved?, true)
+                let (resolution, tools) = resolved?;
+                (resolution, tools, true)
             }
         };
 
@@ -1693,8 +1879,14 @@ impl<'a> Session<'a> {
             resolve::fetch_jars(&mut resolution, &fetcher, self.jobs)?;
         }
 
+        self.fetch_tools(&mut tools, &fetcher)?;
+
         if fresh {
-            Lockfile::from_resolution(manifest, &resolution).write(&lock_path)?;
+            let mut lock = Lockfile::from_resolution(manifest, &resolution);
+            for tool in &tools {
+                lock = lock.with_tool(&tool.language.tool_name(), &tool.resolution);
+            }
+            lock.write(&lock_path)?;
             self.ui.verbose(format!("wrote {}", lock_path.display()));
         }
         // So that `jrs cache prune` knows this project still wants these
@@ -1703,10 +1895,103 @@ impl<'a> Session<'a> {
             self.ui
                 .verbose(format!("could not record the project in the cache: {e}"));
         }
+        resolution
+            .warnings
+            .extend(lang::resolution_warnings(manifest, &resolution));
         for warning in &resolution.warnings {
             self.ui.warn(warning);
         }
+        let _ = self.tools.set(tools);
         Ok(resolution)
+    }
+
+    /// Download the compilers' jars, as the test launcher's are: one line
+    /// naming each compiler, then the shared download bars.
+    fn fetch_tools(&self, tools: &mut [Tool], fetcher: &Fetcher) -> Result<()> {
+        for tool in tools {
+            resolve::locate_cached(&mut tool.resolution, fetcher);
+            let missing = tool
+                .resolution
+                .packages
+                .iter()
+                .filter(|p| p.jar.is_none() && p.packaging != "pom")
+                .count();
+            if missing > 0 && !self.offline {
+                let artifact = tool
+                    .resolution
+                    .roots
+                    .first()
+                    .map_or_else(String::new, |r| r.artifact.clone());
+                self.ui.phase(
+                    "Downloading",
+                    format!("{artifact} ({} compiler)", tool.language),
+                );
+                let scope = self.ui.downloads(missing);
+                let result = resolve::fetch_jars(&mut tool.resolution, fetcher, self.jobs);
+                scope.finish();
+                result?;
+            } else {
+                resolve::fetch_jars(&mut tool.resolution, fetcher, self.jobs)?;
+            }
+            // How a compiler's own graph mediated is the compiler's business.
+            for warning in &tool.resolution.warnings {
+                self.ui
+                    .verbose(format!("{}: {warning}", tool.language.tool_name()));
+            }
+        }
+        Ok(())
+    }
+
+    /// The project's graph, and each language's compiler as a graph apart
+    /// from it.
+    fn resolve_with_tools(&self, fetcher: &Fetcher) -> Result<(Resolution, Vec<Tool>)> {
+        let resolution = resolve::resolve(&self.manifest, fetcher, self.jobs)?;
+        let mut tools = Vec::new();
+        for config in &self.manifest.languages {
+            if let Some(compiler) = config.language.compiler(&config.version) {
+                tools.push(Tool {
+                    language: config.language,
+                    resolution: resolve::resolve_tool(&[compiler.coord], fetcher, self.jobs)?,
+                });
+            }
+        }
+        Ok((resolution, tools))
+    }
+
+    /// `jrs tree --tool <name>`: a compiler's own graph.
+    fn tool_tree(&self, name: &str, limit: Option<usize>) -> Result<TreeNode> {
+        let tools = self.tools.get().cloned().unwrap_or_default();
+        let Some(tool) = tools.iter().find(|t| t.language.tool_name() == name) else {
+            let known: Vec<String> = tools
+                .iter()
+                .map(|t| format!("`{}`", t.language.tool_name()))
+                .collect();
+            let hint = if known.is_empty() {
+                "this project has none: jrs resolves a compiler for each of [kotlin], [scala] \
+                 and [groovy] it turns on"
+                    .to_string()
+            } else {
+                format!("this project's are {}", known.join(", "))
+            };
+            return Err(JrsError::usage(format!(
+                "there is no tool `{name}`\n\n{hint}"
+            )));
+        };
+        let version = self
+            .manifest
+            .language(tool.language)
+            .map_or("", |c| c.version.as_str());
+        let mut root =
+            TreeNode::styled(format!("{name} ({} {version})", tool.language), Style::Bold);
+        if limit == Some(0) {
+            return Ok(root);
+        }
+        let mut seen = Vec::new();
+        for ga in &tool.resolution.roots {
+            root.children
+                .push(Self::tree_node(&tool.resolution, ga, &mut seen, 0, limit));
+        }
+        Ok(root)
     }
 
     /// The dependency graph as a drawable tree, `limit` levels deep.
@@ -1719,9 +2004,15 @@ impl<'a> Session<'a> {
             return root;
         }
         let mut seen = Vec::new();
+        let implied = self.manifest.implied_dependencies();
         for ga in resolution.roots.iter().chain(&resolution.test_roots) {
-            root.children
-                .push(Self::tree_node(resolution, ga, &mut seen, 0, limit));
+            let mut node = Self::tree_node(resolution, ga, &mut seen, 0, limit);
+            if let Some((_, language)) = implied.iter().find(|(d, _)| {
+                d.group == ga.group && d.artifact == ga.artifact && ga.classifier.is_none()
+            }) {
+                let _ = write!(node.label, " (implied by [{}])", language.key());
+            }
+            root.children.push(node);
         }
         root
     }
@@ -1848,12 +2139,20 @@ struct Built {
     classes: usize,
 }
 
-/// A compile unit's sources: the tree's, then each generated directory's.
-fn with_generated(mut sources: Vec<PathBuf>, generated: &[PathBuf]) -> Result<Vec<PathBuf>> {
-    for dir in generated {
-        sources.extend(project::find_by_extension(dir, "java")?);
-    }
-    Ok(sources)
+/// A language's compiler, as the graph jrs resolved for it.
+#[derive(Clone)]
+struct Tool {
+    language: Language,
+    resolution: Resolution,
+}
+
+/// A unit's source roots, for a message.
+fn display_roots(roots: &[PathBuf]) -> String {
+    roots
+        .iter()
+        .map(|r| r.display().to_string())
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 /// `14      3 downloaded`, for the summary.
@@ -1985,6 +2284,16 @@ fn add_command(
                 ))
             })?
         };
+        if let Some(scala) = session.manifest.language(Language::Scala)
+            && let Some(suffix) = lang::cross_build_suffix(artifact)
+            && format!("_{suffix}") != lang::scala_suffix(&scala.version)
+        {
+            ui.warn(format!(
+                "`{group}:{artifact}` is built for Scala {suffix}, but [scala] is Scala {}; \
+                 jrs adds it as written, and does not rewrite the suffix",
+                scala.version
+            ));
+        }
         let mut dep = Dependency::new(group, artifact, version);
         dep.classifier = classifier;
         dep.compile_only = compile_only;
@@ -2165,8 +2474,11 @@ fn referenced(ui: &Ui, cache: &Cache) -> Result<HashSet<String>> {
                 lock.display()
             ))
         })?;
-        for package in parsed.into_iter().flat_map(|l| l.packages) {
-            keep.insert(package.coord.version_dir());
+        // The compilers it pins are its too.
+        if let Some(lock) = parsed {
+            for package in lock.all_packages() {
+                keep.insert(package.coord.version_dir());
+            }
         }
     }
     ui.verbose(format!(
@@ -2254,7 +2566,236 @@ class LibraryTest {
 }
 "#;
 
-fn init(ui: &Ui, name: Option<&str>, lib: bool, path: Option<&Path>) -> Result<i32> {
+/// `MUnit`, the Scala starter's test framework: a `JUnit` 4 runner, so it runs
+/// on the launcher's Vintage engine.
+const STARTER_MUNIT: &str = "1.3.6";
+
+/// Spock, the Groovy starter's test framework, in its build for the Groovy
+/// line the starter pins.
+const STARTER_SPOCK: &str = "2.4-groovy-5.0";
+
+const STARTER_MAIN_KOTLIN: &str = r#"package com.example
+
+fun main() {
+    println(greeting())
+}
+
+fun greeting(): String = "Hello from jrs"
+"#;
+
+const STARTER_MAIN_TEST_KOTLIN: &str = r#"package com.example
+
+import kotlin.test.Test
+import kotlin.test.assertEquals
+
+class MainTest {
+    @Test
+    fun greets() {
+        assertEquals("Hello from jrs", greeting())
+    }
+}
+"#;
+
+const STARTER_LIBRARY_KOTLIN: &str = r#"package com.example
+
+object Library {
+    fun greeting(name: String): String = "Hello, $name"
+}
+"#;
+
+const STARTER_LIBRARY_TEST_KOTLIN: &str = r#"package com.example
+
+import kotlin.test.Test
+import kotlin.test.assertEquals
+
+class LibraryTest {
+    @Test
+    fun greetsByName() {
+        assertEquals("Hello, jrs", Library.greeting("jrs"))
+    }
+}
+"#;
+
+const STARTER_MAIN_SCALA: &str = r#"package com.example
+
+object Main:
+  def main(args: Array[String]): Unit =
+    println(greeting)
+
+  def greeting: String = "Hello from jrs"
+"#;
+
+const STARTER_MAIN_SUITE_SCALA: &str = r#"package com.example
+
+class MainSuite extends munit.FunSuite:
+  test("greets") {
+    assertEquals(Main.greeting, "Hello from jrs")
+  }
+"#;
+
+const STARTER_LIBRARY_SCALA: &str = r#"package com.example
+
+object Library:
+  def greeting(name: String): String = s"Hello, $name"
+"#;
+
+const STARTER_LIBRARY_SUITE_SCALA: &str = r#"package com.example
+
+class LibrarySuite extends munit.FunSuite:
+  test("greets by name") {
+    assertEquals(Library.greeting("jrs"), "Hello, jrs")
+  }
+"#;
+
+const STARTER_MAIN_SPEC_GROOVY: &str = r#"package com.example
+
+import spock.lang.Specification
+
+class MainSpec extends Specification {
+    def "greets"() {
+        expect:
+        Main.greeting() == "Hello from jrs"
+    }
+}
+"#;
+
+const STARTER_LIBRARY_SPEC_GROOVY: &str = r#"package com.example
+
+import spock.lang.Specification
+
+class LibrarySpec extends Specification {
+    def "greets by name"() {
+        expect:
+        Library.greeting(name) == greeting
+
+        where:
+        name  | greeting
+        "jrs" | "Hello, jrs"
+        "you" | "Hello, you"
+    }
+}
+"#;
+
+/// What `jrs init` writes for a language: the main class, the test
+/// dependencies, and two files — the starter and its test — relative to the
+/// project root.
+struct Starter {
+    main_class: &'static str,
+    dev_dependencies: Vec<Dependency>,
+    files: [(&'static str, &'static str); 2],
+}
+
+fn starter(language: Language, lib: bool) -> Starter {
+    let junit = || Dependency::new("org.junit.jupiter", "junit-jupiter", STARTER_JUNIT);
+    let version = language.starter_version().unwrap_or_default();
+    match (language, lib) {
+        (Language::Java, false) => Starter {
+            main_class: "com.example.Main",
+            dev_dependencies: vec![junit()],
+            files: [
+                ("src/main/java/com/example/Main.java", STARTER_MAIN),
+                ("src/test/java/com/example/MainTest.java", STARTER_MAIN_TEST),
+            ],
+        },
+        (Language::Java, true) => Starter {
+            main_class: "com.example.Main",
+            dev_dependencies: vec![junit()],
+            files: [
+                ("src/main/java/com/example/Library.java", STARTER_LIBRARY),
+                (
+                    "src/test/java/com/example/LibraryTest.java",
+                    STARTER_LIBRARY_TEST,
+                ),
+            ],
+        },
+        (Language::Kotlin, _) => Starter {
+            // A `main` at file level compiles to a class named after the file.
+            main_class: "com.example.MainKt",
+            dev_dependencies: vec![
+                junit(),
+                Dependency::new("org.jetbrains.kotlin", "kotlin-test-junit5", version),
+            ],
+            files: if lib {
+                [
+                    (
+                        "src/main/kotlin/com/example/Library.kt",
+                        STARTER_LIBRARY_KOTLIN,
+                    ),
+                    (
+                        "src/test/kotlin/com/example/LibraryTest.kt",
+                        STARTER_LIBRARY_TEST_KOTLIN,
+                    ),
+                ]
+            } else {
+                [
+                    ("src/main/kotlin/com/example/Main.kt", STARTER_MAIN_KOTLIN),
+                    (
+                        "src/test/kotlin/com/example/MainTest.kt",
+                        STARTER_MAIN_TEST_KOTLIN,
+                    ),
+                ]
+            },
+        },
+        (Language::Scala, _) => Starter {
+            main_class: "com.example.Main",
+            dev_dependencies: vec![Dependency::new("org.scalameta", "munit_3", STARTER_MUNIT)],
+            files: if lib {
+                [
+                    (
+                        "src/main/scala/com/example/Library.scala",
+                        STARTER_LIBRARY_SCALA,
+                    ),
+                    (
+                        "src/test/scala/com/example/LibrarySuite.scala",
+                        STARTER_LIBRARY_SUITE_SCALA,
+                    ),
+                ]
+            } else {
+                [
+                    ("src/main/scala/com/example/Main.scala", STARTER_MAIN_SCALA),
+                    (
+                        "src/test/scala/com/example/MainSuite.scala",
+                        STARTER_MAIN_SUITE_SCALA,
+                    ),
+                ]
+            },
+        },
+        // Groovy usually arrives for its tests: Java main code, Spock specs,
+        // and Groovy declared as a test dependency so it stays out of the jar.
+        (Language::Groovy, _) => Starter {
+            main_class: "com.example.Main",
+            dev_dependencies: vec![
+                Dependency::new("org.apache.groovy", "groovy", version),
+                Dependency::new("org.spockframework", "spock-core", STARTER_SPOCK),
+            ],
+            files: if lib {
+                [
+                    ("src/main/java/com/example/Library.java", STARTER_LIBRARY),
+                    (
+                        "src/test/groovy/com/example/LibrarySpec.groovy",
+                        STARTER_LIBRARY_SPEC_GROOVY,
+                    ),
+                ]
+            } else {
+                [
+                    ("src/main/java/com/example/Main.java", STARTER_MAIN),
+                    (
+                        "src/test/groovy/com/example/MainSpec.groovy",
+                        STARTER_MAIN_SPEC_GROOVY,
+                    ),
+                ]
+            },
+        },
+    }
+}
+
+fn init(
+    ui: &Ui,
+    name: Option<&str>,
+    lib: bool,
+    language: Language,
+    path: Option<&Path>,
+) -> Result<i32> {
     ui.banner();
 
     let root = path.map_or_else(|| PathBuf::from("."), Path::to_path_buf);
@@ -2277,36 +2818,31 @@ fn init(ui: &Ui, name: Option<&str>, lib: bool, path: Option<&Path>) -> Result<i
         )));
     }
 
+    let starter = starter(language, lib);
     let mut manifest = manifest::blank(&name, "0.1.0", &root);
     if !lib {
-        manifest.main_class = Some("com.example.Main".to_string());
+        manifest.main_class = Some(starter.main_class.to_string());
     }
     if let Ok(toolchain) = Toolchain::discover() {
         manifest.java.source = Some(toolchain.version);
     }
-    manifest.dev_dependencies.push(Dependency::new(
-        "org.junit.jupiter",
-        "junit-jupiter",
-        STARTER_JUNIT,
-    ));
+    if let Some(version) = language.starter_version() {
+        let key = language.key();
+        manifest.languages.push(LanguageConfig {
+            language,
+            version: version.to_string(),
+            source_dir: PathBuf::from(format!("src/main/{key}")),
+            test_dir: PathBuf::from(format!("src/test/{key}")),
+            compiler_args: Vec::new(),
+            compiler_jvm_args: Vec::new(),
+        });
+    }
+    manifest.dev_dependencies = starter.dev_dependencies;
     std::fs::write(&manifest_path, manifest.render(None)).path(&manifest_path)?;
     ui.phase("Created", manifest_path.display());
 
-    let (class, class_source, test, test_source) = if lib {
-        (
-            "Library",
-            STARTER_LIBRARY,
-            "LibraryTest",
-            STARTER_LIBRARY_TEST,
-        )
-    } else {
-        ("Main", STARTER_MAIN, "MainTest", STARTER_MAIN_TEST)
-    };
-    for (dir, file, contents) in [
-        (manifest.source_path(), class, class_source),
-        (manifest.test_path(), test, test_source),
-    ] {
-        let path = dir.join("com/example").join(format!("{file}.java"));
+    for (relative, contents) in starter.files {
+        let path = root.join(relative);
         if path.exists() {
             continue;
         }
@@ -2435,6 +2971,10 @@ mod tests {
             vec!["jrs", "cache", "prune", "--unused-for", "30", "--dry-run"],
             vec!["jrs", "init"],
             vec!["jrs", "init", "--lib"],
+            vec!["jrs", "init", "--lang", "kotlin"],
+            vec!["jrs", "init", "--lib", "--lang", "groovy"],
+            vec!["jrs", "tree", "--tool", "kotlin-compiler"],
+            vec!["jrs", "tree", "--tool", "scala-compiler", "--depth", "2"],
             vec!["jrs", "migrate"],
             vec!["jrs", "completions", "zsh"],
             vec!["jrs", "task", "--list"],
@@ -2482,8 +3022,71 @@ mod tests {
             vec!["jrs", "task"],
             vec!["jrs", "task", "format", "--list"],
             vec!["jrs", "task", "--list", "--watch"],
+            vec!["jrs", "init", "--lang", "clojure"],
+            vec!["jrs", "tree", "--why", "guava", "--tool", "kotlin-compiler"],
         ] {
             assert!(Cli::try_parse_from(&args).is_err(), "{args:?} parsed");
+        }
+    }
+
+    #[test]
+    fn init_scaffolds_each_language_as_a_project_jrs_can_build() {
+        let ui = Ui::new(UiOptions {
+            quiet: true,
+            progress: When::Never,
+            color: When::Never,
+            charset: CharsetChoice::Ascii,
+            ..UiOptions::default()
+        });
+        for (lang, lib) in [
+            (LangArg::Java, false),
+            (LangArg::Kotlin, false),
+            (LangArg::Kotlin, true),
+            (LangArg::Scala, false),
+            (LangArg::Scala, true),
+            (LangArg::Groovy, false),
+            (LangArg::Groovy, true),
+        ] {
+            let language = Language::from(lang);
+            let root = std::env::temp_dir().join(format!(
+                "jrs-init-{}-{lib}-{}",
+                language.key(),
+                std::process::id()
+            ));
+            let _ = std::fs::remove_dir_all(&root);
+            init(&ui, Some("app"), lib, language, Some(&root)).unwrap();
+
+            let manifest = Manifest::load(root.join(MANIFEST_FILE)).unwrap();
+            assert!(manifest.warnings.is_empty(), "{:?}", manifest.warnings);
+            let project = Project::new(&manifest);
+            let main = project.main_sources().unwrap();
+            let test = project.test_sources().unwrap();
+            assert_eq!(main.len(), 1, "{language}");
+            assert_eq!(test.len(), 1, "{language}");
+            match language {
+                Language::Java => {
+                    assert!(manifest.languages.is_empty());
+                    assert_eq!(main.foreign(), None);
+                }
+                Language::Groovy => {
+                    // Java main code, Groovy specs, Groovy off the runtime.
+                    assert_eq!(main.foreign(), None);
+                    assert_eq!(test.foreign(), Some(Language::Groovy));
+                    assert!(manifest.implied_dependencies().is_empty());
+                }
+                other => {
+                    assert_eq!(main.foreign(), Some(other));
+                    assert_eq!(test.foreign(), Some(other));
+                    assert!(!manifest.implied_dependencies().is_empty());
+                }
+            }
+            assert!(manifest.language(language).is_some() || language == Language::Java);
+            if lib {
+                assert_eq!(manifest.main_class, None);
+            } else if language == Language::Kotlin {
+                assert_eq!(manifest.main_class.as_deref(), Some("com.example.MainKt"));
+            }
+            let _ = std::fs::remove_dir_all(&root);
         }
     }
 

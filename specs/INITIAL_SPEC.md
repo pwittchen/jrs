@@ -5,7 +5,8 @@ It expands the capability list from [README.md](README.md) into a concrete scope
 so that implementation can start from agreed contracts instead of ad-hoc decisions.
 
 Status: **implemented** — every milestone in the [Roadmap](#12-roadmap) has
-landed, except the tool dependencies M7 defers. The document still describes the design rather than the code, so where
+landed, except the tool dependencies M7 defers and the documentation tools M8
+defers. The document still describes the design rather than the code, so where
 the two differ the code is authoritative; the deliberate divergences are listed
 in [§12.1](#121-where-the-implementation-diverges), and the decisions taken on
 [Open questions](#13-open-questions) are recorded there.
@@ -17,7 +18,9 @@ in [§12.1](#121-where-the-implementation-diverges), and the decisions taken on
 ### 1.1 Goals
 
 - Build, test, run and package a single-module Java project with **zero configuration
-  beyond one `jrs.toml` file**.
+  beyond one `jrs.toml` file**. Kotlin, Scala and Groovy sources compile
+  alongside the Java ones (§7.7), but Java is the default and the JDK is the
+  toolchain: jrs stays a Java build system.
 - Resolve dependencies (including transitive ones) from Maven Central.
 - Be fast: parallel compilation and downloads, incremental where cheap to do so.
 - Be a **thin, predictable driver over the JDK toolchain** (`javac`, `java`, `jar`),
@@ -33,7 +36,9 @@ in [§12.1](#121-where-the-implementation-diverges), and the decisions taken on
   reorder the built-in phases, and no user code runs inside jrs.
 - Multi-module / aggregator builds (v1 is one module per manifest).
 - Publishing artifacts to a repository (`deploy`/`publish`).
-- Non-Java JVM languages (Kotlin, Scala, Groovy).
+- JVM languages beyond Java, Kotlin, Scala and Groovy; and for those three,
+  anything off the JVM (Multiplatform, JS, Native, Android), compiler
+  plugins, kapt/KSP, incremental compilation and compiler daemons (§7.7).
 - Android, JPMS module descriptors, annotation-processor configuration,
   built-in code generators, or IDE project file generation. A generator can
   run as a task (§7.6); jrs does not ship one.
@@ -74,9 +79,11 @@ my-project/
 ├── src/
 │   ├── main/
 │   │   ├── java/             # production sources (*.java)
+│   │   ├── kotlin/           # with [kotlin]: *.kt (likewise scala/, groovy/; §7.7)
 │   │   └── resources/        # copied verbatim into the jar
 │   └── test/
 │       ├── java/             # test sources
+│       ├── kotlin/
 │       └── resources/
 └── target/                   # generated, git-ignored
     ├── classes/              # compiled main classes
@@ -119,6 +126,9 @@ jvm-args = ["-Xmx512m"]              # `java` flags for `jrs run`
 
 [test]
 jvm-args = ["-Dmode=test"]           # `java` flags for the test JVM
+
+[kotlin]                             # optional: Kotlin alongside Java (§7.7)
+version = "2.4.20"                   # the compiler, and the implied kotlin-stdlib
 
 [dependencies]
 # short form: version string
@@ -177,6 +187,7 @@ post-package = ["checksum"]
 | `test.jvm-args` | no | `[]` | `java` flags for the test JVM. |
 | `test.jacoco-version` | no | jrs's default | JaCoCo release for `jrs test --coverage` (§10.2). |
 | `package.add-modules` | no | `[]` | Modules a runtime image needs beyond what `jdeps` finds (§9.4). |
+| `kotlin.*`, `scala.*`, `groovy.*` | no | — | The table turns the language on (§7.7): `version` (required, exact), `source-dir` / `test-dir` (`src/main/<lang>` / `src/test/<lang>`), `kotlinc-args` / `scalac-args` / `groovyc-args`, `compiler-jvm-args`. |
 | `dependencies.*` | no | `{}` | Key is `group:artifact` or `group:artifact:classifier`; value is a version, or a table with `version` and optionally `classifier`, `exclusions` (`group:artifact` patterns, `*` allowed) and `compile-only`. |
 | `dev-dependencies.*` | no | `{}` | Test classpath only; never packaged. Same forms, without `compile-only`. |
 | `repositories.*` | no | Central | Name → base URL. |
@@ -200,6 +211,16 @@ The checksums are pins, not only a record: a jar downloaded while the lockfile
 is in use must match its recorded checksum as well as the repository's, or the
 download is discarded and the build fails (§8.3). A `-SNAPSHOT` is republished
 under one name by design, so it is recorded without a checksum.
+
+A project with Kotlin, Scala or Groovy pins each compiler's graph as well, in
+a `[[tool]]` block after the `[[package]]` entries: a `name`
+(`kotlin-compiler`), its `roots`, and `[[tool.package]]` entries in the same
+format. A compiler decides the bytecode, so an unpinned one would not be
+reproducible (§7.7). The file says `version = 2` only when it has `[[tool]]`
+blocks, so a Java project's lockfile stays byte-identical, and a jrs that
+predates tools refuses a version 2 file rather than drop the pins when it
+rewrites it. The implied runtime libraries are ordinary `[[package]]` entries,
+and `manifest-checksum` covers them and each language's version.
 
 ### 4.5 Editing the manifest
 
@@ -232,14 +253,14 @@ jrs <command> [options]
 | `jrs package --jlink` / `--jpackage [type]` | Also a runtime image or a native package (§9.4). |
 | `jrs doc` | Generate Javadoc into `target/doc` (§7.4). |
 | `jrs clean` | Remove `target/`. |
-| `jrs tree [--depth n] [--why artifact]` | Print the resolved dependency graph, `n` levels deep, or inverted from one artifact to the manifest. |
+| `jrs tree [--depth n] [--why artifact] [--tool name]` | Print the resolved dependency graph, `n` levels deep, inverted from one artifact to the manifest, or a compiler's own graph (§7.7). |
 | `jrs classpath [--test \| --runtime]` | Print the resolved classpath to stdout. |
 | `jrs update` | Re-resolve and rewrite `jrs.lock`; re-check every cached snapshot. |
 | `jrs verify` | Re-hash the cached jars against the checksums in `jrs.lock`; exit `1` on a mismatch. |
 | `jrs outdated` | List declared dependencies with newer releases, from `maven-metadata.xml`. |
 | `jrs add` / `jrs remove` | Edit `[dependencies]` / `[dev-dependencies]` in place, then re-resolve (§4.5). |
 | `jrs cache path` / `jrs cache prune` | Show or prune the shared cache (§8.6). |
-| `jrs init [--lib]` | Scaffold `jrs.toml`, a starter class and a starter JUnit test. |
+| `jrs init [--lib] [--lang java\|kotlin\|scala\|groovy]` | Scaffold `jrs.toml`, a starter class and a starter test: JUnit 5 for Java and Kotlin, MUnit for Scala, and for Groovy Java code with Spock specs (§7.7). |
 | `jrs migrate` | Generate `jrs.toml` from an existing `pom.xml` or Gradle build (§11). |
 | `jrs completions <shell>` | Print a bash, zsh or fish completion script. |
 | `jrs task <name> [-- args...]` | Run a user-defined task and whatever it depends on (§7.6). |
@@ -414,7 +435,10 @@ src/
 ├── lockfile.rs       # jrs.lock read/write
 ├── project.rs        # layout discovery, source globbing, target dir mgmt
 ├── toolchain.rs      # locate the JDK (pin, JAVA_HOME, PATH), version probe
-├── compile.rs        # javac/javadoc invocation, argfiles, staleness check
+├── compile/
+│   ├── mod.rs        # compile units and their steps, fingerprint, staleness, argfiles
+│   ├── javac.rs      # javac and javadoc invocation
+│   └── lang.rs       # Kotlin, Scala, Groovy: compilers, runtime libraries, flags (§7.7)
 ├── image.rs          # jdeps, jlink, jpackage (§9.4)
 ├── resolve/
 │   ├── mod.rs        # resolution algorithm, conflict mediation
@@ -504,7 +528,8 @@ the selected `javac`, and a JDK that lacks one is an error naming it.
 
 ### 7.2 Compilation
 
-- Glob `**/*.java` under the source root.
+- Glob `**/*.java` under the source root — and with another language on, every
+  root for every language's extension (§7.7).
 - Compute a staleness check: recompile everything if any source is newer than
   the newest `.class` in `target/classes/`, or if the classpath changed —
   including a jar's size or modification time, which is how a snapshot rebuilt
@@ -520,6 +545,9 @@ the selected `javac`, and a JDK that lacks one is an error naming it.
         -cp <resolved classpath> <javac-args> @sources.args
   ```
 - Non-zero exit → surface `javac` stderr and exit `1`.
+- A unit with Kotlin, Scala or Groovy sources runs that language's compiler
+  first, into the same output directory and under the same fingerprint; the
+  unit is still all-or-nothing (§7.7).
 
 ### 7.3 Resource handling
 
@@ -539,11 +567,15 @@ compile classpath go into `target/.jrs/javadoc.args`, the flags are
 `--release`, the encodings and a title, and `java.javadoc-args` is appended
 verbatim. The output goes to `target/doc`, which is emptied first so a deleted
 class does not keep its page. `javadoc`'s warnings are passed through verbatim.
+In a project with another language only the Java sources are documented, with
+a warning naming what was left out, and the build runs first so that
+`javadoc` finds the other language's classes (§7.7).
 
 ### 7.5 Watch mode
 
 `jrs build --watch` and `jrs test --watch` run the command, then poll the
-manifest, the source and resource trees every 300 ms. Each poll is a size and
+manifest, the source trees (every language's roots, §7.7) and the resource
+trees every 300 ms. Each poll is a size and
 mtime picture over the same sorted walk a build does. They run the command
 again once a change has settled. A failure is reported and waited out rather
 than ending the loop, since the next save is usually the fix. The manifest is
@@ -689,6 +721,83 @@ sources are all generated still builds.
 - `jrs task --list` writes to stdout. Completions cover `jrs task` and its
   flags, but not task names: nothing calls back into jrs at completion time.
 
+### 7.7 Other JVM languages
+
+Kotlin, Scala and Groovy compile alongside Java, on the JVM only. The design,
+the alternatives, and what the spike before it found are in
+[JVM_LANGUAGES.md](JVM_LANGUAGES.md); this is the contract.
+
+**Turning one on.** A `[kotlin]`, `[scala]` or `[groovy]` table turns the
+language on and pins its compiler. `version` is required and exact: at least
+Kotlin 2.0, Scala 2.13.9 or 3.3, or Groovy 4.0. `source-dir` and `test-dir`
+add a root (`src/main/<lang>` and `src/test/<lang>` by default);
+`kotlinc-args` / `scalac-args` / `groovyc-args` are appended verbatim, and
+`compiler-jvm-args` go to the compiler's JVM.
+
+**Sources.** Every root of a unit — `project.source-dir` and each language's —
+is scanned for every extension (`.java`, `.kt`, `.scala`, `.groovy`), so a
+`.kt` file under `src/main/java` compiles too. A source in a language that is
+off is a manifest error naming the table to add, rather than a file silently
+left out. So is a unit with two languages besides Java, since neither
+compiler reads the other's sources. Main and test are separate units: Kotlin
+main code with Groovy tests is fine.
+
+**The runtime library** — `kotlin-stdlib`; `scala-library` on 2.13,
+`scala3-library_3` on 3.0–3.7 and both from 3.8; `org.apache.groovy:groovy` —
+is an implied dependency at the compiler's version, resolved as if declared
+last in `[dependencies]`, so it wins nearest-wins against transitive copies. A
+declaration in either table replaces it: Groovy in `[dev-dependencies]` keeps
+it off the runtime classpath. A declaration at another version warns. It is
+never written into `jrs.toml`, and `jrs tree` labels it `(implied by [kotlin])`.
+
+**The compiler** is a tool: resolved from the project's repositories as a
+graph of its own, never mediated against the project's, pinned in `jrs.lock`
+(§4.4), and run on the project's JDK (§7.1). It is
+`kotlin-compiler-embeddable`, `scala3-compiler_3` or `scala-compiler`, or
+Groovy's core jar, and it is downloaded like the test launcher, under a
+`Downloading <artifact> (<Language> compiler)` line.
+
+**A unit's steps** share one output directory, one fingerprint and one
+staleness decision (§7.2):
+
+| Unit holds | Step 1 | Step 2 |
+| --- | --- | --- |
+| Java only | `javac` | — |
+| Kotlin or Scala (+ Java) | the compiler, over its own sources and the Java ones, which it reads for their symbols | `javac` over the Java sources, step 1's classes first on `-cp` |
+| Groovy (+ Java) | `groovyc -j`, which runs `javac` itself (joint compilation) | — |
+
+The fingerprint covers every step's flags, the compiler's version and jars,
+and the sources, and any change reruns every step into an emptied directory.
+The phase line counts by language:
+`Compiling orders v1.0.0 (2 Kotlin + 1 Java source files)`.
+
+**Invocation.** `java @target/.jrs/<kotlinc|scalac|groovyc>-<unit>.args`. The
+one argfile holds the compiler's JVM flags, its classpath, its main class, its
+flags and the sources, in the `java` launcher's quoting, which is `javac`'s.
+The compilers' own `@file` readers disagree about backslashes and about what a
+file may hold, so jrs does not use them. Output is passed through verbatim.
+
+**Flags.** `java.source`, or the JDK's version, is the one release for every
+language:
+
+| Language | jrs generates |
+| --- | --- |
+| Kotlin | `-no-stdlib -no-reflect -jvm-target <n> -Xjdk-release=<n> -module-name <name>`; the tests get `-module-name <name>_test -Xfriend-paths=target/classes`, so they see `internal` declarations |
+| Scala | `-encoding <enc>`, and `-java-output-version <n>` on 3 or `-release <n>` on 2.13; `-color:never` on 3 when jrs's output is not coloured |
+| Groovy | `--encoding=<enc>` and `-Dgroovy.target.bytecode=<n>` for its JVM; with Java sources, `-j -J=-release=<n>` and `java.javac-args` translated: `-F=<flag>` for a single token, `-J=name=value` or `-F=-name=value` for a known `-name value` pair. An argument the rule cannot place is a manifest error. |
+
+A compiler that does not know the release fails with its own message, and jrs
+adds one line: lower `java.source`, or raise the language's version.
+
+**Around the build.** `jrs run` suggests `<main-class>Kt` when that is the
+only class of the two. `jrs doc` documents the Java sources (§7.4). `jrs
+outdated` lists each `<lang>.version` against its compiler's releases, `jrs
+tree --tool <name>` prints a compiler's graph, `jrs add` warns about a `_2.13`
+or `_3` suffix that does not match `[scala]`, and `jrs verify` and `jrs cache
+prune` cover the pinned compilers (§8.6). Resolution warns about a Scala 2
+library newer than its compiler, two Scala lines' builds of one library, and a
+pre-1.8 `kotlin-stdlib-jdk7`/`-jdk8` beside a Kotlin 2 stdlib.
+
 ---
 
 ## 8. Dependency resolution
@@ -806,8 +915,8 @@ prints where it is. Pruning removes whole version directories, so an
 artifact's jar, POM, checksums and snapshot records go together, and parents
 left empty go too:
 
-- `jrs cache prune` keeps what some project's `jrs.lock` names and removes the
-  rest. Every build records its lockfile's path in `<cache>/.jrs/projects`.
+- `jrs cache prune` keeps what some project's `jrs.lock` names, the compilers
+  in its `[[tool]]` blocks included, and removes the rest. Every build records its lockfile's path in `<cache>/.jrs/projects`.
   This is machine-local bookkeeping, which is why it may hold absolute paths
   when `jrs.lock` never does. Lockfiles that no longer exist are forgotten. An
   empty record, or a lockfile that cannot be read, stops the prune rather than
@@ -845,8 +954,17 @@ wanted.
   - `META-INF/MANIFEST.MF` from dependencies is dropped.
   - `META-INF/services/*` entries are **concatenated**, not overwritten —
     getting this wrong silently breaks `ServiceLoader`.
+  - Groovy extension-module descriptors
+    (`META-INF/groovy/org.codehaus.groovy.runtime.ExtensionModule`, and the
+    legacy copy under `META-INF/services/`) are **merged** into one at the
+    `META-INF/groovy/` path, the union of every module's `extensionClasses`
+    and `staticExtensionClasses`. First-wins would keep one Groovy module's
+    extension methods and silently drop the rest.
   - Signature files (`META-INF/*.SF`, `*.DSA`, `*.RSA`) are dropped, since the
-    merged jar invalidates them.
+    merged jar invalidates them. So are the dependencies' module descriptors
+    (`module-info.class`, and under `META-INF/versions/<n>/`): the merged jar
+    is none of those modules, and `kotlin-stdlib` and `kotlinx-coroutines`, for
+    two, both ship one.
   - Duplicate classes: first wins, with a warning naming both sources.
 - Requires `project.main-class`; error out clearly if it is missing.
 
@@ -924,17 +1042,32 @@ Both need `project.main-class`.
   since the launcher refuses to combine the two.
 - Reports: `--reports-dir target/test-reports` (emptied first), so JUnit XML
   lands where CI systems look for it.
-- The launcher version follows the declared Jupiter version: `5.x.y` →
+- The launcher follows the resolved graph first: the version of the
+  `junit-platform-engine` there. That is how Spock, Kotest and ScalaTest,
+  which bring the platform themselves, get a launcher their engine agrees
+  with. Otherwise it follows the declared Jupiter version: `5.x.y` →
   platform `1.x.y`; from JUnit 6 on, the two are the same. A project with only
-  `junit:junit` gets a fixed 1.x launcher. Its bundled Vintage engine runs
-  JUnit 4 tests, and with both declared, both kinds run.
+  `junit:junit`, declared or brought in (as MUnit brings it), gets a fixed 1.x
+  launcher. Its bundled Vintage engine runs JUnit 4 tests, and with both
+  declared, both kinds run.
+- The launcher goes last on the test JVM's classpath, so the project's own
+  JUnit jars win — except the launcher's own parts (`junit-platform-launcher`,
+  `-console`, `-reporting`), which it bundles at its version. A copy the graph
+  brings in, as `kotlin-test-junit5` brings an older `junit-platform-launcher`,
+  is left off, since it would shadow the launcher's classes.
+- When any test source is not Java, the default `--include-classname` is the
+  launcher's own pattern plus `.*Spec` and `.*Suite`, the names Spock, Kotest,
+  ScalaTest and MUnit classes carry; without them those classes do not run at
+  all. `--filter` still replaces it, and a Java-only project keeps the
+  launcher's default.
 - `test.jvm-args` go before `-cp`.
 - Coverage (`jrs test --coverage`) uses JaCoCo, resolved as an internal
   dependency like the launcher:
   - The agent (`org.jacoco.agent`, classifier `runtime`) goes on the test JVM
     as a `-javaagent`, recording to `target/jacoco.exec`.
   - The CLI (`org.jacoco.cli`, classifier `nodeps`) then writes HTML and
-    `jacoco.xml` into `target/coverage`.
+    `jacoco.xml` into `target/coverage`, reading every main source root, so
+    Kotlin, Scala and Groovy files show too.
   - The line and branch totals are read back out of the XML for the summary.
   - A failing run still gets its report.
 
@@ -1057,6 +1190,22 @@ project root.
 - Fixtures deliberately include unsupported constructs, so the "not migrated"
   report is tested too.
 
+### 11.6 Kotlin, Scala and Groovy
+
+What the builds already say about the other languages (§7.7) is translated too:
+
+| Source | Construct | Becomes |
+| --- | --- | --- |
+| Gradle | `kotlin("jvm") version "x"`, `id("org.jetbrains.kotlin.jvm") version "x"` | `[kotlin] version = "x"` |
+| Gradle | `kotlin { jvmToolchain(n) }` | `java.jdk = n` |
+| Gradle | `id 'groovy'` / `id 'scala'` plus the library dependency | `[groovy]` / `[scala]`, at that dependency's version |
+| Maven | `kotlin-maven-plugin` at `${kotlin.version}` | `[kotlin]`; its `<jvmTarget>` → `java.source` when that is not set |
+| Maven | `scala-maven-plugin`, `gmavenplus-plugin` | `[scala]` / `[groovy]` |
+| both | an explicit `kotlin-stdlib` / `scala-library` / `groovy` dependency at the compiler's version | dropped from `[dependencies]`, since it is implied; reported as migrated |
+| both | compiler plugins (`allopen`, `spring`, `serialization`, `kapt`) | not migrated, each with its reason |
+
+A version below jrs's minimum is not migrated, and the report says why.
+
 ---
 
 ## 12. Roadmap
@@ -1117,6 +1266,18 @@ produces something runnable.
   resolved from Maven Central as their own graph, pinned in `jrs.lock`. They
   change the lockfile format and the resolver's inputs, so they wait until
   T1 and T2 have seen real use (§13.12).
+
+### M8 — JVM languages
+- ☑ multi-step compile units, multi-root sources, and compilers as isolated
+  tool graphs pinned in `jrs.lock` (L0)
+- ☑ Kotlin (L1), Groovy (L2), and Scala 2.13 and 3 (L3), each mixed with Java
+  both ways, and tested on the JUnit Platform: JUnit 5, Spock, MUnit
+- ☑ `jrs init --lang`, the `jrs migrate` rows, `jrs outdated` for compiler
+  versions and `jrs tree --tool` (L4)
+- Added after M7; the design, and the argument for narrowing §1.2, is in
+  [JVM_LANGUAGES.md](JVM_LANGUAGES.md), and §7.7 is the condensed contract.
+  Scaladoc and Groovydoc for `jrs doc` are deferred: `jrs doc` documents the
+  Java sources and says what it left out.
 
 Tick the corresponding README boxes as each lands — the README is the
 user-facing progress tracker, this document is the design behind it.
@@ -1235,3 +1396,16 @@ still the interesting part; the **decision** lines record what was settled on.
     logic written in Java is a `script` task on the JDK's source launcher. §1.2
     was narrowed to say so. Tool dependencies (TASKS.md §8) are deferred, since
     they change the lockfile format and the resolver's inputs.
+13. **Other JVM languages.** §1.2 first ruled out Kotlin, Scala and Groovy.
+    But their compilers are JVM programs on Maven Central, their runtime
+    libraries are ordinary dependencies, and their output is class files that
+    every later phase already handles: what was missing was one compile step
+    before `javac`. Compilers from `PATH`, detecting a language by extension
+    with no manifest key, and delegating to Gradle, Maven or sbt were the
+    alternatives.
+    **Decision:** one table per language (§7.7, designed in
+    [JVM_LANGUAGES.md](JVM_LANGUAGES.md)). The compiler is pinned in the
+    manifest and in `jrs.lock`, resolved as a graph of its own and run on the
+    project's JDK, as `javac` and the JUnit launcher are. This built the
+    isolated tool graph and the `[[tool]]` lockfile blocks that tool
+    dependencies (12) will reuse. §1.2 was narrowed to say what stays out.

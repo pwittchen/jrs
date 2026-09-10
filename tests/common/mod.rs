@@ -14,6 +14,7 @@ use jrs::manifest::Repository;
 use jrs::resolve::cache::Cache;
 use jrs::resolve::coord::Coord;
 use jrs::resolve::repo::{self, Fetcher};
+use jrs::toolchain::Toolchain;
 
 /// A scratch directory removed when the test ends.
 pub struct Scratch {
@@ -137,6 +138,151 @@ impl FixtureRepo {
             repo::file_url(&self.root)
         )
     }
+
+    /// Compile `tests/fixtures/fake-compiler` and publish it as every
+    /// compiler jrs resolves, each with a support jar as its one transitive
+    /// dependency, and a one-class runtime library for each language. Needs a
+    /// JDK; nothing binary is committed.
+    pub fn publish_fake_compilers(&self, scratch: &Scratch, toolchain: &Toolchain) {
+        let src = fixtures().join("fake-compiler");
+        let work = scratch.join("fake-compiler");
+        let support_classes = work.join("support");
+        let compiler_classes = work.join("compiler");
+        javac(
+            toolchain,
+            &[src.join("fake/support/Support.java")],
+            &support_classes,
+            &[],
+        );
+        let sources: Vec<PathBuf> = find_java(&src)
+            .into_iter()
+            .filter(|p| !p.starts_with(src.join("fake/support")))
+            .collect();
+        javac(
+            toolchain,
+            &sources,
+            &compiler_classes,
+            std::slice::from_ref(&support_classes),
+        );
+
+        let support = Coord::new("org.example.fake", "fake-compiler-support", "1.0");
+        self.publish_pom(&support, &pom(&support, &[]));
+        self.publish_jar(&support, &jar(&support_classes, &work.join("support.jar")));
+        let compiler = jar(&compiler_classes, &work.join("compiler.jar"));
+        for (group, artifact, version) in [
+            (
+                "org.jetbrains.kotlin",
+                "kotlin-compiler-embeddable",
+                FAKE_KOTLIN,
+            ),
+            ("org.scala-lang", "scala3-compiler_3", FAKE_SCALA),
+            // Groovy's compiler is in its runtime jar, which is also the
+            // runtime library a Groovy project implies.
+            ("org.apache.groovy", "groovy", FAKE_GROOVY),
+        ] {
+            let coord = Coord::new(group, artifact, version);
+            self.publish_pom(&coord, &pom(&coord, &[&support]));
+            self.publish_jar(&coord, &compiler);
+        }
+
+        for (group, artifact, version, class) in [
+            (
+                "org.jetbrains.kotlin",
+                "kotlin-stdlib",
+                FAKE_KOTLIN,
+                "kotlin.FakeStdlib",
+            ),
+            (
+                "org.scala-lang",
+                "scala-library",
+                FAKE_SCALA,
+                "scala.FakeLibrary",
+            ),
+            (
+                "org.scala-lang",
+                "scala3-library_3",
+                FAKE_SCALA,
+                "scala.FakeShim",
+            ),
+        ] {
+            let coord = Coord::new(group, artifact, version);
+            let (package, name) = class.rsplit_once('.').unwrap();
+            let dir = work.join(artifact);
+            let source = dir.join(format!("src/{package}/{name}.java"));
+            std::fs::create_dir_all(source.parent().unwrap()).unwrap();
+            std::fs::write(
+                &source,
+                format!(
+                    "package {package};\n\npublic final class {name} {{\n    \
+                     private {name}() {{}}\n\n    public static String mark() {{\n        \
+                     return \"{artifact} {version}\";\n    }}\n}}\n"
+                ),
+            )
+            .unwrap();
+            javac(toolchain, &[source], &dir.join("classes"), &[]);
+            self.publish_pom(&coord, &pom(&coord, &[]));
+            self.publish_jar(&coord, &jar(&dir.join("classes"), &dir.join("lib.jar")));
+        }
+    }
+}
+
+/// The versions the fake compilers are published at: new enough for jrs's
+/// minimums, and not a real release of anything.
+pub const FAKE_KOTLIN: &str = "2.9.9";
+pub const FAKE_SCALA: &str = "3.9.9";
+pub const FAKE_GROOVY: &str = "4.9.9";
+
+fn pom(coord: &Coord, dependencies: &[&Coord]) -> String {
+    let deps: String = dependencies
+        .iter()
+        .map(|d| {
+            format!(
+                "<dependency><groupId>{}</groupId><artifactId>{}</artifactId>\
+                 <version>{}</version></dependency>",
+                d.group, d.artifact, d.version
+            )
+        })
+        .collect();
+    format!(
+        "<project><groupId>{}</groupId><artifactId>{}</artifactId>\
+         <version>{}</version><dependencies>{deps}</dependencies></project>",
+        coord.group, coord.artifact, coord.version
+    )
+}
+
+fn find_java(dir: &Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    for entry in std::fs::read_dir(dir).unwrap() {
+        let path = entry.unwrap().path();
+        if path.is_dir() {
+            out.extend(find_java(&path));
+        } else if path.extension().is_some_and(|e| e == "java") {
+            out.push(path);
+        }
+    }
+    out.sort();
+    out
+}
+
+fn javac(toolchain: &Toolchain, sources: &[PathBuf], out: &Path, classpath: &[PathBuf]) {
+    let mut command = std::process::Command::new(&toolchain.javac);
+    command
+        .args(["--release", "17", "-proc:none", "-d"])
+        .arg(out);
+    if !classpath.is_empty() {
+        command.arg("-cp").arg(Toolchain::classpath(classpath));
+    }
+    let output = command.args(sources).output().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+fn jar(classes: &Path, output: &Path) -> Vec<u8> {
+    jrs::package::write_thin_jar(classes, output, &jrs::package::JarManifest::default()).unwrap();
+    std::fs::read(output).unwrap()
 }
 
 /// Skip a JDK-dependent test when there is no JDK, saying so out loud.

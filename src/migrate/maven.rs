@@ -8,11 +8,15 @@
 
 use std::path::{Path, PathBuf};
 
-use super::{Migration, Report, Source};
+use super::{
+    Migration, Report, Source, drop_implied_libraries, enable_from_library, enable_language,
+    report_compiler_plugin,
+};
+use crate::compile::lang::Language;
 use crate::error::{IoResultExt, JrsError, Result};
 use crate::manifest::{self, Dependency, Exclusion, Manifest, Repository};
 use crate::resolve::coord::{Scope, is_range};
-use crate::resolve::pom::{self, Effective, Element, Pom};
+use crate::resolve::pom::{self, Effective, Element, PluginInfo, Pom};
 
 /// Plugins jrs knows how to read something out of. Anything else is reported.
 const UNDERSTOOD_PLUGINS: &[&str] = &[
@@ -20,6 +24,9 @@ const UNDERSTOOD_PLUGINS: &[&str] = &[
     "maven-jar-plugin",
     "maven-surefire-plugin",
     "maven-shade-plugin",
+    "kotlin-maven-plugin",
+    "scala-maven-plugin",
+    "gmavenplus-plugin",
 ];
 
 /// Translate the POM at `pom_path`, and the parents beside it on disk.
@@ -40,9 +47,12 @@ pub fn migrate(pom_path: &Path, root: &Path) -> Result<Migration> {
     report.migrated(format!("project.version = {}", out.version));
 
     read_java_settings(&effective, pom, &mut out, &mut report);
-    read_layout(pom, &mut out, &mut report);
     read_main_class(pom, &mut out, &mut report);
     read_dependencies(&effective, &mut out, &mut report);
+    // The layout depends on which languages are on, and Scala's and Groovy's
+    // versions on the dependencies.
+    read_languages(&chain, pom, &effective, &mut out, &mut report);
+    read_layout(pom, &mut out, &mut report);
     read_annotation_processors(&effective, pom, &mut out, &mut report);
     read_test_settings(&effective, pom, &mut out, &mut report);
     read_repositories(&effective, &mut out, &mut report);
@@ -169,10 +179,29 @@ fn read_java_settings(effective: &Effective, pom: &Pom, out: &mut Manifest, repo
 
 fn read_layout(pom: &Pom, out: &mut Manifest, report: &mut Report) {
     let build = &pom.build;
-    let mut set = |value: &Option<String>, field: &mut PathBuf, default: &str, name: &str| {
+    let languages: Vec<&str> = out.languages.iter().map(|c| c.language.key()).collect();
+    // `parent` is where a language keeps its own root: `src/main` for
+    // `src/main/kotlin`. Such a root is compiled through its table already,
+    // and moving the Java root there would lose `src/main/java`.
+    let mut set = |value: &Option<String>,
+                   field: &mut PathBuf,
+                   default: &str,
+                   name: &str,
+                   parent: Option<&str>| {
         let Some(raw) = value else { return };
         let cleaned = strip_basedir(raw);
         if cleaned == default {
+            return;
+        }
+        if let Some(parent) = parent
+            && let Some(key) = languages
+                .iter()
+                .find(|k| cleaned == format!("{parent}/{k}"))
+        {
+            report.migrated(format!(
+                "project.{name} left at {default}: {cleaned} is [{key}]'s own root, \
+                 which jrs compiles too"
+            ));
             return;
         }
         *field = PathBuf::from(&cleaned);
@@ -186,18 +215,21 @@ fn read_layout(pom: &Pom, out: &mut Manifest, report: &mut Report) {
         &mut out.source_dir,
         "src/main/java",
         "source-dir",
+        Some("src/main"),
     );
     set(
         &build.test_source_directory,
         &mut out.test_dir,
         "src/test/java",
         "test-dir",
+        Some("src/test"),
     );
     set(
         &build.directory,
         &mut out.target_dir,
         "target",
         "target-dir",
+        None,
     );
 
     match build.resource_directories.len() {
@@ -519,7 +551,152 @@ fn read_the_rest(pom: &Pom, report: &mut Report) {
     }
 }
 
-fn plugin<'a>(pom: &'a Pom, artifact: &str) -> Option<&'a crate::resolve::pom::PluginInfo> {
+/// The compiler plugins for Kotlin, Scala and Groovy turn their language on
+/// (`JVM_LANGUAGES.md` §10), and the runtime library each then implies is taken
+/// out of `[dependencies]`.
+fn read_languages(
+    chain: &[Pom],
+    pom: &Pom,
+    effective: &Effective,
+    out: &mut Manifest,
+    report: &mut Report,
+) {
+    if let Some(kotlin) = plugin(pom, "kotlin-maven-plugin") {
+        read_kotlin(chain, effective, kotlin, out, report);
+    }
+    if let Some(scala) = plugin(pom, "scala-maven-plugin") {
+        let configured = scala
+            .configuration
+            .as_ref()
+            .and_then(|c| c.text_of("scalaVersion"))
+            .map(|v| pom::interpolate(v, &effective.properties));
+        match configured {
+            Some(version) => {
+                enable_language(
+                    out,
+                    Language::Scala,
+                    &version,
+                    "scala-maven-plugin <scalaVersion>",
+                    report,
+                );
+            }
+            None => enable_from_library(out, Language::Scala, "scala-maven-plugin", report),
+        }
+    }
+    if plugin(pom, "gmavenplus-plugin").is_some() {
+        enable_from_library(out, Language::Groovy, "gmavenplus-plugin", report);
+    }
+    drop_implied_libraries(out, report);
+}
+
+/// kotlin-maven-plugin: its version is the compiler's, `<jvmTarget>` is the
+/// release when nothing else set one, and its compiler plugins and kapt are
+/// reported.
+fn read_kotlin(
+    chain: &[Pom],
+    effective: &Effective,
+    kotlin: &PluginInfo,
+    out: &mut Manifest,
+    report: &mut Report,
+) {
+    match plugin_version(chain, "kotlin-maven-plugin") {
+        Some(version) => {
+            let version = pom::interpolate(&version, &effective.properties);
+            enable_language(
+                out,
+                Language::Kotlin,
+                &version,
+                "kotlin-maven-plugin",
+                report,
+            );
+        }
+        None => enable_from_library(out, Language::Kotlin, "kotlin-maven-plugin", report),
+    }
+
+    let jvm_target = kotlin
+        .configuration
+        .as_ref()
+        .and_then(|c| c.text_of("jvmTarget"))
+        .map(str::to_string)
+        .or_else(|| {
+            effective
+                .properties
+                .get("kotlin.compiler.jvmTarget")
+                .cloned()
+        })
+        .map(|t| pom::interpolate(&t, &effective.properties));
+    if let Some(raw) = jvm_target {
+        match (parse_release(&raw), out.java.source) {
+            (Some(n), None) => {
+                out.java.source = Some(n);
+                report.migrated(format!(
+                    "java.source = {n} (from kotlin-maven-plugin <jvmTarget>)"
+                ));
+            }
+            (Some(n), Some(source)) if n != source => report.review(format!(
+                "kotlin-maven-plugin <jvmTarget>{n}</jvmTarget> — java.source is {source}, \
+                 and jrs compiles Java and Kotlin for that one release"
+            )),
+            (Some(_), Some(_)) => {}
+            (None, _) => report.review(format!(
+                "kotlin-maven-plugin <jvmTarget>{raw}</jvmTarget> could not be read as a \
+                 Java release; java.source was not set from it"
+            )),
+        }
+    }
+
+    // `<compilerPlugins>` sits under the plugin's configuration or an
+    // execution's, as shade's transformers do.
+    let mut configurations: Vec<&Element> = kotlin
+        .executions
+        .iter()
+        .filter_map(|e| e.child("configuration"))
+        .collect();
+    configurations.extend(kotlin.configuration.as_ref());
+    let mut seen: Vec<String> = Vec::new();
+    for name in configurations
+        .iter()
+        .filter_map(|c| c.child("compilerPlugins"))
+        .flat_map(|list| &list.children)
+        .map(|p| p.text.trim().to_string())
+        .filter(|n| !n.is_empty())
+    {
+        if !seen.contains(&name) {
+            report_compiler_plugin(
+                &name,
+                &format!("kotlin-maven-plugin compiler plugin `{name}`"),
+                report,
+            );
+            seen.push(name);
+        }
+    }
+    let kapt = kotlin.executions.iter().any(|e| {
+        e.list("goals", "goal")
+            .iter()
+            .any(|g| g.text.trim() == "kapt")
+    });
+    if kapt {
+        report_compiler_plugin("kapt", "kotlin-maven-plugin's `kapt` goal", report);
+    }
+}
+
+/// A plugin's `<version>`, which `PluginInfo` does not keep: from `<plugins>`,
+/// else from `<pluginManagement>`, nearest POM first. Not yet interpolated.
+fn plugin_version(chain: &[Pom], artifact: &str) -> Option<String> {
+    let find = |plugins: Option<&Element>| {
+        plugins?
+            .children_named("plugin")
+            .find(|p| p.text_of("artifactId") == Some(artifact))?
+            .text_of("version")
+            .map(str::to_string)
+    };
+    chain.iter().find_map(|pom| {
+        let build = pom.root.child("build")?;
+        find(build.child("plugins")).or_else(|| find(build.path(&["pluginManagement", "plugins"])))
+    })
+}
+
+fn plugin<'a>(pom: &'a Pom, artifact: &str) -> Option<&'a PluginInfo> {
     pom.build.plugins.iter().find(|p| p.artifact == artifact)
 }
 
@@ -997,5 +1174,96 @@ mod tests {
         assert_eq!(parsed.dependencies.len(), 2);
         assert_eq!(parsed.dev_dependencies.len(), 1);
         assert!(parsed.warnings.is_empty(), "{:?}", parsed.warnings);
+    }
+
+    #[test]
+    fn the_kotlin_version_can_come_from_plugin_management() {
+        let dir = Dir::new("kotlin-managed");
+        let migration = dir.migrate(
+            "<project><groupId>g</groupId><artifactId>a</artifactId><version>1</version>\
+             <properties><kotlin.version>2.2.0</kotlin.version></properties>\
+             <dependencies><dependency><groupId>org.jetbrains.kotlin</groupId>\
+             <artifactId>kotlin-stdlib</artifactId><version>2.1.0</version></dependency>\
+             </dependencies>\
+             <build><pluginManagement><plugins><plugin>\
+             <groupId>org.jetbrains.kotlin</groupId><artifactId>kotlin-maven-plugin</artifactId>\
+             <version>${kotlin.version}</version></plugin></plugins></pluginManagement>\
+             <plugins><plugin><groupId>org.jetbrains.kotlin</groupId>\
+             <artifactId>kotlin-maven-plugin</artifactId>\
+             <executions><execution><goals><goal>kapt</goal></goals></execution></executions>\
+             </plugin></plugins></build></project>",
+        );
+        let m = &migration.manifest;
+        assert_eq!(m.language(Language::Kotlin).unwrap().version, "2.2.0");
+        assert_eq!(
+            m.dependencies[0].version, "2.1.0",
+            "a stdlib at another version than the compiler is kept"
+        );
+        let review = migration.report.needs_review.join("\n");
+        assert!(review.contains("kept at the version"), "{review}");
+        let skipped = migration.report.not_migrated.join("\n");
+        assert!(skipped.contains("`kapt` goal"), "{skipped}");
+        assert!(!skipped.contains("no plugin system"), "{skipped}");
+    }
+
+    #[test]
+    fn a_compiler_jrs_cannot_drive_gets_no_table() {
+        let dir = Dir::new("old-compilers");
+        for (build, reason) in [
+            (
+                "<build><plugins><plugin><groupId>org.jetbrains.kotlin</groupId>\
+                 <artifactId>kotlin-maven-plugin</artifactId><version>1.9.24</version>\
+                 </plugin></plugins></build>",
+                "Kotlin 2.0",
+            ),
+            (
+                "<dependencies><dependency><groupId>org.scala-lang</groupId>\
+                 <artifactId>scala-library</artifactId><version>2.12.18</version>\
+                 </dependency></dependencies><build><plugins><plugin>\
+                 <groupId>net.alchim31.maven</groupId><artifactId>scala-maven-plugin</artifactId>\
+                 </plugin></plugins></build>",
+                "2.12 is not supported",
+            ),
+            (
+                "<dependencies><dependency><groupId>org.codehaus.groovy</groupId>\
+                 <artifactId>groovy</artifactId><version>3.0.22</version>\
+                 </dependency></dependencies><build><plugins><plugin>\
+                 <groupId>org.codehaus.gmavenplus</groupId><artifactId>gmavenplus-plugin</artifactId>\
+                 </plugin></plugins></build>",
+                "org.apache.groovy",
+            ),
+        ] {
+            let migration = dir.migrate(&format!(
+                "<project><groupId>g</groupId><artifactId>a</artifactId><version>1</version>\
+                 {build}</project>"
+            ));
+            assert!(migration.manifest.languages.is_empty(), "{build}");
+            let skipped = migration.report.not_migrated.join("\n");
+            assert!(skipped.contains(reason), "{skipped}");
+            let text = migration.render_manifest();
+            Manifest::parse(&text, &dir.path.join("jrs.toml"), &dir.path).unwrap();
+        }
+    }
+
+    #[test]
+    fn a_language_root_as_source_directory_leaves_the_java_root_alone() {
+        let dir = Dir::new("kotlin-layout");
+        let migration = dir.migrate(
+            "<project><groupId>g</groupId><artifactId>a</artifactId><version>1</version>\
+             <build><sourceDirectory>${basedir}/src/main/kotlin</sourceDirectory>\
+             <testSourceDirectory>src/test/scala</testSourceDirectory>\
+             <plugins><plugin><groupId>org.jetbrains.kotlin</groupId>\
+             <artifactId>kotlin-maven-plugin</artifactId><version>2.2.0</version>\
+             </plugin></plugins></build></project>",
+        );
+        let m = &migration.manifest;
+        assert_eq!(m.source_dir, PathBuf::from("src/main/java"));
+        assert_eq!(
+            m.test_dir,
+            PathBuf::from("src/test/scala"),
+            "Scala is not on, so its root is just a directory"
+        );
+        let migrated = migration.report.migrated.join("\n");
+        assert!(migrated.contains("[kotlin]'s own root"), "{migrated}");
     }
 }

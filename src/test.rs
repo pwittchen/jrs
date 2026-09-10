@@ -4,7 +4,10 @@
 //! which the same launcher bundles (SPEC §10.2). The launcher is an internal
 //! dependency: jrs resolves it itself, at the platform version that matches the
 //! Jupiter version the user declared, and puts it last on the classpath so the
-//! user's own `JUnit` jars win every conflict.
+//! user's own `JUnit` jars win every conflict — except the launcher's own
+//! parts, which it bundles at its version: a copy of those that the project's
+//! graph brings in would shadow the console launcher's classes with another
+//! release of them.
 //!
 //! The launcher's output is passed through verbatim; jrs only reads it to keep a
 //! live counter, and takes its authoritative numbers from the summary block the
@@ -15,7 +18,8 @@ use std::path::{Path, PathBuf};
 
 use crate::error::{IoResultExt, JrsError, Result};
 use crate::manifest::Manifest;
-use crate::resolve::coord::{Coord, compare_versions};
+use crate::resolve::Resolution;
+use crate::resolve::coord::{Coord, Ga, compare_versions};
 use crate::toolchain::{Toolchain, run_captured, run_streaming};
 use crate::ui::{Live, Outcome, Stream, Ui};
 
@@ -46,15 +50,19 @@ pub fn platform_version(jupiter: &str) -> Option<String> {
 
 /// Which console launcher to run.
 ///
-/// An explicit `junit-platform-console-standalone` in `dev-dependencies` wins;
-/// otherwise the version is derived from whichever Jupiter artifact is
-/// declared, and a project on `junit:junit` alone gets the Vintage launcher.
+/// An explicit `junit-platform-console-standalone` in `dev-dependencies` wins.
+/// Otherwise the launcher follows the resolved graph: the version of the
+/// `junit-platform-engine` there, which is how Spock, Kotest and `ScalaTest`,
+/// which bring the platform transitively, get a launcher their engine agrees
+/// with. Failing that, the version is derived from whichever Jupiter artifact
+/// is declared, and a project on `junit:junit`, declared or brought in (as
+/// `MUnit` brings it), gets the Vintage launcher.
 ///
 /// # Errors
 ///
-/// [`JrsError::Test`] if no `JUnit` is declared, or a Jupiter artifact is at a
-/// version that is not a `JUnit` 5 or 6 release.
-pub fn launcher_coordinate(manifest: &Manifest) -> Result<Coord> {
+/// [`JrsError::Test`] if no `JUnit` is declared or resolved, or a Jupiter
+/// artifact is at a version that is not a `JUnit` 5 or 6 release.
+pub fn launcher_coordinate(manifest: &Manifest, resolution: &Resolution) -> Result<Coord> {
     const JUPITER_ARTIFACTS: &[&str] = &[
         "junit-jupiter",
         "junit-jupiter-api",
@@ -68,6 +76,17 @@ pub fn launcher_coordinate(manifest: &Manifest) -> Result<Coord> {
         .find(|d| d.group == LAUNCHER_GROUP && d.artifact == LAUNCHER_ARTIFACT)
     {
         return Ok(Coord::new(&d.group, &d.artifact, &d.version));
+    }
+
+    if let Some(engine) = resolution
+        .get(&Ga::new(LAUNCHER_GROUP, "junit-platform-engine"))
+        .filter(|p| platform_release(&p.coord.version))
+    {
+        return Ok(Coord::new(
+            LAUNCHER_GROUP,
+            LAUNCHER_ARTIFACT,
+            &engine.coord.version,
+        ));
     }
 
     let jupiter = manifest.dev_dependencies.iter().find(|d| {
@@ -92,6 +111,7 @@ pub fn launcher_coordinate(manifest: &Manifest) -> Result<Coord> {
         .dev_dependencies
         .iter()
         .any(|d| d.group == "junit" && d.artifact == "junit")
+        || resolution.get(&Ga::new("junit", "junit")).is_some()
     {
         return Ok(Coord::new(
             LAUNCHER_GROUP,
@@ -106,6 +126,56 @@ pub fn launcher_coordinate(manifest: &Manifest) -> Result<Coord> {
          \"org.junit.jupiter:junit-jupiter\" = \"5.13.4\"\n\n\
          (or `\"junit:junit\" = \"4.13.2\"` for JUnit 4)",
     ))
+}
+
+/// Whether a `junit-platform-engine` version has a console launcher to match:
+/// `1.x` or, from `JUnit` 6 on, the Jupiter version itself.
+fn platform_release(version: &str) -> bool {
+    version.starts_with("1.") || platform_version(version).is_some()
+}
+
+/// The launcher's own default class-name pattern, plus the `Spec` and `Suite`
+/// suffixes Spock, Kotest, `ScalaTest` and `MUnit` name their classes with.
+/// Without them those classes are not run at all.
+pub const NON_JAVA_CLASS_PATTERN: &str = r"^(Test.*|.+[.$]Test.*|.*Tests?|.*Spec|.*Suite)$";
+
+/// The launcher's own parts, which the standalone jar bundles at the version
+/// jrs picked. `kotlin-test-junit5`, for one, brings `junit-platform-launcher`
+/// at an older release, and first on the classpath it would shadow the console
+/// launcher's classes: a `NoSuchMethodError` before any test runs.
+const BUNDLED_PARTS: &[&str] = &[
+    "junit-platform-launcher",
+    "junit-platform-console",
+    "junit-platform-reporting",
+];
+
+/// The test JVM's classpath: `classpath` without the jars of the graph's own
+/// copies of the launcher's parts, since the standalone launcher brings them.
+#[must_use]
+pub fn without_bundled_launcher(classpath: Vec<PathBuf>, resolution: &Resolution) -> Vec<PathBuf> {
+    let bundled: Vec<&PathBuf> = resolution
+        .packages
+        .iter()
+        .filter(|p| {
+            p.coord.group == LAUNCHER_GROUP && BUNDLED_PARTS.contains(&p.coord.artifact.as_str())
+        })
+        .filter_map(|p| p.jar.as_ref())
+        .collect();
+    classpath
+        .into_iter()
+        .filter(|entry| !bundled.contains(&entry))
+        .collect()
+}
+
+/// The `--include-classname` pattern: `--filter` when given, else the wider
+/// pattern when the tests are not all Java. A Java-only project keeps the
+/// launcher's default, so that Java classes named `*Spec` that never ran do
+/// not start running (`JVM_LANGUAGES.md` §14.5).
+#[must_use]
+pub fn class_name_filter(filter: Option<&str>, non_java_tests: bool) -> Option<String> {
+    filter
+        .map(str::to_string)
+        .or_else(|| non_java_tests.then(|| NON_JAVA_CLASS_PATTERN.to_string()))
 }
 
 /// The platform release that introduced the `execute` subcommand. Invoking the
@@ -382,7 +452,9 @@ pub fn agent_argument(agent: &Path, exec: &Path) -> String {
 pub struct CoverageReport {
     pub exec: PathBuf,
     pub classes: PathBuf,
-    pub sources: PathBuf,
+    /// Every main source root, so the HTML shows Kotlin, Scala and Groovy
+    /// files as well as Java ones.
+    pub sources: Vec<PathBuf>,
     pub html: PathBuf,
     pub xml: PathBuf,
     pub name: String,
@@ -392,22 +464,27 @@ impl CoverageReport {
     #[must_use]
     pub fn args(&self, cli: &Path) -> Vec<String> {
         let path = |p: &Path| p.display().to_string();
-        vec![
+        let mut args = vec![
             "-jar".to_string(),
             path(cli),
             "report".to_string(),
             path(&self.exec),
             "--classfiles".to_string(),
             path(&self.classes),
-            "--sourcefiles".to_string(),
-            path(&self.sources),
+        ];
+        for root in &self.sources {
+            args.push("--sourcefiles".to_string());
+            args.push(path(root));
+        }
+        args.extend([
             "--html".to_string(),
             path(&self.html),
             "--xml".to_string(),
             path(&self.xml),
             "--name".to_string(),
             self.name.clone(),
-        ]
+        ]);
+        args
     }
 }
 
@@ -499,6 +576,140 @@ mod tests {
     fn manifest(body: &str) -> Manifest {
         let text = format!("[project]\nname='app'\nversion='1.0.0'\n{body}");
         Manifest::parse(&text, Path::new("/p/jrs.toml"), Path::new("/p")).unwrap()
+    }
+
+    /// Today's rules, from the manifest alone: a graph with nothing in it.
+    fn launcher_coordinate(manifest: &Manifest) -> Result<Coord> {
+        super::launcher_coordinate(manifest, &Resolution::default())
+    }
+
+    fn resolved(gavs: &[&str]) -> Resolution {
+        Resolution {
+            packages: gavs
+                .iter()
+                .map(|gav| crate::resolve::ResolvedPackage {
+                    coord: Coord::parse(gav).unwrap(),
+                    classpath: crate::resolve::Classpath::Test,
+                    packaging: "jar".into(),
+                    depth: 2,
+                    direct: false,
+                    dependencies: Vec::new(),
+                    jar: None,
+                    checksum: None,
+                    mediated: false,
+                })
+                .collect(),
+            ..Resolution::default()
+        }
+    }
+
+    #[test]
+    fn the_launcher_follows_the_resolved_platform_engine() {
+        // Spock brings the platform transitively; nothing JUnit is declared.
+        let m = manifest("[dev-dependencies]\n'org.spockframework:spock-core'='2.4-groovy-5.0'");
+        let r = resolved(&["org.junit.platform:junit-platform-engine:1.14.1"]);
+        assert_eq!(
+            super::launcher_coordinate(&m, &r).unwrap().to_string(),
+            "org.junit.platform:junit-platform-console-standalone:1.14.1"
+        );
+        // And where mediation moved the engine, the launcher moves with it.
+        let m = manifest("[dev-dependencies]\n'org.junit.jupiter:junit-jupiter'='5.10.2'");
+        let r = resolved(&["org.junit.platform:junit-platform-engine:1.11.4"]);
+        assert_eq!(
+            super::launcher_coordinate(&m, &r).unwrap().version,
+            "1.11.4"
+        );
+        let r = resolved(&["org.junit.platform:junit-platform-engine:6.0.1"]);
+        assert_eq!(super::launcher_coordinate(&m, &r).unwrap().version, "6.0.1");
+    }
+
+    #[test]
+    fn a_transitive_junit_4_gets_the_vintage_launcher() {
+        // MUnit is a JUnit 4 runner and brings `junit:junit` itself.
+        let m = manifest("[dev-dependencies]\n'org.scalameta:munit_3'='1.3.6'");
+        let r = resolved(&["junit:junit:4.13.2"]);
+        assert_eq!(
+            super::launcher_coordinate(&m, &r).unwrap().version,
+            VINTAGE_LAUNCHER
+        );
+        assert!(super::launcher_coordinate(&m, &Resolution::default()).is_err());
+    }
+
+    #[test]
+    fn the_graphs_own_launcher_parts_leave_the_test_classpath() {
+        let mut r = resolved(&[
+            "org.junit.platform:junit-platform-launcher:1.10.1",
+            "org.junit.platform:junit-platform-engine:1.13.4",
+        ]);
+        for p in &mut r.packages {
+            p.jar = Some(PathBuf::from(format!("/c/{}.jar", p.coord.artifact)));
+        }
+        let classpath = vec![
+            PathBuf::from("/t/classes"),
+            PathBuf::from("/c/junit-platform-launcher.jar"),
+            PathBuf::from("/c/junit-platform-engine.jar"),
+        ];
+        assert_eq!(
+            without_bundled_launcher(classpath, &r),
+            vec![
+                PathBuf::from("/t/classes"),
+                PathBuf::from("/c/junit-platform-engine.jar")
+            ],
+            "the engine is the user's; the launcher is the standalone jar's"
+        );
+    }
+
+    #[test]
+    fn spec_and_suite_classes_run_only_with_non_java_tests() {
+        assert_eq!(class_name_filter(None, false), None);
+        let pattern = class_name_filter(None, true).unwrap();
+        assert_eq!(pattern, NON_JAVA_CLASS_PATTERN);
+        assert_eq!(
+            class_name_filter(Some(".*Only"), true).as_deref(),
+            Some(".*Only"),
+            "--filter still replaces it"
+        );
+        // The launcher's own default is the pattern's first three branches.
+        for class in ["com.example.FooTest", "com.example.TestFoo", "FooTests"] {
+            assert!(matches_pattern(class), "{class}");
+        }
+        for class in ["com.example.GreeterSpec", "demo.GreeterSuite"] {
+            assert!(matches_pattern(class), "{class}");
+        }
+        assert!(!matches_pattern("com.example.Helper"));
+    }
+
+    /// The pattern's branches, checked by hand: jrs has no regex crate, and
+    /// the launcher does the real matching.
+    fn matches_pattern(class: &str) -> bool {
+        let simple = class.rsplit(['.', '$']).next().unwrap_or(class);
+        simple.starts_with("Test")
+            || simple.ends_with("Test")
+            || simple.ends_with("Tests")
+            || simple.ends_with("Spec")
+            || simple.ends_with("Suite")
+    }
+
+    #[test]
+    fn coverage_reads_every_source_root() {
+        let report = CoverageReport {
+            exec: PathBuf::from("/t/jacoco.exec"),
+            classes: PathBuf::from("/t/classes"),
+            sources: vec![
+                PathBuf::from("/p/src/main/java"),
+                PathBuf::from("/p/src/main/kotlin"),
+            ],
+            html: PathBuf::from("/t/coverage"),
+            xml: PathBuf::from("/t/coverage/jacoco.xml"),
+            name: "app".into(),
+        };
+        let args = report.args(Path::new("/c/cli.jar"));
+        let roots: Vec<&str> = args
+            .windows(2)
+            .filter(|w| w[0] == "--sourcefiles")
+            .map(|w| w[1].as_str())
+            .collect();
+        assert_eq!(roots, ["/p/src/main/java", "/p/src/main/kotlin"]);
     }
 
     fn run(launcher_version: &str) -> TestRun {

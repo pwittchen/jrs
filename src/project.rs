@@ -6,8 +6,75 @@
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
+use crate::compile::lang::Language;
 use crate::error::{IoResultExt, JrsError, Result};
 use crate::manifest::Manifest;
+
+/// Which compile unit sources feed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Unit {
+    Main,
+    Test,
+}
+
+impl Unit {
+    fn name(self) -> &'static str {
+        match self {
+            Unit::Main => "main",
+            Unit::Test => "test",
+        }
+    }
+}
+
+/// A compile unit's sources: every root, every language, sorted.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Sources {
+    pub files: Vec<PathBuf>,
+}
+
+impl Sources {
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.files.is_empty()
+    }
+
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.files.len()
+    }
+
+    #[must_use]
+    pub fn count(&self, language: Language) -> usize {
+        self.files
+            .iter()
+            .filter(|p| Language::of(p) == Some(language))
+            .count()
+    }
+
+    /// The unit's language besides Java, when it has sources in one. The
+    /// checks in [`Project::sources`] make sure there is at most one.
+    #[must_use]
+    pub fn foreign(&self) -> Option<Language> {
+        Language::FOREIGN.into_iter().find(|l| self.count(*l) > 0)
+    }
+
+    /// `2 Kotlin + 1 Java source files`, counted by language, for the phase
+    /// line; a unit with Java only reads `3 source files`, as it always has.
+    #[must_use]
+    pub fn describe(&self, noun: &str) -> String {
+        if self.foreign().is_none() {
+            return format!("{} {noun}", self.len());
+        }
+        let parts: Vec<String> = Language::FOREIGN
+            .into_iter()
+            .chain([Language::Java])
+            .map(|l| (l, self.count(l)))
+            .filter(|(_, n)| *n > 0)
+            .map(|(l, n)| format!("{n} {l}"))
+            .collect();
+        format!("{} {noun}", parts.join(" + "))
+    }
+}
 
 /// The directories a build reads from and writes to.
 pub struct Project<'a> {
@@ -46,22 +113,135 @@ impl<'a> Project<'a> {
         self.target_dir().join(self.manifest.jar_name())
     }
 
-    /// Every `.java` file under the main source root, sorted.
-    ///
-    /// # Errors
-    ///
-    /// [`JrsError::Io`] if a directory under the source root cannot be read.
-    pub fn main_sources(&self) -> Result<Vec<PathBuf>> {
-        find_by_extension(&self.manifest.source_path(), "java")
+    /// Where the unit's sources live: the project's root for it, then each
+    /// turned-on language's.
+    #[must_use]
+    pub fn roots(&self, unit: Unit) -> Vec<PathBuf> {
+        let m = self.manifest;
+        let mut roots = vec![match unit {
+            Unit::Main => m.source_path(),
+            Unit::Test => m.test_path(),
+        }];
+        for config in &m.languages {
+            let dir = m.root.join(match unit {
+                Unit::Main => &config.source_dir,
+                Unit::Test => &config.test_dir,
+            });
+            if !roots.contains(&dir) {
+                roots.push(dir);
+            }
+        }
+        roots
     }
 
-    /// Every `.java` file under the test source root, sorted.
+    /// The main sources, in every language, sorted. See [`Project::sources`].
     ///
     /// # Errors
     ///
-    /// [`JrsError::Io`] if a directory under the test root cannot be read.
-    pub fn test_sources(&self) -> Result<Vec<PathBuf>> {
-        find_by_extension(&self.manifest.test_path(), "java")
+    /// As for [`Project::sources`].
+    pub fn main_sources(&self) -> Result<Sources> {
+        self.sources(Unit::Main, &[])
+    }
+
+    /// The test sources, in every language, sorted. See [`Project::sources`].
+    ///
+    /// # Errors
+    ///
+    /// As for [`Project::sources`].
+    pub fn test_sources(&self) -> Result<Sources> {
+        self.sources(Unit::Test, &[])
+    }
+
+    /// Every source file of `unit`: each of its roots and each `generated`
+    /// directory, scanned for every language's extension, so a `.kt` file
+    /// under `src/main/java` compiles too. The walk is the sorted one, so
+    /// argfiles stay deterministic.
+    ///
+    /// Two rules are checked here, before any compiler runs. A source in a
+    /// language the manifest has not turned on is an error rather than a file
+    /// silently left out — which is also why a language's default directory
+    /// is scanned when its table is missing. And a unit holds at most one
+    /// language besides Java, since neither compiler reads the other's
+    /// sources.
+    ///
+    /// # Errors
+    ///
+    /// [`JrsError::Manifest`] for either rule; [`JrsError::Io`] if a directory
+    /// under a root cannot be read.
+    pub fn sources(&self, unit: Unit, generated: &[PathBuf]) -> Result<Sources> {
+        let m = self.manifest;
+        let mut roots = self.roots(unit);
+        roots.extend(generated.iter().cloned());
+        let off: Vec<Language> = Language::FOREIGN
+            .into_iter()
+            .filter(|l| m.language(*l).is_none())
+            .collect();
+        for language in &off {
+            let dir = m
+                .root
+                .join(format!("src/{}/{}", unit.name(), language.key()));
+            if !roots.contains(&dir) {
+                roots.push(dir);
+            }
+        }
+
+        let mut files = Vec::new();
+        for root in &roots {
+            if root.is_dir() {
+                walk(root, &mut |path| {
+                    if Language::of(path).is_some() {
+                        files.push(path.to_path_buf());
+                    }
+                })?;
+            }
+        }
+        files.sort();
+        files.dedup();
+        let sources = Sources { files };
+
+        for language in off {
+            let n = sources.count(language);
+            if n == 0 {
+                continue;
+            }
+            let first = sources
+                .files
+                .iter()
+                .find(|p| Language::of(p) == Some(language));
+            let dir = first
+                .and_then(|f| roots.iter().find(|r| f.starts_with(r)))
+                .cloned()
+                .unwrap_or_else(|| m.root.clone());
+            return Err(JrsError::manifest(format!(
+                "found {n} .{} files under {}, but {} has no [{key}] table\n\n\
+                 add it to turn {language} on:\n\n    [{key}]\n    version = \"{}\"",
+                language.extension(),
+                dir.display(),
+                m.path.display(),
+                language.starter_version().unwrap_or_default(),
+                key = language.key(),
+            )));
+        }
+        let present: Vec<Language> = Language::FOREIGN
+            .into_iter()
+            .filter(|l| sources.count(*l) > 0)
+            .collect();
+        if present.len() > 1 {
+            let counts: Vec<String> = present
+                .iter()
+                .map(|l| format!("{} .{}", sources.count(*l), l.extension()))
+                .collect();
+            let names: Vec<&str> = present.iter().map(|l| l.name()).collect();
+            return Err(JrsError::manifest(format!(
+                "the {} sources mix {} ({}); a compile unit mixes Java with at most one \
+                 other language, since neither compiler reads the other's sources\n\n\
+                 main and test are separate units, so Kotlin main code with Groovy tests is fine",
+                unit.name(),
+                names.join(" and "),
+                counts.join(", ")
+            )));
+        }
+        Ok(sources)
     }
 
     /// Remove `target/`. Returns whether there was anything to remove.
@@ -372,6 +552,7 @@ mod tests {
         let m = tree.manifest("");
         let sources = Project::new(&m).main_sources().unwrap();
         let names: Vec<String> = sources
+            .files
             .iter()
             .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
             .collect();
@@ -384,6 +565,118 @@ mod tests {
         tree.write("src/main/java/Main.java", "");
         let m = tree.manifest("");
         assert!(Project::new(&m).test_sources().unwrap().is_empty());
+    }
+
+    fn names(sources: &Sources) -> Vec<String> {
+        sources
+            .files
+            .iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+            .collect()
+    }
+
+    #[test]
+    fn every_root_is_scanned_for_every_language() {
+        let tree = Tree::new("roots");
+        tree.write("src/main/java/com/example/Legacy.java", "");
+        tree.write("src/main/java/com/example/Stray.kt", "");
+        tree.write("src/main/kotlin/com/example/Main.kt", "");
+        tree.write("src/main/kotlin/build.gradle.kts", "");
+        tree.write("src/test/kotlin/com/example/MainTest.kt", "");
+
+        let m = tree.manifest("[kotlin]\nversion = '2.4.20'\n");
+        let p = Project::new(&m);
+        assert_eq!(
+            p.roots(Unit::Main),
+            vec![
+                tree.root.join("src/main/java"),
+                tree.root.join("src/main/kotlin")
+            ]
+        );
+        let main = p.main_sources().unwrap();
+        assert_eq!(names(&main), ["Legacy.java", "Stray.kt", "Main.kt"]);
+        assert_eq!(main.foreign(), Some(Language::Kotlin));
+        assert_eq!(
+            main.describe("source files"),
+            "2 Kotlin + 1 Java source files"
+        );
+        let test = p.test_sources().unwrap();
+        assert_eq!(names(&test), ["MainTest.kt"]);
+        assert_eq!(test.describe("test sources"), "1 Kotlin test sources");
+    }
+
+    #[test]
+    fn a_java_only_unit_reads_as_it_always_has() {
+        let tree = Tree::new("java-describe");
+        tree.write("src/main/java/A.java", "");
+        tree.write("src/main/java/B.java", "");
+        let m = tree.manifest("");
+        let main = Project::new(&m).main_sources().unwrap();
+        assert_eq!(main.foreign(), None);
+        assert_eq!(main.describe("source files"), "2 source files");
+    }
+
+    #[test]
+    fn sources_in_a_language_that_is_off_are_an_error_not_a_skip() {
+        let tree = Tree::new("not-enabled");
+        tree.write("src/main/java/Main.java", "");
+        for name in ["A", "B", "C"] {
+            tree.write(&format!("src/main/kotlin/{name}.kt"), "");
+        }
+        let m = tree.manifest("");
+        let err = Project::new(&m).main_sources().unwrap_err();
+        assert_eq!(err.exit_code(), 2);
+        let err = err.to_string();
+        assert!(err.contains("found 3 .kt files under"), "{err}");
+        assert!(err.contains("src/main/kotlin"), "{err}");
+        assert!(err.contains("has no [kotlin] table"), "{err}");
+        assert!(err.contains("[kotlin]\n    version = \""), "{err}");
+
+        // Found under the Java root too, not only in the default directory.
+        let tree = Tree::new("not-enabled-java-root");
+        tree.write("src/main/java/Script.groovy", "");
+        let m = tree.manifest("");
+        let err = Project::new(&m).main_sources().unwrap_err().to_string();
+        assert!(err.contains("found 1 .groovy files under"), "{err}");
+        assert!(err.contains("src/main/java"), "{err}");
+    }
+
+    #[test]
+    fn a_unit_mixes_java_with_one_other_language_only() {
+        let tree = Tree::new("two-languages");
+        tree.write("src/main/kotlin/A.kt", "");
+        tree.write("src/main/scala/B.scala", "");
+        let m = tree.manifest("[kotlin]\nversion = '2.4.20'\n[scala]\nversion = '3.9.0'\n");
+        let err = Project::new(&m).main_sources().unwrap_err().to_string();
+        assert!(
+            err.contains("the main sources mix Kotlin and Scala"),
+            "{err}"
+        );
+        assert!(err.contains("1 .kt, 1 .scala"), "{err}");
+    }
+
+    #[test]
+    fn kotlin_main_code_with_groovy_tests_is_fine() {
+        let tree = Tree::new("kotlin-groovy");
+        tree.write("src/main/kotlin/Main.kt", "");
+        tree.write("src/test/groovy/MainSpec.groovy", "");
+        let m = tree.manifest("[kotlin]\nversion = '2.4.20'\n[groovy]\nversion = '5.1.2'\n");
+        let p = Project::new(&m);
+        assert_eq!(p.main_sources().unwrap().foreign(), Some(Language::Kotlin));
+        assert_eq!(p.test_sources().unwrap().foreign(), Some(Language::Groovy));
+    }
+
+    #[test]
+    fn generated_directories_are_scanned_like_roots() {
+        let tree = Tree::new("generated");
+        tree.write("src/main/java/Main.java", "");
+        tree.write("target/generated/Gen.java", "");
+        tree.write("target/generated/Gen2.kt", "");
+        let m = tree.manifest("[kotlin]\nversion = '2.4.20'\n");
+        let sources = Project::new(&m)
+            .sources(Unit::Main, &[tree.root.join("target/generated")])
+            .unwrap();
+        assert_eq!(names(&sources), ["Main.java", "Gen.java", "Gen2.kt"]);
     }
 
     #[test]

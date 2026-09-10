@@ -1,0 +1,28 @@
+// A Java project with Spock tests: Groovy is on the test classpath only.
+plugins {
+    id 'java'
+    id 'groovy'
+}
+
+group = 'com.example'
+version = '0.3.0'
+
+java {
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(21)
+    }
+}
+
+repositories {
+    mavenCentral()
+}
+
+dependencies {
+    implementation 'com.google.guava:guava:33.4.8-jre'
+    testImplementation 'org.apache.groovy:groovy:4.0.27'
+    testImplementation 'org.spockframework:spock-core:2.3-groovy-4.0'
+}
+
+test {
+    useJUnitPlatform()
+}

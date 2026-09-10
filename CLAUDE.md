@@ -7,7 +7,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 `jrs` is a Java build system written in Rust: it builds, tests, runs and packages a
 single-module Java project from one `jrs.toml` manifest, resolving dependencies from
 Maven Central. It shells out to `javac`, `java` and `jar` — it is a driver, not a
-reimplementation of the JDK.
+reimplementation of the JDK. Kotlin, Scala and Groovy compile alongside Java
+(`specs/JVM_LANGUAGES.md`, SPEC §7.7): their compilers are resolved from Maven
+Central as isolated tool graphs, pinned in `jrs.lock`'s `[[tool]]` blocks, and
+run on the project's JDK — still a driver.
 
 `specs/INITIAL_SPEC.md` is the design document the implementation follows, and module
 doc comments cite it by section (`SPEC §8.2`). Read the relevant section before changing
@@ -85,6 +88,13 @@ Project + Classpath ──► compile ──► target/classes ──► package
 `dependencies()` (lockfile or fresh resolution → cache lookup → downloads) then
 `javac` with a staleness check, then a resource copy.
 
+A compile unit (`compile/mod.rs`) is ordered steps that share one output
+directory and one fingerprint: the compiler of the unit's other language, then
+`javac` (`compile/javac.rs`); Groovy does both in one joint step. Each
+language's compiler coordinate, runtime library and flags are plain data on
+`enum Language` in `compile/lang.rs`. A compiler runs as `java @argfile`, with
+its whole invocation — classpath, main class, flags, sources — in the file.
+
 User-defined tasks (`[tasks]`, `[hooks]`, SPEC §7.6) are planned in `task.rs`:
 ordering, cycle checks, placeholder expansion, the environment and fingerprints.
 `Session` in `cli.rs` fires the hooks at their fixed points and emits the
@@ -132,7 +142,15 @@ regression, not a style nit.
 - **Toolchain output is passed through verbatim.** `javac` and the JUnit launcher have
   good diagnostics; jrs never reformats them, it only tears the live region down first.
 - **`jrs.lock` records no absolute paths.** Cache paths are recomputed on load; the
-  `manifest-checksum` field is what triggers re-resolution.
+  `manifest-checksum` field is what triggers re-resolution. It is `version = 1`
+  byte for byte until a `[[tool]]` block makes it `version = 2`.
+- **The implied runtime library.** Resolution and `manifest-checksum` read
+  `Manifest::effective_dependencies()` — the declared dependencies plus the
+  languages' runtime libraries, declared last — never `manifest.dependencies`
+  alone; `render()` never writes the implied ones.
+- **A compiler's graph never meets the project's.** `resolve::resolve_tool`
+  resolves it alone, so the Kotlin compiler's own coroutines cannot mediate
+  against the project's.
 
 ## Tests
 
@@ -147,8 +165,14 @@ regression, not a style nit.
   jars beside them are synthesised at test time, so nothing binary is committed and
   the default test run never touches the network. Add new resolution cases by
   publishing into the fixture, not by reaching for Maven Central.
+- **Kotlin, Scala and Groovy** run end to end in `tests/build.rs` against fake
+  compilers: `tests/fixtures/fake-compiler` holds Java classes named like the
+  real compilers' main classes, compiled and published into the fixture repo
+  at test time. Those tests drive the jrs binary with their own
+  `JRS_CACHE_DIR`, so fake artifacts never reach the user's cache.
 - **`tests/network.rs`** is the only suite allowed to hit Maven Central, behind the
-  `network-tests` feature.
+  `network-tests` feature. It also builds one project per language with the
+  real compilers, which is the only check of their determinism.
 
 ## Dependencies
 

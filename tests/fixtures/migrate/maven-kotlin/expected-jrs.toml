@@ -1,0 +1,17 @@
+[project]
+name = "kotlin-service"
+version = "1.4.0"
+main-class = "com.example.ServiceKt"
+
+[java]
+source = 21
+
+[kotlin]
+version = "2.2.0"
+
+[dependencies]
+"org.jetbrains.kotlinx:kotlinx-coroutines-core" = "1.10.2"
+
+[dev-dependencies]
+"org.jetbrains.kotlin:kotlin-test-junit5" = "2.2.0"
+"org.junit.jupiter:junit-jupiter" = "5.13.1"

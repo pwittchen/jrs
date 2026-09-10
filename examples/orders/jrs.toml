@@ -1,0 +1,22 @@
+[project]
+name = "orders"
+version = "1.0.0"
+# a `main` function at file level in Main.kt compiles to MainKt
+main-class = "com.example.orders.MainKt"
+
+[java]
+source = 17
+javac-args = ["-Xlint:all"]
+
+[kotlin]
+# the compiler, and the kotlin-stdlib every build links against
+version = "2.4.20"
+kotlinc-args = ["-Werror"]
+
+[dependencies]
+# a Kotlin Multiplatform library: its root POM points at the -jvm artifact
+"org.jetbrains.kotlinx:kotlinx-coroutines-core" = "1.10.2"
+
+[dev-dependencies]
+"org.junit.jupiter:junit-jupiter" = "5.13.4"
+"org.jetbrains.kotlin:kotlin-test-junit5" = "2.4.20"

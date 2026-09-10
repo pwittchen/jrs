@@ -5,7 +5,11 @@
 //!
 //! The fat jar's merge rules are where the real care goes. `META-INF/services/*`
 //! entries are concatenated rather than overwritten — getting that wrong breaks
-//! `ServiceLoader` silently, which is the worst kind of packaging bug.
+//! `ServiceLoader` silently, which is the worst kind of packaging bug. Groovy
+//! extension-module descriptors get the same care for the same reason: every one
+//! on the classpath, at either location, is merged into a single descriptor whose
+//! class lists are the union of them all (SPEC §9.2's rule for Groovy extension
+//! modules).
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
@@ -197,6 +201,11 @@ pub fn write_thin_jar(
 /// directory — the resulting jar is identical, and a build that packages 40 MB of
 /// dependencies should not write 40 MB to disk twice.
 ///
+/// Groovy extension-module descriptors, the project's own first and then each
+/// jar's in classpath order, are merged into one at
+/// `META-INF/groovy/org.codehaus.groovy.runtime.ExtensionModule`, so no module's
+/// extension methods are lost to first-wins (SPEC §9.2).
+///
 /// # Errors
 ///
 /// `JrsError::Manifest` if `manifest` has no main class; `JrsError::Build` if
@@ -221,6 +230,16 @@ pub fn write_fat_jar(
     // The project's own classes go in first, so they win every conflict.
     collect_directory(classes_dir, &mut plan)?;
 
+    // Its extension-module descriptors are not copied but merged, ahead of any
+    // dependency's. Both names sort in this order, as the walk found them.
+    let mut module_files = Vec::new();
+    for name in [EXTENSION_MODULE, LEGACY_EXTENSION_MODULE] {
+        if let Some(Entry::File(path)) = plan.remove(name) {
+            module_files.push(path);
+        }
+    }
+    let mut module_entries = Vec::new();
+
     let mut archives = Vec::new();
     for (index, jar) in dependency_jars.iter().enumerate() {
         let file = std::fs::File::open(jar).path(jar)?;
@@ -236,6 +255,12 @@ pub fn write_fat_jar(
             }
             let name = entry.name().to_string();
             if is_dropped(&name) {
+                continue;
+            }
+            // Checked before the services rule: the legacy descriptor lives under
+            // `META-INF/services/` but must be merged, not concatenated.
+            if is_extension_module(&name) {
+                module_entries.push((index, i));
                 continue;
             }
             if is_service_file(&name) {
@@ -270,6 +295,15 @@ pub fn write_fat_jar(
         archives.push(archive);
     }
 
+    // Even a single descriptor goes through the merge, so the output is always
+    // normalised and always at the canonical location.
+    if !module_files.is_empty() || !module_entries.is_empty() {
+        plan.insert(
+            EXTENSION_MODULE.to_string(),
+            Entry::ExtensionModules(module_files, module_entries),
+        );
+    }
+
     write_jar(output, manifest, &plan, archives, warnings)
 }
 
@@ -279,6 +313,9 @@ enum Entry {
     Jar(usize, usize),
     /// A `META-INF/services` file, concatenated from every jar that has one.
     Services(Vec<(usize, usize)>),
+    /// Groovy extension-module descriptors, merged into one: the project's own
+    /// files first, then jar entries in classpath order.
+    ExtensionModules(Vec<PathBuf>, Vec<(usize, usize)>),
 }
 
 impl Entry {
@@ -291,6 +328,12 @@ impl Entry {
             Entry::File(_) => classes_dir.display().to_string(),
             Entry::Jar(index, _) => jar(index),
             Entry::Services(sources) => sources
+                .first()
+                .map_or_else(|| "an earlier jar".to_string(), |(index, _)| jar(index)),
+            Entry::ExtensionModules(files, _) if !files.is_empty() => {
+                classes_dir.display().to_string()
+            }
+            Entry::ExtensionModules(_, sources) => sources
                 .first()
                 .map_or_else(|| "an earlier jar".to_string(), |(index, _)| jar(index)),
         }
@@ -314,13 +357,26 @@ fn collect_directory(dir: &Path, plan: &mut BTreeMap<String, Entry>) -> Result<(
     Ok(())
 }
 
-/// Signature files no longer describe the merged jar's contents (SPEC §9.2).
+/// Signature files and module descriptors no longer describe the merged jar
+/// (SPEC §9.2): it is neither signed nor any one of the dependencies' modules.
+/// A descriptor may sit at the root or, in a multi-release jar, under
+/// `META-INF/versions/<n>/`, as `kotlin-stdlib`'s does.
 #[allow(
     clippy::case_sensitive_file_extension_comparisons,
     reason = "compares an upper-cased copy, so the match is already case-insensitive"
 )]
 fn is_dropped(name: &str) -> bool {
     if name == "META-INF/MANIFEST.MF" || name == "META-INF/INDEX.LIST" {
+        return true;
+    }
+    if name == "module-info.class"
+        || name
+            .strip_prefix("META-INF/versions/")
+            .and_then(|rest| rest.split_once('/'))
+            .is_some_and(|(version, file)| {
+                file == "module-info.class" && version.chars().all(|c| c.is_ascii_digit())
+            })
+    {
         return true;
     }
     if let Some(rest) = name.strip_prefix("META-INF/")
@@ -337,6 +393,91 @@ fn is_dropped(name: &str) -> bool {
 
 fn is_service_file(name: &str) -> bool {
     name.starts_with("META-INF/services/") && name.len() > "META-INF/services/".len()
+}
+
+/// Where Groovy 2.5+ looks for an extension-module descriptor, and where the
+/// merged one is written.
+const EXTENSION_MODULE: &str = "META-INF/groovy/org.codehaus.groovy.runtime.ExtensionModule";
+
+/// Where older Groovy modules put theirs. Read, never written.
+const LEGACY_EXTENSION_MODULE: &str =
+    "META-INF/services/org.codehaus.groovy.runtime.ExtensionModule";
+
+fn is_extension_module(name: &str) -> bool {
+    name == EXTENSION_MODULE || name == LEGACY_EXTENSION_MODULE
+}
+
+/// The union of several Groovy extension-module descriptors.
+///
+/// Only the two class lists survive a merge; `moduleName` and `moduleVersion`
+/// describe one module, and the merged descriptor is no one module.
+#[derive(Debug, Default)]
+struct ExtensionModule {
+    extension_classes: Vec<String>,
+    static_extension_classes: Vec<String>,
+}
+
+impl ExtensionModule {
+    /// Fold one descriptor in. Parsing is lenient — `key=value` or `key: value`,
+    /// `#` and `!` comments, trailing-`\` continuations — and classes already
+    /// seen are skipped, so the lists keep first-seen order without duplicates.
+    fn add(&mut self, text: &str) {
+        let mut pending: Option<String> = None;
+        for raw in text.lines() {
+            let line = raw.trim_start();
+            let mut logical = match pending.take() {
+                Some(logical) => logical,
+                None if line.is_empty() || line.starts_with('#') || line.starts_with('!') => {
+                    continue;
+                }
+                None => String::new(),
+            };
+            // An odd run of trailing backslashes continues the line; an even run
+            // is escaped backslashes.
+            let backslashes = line.len() - line.trim_end_matches('\\').len();
+            if backslashes % 2 == 1 {
+                logical.push_str(&line[..line.len() - 1]);
+                pending = Some(logical);
+            } else {
+                logical.push_str(line);
+                self.apply(&logical);
+            }
+        }
+        if let Some(logical) = pending {
+            self.apply(&logical);
+        }
+    }
+
+    fn apply(&mut self, property: &str) {
+        let Some(split) = property.find(['=', ':']) else {
+            return;
+        };
+        let list = match property[..split].trim() {
+            "extensionClasses" => &mut self.extension_classes,
+            "staticExtensionClasses" => &mut self.static_extension_classes,
+            _ => return,
+        };
+        for class in property[split + 1..].split(',').map(str::trim) {
+            if !class.is_empty() && !list.iter().any(|seen| seen == class) {
+                list.push(class.to_string());
+            }
+        }
+    }
+
+    fn render(&self) -> String {
+        let mut s = String::from("moduleName=merged-by-jrs\nmoduleVersion=1.0\n");
+        if !self.extension_classes.is_empty() {
+            let _ = writeln!(s, "extensionClasses={}", self.extension_classes.join(","));
+        }
+        if !self.static_extension_classes.is_empty() {
+            let _ = writeln!(
+                s,
+                "staticExtensionClasses={}",
+                self.static_extension_classes.join(",")
+            );
+        }
+        s
+    }
 }
 
 /// The empty archive list a thin jar needs, with the type parameter pinned.
@@ -398,6 +539,22 @@ fn write_jar<R: Read + Seek>(
                     merged.extend_from_slice(&bytes);
                 }
                 writer.write_all(&merged).path(output)?;
+            }
+            Entry::ExtensionModules(files, sources) => {
+                let mut merged = ExtensionModule::default();
+                for path in files {
+                    let bytes = std::fs::read(path).path(path)?;
+                    merged.add(&String::from_utf8_lossy(&bytes));
+                }
+                for (archive, index) in sources {
+                    let mut source = archives[*archive]
+                        .by_index(*index)
+                        .map_err(|e| JrsError::build(format!("{}: {e}", output.display())))?;
+                    let mut bytes = Vec::new();
+                    source.read_to_end(&mut bytes).path(output)?;
+                    merged.add(&String::from_utf8_lossy(&bytes));
+                }
+                writer.write_all(merged.render().as_bytes()).path(output)?;
             }
         }
         entries += 1;
@@ -699,6 +856,18 @@ mod tests {
     }
 
     #[test]
+    fn dependency_module_descriptors_are_dropped() {
+        assert!(is_dropped("module-info.class"));
+        assert!(is_dropped("META-INF/versions/9/module-info.class"));
+        assert!(is_dropped("META-INF/versions/21/module-info.class"));
+        // A versioned class is not a descriptor, nor is a descriptor's
+        // look-alike somewhere else.
+        assert!(!is_dropped("META-INF/versions/9/kotlin/Unit.class"));
+        assert!(!is_dropped("com/example/module-info.class"));
+        assert!(!is_dropped("META-INF/versions/nine/module-info.class"));
+    }
+
+    #[test]
     fn a_signed_dependency_loses_its_signature() {
         let tree = Tree::new("signed");
         std::fs::create_dir_all(tree.root.join("classes")).unwrap();
@@ -868,6 +1037,176 @@ mod tests {
         assert!(
             !lib.join("stale.jar").exists(),
             "a dropped dependency lingered"
+        );
+    }
+
+    fn fat_jar(tree: &Tree, jars: &[PathBuf], out: &Path) {
+        write_fat_jar(
+            &tree.root.join("classes"),
+            jars,
+            out,
+            &JarManifest {
+                main_class: Some("Main".into()),
+                class_path: vec![],
+            },
+        )
+        .unwrap();
+    }
+
+    fn extension_module(contents: &BTreeMap<String, Vec<u8>>) -> String {
+        String::from_utf8(contents[EXTENSION_MODULE].clone()).unwrap()
+    }
+
+    #[test]
+    fn extension_modules_from_two_jars_merge_into_one() {
+        let tree = Tree::new("groovy-two-jars");
+        std::fs::create_dir_all(tree.root.join("classes")).unwrap();
+        let datetime = tree.jar(
+            "groovy-datetime.jar",
+            &[(
+                EXTENSION_MODULE,
+                b"moduleName=groovy-datetime\nmoduleVersion=4.0.0\n\
+                  extensionClasses=org.groovy.DateTimeExtensions\n\
+                  staticExtensionClasses=org.groovy.DateTimeStaticExtensions\n"
+                    as &[u8],
+            )],
+        );
+        let sql = tree.jar(
+            "groovy-sql.jar",
+            &[(
+                EXTENSION_MODULE,
+                b"moduleName=groovy-sql\nmoduleVersion=4.0.0\n\
+                  extensionClasses=org.groovy.SqlExtensions, org.groovy.SqlGroovyMethods\n\
+                  staticExtensionClasses=org.groovy.SqlStaticExtensions\n"
+                    as &[u8],
+            )],
+        );
+
+        let out = tree.root.join("fat.jar");
+        fat_jar(&tree, &[datetime, sql], &out);
+        assert_eq!(
+            extension_module(&read_jar(&out)),
+            "moduleName=merged-by-jrs\nmoduleVersion=1.0\n\
+             extensionClasses=org.groovy.DateTimeExtensions,org.groovy.SqlExtensions,\
+             org.groovy.SqlGroovyMethods\n\
+             staticExtensionClasses=org.groovy.DateTimeStaticExtensions,\
+             org.groovy.SqlStaticExtensions\n"
+        );
+    }
+
+    #[test]
+    fn a_legacy_extension_module_is_merged_not_concatenated() {
+        let tree = Tree::new("groovy-legacy");
+        std::fs::create_dir_all(tree.root.join("classes")).unwrap();
+        let old = tree.jar(
+            "old.jar",
+            &[
+                (
+                    LEGACY_EXTENSION_MODULE,
+                    b"moduleName=old\nmoduleVersion=1.0\nextensionClasses=com.old.Ext\n" as &[u8],
+                ),
+                ("META-INF/services/java.sql.Driver", b"com.old.Driver\n"),
+            ],
+        );
+        let new = tree.jar(
+            "new.jar",
+            &[
+                (
+                    EXTENSION_MODULE,
+                    b"moduleName=new\nmoduleVersion=2.0\nextensionClasses=com.new.Ext\n" as &[u8],
+                ),
+                ("META-INF/services/java.sql.Driver", b"com.new.Driver\n"),
+            ],
+        );
+
+        let out = tree.root.join("fat.jar");
+        fat_jar(&tree, &[old, new], &out);
+        let contents = read_jar(&out);
+        assert_eq!(
+            extension_module(&contents),
+            "moduleName=merged-by-jrs\nmoduleVersion=1.0\n\
+             extensionClasses=com.old.Ext,com.new.Ext\n"
+        );
+        assert!(
+            !contents.contains_key(LEGACY_EXTENSION_MODULE),
+            "the legacy location must not be written"
+        );
+        assert_eq!(
+            contents["META-INF/services/java.sql.Driver"],
+            b"com.old.Driver\ncom.new.Driver\n"
+        );
+    }
+
+    #[test]
+    fn the_projects_own_extension_module_comes_first_without_duplicates() {
+        let tree = Tree::new("groovy-project");
+        tree.write("classes/Main.class", b"main");
+        tree.write(
+            &format!("classes/{EXTENSION_MODULE}"),
+            b"moduleName=app\nmoduleVersion=0.1\nextensionClasses=com.app.Ext,com.lib.Ext\n",
+        );
+        let lib = tree.jar(
+            "lib.jar",
+            &[(
+                EXTENSION_MODULE,
+                b"moduleName=lib\nmoduleVersion=1.0\nextensionClasses=com.lib.Ext,com.app.Ext\n\
+                  staticExtensionClasses=com.lib.Static\n" as &[u8],
+            )],
+        );
+
+        let out = tree.root.join("fat.jar");
+        fat_jar(&tree, &[lib], &out);
+        assert_eq!(
+            extension_module(&read_jar(&out)),
+            "moduleName=merged-by-jrs\nmoduleVersion=1.0\n\
+             extensionClasses=com.app.Ext,com.lib.Ext\n\
+             staticExtensionClasses=com.lib.Static\n"
+        );
+    }
+
+    #[test]
+    fn a_merged_fat_jar_is_byte_identical_across_builds() {
+        let tree = Tree::new("groovy-deterministic");
+        tree.write(
+            &format!("classes/{LEGACY_EXTENSION_MODULE}"),
+            b"extensionClasses=com.app.Ext\n",
+        );
+        let first = tree.jar(
+            "first.jar",
+            &[(
+                EXTENSION_MODULE,
+                b"extensionClasses=com.first.Ext\n" as &[u8],
+            )],
+        );
+        let second = tree.jar(
+            "second.jar",
+            &[(
+                LEGACY_EXTENSION_MODULE,
+                b"staticExtensionClasses=com.second.Static\n" as &[u8],
+            )],
+        );
+
+        let one = tree.root.join("one.jar");
+        let two = tree.root.join("two.jar");
+        for out in [&one, &two] {
+            fat_jar(&tree, &[first.clone(), second.clone()], out);
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert_eq!(std::fs::read(&one).unwrap(), std::fs::read(&two).unwrap());
+    }
+
+    #[test]
+    fn extension_module_parsing_is_lenient() {
+        let mut merged = ExtensionModule::default();
+        merged.add(
+            "# a comment\n! another\n\n  moduleName = spaced\r\n\
+             extensionClasses : com.a.One, \\\n    com.a.Two,\\\n  com.a.Three\n\
+             staticExtensionClasses=\n",
+        );
+        assert_eq!(
+            merged.render(),
+            "moduleName=merged-by-jrs\nmoduleVersion=1.0\n\
+             extensionClasses=com.a.One,com.a.Two,com.a.Three\n"
         );
     }
 

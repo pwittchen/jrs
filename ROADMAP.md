@@ -5,8 +5,9 @@ most of what this document used to list: Windows and macOS in CI, SNAPSHOT
 dependencies, the long dependency form, cache maintenance, JVM arguments, JDK
 pinning, watch mode, Javadoc, test reports and selection, JUnit 4, coverage,
 the portable layout, runtime images, `add`/`remove`/`outdated`, `tree` filters,
-`classpath`, `init` templates, shell completions, the M5 benchmark, and
-user-defined tasks and lifecycle hooks (SPEC §7.6).
+`classpath`, `init` templates, shell completions, the M5 benchmark,
+user-defined tasks and lifecycle hooks (SPEC §7.6), and Kotlin, Scala and
+Groovy alongside Java (SPEC §7.7).
 
 What is left is below. Anything that touches a [non-goal](specs/INITIAL_SPEC.md#12-non-goals)
 or adds a crate is a spec-level decision (see the last section) — it needs a
@@ -20,6 +21,14 @@ spec change before it needs code.
   all-or-nothing by design (SPEC §7.2). Worth revisiting only if large projects
   show `javac` time dominating a no-dependency-change rebuild; the M5 benchmark
   harness is the place to measure it first.
+- **Compiler start-up.** kotlinc and scalac add a second or so of JVM start-up
+  to a changed build ([JVM_LANGUAGES.md §14.1](specs/JVM_LANGUAGES.md#14-open-questions)).
+  A compiler daemon would hide it, at the cost of jrs managing a long-lived
+  process; worth it only if real projects feel it.
+- **Scaladoc and Groovydoc.** `jrs doc` documents the Java sources only.
+  Scaladoc 2 ships in the compiler, Scala 3's is an artifact of its own that
+  reads TASTy, and Groovydoc is a small graph. Dokka, for Kotlin, is a plugin
+  host with its own configuration (JVM_LANGUAGES.md §14.4).
 
 ## 2. Packaging
 
@@ -54,7 +63,9 @@ listed so the discussion has a home, not because they are planned.
 | Multi-module builds / workspaces | Non-goal: one module per manifest |
 | Annotation-processor path in the manifest | Non-goal: no annotation-processor configuration. Processors on the compile classpath, as `compile-only` dependencies with `-proc:full`, work today |
 | JPMS (`module-info.java`, module path) | Non-goal |
-| Kotlin or other JVM languages | Non-goal |
+| JVM languages beyond Kotlin, Scala and Groovy; Kotlin Multiplatform | Non-goal (SPEC §1.2) |
+| Kotlin compiler plugins (`allopen`, `spring`, `serialization`), kapt/KSP | Non-goal: compiler-plugin configuration ([JVM_LANGUAGES.md §14.2](specs/JVM_LANGUAGES.md#14-open-questions)). Kotlin on Spring needs `allopen`, so this is the first to revisit |
+| sbt-style `%%` cross-version keys | New key syntax, touching `edit.rs`, the lockfile and migration (JVM_LANGUAGES.md §14.3) |
 | TestNG | SPEC §13.7: the JUnit Platform only (Jupiter and Vintage) |
 | Version ranges | SPEC §8.2 rejects them rather than guessing |
 | Highest-wins mediation (opt-in) | SPEC §13.6 chose nearest-wins |

@@ -413,6 +413,88 @@ fn a_failing_hooks_output_lands_before_the_error_line() {
     );
 }
 
+/// A Kotlin project's first build, as `cli.rs` plays it: the compiler is
+/// resolved with the dependencies and downloaded like the test launcher, and
+/// the sources are counted by language.
+fn play_a_kotlin_build(ui: &Ui) {
+    ui.phase(
+        "Resolving",
+        "3 declared dependencies and the Kotlin compiler",
+    );
+    let scope = ui.spinner(
+        "Resolving",
+        "3 declared dependencies and the Kotlin compiler",
+    );
+    ui.render_frame();
+    scope.finish();
+
+    ui.phase(
+        "Downloading",
+        "kotlin-compiler-embeddable (Kotlin compiler)",
+    );
+    let scope = ui.downloads(8);
+    ui.update_live(|live| {
+        if let Live::Downloads(d) = live {
+            d.active = vec![Transfer {
+                id: 1,
+                name: "kotlin-compiler-embeddable-2.4.20.jar".into(),
+                done: 31_457_280,
+                total: Some(62_914_560),
+                verifying: false,
+            }];
+        }
+    });
+    ui.render_frame();
+    scope.finish();
+
+    ui.phase(
+        "Compiling",
+        "orders v1.0.0 (2 Kotlin + 1 Java source files)",
+    );
+    let scope = ui.spinner("Compiling", "2 Kotlin + 1 Java source files");
+    ui.render_frame();
+    scope.finish();
+    ui.phase("Finished", "build in 6.84s");
+}
+
+#[test]
+fn a_kotlin_build_names_its_compiler_and_counts_sources_by_language() {
+    let (plain, plain_capture) =
+        Ui::captured(options(When::Never, CharsetChoice::Ascii), geometry(WIDTH));
+    play_a_kotlin_build(&plain);
+    let transcript = concat!(
+        "   Resolving 3 declared dependencies and the Kotlin compiler\n",
+        " Downloading kotlin-compiler-embeddable (Kotlin compiler)\n",
+        "   Compiling orders v1.0.0 (2 Kotlin + 1 Java source files)\n",
+        "    Finished build in 6.84s\n",
+    );
+    assert_eq!(plain_capture.stderr(), transcript);
+
+    // Animated, in ASCII, and in a terminal narrower than the lines: the
+    // same scrollback, no byte outside ASCII, no line past the edge.
+    let (animated, animated_capture) =
+        Ui::captured(options(When::Always, CharsetChoice::Ascii), geometry(WIDTH));
+    play_a_kotlin_build(&animated);
+    let raw = animated_capture.stderr();
+    assert!(raw.is_ascii(), "{raw:?}");
+    let text = plain_text(&raw);
+    for line in transcript.lines() {
+        assert!(text.contains(line), "the animated run lost {line:?}");
+    }
+    // The one transfer is half done; its name is cut to fit the width.
+    assert!(text.contains(" 50%"), "no download bar for the compiler");
+
+    let (narrow, narrow_capture) =
+        Ui::captured(options(When::Always, CharsetChoice::Ascii), geometry(30));
+    play_a_kotlin_build(&narrow);
+    for line in plain_text(&narrow_capture.stderr())
+        .lines()
+        .filter(|l| l.contains('[') || l.contains("Compiling |"))
+    {
+        assert!(line.chars().count() <= 30, "{line:?}");
+    }
+}
+
 #[test]
 fn toolchain_output_is_passed_through_after_the_live_region_comes_down() {
     let (ui, capture) = Ui::captured(options(When::Always, CharsetChoice::Ascii), geometry(WIDTH));

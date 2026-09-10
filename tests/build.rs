@@ -38,7 +38,7 @@ fn hello_project(scratch: &Scratch) -> Manifest {
 
 fn compile_main(manifest: &Manifest, toolchain: &Toolchain, classpath: Vec<PathBuf>) -> usize {
     let project = Project::new(manifest);
-    let sources = project.main_sources().unwrap();
+    let sources = project.main_sources().unwrap().files;
     assert!(!sources.is_empty(), "the fixture has no sources");
 
     let unit = CompileUnit {
@@ -51,6 +51,7 @@ fn compile_main(manifest: &Manifest, toolchain: &Toolchain, classpath: Vec<PathB
         encoding: manifest.java.encoding.clone(),
         extra_args: manifest.java.javac_args.clone(),
         work_dir: project.work_dir(),
+        foreign: None,
     };
     match compile::compile(toolchain, &unit, &silent_ui()).unwrap() {
         compile::Outcome::Compiled { classes } => classes,
@@ -179,7 +180,7 @@ fn a_second_build_is_up_to_date_and_a_touched_source_is_not() {
 
     let unit = || CompileUnit {
         label: "main".into(),
-        sources: project.main_sources().unwrap(),
+        sources: project.main_sources().unwrap().files,
         output_dir: project.classes_dir(),
         classpath: Vec::new(),
         release: toolchain.release(manifest.java.source).unwrap(),
@@ -187,6 +188,7 @@ fn a_second_build_is_up_to_date_and_a_touched_source_is_not() {
         encoding: manifest.java.encoding.clone(),
         extra_args: manifest.java.javac_args.clone(),
         work_dir: project.work_dir(),
+        foreign: None,
     };
 
     compile::compile(&toolchain, &unit(), &silent_ui()).unwrap();
@@ -250,7 +252,7 @@ fn a_compilation_error_fails_the_build_and_leaves_no_fingerprint() {
 
     let unit = CompileUnit {
         label: "main".into(),
-        sources: project.main_sources().unwrap(),
+        sources: project.main_sources().unwrap().files,
         output_dir: project.classes_dir(),
         classpath: Vec::new(),
         release: toolchain.release(manifest.java.source).unwrap(),
@@ -258,6 +260,7 @@ fn a_compilation_error_fails_the_build_and_leaves_no_fingerprint() {
         encoding: manifest.java.encoding.clone(),
         extra_args: manifest.java.javac_args.clone(),
         work_dir: project.work_dir(),
+        foreign: None,
     };
     let error = compile::compile(&toolchain, &unit, &silent_ui()).unwrap_err();
     assert!(error.to_string().contains("compilation failed"), "{error}");
@@ -780,6 +783,464 @@ fn a_shell_task_runs_under_cmd_on_windows() {
             .trim(),
         "hello"
     );
+}
+
+// ---- Kotlin, Scala and Groovy (JVM_LANGUAGES.md) ---------------------------
+//
+// These run against the fake compilers in tests/fixtures/fake-compiler,
+// published into the fixture repository as every compiler jrs resolves. That
+// drives the whole pipeline the real ones go through — isolated tool graphs,
+// `[[tool]]` pins, running on the project's JDK, step order, the implied
+// runtime library — on every CI leg, without the network.
+
+/// A project with the fake compilers published beside it, run through the jrs
+/// binary with a cache of its own: these tests resolve, and the fake
+/// compilers must never land in the user's cache.
+struct Polyglot {
+    root: PathBuf,
+    cache: PathBuf,
+    config: PathBuf,
+}
+
+impl Polyglot {
+    fn new(
+        scratch: &Scratch,
+        toolchain: &Toolchain,
+        manifest: &str,
+        files: &[(&str, &str)],
+    ) -> Polyglot {
+        let fixture = FixtureRepo::new(scratch);
+        fixture.publish_fake_compilers(scratch, toolchain);
+        scratch.write(
+            "app/jrs.toml",
+            &format!("{manifest}\n{}", fixture.manifest_section()),
+        );
+        for (path, contents) in files {
+            scratch.write(&format!("app/{path}"), contents);
+        }
+        Polyglot {
+            root: scratch.join("app"),
+            cache: scratch.join("jrs-cache"),
+            // A user's mirrors or proxy must not reach the fixture.
+            config: scratch.join("no-config.toml"),
+        }
+    }
+
+    fn jrs(&self, args: &[&str]) -> (i32, String, String) {
+        let output = std::process::Command::new(env!("CARGO_BIN_EXE_jrs"))
+            .arg("--manifest-path")
+            .arg(&self.root)
+            .args([
+                "--progress",
+                "never",
+                "--color",
+                "never",
+                "--charset",
+                "ascii",
+            ])
+            .args(args)
+            .env("JRS_CACHE_DIR", &self.cache)
+            .env("JRS_CONFIG", &self.config)
+            .output()
+            .unwrap();
+        (
+            output.status.code().unwrap_or(-1),
+            String::from_utf8_lossy(&output.stdout).into_owned(),
+            String::from_utf8_lossy(&output.stderr).into_owned(),
+        )
+    }
+
+    /// What a fake compiler was run with: its name, then one argument a line,
+    /// then what it saw of its own JVM.
+    fn record(&self, unit: &str, tool: &str) -> Vec<String> {
+        let path = self.root.join(format!("target/{unit}.fake-{tool}"));
+        std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("{}: {e}", path.display()))
+            .lines()
+            .map(str::to_string)
+            .collect()
+    }
+
+    fn modified(&self, relative: &str) -> std::time::SystemTime {
+        std::fs::metadata(self.root.join(relative))
+            .unwrap()
+            .modified()
+            .unwrap()
+    }
+}
+
+/// Whether `flag` is followed by `value` somewhere in `args`.
+fn pair(args: &[String], flag: &str, value: &str) -> bool {
+    args.windows(2).any(|w| w[0] == flag && w[1] == value)
+}
+
+/// "Kotlin" that the fake kotlinc compiles as Java: it uses a Java class and
+/// the implied runtime library, and a Java class uses it back.
+const GREETER_KT: &str = "package com.example;\n\n\
+    public final class Greeter {\n    public static String greet(String name) {\n        \
+    return \"Hello, \" + Util.shout(name) + \" from \" + kotlin.FakeStdlib.mark();\n    }\n}\n";
+
+const UTIL_JAVA: &str = "package com.example;\n\n\
+    public final class Util {\n    public static String shout(String s) {\n        \
+    return s.toUpperCase();\n    }\n}\n";
+
+const APP_JAVA: &str = "package com.example;\n\n\
+    public class App {\n    public static void main(String[] args) {\n        \
+    System.out.println(Greeter.greet(\"jrs\"));\n    }\n}\n";
+
+const KOTLIN_APP: &str = "[project]\nname = \"mixed\"\nversion = \"1.0.0\"\n\
+    main-class = \"com.example.App\"\n\n[kotlin]\nversion = \"2.9.9\"\n";
+
+fn kotlin_app(scratch: &Scratch, toolchain: &Toolchain) -> Polyglot {
+    Polyglot::new(
+        scratch,
+        toolchain,
+        KOTLIN_APP,
+        &[
+            ("src/main/kotlin/com/example/Greeter.kt", GREETER_KT),
+            ("src/main/java/com/example/Util.java", UTIL_JAVA),
+            ("src/main/java/com/example/App.java", APP_JAVA),
+        ],
+    )
+}
+
+#[test]
+fn a_mixed_kotlin_project_compiles_in_two_steps_and_runs() {
+    let toolchain = require_jdk!();
+    let scratch = Scratch::new("lang-kotlin");
+    let p = kotlin_app(&scratch, &toolchain);
+
+    let (code, stdout, stderr) = p.jrs(&["run"]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(
+        stderr.contains("Resolving 0 declared dependencies and the Kotlin compiler"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("Downloading kotlin-compiler-embeddable (Kotlin compiler)"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("Compiling mixed v1.0.0 (1 Kotlin + 2 Java source files)"),
+        "{stderr}"
+    );
+    // Java calls "Kotlin", "Kotlin" calls Java, and the implied stdlib is on
+    // the runtime classpath.
+    assert_eq!(stdout.trim(), "Hello, JRS from kotlin-stdlib 2.9.9");
+
+    let kotlinc = p.record("classes", "kotlinc");
+    let release = toolchain.release(None).unwrap().to_string();
+    assert!(kotlinc.contains(&"-no-stdlib".to_string()), "{kotlinc:?}");
+    assert!(pair(&kotlinc, "-jvm-target", &release), "{kotlinc:?}");
+    assert!(pair(&kotlinc, "-module-name", "mixed"), "{kotlinc:?}");
+    assert!(
+        kotlinc.iter().any(|a| a.ends_with("Util.java")),
+        "kotlinc reads the Java sources: {kotlinc:?}"
+    );
+    assert!(
+        kotlinc.contains(&"support=fake-compiler-support".to_string()),
+        "the compiler runs with its whole graph: {kotlinc:?}"
+    );
+    assert!(
+        p.root.join("target/.jrs/javac-main.args").is_file(),
+        "javac compiled the Java sources after kotlinc"
+    );
+
+    let lock = std::fs::read_to_string(p.root.join("jrs.lock")).unwrap();
+    assert!(lock.contains("\nversion = 2\n"), "{lock}");
+    assert!(
+        lock.contains("roots = [\"org.jetbrains.kotlin:kotlin-stdlib\"]"),
+        "{lock}"
+    );
+    assert!(
+        lock.contains("[[tool]]\nname = \"kotlin-compiler\"\n"),
+        "{lock}"
+    );
+    assert!(
+        lock.contains("artifact = \"fake-compiler-support\""),
+        "{lock}"
+    );
+
+    let (code, stdout, _) = p.jrs(&["tree"]);
+    assert_eq!(code, 0);
+    assert!(
+        stdout.contains("org.jetbrains.kotlin:kotlin-stdlib:2.9.9 (implied by [kotlin])"),
+        "{stdout}"
+    );
+    let (code, stdout, _) = p.jrs(&["tree", "--tool", "kotlin-compiler"]);
+    assert_eq!(code, 0);
+    assert!(
+        stdout.contains("kotlin-compiler (Kotlin 2.9.9)"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("org.example.fake:fake-compiler-support:1.0"),
+        "{stdout}"
+    );
+    let (code, _, stderr) = p.jrs(&["tree", "--tool", "scala-compiler"]);
+    assert_eq!(code, 2);
+    assert!(stderr.contains("`kotlin-compiler`"), "{stderr}");
+
+    // Nothing changed: the unit is fresh, and neither step runs.
+    let kotlinc_at = p.modified("target/classes.fake-kotlinc");
+    let javac_at = p.modified("target/.jrs/javac-main.args");
+    let (code, _, stderr) = p.jrs(&["build"]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stderr.contains("Fresh mixed v1.0.0"), "{stderr}");
+    assert!(!stderr.contains("Compiling"), "{stderr}");
+    assert!(
+        !stderr.contains("Downloading"),
+        "the compiler is cached: {stderr}"
+    );
+    assert_eq!(p.modified("target/classes.fake-kotlinc"), kotlinc_at);
+
+    // A touched .kt reruns both steps.
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    let greeter = p.root.join("src/main/kotlin/com/example/Greeter.kt");
+    std::fs::write(&greeter, format!("{GREETER_KT}// touched\n")).unwrap();
+    let (code, _, stderr) = p.jrs(&["build"]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stderr.contains("Compiling mixed v1.0.0"), "{stderr}");
+    assert_ne!(p.modified("target/classes.fake-kotlinc"), kotlinc_at);
+    assert_ne!(p.modified("target/.jrs/javac-main.args"), javac_at);
+}
+
+#[test]
+fn a_mixed_project_packages_byte_identical_fat_jars() {
+    let toolchain = require_jdk!();
+    let scratch = Scratch::new("lang-fat");
+    let p = kotlin_app(&scratch, &toolchain);
+    let jar = p.root.join("target/mixed-1.0.0.jar");
+
+    let (code, _, stderr) = p.jrs(&["package", "--fat"]);
+    assert_eq!(code, 0, "{stderr}");
+    let first = std::fs::read(&jar).unwrap();
+    let output = std::process::Command::new(&toolchain.java)
+        .arg("-jar")
+        .arg(&jar)
+        .output()
+        .unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout).trim(),
+        "Hello, JRS from kotlin-stdlib 2.9.9",
+        "the implied stdlib is in the fat jar"
+    );
+
+    assert_eq!(p.jrs(&["clean"]).0, 0);
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    let (code, _, stderr) = p.jrs(&["package", "--fat"]);
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(first, std::fs::read(&jar).unwrap());
+}
+
+#[test]
+fn groovy_compiles_its_java_sources_jointly_in_one_step() {
+    let toolchain = require_jdk!();
+    let scratch = Scratch::new("lang-groovy");
+    let p = Polyglot::new(
+        &scratch,
+        &toolchain,
+        "[project]\nname = \"groovy-app\"\nversion = \"1.0.0\"\n\
+         main-class = \"com.example.App\"\n\n[java]\njavac-args = [\"-Xlint:all\"]\n\n\
+         [groovy]\nversion = \"4.9.9\"\n",
+        &[
+            (
+                "src/main/groovy/com/example/Greeter.groovy",
+                "package com.example;\n\npublic final class Greeter {\n    \
+                 public static String greet(String name) {\n        \
+                 return \"Hello, \" + Util.shout(name) + \" from \" + groovy.lang.FakeGroovy.MARK;\n    \
+                 }\n}\n",
+            ),
+            ("src/main/java/com/example/Util.java", UTIL_JAVA),
+            ("src/main/java/com/example/App.java", APP_JAVA),
+        ],
+    );
+
+    let (code, stdout, stderr) = p.jrs(&["run"]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(
+        stderr.contains("Compiling groovy-app v1.0.0 (1 Groovy + 2 Java source files)"),
+        "{stderr}"
+    );
+    assert_eq!(stdout.trim(), "Hello, JRS from groovy runtime");
+
+    let groovyc = p.record("classes", "groovyc");
+    let release = toolchain.release(None).unwrap();
+    assert_eq!(groovyc[1], "-cp", "groovyc wants its classpath first");
+    assert!(groovyc.contains(&"-j".to_string()), "{groovyc:?}");
+    assert!(
+        groovyc.contains(&format!("-J=-release={release}")),
+        "{groovyc:?}"
+    );
+    assert!(groovyc.contains(&"-F=Xlint:all".to_string()), "{groovyc:?}");
+    assert!(
+        groovyc.contains(&format!("groovy.target.bytecode={release}")),
+        "{groovyc:?}"
+    );
+    assert!(
+        !p.root.join("target/.jrs/javac-main.args").exists(),
+        "groovyc ran javac itself"
+    );
+}
+
+#[test]
+fn scala_3_gets_its_own_flags_and_both_halves_of_its_library() {
+    let toolchain = require_jdk!();
+    let scratch = Scratch::new("lang-scala");
+    let p = Polyglot::new(
+        &scratch,
+        &toolchain,
+        "[project]\nname = \"scala-app\"\nversion = \"1.0.0\"\n\
+         main-class = \"com.example.App\"\n\n[scala]\nversion = \"3.9.9\"\n\
+         scalac-args = [\"-deprecation\"]\n",
+        &[
+            (
+                "src/main/scala/com/example/Greeter.scala",
+                "package com.example;\n\npublic final class Greeter {\n    \
+                 public static String greet(String name) {\n        \
+                 return \"Hello, \" + Util.shout(name) + \" from \" + scala.FakeLibrary.mark();\n    \
+                 }\n}\n",
+            ),
+            ("src/main/java/com/example/Util.java", UTIL_JAVA),
+            ("src/main/java/com/example/App.java", APP_JAVA),
+        ],
+    );
+    let (code, stdout, stderr) = p.jrs(&["run"]);
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(stdout.trim(), "Hello, JRS from scala-library 3.9.9");
+    let scalac = p.record("classes", "scalac");
+    let release = toolchain.release(None).unwrap().to_string();
+    assert!(
+        pair(&scalac, "-java-output-version", &release),
+        "{scalac:?}"
+    );
+    assert!(scalac.contains(&"-color:never".to_string()), "{scalac:?}");
+    let at = |arg: &str| scalac.iter().position(|a| a == arg);
+    assert!(
+        at("-deprecation") > at("-java-output-version"),
+        "scalac-args come after jrs's own flags: {scalac:?}"
+    );
+    let lock = std::fs::read_to_string(p.root.join("jrs.lock")).unwrap();
+    assert!(
+        lock.contains(
+            "roots = [\"org.scala-lang:scala3-library_3\", \"org.scala-lang:scala-library\"]"
+        ),
+        "{lock}"
+    );
+}
+
+#[test]
+fn kotlin_tests_see_the_main_modules_internals() {
+    let toolchain = require_jdk!();
+    let scratch = Scratch::new("lang-kotlin-tests");
+    let p = kotlin_app(&scratch, &toolchain);
+    scratch.write(
+        "app/src/test/kotlin/com/example/GreeterTest.kt",
+        "package com.example;\n\nclass GreeterTest {\n    String probe() {\n        \
+         return Greeter.greet(\"test\");\n    }\n}\n",
+    );
+    // No JUnit in the fixture: the tests compile, then the launcher is missing.
+    let (code, _, stderr) = p.jrs(&["test"]);
+    assert_eq!(code, 1, "{stderr}");
+    assert!(
+        stderr.contains("Compiling 1 Kotlin test sources"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("needs JUnit"), "{stderr}");
+    let kotlinc = p.record("test-classes", "kotlinc");
+    assert!(pair(&kotlinc, "-module-name", "mixed_test"), "{kotlinc:?}");
+    let classes = p.root.join("target/classes");
+    let friends = kotlinc
+        .iter()
+        .find_map(|a| a.strip_prefix("-Xfriend-paths="))
+        .unwrap_or_else(|| panic!("no friend paths: {kotlinc:?}"));
+    assert_eq!(
+        std::fs::canonicalize(friends).unwrap(),
+        std::fs::canonicalize(&classes).unwrap()
+    );
+}
+
+#[test]
+fn kotlin_main_code_takes_groovy_tests() {
+    let toolchain = require_jdk!();
+    let scratch = Scratch::new("lang-kotlin-groovy");
+    let p = Polyglot::new(
+        &scratch,
+        &toolchain,
+        &format!("{KOTLIN_APP}\n[groovy]\nversion = \"4.9.9\"\n"),
+        &[
+            ("src/main/kotlin/com/example/Greeter.kt", GREETER_KT),
+            ("src/main/java/com/example/Util.java", UTIL_JAVA),
+            ("src/main/java/com/example/App.java", APP_JAVA),
+            (
+                "src/test/groovy/com/example/GreeterSpec.groovy",
+                "package com.example;\n\nclass GreeterSpec {\n    String probe() {\n        \
+                 return Greeter.greet(\"spec\");\n    }\n}\n",
+            ),
+        ],
+    );
+    let (code, _, stderr) = p.jrs(&["test"]);
+    assert_eq!(code, 1, "no JUnit in the fixture: {stderr}");
+    assert!(
+        stderr.contains("Compiling 1 Groovy test sources"),
+        "{stderr}"
+    );
+    let groovyc = p.record("test-classes", "groovyc");
+    assert!(
+        !groovyc.contains(&"-j".to_string()),
+        "no Java tests, so no joint compilation: {groovyc:?}"
+    );
+    let lock = std::fs::read_to_string(p.root.join("jrs.lock")).unwrap();
+    assert!(lock.contains("name = \"kotlin-compiler\""), "{lock}");
+    assert!(lock.contains("name = \"groovy-compiler\""), "{lock}");
+}
+
+#[test]
+fn a_file_level_main_gets_its_class_name_suggested() {
+    let toolchain = require_jdk!();
+    let scratch = Scratch::new("lang-main-kt");
+    let p = Polyglot::new(
+        &scratch,
+        &toolchain,
+        KOTLIN_APP,
+        &[(
+            "src/main/kotlin/com/example/App.kt",
+            "package com.example;\n\n// A file-level `main` in App.kt compiles to AppKt.\n\
+             final class AppKt {\n    public static void main(String[] args) {}\n}\n",
+        )],
+    );
+    let (code, _, stderr) = p.jrs(&["run"]);
+    assert_eq!(code, 2, "{stderr}");
+    assert!(
+        stderr.contains("there is no class `com.example.App`"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("main-class = \"com.example.AppKt\""),
+        "{stderr}"
+    );
+}
+
+#[test]
+fn a_compiler_is_not_downloaded_offline() {
+    let toolchain = require_jdk!();
+    let scratch = Scratch::new("lang-offline");
+    let p = kotlin_app(&scratch, &toolchain);
+    let (code, _, stderr) = p.jrs(&["--offline", "build"]);
+    assert_ne!(code, 0, "{stderr}");
+    assert!(stderr.contains("offline"), "{stderr}");
+}
+
+#[test]
+fn sources_in_a_language_that_is_off_fail_the_build() {
+    let _toolchain = require_jdk!();
+    let scratch = Scratch::new("lang-off");
+    let root = hello_with(&scratch, "", &[]);
+    scratch.write("hello/src/main/kotlin/com/example/Stray.kt", "class Stray");
+    let (code, _, stderr) = jrs(&root, &["build"]);
+    assert_eq!(code, 2, "{stderr}");
+    assert!(stderr.contains("found 1 .kt files under"), "{stderr}");
+    assert!(stderr.contains("has no [kotlin] table"), "{stderr}");
 }
 
 #[test]

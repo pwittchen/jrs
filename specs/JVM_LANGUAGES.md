@@ -3,15 +3,18 @@
 Design proposal for compiling Kotlin, Scala and Groovy sources alongside Java,
 in the same single-module project and from the same `jrs.toml`.
 
-Status: **proposal**. This removes a line drawn in [SPEC §1.2](INITIAL_SPEC.md#12-non-goals)
-("Non-Java JVM languages (Kotlin, Scala, Groovy)"), so per
-[ROADMAP §4](../ROADMAP.md#4-needs-a-spec-decision-first) it needs an INITIAL_SPEC.md
-change before it needs code. §2 below is that argument; §12 lists the exact
-INITIAL_SPEC.md edits it implies.
+Status: **implemented**, as milestone M8 of [SPEC §12](INITIAL_SPEC.md#12-roadmap);
+[SPEC §7.7](INITIAL_SPEC.md#77-other-jvm-languages) is the condensed contract.
+This removed a line drawn in [SPEC §1.2](INITIAL_SPEC.md#12-non-goals)
+("Non-Java JVM languages (Kotlin, Scala, Groovy)"), so it needed an
+INITIAL_SPEC.md change before it needed code. §2 below is that argument; §12
+lists the INITIAL_SPEC.md edits it implied, which have been made.
 
-Where this document states how a third-party compiler behaves, the claim is
-checked by the L0 spike (§13.2) before code depends on it. Those claims are
-marked *(verify)*.
+Where this document states how a third-party compiler behaves, the claim was
+checked by the L0 spike (§13.2) before code depended on it. What the spike
+found is in §15, and the text below has been corrected where the proposal
+guessed wrong. Scaladoc and Groovydoc for `jrs doc` (§9) are the one part not
+built.
 
 ---
 
@@ -209,7 +212,8 @@ Code compiled by these compilers links against a runtime library:
 | --- | --- |
 | Kotlin | `org.jetbrains.kotlin:kotlin-stdlib:<version>` |
 | Scala 2.13 | `org.scala-lang:scala-library:<version>` |
-| Scala 3 | `org.scala-lang:scala3-library_3:<version>` *(verify the name on 3.8+, where the stdlib is rebuilt with Scala 3; the mapping is a per-version table in `lang/scala.rs`, not a formula)* |
+| Scala 3.0–3.7 | `org.scala-lang:scala3-library_3:<version>` |
+| Scala 3.8+ | `org.scala-lang:scala3-library_3:<version>` and `org.scala-lang:scala-library:<version>`: 3.8 rebuilt the standard library with Scala 3 as `scala-library` 3.x, and left `scala3-library_3` a shim that depends on it (§15). The mapping is a per-version table in `compile/lang.rs`, not a formula. |
 | Groovy | `org.apache.groovy:groovy:<version>` |
 
 - It joins `[dependencies]` as if declared **last**, so it is a direct
@@ -290,20 +294,22 @@ checksum = "sha256:…"
 ### 5.3 Invocation
 
 ```
-java <compiler-jvm-args> @target/.jrs/kotlinc-main.cp.args \
-     org.jetbrains.kotlin.cli.jvm.K2JVMCompiler @target/.jrs/kotlinc-main.args
+java @target/.jrs/kotlinc-main.args
 ```
 
 - `java` is the **selected toolchain's** `java`, so the compiler sees the pinned
   JDK's class library, and `-jdk-home` / `-release` agree with it.
-- The compiler's own classpath goes in a `java` argfile, and the compiler's
-  flags and sources go in a compiler argfile. The "argfiles, not command lines"
-  rule holds for both. `java` has read `@argfiles` since JDK 9. kotlinc, scalac
-  and groovyc (picocli) each read `@file` *(verify)*.
-- **Argfile dialects differ.** `render_argfile`'s quoting is `javac`'s. Each
-  compiler's quoting and backslash rules are checked in the spike. The
-  renderer takes a `Dialect`, and a path with a space and a backslash is a
-  test case on the Windows CI leg for each one.
+- **One argfile holds everything**: `compiler-jvm-args`, `-cp` and the
+  compiler's own classpath, its main class, its flags, and the sources. The
+  `java` launcher has read `@argfiles` since JDK 9, and it hands the arguments
+  after the main class to the program as they are in the file, quoted as
+  `javac`'s argfiles are. So `render_argfile` serves every compiler, and the
+  "argfiles, not command lines" rule holds without the compilers' help.
+- The proposal had each compiler read its own `@file`, with a `Dialect` per
+  compiler. The spike found the dialects disagree in ways that matter: scalac
+  keeps backslashes, which mangles every Windows path, and groovyc's `@file`
+  lists source files only, never options (§15). One launcher argfile sidesteps
+  all three.
 - Output goes through `run_captured` and is replayed verbatim, as `javac`'s
   is (SPEC §6.2).
 
@@ -344,8 +350,8 @@ the project. Mixed bytecode levels in one jar are a known source of runtime
 | --- | --- |
 | Java | `--release <n>` (or `-source`/`-target`, as today) |
 | Kotlin | `-jvm-target <n> -Xjdk-release=<n>` |
-| Scala | `-release <n>` |
-| Groovy | the target bytecode level through groovyc's option or `groovy.target.bytecode` *(verify spelling)*, and `-Jrelease=<n>` for the joint `javac` *(verify)* |
+| Scala | `-release <n>` on 2.13; `-java-output-version <n>` on 3, the new name of the same flag, which 3.3 has too |
+| Groovy | `-Dgroovy.target.bytecode=<n>` for groovyc's JVM, since groovyc has no flag for it, and `-J=-release=<n>`, which reaches the joint `javac` as `--release <n>` |
 
 A Kotlin version older than the JDK may not know `-jvm-target 25`. kotlinc's
 own error is passed through, and jrs adds one line: lower `java.source`, or
@@ -375,13 +381,16 @@ raise `kotlin.version`. jrs does not clamp silently.
 
 **Groovy**
 
-- `--encoding <java.encoding>`, `-cp`, `-d`, and `-j` when the unit has
-  `.java` files.
+- `--encoding=<java.encoding>`, `-cp` (first: groovyc wants it there), `-d`,
+  and `-j` when the unit has `.java` files. Without `-j`, groovyc compiles
+  `.java` files as Groovy source.
 - In joint mode, jrs's own `javac` flags are translated exactly.
-  `java.javac-args` go to the embedded `javac` by a fixed rule: a single-token
-  flag becomes `-F<flag>`, and `-key value` pairs listed in the rule's table
-  become `-Jkey=value` *(verify)*. An argument the rule cannot place is a
-  manifest error that names it. jrs does not guess.
+  `java.javac-args` go to the embedded `javac` by a fixed rule. groovyc puts
+  the leading `-` back itself, so a single-token flag `-X` becomes `-F=X`, and
+  a `-key value` pair listed in the rule's table becomes `-J=key=value`. A
+  `--key value` pair becomes the one token `-F=-key=value`, which javac reads
+  as `--key=value`. An argument the rule cannot place is a manifest error that
+  names it. jrs does not guess.
 
 ### 6.4 Code layout
 
@@ -424,11 +433,12 @@ Three changes make these work:
    launcher version then comes from the resolved `junit-platform-engine`
    (falling back to today's rules), so the standalone launcher and the
    engine's platform agree.
-2. **The default class-name filter includes `.*Spec`** when any test unit has
-   non-Java sources. Spock specs and Kotest specs are named `*Spec`, and the
-   launcher's default pattern only matches `*Test`/`*Tests`/`Test*`, so they
-   would be skipped *(verify with Spock's engine)*. `--filter` still replaces
-   it.
+2. **The default class-name filter includes `.*Spec` and `.*Suite`** when
+   the test unit has non-Java sources. Spock and Kotest specs are named
+   `*Spec`, ScalaTest and MUnit suites `*Suite`, and the launcher's default
+   pattern only matches `*Test`/`*Tests`/`Test*`, so they are skipped: the
+   spike found zero tests in a Spock spec and in an MUnit suite until the
+   pattern had them (§15). `--filter` still replaces it.
 3. **Coverage reads every source root.** `CoverageReport.sources` becomes a
    list, so JaCoCo's HTML can show Kotlin, Scala and Groovy files. JaCoCo
    already filters Kotlin's synthetic code.
@@ -510,7 +520,7 @@ an input build paired with its expected `jrs.toml`.
 | `jrs outdated` | Lists `<lang>.version` against the compiler artifact's `maven-metadata.xml`. |
 | `jrs add` | Warns when a `_2.13`/`_3` suffix does not match the Scala line in `[scala]`. It does not rewrite the suffix. |
 | Resolution warnings | A `kotlin-stdlib-jdk7`/`-jdk8` older than 1.8 beside a Kotlin 2 stdlib duplicates classes. The warning names the fix, which is to declare it at `kotlin.version` so nearest-wins picks that. jrs does not align versions implicitly, since that would be a second mediation rule. |
-| Kotlin Multiplatform libraries | Their root artifact's POM may not point at the `-jvm` variant, because Gradle Module Metadata does that *(verify)*. Documented: declare the `-jvm` artifact, e.g. `kotlinx-coroutines-core-jvm`. The general fix is ROADMAP §4's `.module` row. |
+| Kotlin Multiplatform libraries | Their root artifact's POM may not point at the `-jvm` variant, because Gradle Module Metadata does that. The spike found both kinds (§15): `kotlinx-coroutines-core`'s root POM is `pom`-packaged and depends on `-jvm`, so it resolves as is, while `kotlinx-datetime`'s does not. Documented: when a root does not resolve to classes, declare the `-jvm` artifact. The general fix is ROADMAP §4's `.module` row. |
 
 ---
 
@@ -660,7 +670,11 @@ The layers:
 1. **Compiler start-up.** kotlinc and scalac spend seconds starting a cold JVM,
   and `javac` does not. The Kotlin daemon or a Zinc/Bloop server would hide
   that, but either means jrs managing a long-lived process. Proposed: measure
-  it in L0's bench first, then decide.
+  it in L0's bench first, then decide. The spike measured instead of a bench
+  (§15): one small mixed unit takes 1.8 s in kotlinc, 0.9 s in scalac 3,
+  0.7 s in scalac 2.13 and 0.5 s in groovyc, wall clock, on JDK 23. A second
+  of JVM start-up per changed build is noticeable next to `javac`, but not
+  yet worth a daemon: no daemon for now.
 2. **Compiler plugins.** Spring projects in Kotlin need `allopen`/`spring`
    (classes are final by default), and `kotlinx.serialization` needs its
    plugin. Both are Maven artifacts passed as `-Xplugin=<jar>`, so the
@@ -683,3 +697,50 @@ The layers:
 6. **Scala 2.12.** It is still used by Spark. It would need
    `-target:jvm-1.8`-era flags and a second Scala 2 table. Proposed: out unless
    asked for.
+
+---
+
+## 15. What the L0 spike found
+
+Every *(verify)* in the proposal was run by hand before the code depended on
+it. The setup was JDK 23 on macOS (arm64), with Kotlin 2.4.20, Scala 3.9.0,
+3.3.6 and 2.13.18, Groovy 5.1.2 and 4.0.28, Spock `2.4-groovy-5.0`, MUnit
+1.3.6, and the JUnit console launcher 1.14.1. Each compiler got a mixed source
+set that used Java both ways, through an argfile whose output path held a
+space and a literal backslash.
+
+| Question | Finding |
+| --- | --- |
+| Do kotlinc, scalac and groovyc read `@file`? | kotlinc reads `@argfile` with `javac`'s quoting. scalac, 2 and 3 alike, strips the quotes but keeps backslashes, so `"C:\\src"` arrives doubled. groovyc's `@file` is a list of source files, one per line, and never options. So jrs uses none of them: the `java` launcher reads the whole invocation from one argfile, and passes what follows the main class through unchanged (§5.3). |
+| Groovy's `-J` and `-F` | `-J=name=value` reaches javac as `-name value`, and `-F=flag` as `-flag`: groovyc adds the `-`. `-J=-release=17` is therefore `--release 17`, and `-F=-add-exports=…` is `--add-exports=…`. Flags such as `Xlint:all`, `Werror`, `parameters` and `Akey=v` pass through `-F`, and classpath jars are visible to the joint javac. |
+| Groovy's target level | groovyc has no flag for it: it reads `groovy.target.bytecode` from its own JVM. Without the property, Groovy 5 writes the level of the JDK it runs on (major 67 on JDK 23), not the project's. Given a level it does not know, Groovy 4 fails (`Bytecode version … is not supported by the compiler`), and Groovy 5 silently writes Java 11 bytecode (major 55). jrs cannot catch the second case. |
+| groovyc without `-j` | It compiles `.java` files as Groovy source, so jrs passes `-j` whenever the unit has Java sources. |
+| Spock, MUnit and the class-name filter | `--scan-class-path` with the launcher's default pattern found 0 tests in a Spock spec, and 0 in an MUnit suite. With `.*Spec` and `.*Suite` added, it found 1 in each (§7). |
+| The Scala 3.8+ library | `org.scala-lang:scala-library:3.9.0` is the 9.8 MB standard library, and `scala3-library_3:3.9.0` is a 344-byte jar that depends on it. MUnit 1.3.6 brings `scala3-library_3:3.3.8`, which has real classes, and the 3.9 compiler fails against it ("Bad symbolic reference") unless the 3.9 shim wins mediation. So from 3.8 both are implied at depth 1. |
+| KMP root POMs | They vary. `kotlinx-coroutines-core` and `kotlinx-serialization-json` are `pom`-packaged roots that depend on their `-jvm` artifacts, which jrs resolves as they are. `kotlinx-datetime`'s root does not point at `-jvm` (§11). |
+| A release the compiler does not know | kotlinc 2.4 takes `-jvm-target` 1.8 and 9–26, and fails with `unknown JVM target version` past that. scalac fails with `is not a valid choice for` on both lines, and Groovy 4 as above. jrs adds its one-line hint under those phrases (§6.2). |
+| Friend paths, output, colour | `-Xfriend-paths` with `-module-name <name>_test` gives tests the main module's `internal` declarations. kotlinc and scalac write only their own classes from a mixed source set, so `javac` after them is the only writer of Java classes. Scala 3 colours its diagnostics even into a pipe, hence `-color:never`. |
+| Start-up | Wall clock for one small mixed unit: kotlinc 1.8 s, scalac 3.9 0.9 s, scalac 2.13 0.7 s, groovyc 0.5 s (§14.1). |
+
+### 15.1 Where the implementation differs from the proposal
+
+1. **One `java` argfile per compiler run, and no `Dialect`** (§5.3), for the
+   reasons in the first row above.
+2. **`.*Suite` joins `.*Spec`** in the non-Java class-name pattern (§7), for
+   ScalaTest and MUnit.
+3. **Scala 3.8+ implies two libraries** (§4.3): the shim and the real one.
+4. **`jrs doc` builds first in a mixed project**, so that `javadoc` finds the
+   other language's classes when the Java sources use them. It documents the
+   Java sources and warns about the rest (§9). Scaladoc and Groovydoc are not
+   built: Scala 3's scaladoc is its own artifact that reads TASTy, not
+   sources, and neither is needed to build.
+5. **No start-up bench**: the spike's measurements answer §14.1's question
+   for now, and `benches/` keeps the one M5 harness.
+6. **The phase line names the compilers** when a fresh resolution resolves
+   them: `Resolving 3 declared dependencies and the Kotlin compiler`.
+7. **The graph's own launcher parts leave the test JVM's classpath** (§7).
+   `kotlin-test-junit5` 2.4 depends on `junit-platform-launcher` 1.10, which,
+   ahead of a 1.13 console launcher on the classpath, failed every run with a
+   `NoSuchMethodError`. The standalone launcher bundles its own launcher,
+   console and reporting parts, so copies of those from the graph are left
+   off; the engines and everything else are still the project's.

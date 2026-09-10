@@ -13,6 +13,7 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 use super::{Migration, Report, Source};
+use crate::compile::lang::Language;
 use crate::error::{IoResultExt, Result};
 use crate::manifest::{self, Dependency, Exclusion, Manifest};
 
@@ -88,12 +89,17 @@ pub fn migrate(build_file: &Path, root: &Path) -> Result<Migration> {
     let mut out = manifest::blank(&name, &version, root);
     report.migrated(format!("project.name = {name}"));
 
+    let plugins = read_plugins(&script);
     read_java(&script, &mut out, &mut report);
+    // Before the dependencies: `kotlin("reflect")` takes [kotlin]'s version.
+    read_kotlin(&script, &plugins, &mut out, &mut report);
     read_main_class(&script, &mut out, &mut report);
     read_dependencies(&script, &catalog, &mut out, &mut report);
+    // After them: `groovy` and `scala` take their library's version.
+    read_library_languages(&plugins, &mut out, &mut report);
     read_jvm_args(&script, &mut out, &mut report);
     read_repositories(&script, &mut out, &mut report);
-    report_the_unreadable(&script, &settings, &mut report);
+    report_the_unreadable(&script, &settings, &plugins, &mut report);
 
     Ok(Migration {
         source: Source::Gradle,
@@ -239,18 +245,14 @@ fn read_catalog(root: &Path, report: &mut Report) -> Catalog {
 // ---- the build script ------------------------------------------------------
 
 fn read_java(script: &str, out: &mut Manifest, report: &mut Report) {
+    // A toolchain inside `kotlin { }` pins the JDK, not the release; that one
+    // is `read_kotlin`'s.
+    let kotlin = kotlin_lines(script);
     let toolchain = script
         .lines()
+        .filter(|l| !kotlin.iter().any(|k| std::ptr::eq(k.as_ptr(), l.as_ptr())))
         .find(|l| l.contains("languageVersion") && l.contains("JavaLanguageVersion.of"))
-        .and_then(|l| l.split("JavaLanguageVersion.of").nth(1))
-        .and_then(|rest| {
-            let digits: String = rest
-                .trim_start_matches(['(', ' '])
-                .chars()
-                .take_while(char::is_ascii_digit)
-                .collect();
-            digits.parse::<u32>().ok()
-        });
+        .and_then(|l| number_after(l, "JavaLanguageVersion.of"));
 
     let source = toolchain
         .or_else(|| assignment(script, "sourceCompatibility").and_then(|v| java_version(&v)));
@@ -289,6 +291,7 @@ fn read_dependencies(script: &str, catalog: &Catalog, out: &mut Manifest, report
     // deep inside it the scan is.
     let mut closure: Option<(Target, usize, usize)> = None;
     let mut processors = Vec::new();
+    let kotlin = out.language(Language::Kotlin).map(|c| c.version.clone());
 
     for line in block_lines(script, "dependencies") {
         let trimmed = line.trim();
@@ -329,7 +332,9 @@ fn read_dependencies(script: &str, catalog: &Catalog, out: &mut Manifest, report
             Some(at) => (&trimmed[..at], Some(&trimmed[at..])),
             None => (trimmed, None),
         };
-        let Some(mut dep) = read_declaration(declaration, &config, catalog, report) else {
+        let Some(mut dep) =
+            read_declaration(declaration, &config, kotlin.as_deref(), catalog, report)
+        else {
             continue;
         };
         if let Some(body) = inline_closure {
@@ -365,13 +370,19 @@ fn read_dependencies(script: &str, catalog: &Catalog, out: &mut Manifest, report
 }
 
 /// One dependency declaration, without its closure: a catalog reference, a
-/// `g:a:v` literal, or the map notation.
+/// `g:a:v` literal, the map notation, or `kotlin("<module>")` at `kotlin`,
+/// the `[kotlin]` version.
 fn read_declaration(
     text: &str,
     config: &str,
+    kotlin: Option<&str>,
     catalog: &Catalog,
     report: &mut Report,
 ) -> Option<Dependency> {
+    if let Some((module, version)) = kotlin_notation(text) {
+        return kotlin_dependency(text.trim(), &module, version.as_deref().or(kotlin), report);
+    }
+
     // `libs.foo.bar`, resolved through the version catalog.
     if let Some(reference) = catalog_reference(text) {
         let found = catalog.get(&reference).cloned();
@@ -569,7 +580,12 @@ fn read_repositories(script: &str, out: &mut Manifest, report: &mut Report) {
     out.repositories = repos;
 }
 
-fn report_the_unreadable(script: &str, settings: &Settings, report: &mut Report) {
+fn report_the_unreadable(
+    script: &str,
+    settings: &Settings,
+    plugins: &[Plugin],
+    report: &mut Report,
+) {
     if !settings.includes.is_empty() {
         report.skipped(format!(
             "settings.gradle includes {} — jrs builds one module per manifest; \
@@ -598,16 +614,206 @@ fn report_the_unreadable(script: &str, settings: &Settings, report: &mut Report)
             report.skipped(what.to_string());
         }
     }
-    for line in block_lines(script, "plugins") {
-        let trimmed = line.trim();
-        if let Some(id) = quoted(trimmed).first()
-            && id != "java"
-            && id != "java-library"
-            && id != "application"
-        {
+    for plugin in plugins {
+        // Language plugins and Kotlin's compiler plugins have been reported,
+        // migrated or not, by `read_kotlin` and `read_library_languages`.
+        let id = plugin.id.as_str();
+        let understood = matches!(id, "java" | "java-library" | "application")
+            || language_plugin(id).is_some()
+            || kotlin_compiler_plugin(id).is_some();
+        if !understood {
             report.skipped(format!("plugin `{id}` — jrs has no plugin system"));
         }
     }
+}
+
+// ---- JVM languages (JVM_LANGUAGES.md §10) -----------------------------------
+
+/// One entry of the `plugins { }` block.
+struct Plugin {
+    id: String,
+    /// The version written beside the id, when it is a literal.
+    version: Option<String>,
+}
+
+/// `id 'x' version 'v'`, `id("x") version "v"`, `kotlin("jvm") version "v"`,
+/// and the Kotlin DSL's bare `java` or `groovy`.
+fn read_plugins(script: &str) -> Vec<Plugin> {
+    block_lines(script, "plugins")
+        .into_iter()
+        .filter_map(read_plugin)
+        .collect()
+}
+
+fn read_plugin(line: &str) -> Option<Plugin> {
+    let trimmed = line.trim();
+    // `kotlin("jvm")` is Gradle's shorthand for `id("org.jetbrains.kotlin.jvm")`.
+    if let Some(args) = trimmed.strip_prefix("kotlin(") {
+        let (name, rest) = first_literal(args)?;
+        return Some(Plugin {
+            id: format!("org.jetbrains.kotlin.{name}"),
+            version: plugin_version(rest),
+        });
+    }
+    let bare = !trimmed.is_empty()
+        && trimmed
+            .chars()
+            .all(|c| c.is_alphanumeric() || matches!(c, '-' | '_' | '.' | '`'));
+    if bare {
+        return Some(Plugin {
+            id: trimmed.trim_matches('`').to_string(),
+            version: None,
+        });
+    }
+    let (id, rest) = first_literal(trimmed)?;
+    Some(Plugin {
+        id,
+        version: plugin_version(rest),
+    })
+}
+
+/// `version "2.2.0"` or `.version("2.2.0")` after a plugin's id. A version
+/// from a variable or a catalog is not one jrs can read.
+fn plugin_version(rest: &str) -> Option<String> {
+    let rest = rest.trim_start_matches([')', ' ', '\t', '.']);
+    let (version, _) = first_literal(rest.strip_prefix("version")?)?;
+    (!version.contains('$')).then_some(version)
+}
+
+/// The plugins that turn a language on.
+fn language_plugin(id: &str) -> Option<Language> {
+    match id {
+        "org.jetbrains.kotlin.jvm" => Some(Language::Kotlin),
+        "scala" => Some(Language::Scala),
+        "groovy" => Some(Language::Groovy),
+        _ => None,
+    }
+}
+
+/// `org.jetbrains.kotlin.plugin.spring` → `spring`, and kapt, which is a
+/// compiler plugin too.
+fn kotlin_compiler_plugin(id: &str) -> Option<&str> {
+    if id == "org.jetbrains.kotlin.kapt" {
+        return Some("kapt");
+    }
+    id.strip_prefix("org.jetbrains.kotlin.plugin.")
+}
+
+/// The Kotlin plugin's version turns `[kotlin]` on, `jvmToolchain` pins the
+/// JDK, and the compiler plugins beside it are reported.
+fn read_kotlin(script: &str, plugins: &[Plugin], out: &mut Manifest, report: &mut Report) {
+    for plugin in plugins {
+        let from = format!("plugin `{}`", plugin.id);
+        if language_plugin(&plugin.id) == Some(Language::Kotlin) {
+            match &plugin.version {
+                Some(version) => {
+                    super::enable_language(out, Language::Kotlin, version, &from, report);
+                }
+                None => report.skipped(format!(
+                    "{from} — its version is set somewhere jrs does not read (settings, a \
+                     catalog, a variable); no [kotlin] table was written"
+                )),
+            }
+        } else if let Some(name) = kotlin_compiler_plugin(&plugin.id) {
+            super::report_compiler_plugin(name, &from, report);
+        }
+    }
+
+    // `jvmToolchain(21)`, or the block form when all it says is the version.
+    let kotlin = kotlin_lines(script);
+    let jdk = kotlin
+        .iter()
+        .find_map(|l| number_after(l, "jvmToolchain"))
+        .or_else(|| {
+            kotlin
+                .iter()
+                .find_map(|l| number_after(l, "JavaLanguageVersion.of"))
+        });
+    if let Some(jdk) = jdk
+        && out.java.jdk.is_none()
+    {
+        out.java.jdk = Some(jdk);
+        report.migrated(format!("java.jdk = {jdk} (from kotlin {{ jvmToolchain }})"));
+    }
+}
+
+/// `groovy` and `scala` name no version: it is their library's, read out of
+/// the dependencies. Then the runtime libraries the tables imply are taken
+/// out.
+fn read_library_languages(plugins: &[Plugin], out: &mut Manifest, report: &mut Report) {
+    for plugin in plugins {
+        if let Some(language @ (Language::Scala | Language::Groovy)) = language_plugin(&plugin.id) {
+            super::enable_from_library(out, language, &format!("plugin `{}`", plugin.id), report);
+        }
+    }
+    super::drop_implied_libraries(out, report);
+}
+
+/// The `kotlin { }` extension's lines, opening lines included: `kotlin {
+/// jvmToolchain(21) }` is as often written on one line as on three.
+fn kotlin_lines(script: &str) -> Vec<&str> {
+    let mut lines: Vec<&str> = script
+        .lines()
+        .filter(|l| is_kotlin_block(l.trim()) || l.trim().starts_with("kotlin."))
+        .collect();
+    lines.extend(blocks_where(script, is_kotlin_block));
+    lines
+}
+
+fn is_kotlin_block(header: &str) -> bool {
+    let compact: String = header.chars().filter(|c| !c.is_whitespace()).collect();
+    compact.starts_with("kotlin{")
+}
+
+/// `kotlin("reflect")` → `reflect`, and `kotlin("stdlib", "2.1.0")` with its
+/// own version.
+fn kotlin_notation(text: &str) -> Option<(String, Option<String>)> {
+    let at = text.find("kotlin(")?;
+    if text[..at].ends_with(|c: char| c.is_alphanumeric() || c == '_' || c == '.') {
+        return None;
+    }
+    let args = &text[at + "kotlin(".len()..];
+    let args = &args[..args.find(')')?];
+    let mut literals = quoted(args).into_iter();
+    Some((literals.next()?, literals.next()))
+}
+
+/// `kotlin("<module>")` is `org.jetbrains.kotlin:kotlin-<module>` at the Kotlin
+/// plugin's version, with two readings of jrs's own.
+fn kotlin_dependency(
+    text: &str,
+    module: &str,
+    version: Option<&str>,
+    report: &mut Report,
+) -> Option<Dependency> {
+    let Some(version) = version else {
+        report.skipped(format!(
+            "`{text}` — `kotlin(\"{module}\")` takes the Kotlin plugin's version, and no \
+             [kotlin] version was migrated"
+        ));
+        return None;
+    };
+    let artifact = match module {
+        "stdlib" => "kotlin-stdlib".to_string(),
+        // Kotlin 2's stdlib has the classes these once added; they are empty.
+        "stdlib-jdk7" | "stdlib-jdk8" => {
+            report.migrated(format!(
+                "`{text}` — read as kotlin-stdlib, which has had the -jdk7/-jdk8 classes \
+                 since Kotlin 1.8"
+            ));
+            "kotlin-stdlib".to_string()
+        }
+        "test" => {
+            report.review(format!(
+                "`{text}` → org.jetbrains.kotlin:kotlin-test-junit5 — Gradle picks \
+                 kotlin-test's framework variant by capability, from the test task's \
+                 framework; jrs picked the JUnit 5 one"
+            ));
+            "kotlin-test-junit5".to_string()
+        }
+        other => format!("kotlin-{other}"),
+    };
+    Some(Dependency::new("org.jetbrains.kotlin", artifact, version))
 }
 
 // ---- text helpers ----------------------------------------------------------
@@ -717,6 +923,27 @@ fn blocks_where(script: &str, header: impl Fn(&str) -> bool) -> Vec<&str> {
         depth = next;
     }
     out
+}
+
+/// The first quoted literal in `text`, and what follows its closing quote.
+fn first_literal(text: &str) -> Option<(String, &str)> {
+    let start = text.find(['\'', '"'])?;
+    let quote = &text[start..=start];
+    let body = &text[start + 1..];
+    let end = body.find(quote)?;
+    Some((body[..end].to_string(), &body[end + 1..]))
+}
+
+/// The whole number right after `needle`: `jvmToolchain(21)`,
+/// `JavaLanguageVersion.of(17)`.
+fn number_after(line: &str, needle: &str) -> Option<u32> {
+    let rest = line.split(needle).nth(1)?;
+    let digits: String = rest
+        .trim_start_matches(['(', ' '])
+        .chars()
+        .take_while(char::is_ascii_digit)
+        .collect();
+    digits.parse().ok()
 }
 
 /// The value of a `name = <literal>` assignment anywhere in the script.
@@ -1219,5 +1446,96 @@ junit = "org.junit.jupiter:junit-jupiter:5.10.2"
     #[test]
     fn build_file_names_are_the_ones_detection_looks_for() {
         assert_eq!(build_file_names(), ["build.gradle", "build.gradle.kts"]);
+    }
+
+    #[test]
+    fn the_groovy_dsl_names_kotlin_by_plugin_id() {
+        let dir = Dir::new("kotlin-ids");
+        let migration = dir.migrate(
+            "plugins {\n  id 'org.jetbrains.kotlin.jvm' version '2.2.0'\n  \
+             id 'org.jetbrains.kotlin.plugin.jpa' version '2.2.0'\n}\n\
+             kotlin {\n  jvmToolchain {\n    languageVersion = JavaLanguageVersion.of(17)\n  }\n}\n\
+             dependencies {\n  implementation 'org.jetbrains.kotlin:kotlin-stdlib:2.2.0'\n}\n",
+        );
+        let m = &migration.manifest;
+        assert_eq!(m.language(Language::Kotlin).unwrap().version, "2.2.0");
+        assert_eq!(m.java.jdk, Some(17));
+        assert_eq!(
+            m.java.source, None,
+            "Kotlin's toolchain pins the JDK, not the release"
+        );
+        assert!(m.dependencies.is_empty(), "the stdlib is implied");
+        let skipped = migration.report.not_migrated.join("\n");
+        assert!(skipped.contains("plugin.jpa"), "{skipped}");
+        assert!(skipped.contains("JPA"), "{skipped}");
+        assert!(!skipped.contains("no plugin system"), "{skipped}");
+    }
+
+    #[test]
+    fn kotlin_modules_need_a_kotlin_version_jrs_can_use() {
+        let dir = Dir::new("kotlin-old");
+        let migration = dir.migrate(
+            "plugins {\n  id(\"org.jetbrains.kotlin.jvm\") version \"1.9.24\"\n}\n\
+             kotlin { jvmToolchain(21) }\n\
+             dependencies {\n  implementation(kotlin(\"stdlib-jdk8\"))\n}\n",
+        );
+        let m = &migration.manifest;
+        assert!(m.languages.is_empty());
+        assert!(m.dependencies.is_empty());
+        assert_eq!(m.java.jdk, Some(21), "one line is enough for jvmToolchain");
+        let skipped = migration.report.not_migrated.join("\n");
+        assert!(skipped.contains("Kotlin 2.0"), "{skipped}");
+        assert!(skipped.contains("kotlin(\"stdlib-jdk8\")"), "{skipped}");
+        let text = migration.render_manifest();
+        Manifest::parse(&text, &dir.path.join("jrs.toml"), &dir.path).unwrap();
+    }
+
+    #[test]
+    fn scala_and_groovy_take_their_librarys_version() {
+        let dir = Dir::new("library-versions");
+        let file = dir.write(
+            "build.gradle.kts",
+            "plugins {\n  scala\n}\n\
+             dependencies {\n  implementation(\"org.scala-lang:scala-library:2.13.16\")\n}\n",
+        );
+        let scala = super::migrate(&file, &dir.path).unwrap();
+        assert_eq!(
+            scala.manifest.language(Language::Scala).unwrap().version,
+            "2.13.16"
+        );
+        assert!(scala.manifest.dependencies.is_empty());
+
+        let groovy = dir.migrate(
+            "plugins {\n  id(\"groovy\")\n}\n\
+             dependencies {\n  implementation 'org.codehaus.groovy:groovy:3.0.22'\n}\n",
+        );
+        assert!(groovy.manifest.languages.is_empty());
+        assert_eq!(groovy.manifest.dependencies.len(), 1, "kept as it was");
+        let skipped = groovy.report.not_migrated.join("\n");
+        assert!(skipped.contains("org.apache.groovy"), "{skipped}");
+    }
+
+    #[test]
+    fn plugin_lines_are_read_in_every_spelling() {
+        let read = |line: &str| {
+            let p = read_plugin(line).unwrap();
+            (p.id, p.version)
+        };
+        let some = |s: &str| Some(s.to_string());
+        assert_eq!(
+            read("kotlin(\"jvm\") version \"2.2.0\""),
+            ("org.jetbrains.kotlin.jvm".into(), some("2.2.0"))
+        );
+        assert_eq!(
+            read("id(\"x.y\").version(\"1.0\")"),
+            ("x.y".into(), some("1.0"))
+        );
+        assert_eq!(read("id 'x.y' version '1.0'"), ("x.y".into(), some("1.0")));
+        assert_eq!(read("`java-library`"), ("java-library".into(), None));
+        assert_eq!(
+            read("kotlin(\"jvm\") version kotlinVersion"),
+            ("org.jetbrains.kotlin.jvm".into(), None)
+        );
+        assert!(read_plugin("alias(libs.plugins.x)").is_none());
     }
 }

@@ -10,8 +10,10 @@ pub mod maven;
 
 use std::path::{Path, PathBuf};
 
+use crate::compile::lang::Language;
 use crate::error::{IoResultExt, JrsError, Result};
-use crate::manifest::{MANIFEST_FILE, Manifest};
+use crate::manifest::{Dependency, LanguageConfig, MANIFEST_FILE, Manifest};
+use crate::resolve::coord::is_range;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Source {
@@ -194,6 +196,186 @@ pub fn write(migration: &Migration, dir: &Path, force: bool) -> Result<Option<Pa
     }
     std::fs::write(&target, migration.render_manifest()).path(&target)?;
     Ok(Some(target))
+}
+
+// ---- JVM languages (JVM_LANGUAGES.md §10) ----------------------------------
+
+/// Where a `[kotlin]` version is read from when the build plugin has none.
+const KOTLIN_LIBRARIES: &[(&str, &str)] = &[("org.jetbrains.kotlin", "kotlin-stdlib")];
+
+/// Where a `[scala]` version is read from when the build names none itself:
+/// the Scala 3 library first, since a Scala 3 build has the 2.13 one too.
+const SCALA_LIBRARIES: &[(&str, &str)] = &[
+    ("org.scala-lang", "scala3-library_3"),
+    ("org.scala-lang", "scala-library"),
+];
+
+/// Where a `[groovy]` version is read from. The `org.codehaus.groovy` group is
+/// Groovy 3 and older, which jrs does not drive, so it is looked for only to
+/// say so.
+const GROOVY_LIBRARIES: &[(&str, &str)] = &[
+    ("org.apache.groovy", "groovy"),
+    ("org.codehaus.groovy", "groovy"),
+];
+
+/// Turn `language` on at `version`, which was read from `from`.
+///
+/// A version jrs cannot drive gets no table, since the manifest would then not
+/// load, and a "Not migrated" line quoting why. Returns whether the table was
+/// written.
+fn enable_language(
+    out: &mut Manifest,
+    language: Language,
+    version: &str,
+    from: &str,
+    report: &mut Report,
+) -> bool {
+    if out.language(language).is_some() {
+        return true;
+    }
+    let key = language.key();
+    let version = version.trim();
+    let problem = if version.is_empty() || version.contains('$') {
+        Some("the version could not be read".to_string())
+    } else if is_range(version) {
+        Some("a range, and the compiler is pinned at an exact version".to_string())
+    } else {
+        language.check_version(version).err()
+    };
+    if let Some(problem) = problem {
+        report.skipped(format!(
+            "{from} — {} `{version}`: {problem}; no [{key}] table was written",
+            language.name()
+        ));
+        return false;
+    }
+    out.languages.push(LanguageConfig {
+        language,
+        version: version.to_string(),
+        source_dir: PathBuf::from(format!("src/main/{key}")),
+        test_dir: PathBuf::from(format!("src/test/{key}")),
+        compiler_args: Vec::new(),
+        compiler_jvm_args: Vec::new(),
+    });
+    out.languages.sort_by_key(|c| c.language);
+    report.migrated(format!("[{key}] version = {version} (from {from})"));
+    true
+}
+
+/// Turn a language on at the version of its runtime library, declared in
+/// either table, when the build plugin itself names no version.
+fn enable_from_library(out: &mut Manifest, language: Language, from: &str, report: &mut Report) {
+    let candidates = match language {
+        Language::Kotlin => KOTLIN_LIBRARIES,
+        Language::Scala => SCALA_LIBRARIES,
+        Language::Groovy => GROOVY_LIBRARIES,
+        Language::Java => return,
+    };
+    let found = candidates.iter().find_map(|(group, artifact)| {
+        out.dependencies
+            .iter()
+            .chain(&out.dev_dependencies)
+            .find(|d| d.group == *group && d.artifact == *artifact)
+            .map(|d| (format!("{group}:{artifact}"), d.version.clone()))
+    });
+    match found {
+        Some((library, version)) => {
+            enable_language(
+                out,
+                language,
+                &version,
+                &format!("{from}, at {library}'s version"),
+                report,
+            );
+        }
+        None => report.skipped(format!(
+            "{from} — no {}:{} dependency to take the {} version from; no [{}] table \
+             was written",
+            candidates[0].0,
+            candidates[0].1,
+            language.name(),
+            language.key()
+        )),
+    }
+}
+
+/// A Kotlin compiler plugin, by the short name kotlin-maven-plugin's
+/// `<compilerPlugins>` or Gradle's `kotlin("plugin.<name>")` gives it. jrs does
+/// not pass compiler plugins to kotlinc yet (`JVM_LANGUAGES.md` §14.2), so each
+/// is reported with what goes missing without it.
+fn report_compiler_plugin(name: &str, from: &str, report: &mut Report) {
+    let consequence = match name {
+        "all-open" | "allopen" | "spring" => {
+            "Kotlin classes stay final, so frameworks that subclass them, such as \
+             Spring's proxies, cannot"
+        }
+        "no-arg" | "noarg" | "jpa" => {
+            "classes get no generated no-argument constructor, which JPA needs"
+        }
+        "kotlinx-serialization" | "serialization" => {
+            "@Serializable classes get no generated serializer"
+        }
+        "kapt" => "annotation processors do not run over Kotlin sources",
+        _ => "whatever it generates is missing",
+    };
+    report.skipped(format!(
+        "{from} — Kotlin compiler plugins are not supported yet (JVM_LANGUAGES.md \
+         §14.2): {consequence}"
+    ));
+}
+
+/// Take out the runtime libraries the build declared by hand that a language
+/// table now implies (`JVM_LANGUAGES.md` §4.3).
+///
+/// Only a plain `[dependencies]` entry at the compiler's version goes: it says
+/// exactly what the table implies. A `[dev-dependencies]` entry stays, because
+/// declaring the library there is what keeps it off the runtime classpath and
+/// out of the fat jar. That is the Groovy project with only Spock tests, and
+/// dropping its declaration would put Groovy on its runtime. At any other
+/// version the entry stays too, since it was chosen, and gets a review line,
+/// since kotlinc and scalac reject a library newer than themselves.
+fn drop_implied_libraries(out: &mut Manifest, report: &mut Report) {
+    let libraries: Vec<(&str, String, &str, &str)> = out
+        .languages
+        .iter()
+        .flat_map(|c| {
+            c.language
+                .runtime_libraries(&c.version)
+                .into_iter()
+                .map(|(group, artifact)| (c.language.key(), c.version.clone(), group, artifact))
+        })
+        .collect();
+
+    for (key, version, group, artifact) in libraries {
+        let is_library =
+            |d: &Dependency| d.group == group && d.artifact == artifact && d.classifier.is_none();
+        if let Some(index) = out.dependencies.iter().position(|d| {
+            is_library(d) && d.version == version && !d.compile_only && d.exclusions.is_empty()
+        }) {
+            out.dependencies.remove(index);
+            // The dependency pass reported it as migrated; this line replaces
+            // that one, rather than contradict it.
+            let listed = format!("{group}:{artifact} (");
+            report.migrated.retain(|line| !line.starts_with(&listed));
+            report.migrated(format!(
+                "{group}:{artifact}:{version} — left out of [dependencies]: [{key}] \
+                 implies it at that version"
+            ));
+        }
+        for d in out
+            .dependencies
+            .iter()
+            .chain(&out.dev_dependencies)
+            .filter(|d| is_library(d) && d.version != version)
+        {
+            report.review(format!(
+                "{group}:{artifact}:{} — kept at the version the build declares, which is \
+                 not [{key}]'s {version}; kotlinc and scalac reject a runtime library newer \
+                 than themselves, so keep the two in step",
+                d.version
+            ));
+        }
+    }
 }
 
 #[cfg(test)]

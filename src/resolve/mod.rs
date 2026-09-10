@@ -199,11 +199,10 @@ struct Selected {
               `packaging`); split up, every piece would take all of it"
 )]
 pub fn resolve(manifest: &Manifest, fetcher: &Fetcher, jobs: usize) -> Result<Resolution> {
-    for dep in manifest
-        .dependencies
-        .iter()
-        .chain(&manifest.dev_dependencies)
-    {
+    // The runtime libraries the manifest's languages imply are resolved as
+    // direct dependencies, declared last.
+    let dependencies = manifest.effective_dependencies();
+    for dep in dependencies.iter().chain(&manifest.dev_dependencies) {
         if is_range(&dep.version) {
             return Err(JrsError::resolve(format!(
                 "`{}` asks for the version range `{}`\n\n\
@@ -228,11 +227,11 @@ pub fn resolve(manifest: &Manifest, fetcher: &Fetcher, jobs: usize) -> Result<Re
     let mut selected: HashMap<Ga, Selected> = HashMap::new();
     let mut edges: HashMap<Ga, Vec<Ga>> = HashMap::new();
     let mut packaging: HashMap<Ga, String> = HashMap::new();
-    let mut level: Vec<Pending> = seed(manifest);
+    let mut level: Vec<Pending> = seed(&dependencies, &manifest.dev_dependencies);
 
     let root_ga =
         |d: &Dependency| Ga::new(&d.group, &d.artifact).with_classifier(d.classifier.clone());
-    let roots: Vec<Ga> = manifest.dependencies.iter().map(root_ga).collect();
+    let roots: Vec<Ga> = dependencies.iter().map(root_ga).collect();
     let test_roots: Vec<Ga> = manifest.dev_dependencies.iter().map(root_ga).collect();
 
     let mut depth = 1;
@@ -387,7 +386,29 @@ pub fn resolve(manifest: &Manifest, fetcher: &Fetcher, jobs: usize) -> Result<Re
     })
 }
 
-fn seed(manifest: &Manifest) -> Vec<Pending> {
+/// Resolve a tool — a compiler — as a graph of its own, never merged into the
+/// project's: the Kotlin compiler's `kotlinx-coroutines` must not mediate
+/// against the project's (`JVM_LANGUAGES.md` §5.1). It is an ordinary
+/// resolution of a manifest that declares `roots` and nothing else, and the
+/// isolated tool graph TASKS.md §8 proposes for task dependencies too.
+///
+/// # Errors
+///
+/// As for [`resolve`].
+pub fn resolve_tool(roots: &[Coord], fetcher: &Fetcher, jobs: usize) -> Result<Resolution> {
+    let mut manifest = crate::manifest::blank("tool", "0", std::path::Path::new("."));
+    manifest.dependencies = roots
+        .iter()
+        .map(|c| {
+            let mut d = Dependency::new(&c.group, &c.artifact, &c.version);
+            d.classifier.clone_from(&c.classifier);
+            d
+        })
+        .collect();
+    resolve(&manifest, fetcher, jobs)
+}
+
+fn seed(dependencies: &[Dependency], dev_dependencies: &[Dependency]) -> Vec<Pending> {
     let mut out = Vec::new();
     let mut push = |d: &Dependency, classpath: Classpath| {
         out.push(Pending {
@@ -408,10 +429,10 @@ fn seed(manifest: &Manifest) -> Vec<Pending> {
             pom_only: false,
         });
     };
-    for d in &manifest.dependencies {
+    for d in dependencies {
         push(d, Classpath::Compile);
     }
-    for d in &manifest.dev_dependencies {
+    for d in dev_dependencies {
         push(d, Classpath::Test);
     }
     out
@@ -1179,6 +1200,62 @@ mod tests {
             of("b")
         );
         assert_eq!(of("c"), Integrity::NotCached);
+    }
+
+    #[test]
+    fn an_implied_runtime_library_is_a_direct_dependency_that_wins_mediation() {
+        let repo = Repo::new("implied");
+        // A library built against an older stdlib, which nearest-wins must
+        // not let onto the classpath beside the compiler's own.
+        repo.publish(
+            "g:lib:1.0",
+            &dep(&d("org.jetbrains.kotlin:kotlin-stdlib:1.9.0", "")),
+        );
+        repo.publish("org.jetbrains.kotlin:kotlin-stdlib:1.9.0", "");
+        repo.publish("org.jetbrains.kotlin:kotlin-stdlib:2.4.20", "");
+
+        let m = repo.manifest("[kotlin]\nversion='2.4.20'\n[dependencies]\n'g:lib'='1.0'");
+        let r = resolve(&m, &repo.fetcher(), 4).unwrap();
+        let stdlib = r
+            .get(&Ga::new("org.jetbrains.kotlin", "kotlin-stdlib"))
+            .unwrap();
+        assert_eq!(stdlib.coord.version, "2.4.20");
+        assert!(stdlib.direct);
+        assert_eq!(stdlib.classpath, Classpath::Compile);
+        assert_eq!(
+            r.roots,
+            vec![
+                Ga::new("g", "lib"),
+                Ga::new("org.jetbrains.kotlin", "kotlin-stdlib")
+            ],
+            "declared first, implied last"
+        );
+    }
+
+    #[test]
+    fn a_tool_graph_is_resolved_apart_from_the_projects() {
+        let repo = Repo::new("tool");
+        repo.publish("g:compiler:1.0", &dep(&d("g:shared:1.0", "")));
+        repo.publish("g:shared:1.0", "");
+        repo.publish("g:shared:2.0", "");
+
+        // The project pins shared 2.0; the compiler still gets the 1.0 it
+        // asked for, since the two graphs never meet.
+        let tool = resolve_tool(
+            &[Coord::parse("g:compiler:1.0").unwrap()],
+            &repo.fetcher(),
+            4,
+        )
+        .unwrap();
+        assert_eq!(names(&tool), vec!["g:compiler:1.0", "g:shared:1.0"]);
+        assert_eq!(tool.roots, vec![Ga::new("g", "compiler")]);
+        let project = resolve(
+            &repo.manifest("[dependencies]\n'g:shared'='2.0'"),
+            &repo.fetcher(),
+            4,
+        )
+        .unwrap();
+        assert_eq!(names(&project), vec!["g:shared:2.0"]);
     }
 
     #[test]

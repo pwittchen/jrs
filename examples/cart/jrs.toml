@@ -1,0 +1,17 @@
+[project]
+name = "cart"
+version = "1.0.0"
+main-class = "com.example.cart.Main"
+
+[java]
+source = 17
+javac-args = ["-Xlint:all"]
+
+[groovy]
+# the compiler for the Spock specs; the main code is plain Java
+version = "5.1.2"
+
+[dev-dependencies]
+# declared here, Groovy is on the test classpath only, so not in the jar
+"org.apache.groovy:groovy" = "5.1.2"
+"org.spockframework:spock-core" = "2.4-groovy-5.0"

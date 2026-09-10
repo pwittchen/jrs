@@ -19,6 +19,12 @@ use crate::resolve::{Classpath, Resolution, ResolvedPackage};
 
 pub const LOCK_VERSION: u64 = 1;
 
+/// The format with `[[tool]]` blocks (`JVM_LANGUAGES.md` §5.2). A lockfile
+/// with no tools stays at [`LOCK_VERSION`], byte for byte; a jrs that predates
+/// tools meets this number and refuses the file, rather than dropping the
+/// compiler pins the next time it rewrites it.
+pub const TOOLS_LOCK_VERSION: u64 = 2;
+
 #[derive(Debug, Clone)]
 pub struct Lockfile {
     pub version: u64,
@@ -27,20 +33,67 @@ pub struct Lockfile {
     pub roots: Vec<Ga>,
     pub test_roots: Vec<Ga>,
     pub packages: Vec<ResolvedPackage>,
+    /// Graphs jrs resolves for itself, each apart from the project's: the
+    /// compilers of the project's other languages.
+    pub tools: Vec<LockedTool>,
+}
+
+/// One tool's pinned graph, in the package format the project's uses.
+#[derive(Debug, Clone)]
+pub struct LockedTool {
+    /// `kotlin-compiler`.
+    pub name: String,
+    pub roots: Vec<Ga>,
+    pub packages: Vec<ResolvedPackage>,
 }
 
 impl Lockfile {
     #[must_use]
     pub fn from_resolution(manifest: &Manifest, resolution: &Resolution) -> Lockfile {
-        let mut packages = resolution.packages.clone();
-        packages.sort_by(|a, b| a.coord.cmp(&b.coord));
         Lockfile {
             version: LOCK_VERSION,
             manifest_checksum: manifest_checksum(manifest),
             roots: resolution.roots.clone(),
             test_roots: resolution.test_roots.clone(),
-            packages,
+            packages: sorted(&resolution.packages),
+            tools: Vec::new(),
         }
+    }
+
+    /// Pin a tool's graph beside the project's, which makes this a version 2
+    /// lockfile.
+    #[must_use]
+    pub fn with_tool(mut self, name: &str, resolution: &Resolution) -> Lockfile {
+        self.tools.push(LockedTool {
+            name: name.to_string(),
+            roots: resolution.roots.clone(),
+            packages: sorted(&resolution.packages),
+        });
+        self.version = TOOLS_LOCK_VERSION;
+        self
+    }
+
+    /// The tool `name`'s graph, as a resolution with its jar paths left empty.
+    #[must_use]
+    pub fn tool(&self, name: &str) -> Option<Resolution> {
+        self.tools
+            .iter()
+            .find(|t| t.name == name)
+            .map(|t| Resolution {
+                packages: t.packages.clone(),
+                roots: t.roots.clone(),
+                test_roots: Vec::new(),
+                warnings: Vec::new(),
+                downloaded: 0,
+            })
+    }
+
+    /// Every package the lockfile pins, the tools' included: what `jrs verify`
+    /// re-hashes and `jrs cache prune` keeps.
+    pub fn all_packages(&self) -> impl Iterator<Item = &ResolvedPackage> {
+        self.packages
+            .iter()
+            .chain(self.tools.iter().flat_map(|t| &t.packages))
     }
 
     /// Turn the lockfile back into a resolution. Jar paths are left empty; the
@@ -56,10 +109,16 @@ impl Lockfile {
         }
     }
 
-    /// Whether this lockfile still describes `manifest`.
+    /// Whether this lockfile still describes `manifest`: its dependencies,
+    /// and a pinned compiler for every language it turns on.
     #[must_use]
     pub fn matches(&self, manifest: &Manifest) -> bool {
-        self.version == LOCK_VERSION && self.manifest_checksum == manifest_checksum(manifest)
+        supported(self.version)
+            && self.manifest_checksum == manifest_checksum(manifest)
+            && manifest
+                .languages
+                .iter()
+                .all(|c| self.tools.iter().any(|t| t.name == c.language.tool_name()))
     }
 
     /// Read and parse the lockfile at `path`; `Ok(None)` when there is none.
@@ -89,9 +148,10 @@ impl Lockfile {
     ///
     /// # Errors
     ///
-    /// [`JrsError::Resolve`] when `text` is not TOML, its `version` is not
-    /// [`LOCK_VERSION`], or a `[[package]]` is not a table or lacks its
-    /// `group`, `artifact` or `version`.
+    /// [`JrsError::Resolve`] when `text` is not TOML, its `version` is neither
+    /// [`LOCK_VERSION`] nor [`TOOLS_LOCK_VERSION`], a `[[tool]]` has no
+    /// `name`, or a `[[package]]` is not a table or lacks its `group`,
+    /// `artifact` or `version`.
     pub fn parse(text: &str, path: &Path) -> Result<Lockfile> {
         let table: toml::Table = toml::from_str(text)
             .map_err(|e| JrsError::resolve(format!("{}: {}", path.display(), e.message())))?;
@@ -101,25 +161,38 @@ impl Lockfile {
             .and_then(toml::Value::as_integer)
             .and_then(|n| u64::try_from(n).ok())
             .unwrap_or(0);
-        if version != LOCK_VERSION {
+        if !supported(version) {
             return Err(JrsError::resolve(format!(
                 "{}: lockfile version {version} is not supported by jrs {} \
-                 (expected {LOCK_VERSION})\n\nrun `jrs update` to regenerate it",
+                 (expected {LOCK_VERSION} or {TOOLS_LOCK_VERSION})\n\nrun `jrs update` to \
+                 regenerate it",
                 path.display(),
                 env!("CARGO_PKG_VERSION"),
             )));
         }
 
-        let packages = table
-            .get("package")
+        let mut tools = Vec::new();
+        for tool in table
+            .get("tool")
             .and_then(|v| v.as_array())
-            .map(|a| {
-                a.iter()
-                    .map(|p| read_package(p, path))
-                    .collect::<Result<Vec<_>>>()
-            })
-            .transpose()?
-            .unwrap_or_default();
+            .into_iter()
+            .flatten()
+        {
+            let t = tool.as_table().ok_or_else(|| {
+                JrsError::resolve(format!("{}: [[tool]] must be a table", path.display()))
+            })?;
+            let name = t.get("name").and_then(|v| v.as_str()).ok_or_else(|| {
+                JrsError::resolve(format!(
+                    "{}: [[tool]] is missing `name`\n\nrun `jrs update` to regenerate it",
+                    path.display()
+                ))
+            })?;
+            tools.push(LockedTool {
+                name: name.to_string(),
+                roots: read_gas(t, "roots"),
+                packages: read_packages(t, path)?,
+            });
+        }
 
         Ok(Lockfile {
             version,
@@ -130,7 +203,8 @@ impl Lockfile {
                 .to_string(),
             roots: read_gas(&table, "roots"),
             test_roots: read_gas(&table, "test-roots"),
-            packages,
+            packages: read_packages(&table, path)?,
+            tools,
         })
     }
 
@@ -146,26 +220,61 @@ impl Lockfile {
         let _ = writeln!(s, "test-roots = {}", render_gas(&self.test_roots));
 
         for p in &self.packages {
-            s.push_str("\n[[package]]\n");
-            let _ = writeln!(s, "group = \"{}\"", p.coord.group);
-            let _ = writeln!(s, "artifact = \"{}\"", p.coord.artifact);
-            let _ = writeln!(s, "version = \"{}\"", p.coord.version);
-            if let Some(c) = &p.coord.classifier {
-                let _ = writeln!(s, "classifier = \"{c}\"");
-            }
-            let _ = writeln!(s, "classpath = \"{}\"", p.classpath.as_str());
-            let _ = writeln!(s, "packaging = \"{}\"", p.packaging);
-            let _ = writeln!(s, "depth = {}", p.depth);
-            let _ = writeln!(s, "direct = {}", p.direct);
-            if let Some(c) = &p.checksum {
-                let _ = writeln!(s, "checksum = \"{c}\"");
-            }
-            if !p.dependencies.is_empty() {
-                let _ = writeln!(s, "dependencies = {}", render_gas(&p.dependencies));
+            render_package(&mut s, "package", p);
+        }
+        for tool in &self.tools {
+            s.push_str("\n[[tool]]\n");
+            let _ = writeln!(s, "name = \"{}\"", tool.name);
+            let _ = writeln!(s, "roots = {}", render_gas(&tool.roots));
+            for p in &tool.packages {
+                render_package(&mut s, "tool.package", p);
             }
         }
         s
     }
+}
+
+fn supported(version: u64) -> bool {
+    version == LOCK_VERSION || version == TOOLS_LOCK_VERSION
+}
+
+fn sorted(packages: &[ResolvedPackage]) -> Vec<ResolvedPackage> {
+    let mut packages = packages.to_vec();
+    packages.sort_by(|a, b| a.coord.cmp(&b.coord));
+    packages
+}
+
+fn render_package(s: &mut String, header: &str, p: &ResolvedPackage) {
+    let _ = writeln!(s, "\n[[{header}]]");
+    let _ = writeln!(s, "group = \"{}\"", p.coord.group);
+    let _ = writeln!(s, "artifact = \"{}\"", p.coord.artifact);
+    let _ = writeln!(s, "version = \"{}\"", p.coord.version);
+    if let Some(c) = &p.coord.classifier {
+        let _ = writeln!(s, "classifier = \"{c}\"");
+    }
+    let _ = writeln!(s, "classpath = \"{}\"", p.classpath.as_str());
+    let _ = writeln!(s, "packaging = \"{}\"", p.packaging);
+    let _ = writeln!(s, "depth = {}", p.depth);
+    let _ = writeln!(s, "direct = {}", p.direct);
+    if let Some(c) = &p.checksum {
+        let _ = writeln!(s, "checksum = \"{c}\"");
+    }
+    if !p.dependencies.is_empty() {
+        let _ = writeln!(s, "dependencies = {}", render_gas(&p.dependencies));
+    }
+}
+
+fn read_packages(table: &toml::Table, path: &Path) -> Result<Vec<ResolvedPackage>> {
+    table
+        .get("package")
+        .and_then(|v| v.as_array())
+        .map(|a| {
+            a.iter()
+                .map(|p| read_package(p, path))
+                .collect::<Result<Vec<_>>>()
+        })
+        .transpose()
+        .map(Option::unwrap_or_default)
 }
 
 fn read_gas(table: &toml::Table, key: &str) -> Vec<Ga> {
@@ -240,7 +349,10 @@ fn read_package(value: &toml::Value, path: &Path) -> Result<ResolvedPackage> {
 /// Digest the manifest fields that can change what resolution produces.
 ///
 /// Deliberately narrow: changing `main-class` or `javac-args` must not invalidate
-/// a perfectly good lockfile.
+/// a perfectly good lockfile. The implied runtime libraries count as the
+/// dependencies they are, and each language adds a `lang` line, since its
+/// compiler's pinned graph depends on the version. A Java-only manifest adds
+/// nothing, so its existing lockfile still matches.
 #[must_use]
 pub fn manifest_checksum(manifest: &Manifest) -> String {
     // The long form's extras are appended only when present, so a lockfile
@@ -256,7 +368,7 @@ pub fn manifest_checksum(manifest: &Manifest) -> String {
         s
     };
     let mut canonical = String::new();
-    for d in &manifest.dependencies {
+    for d in &manifest.effective_dependencies() {
         let _ = writeln!(canonical, "dep {}", line(d));
     }
     for d in &manifest.dev_dependencies {
@@ -264,6 +376,9 @@ pub fn manifest_checksum(manifest: &Manifest) -> String {
     }
     for r in &manifest.repositories {
         let _ = writeln!(canonical, "repo {} {}", r.name, r.url);
+    }
+    for c in &manifest.languages {
+        let _ = writeln!(canonical, "lang {} {}", c.language.key(), c.version);
     }
     format!("sha256:{}", sha256_hex(canonical.as_bytes()))
 }
@@ -396,6 +511,111 @@ mod tests {
         assert_ne!(manifest_checksum(&base), manifest_checksum(&added));
         assert_ne!(manifest_checksum(&base), manifest_checksum(&dev));
         assert_ne!(manifest_checksum(&base), manifest_checksum(&repo));
+    }
+
+    #[test]
+    fn the_checksum_follows_the_compiler_version() {
+        let java = manifest("[dependencies]\n'g:a'='1.0'");
+        let kotlin = manifest("[dependencies]\n'g:a'='1.0'\n[kotlin]\nversion='2.4.20'");
+        let newer = manifest("[dependencies]\n'g:a'='1.0'\n[kotlin]\nversion='2.4.21'");
+        let flags = manifest(
+            "[dependencies]\n'g:a'='1.0'\n[kotlin]\nversion='2.4.20'\nkotlinc-args=['-x']",
+        );
+        assert_ne!(manifest_checksum(&java), manifest_checksum(&kotlin));
+        assert_ne!(manifest_checksum(&kotlin), manifest_checksum(&newer));
+        assert_eq!(
+            manifest_checksum(&kotlin),
+            manifest_checksum(&flags),
+            "compiler flags do not change what is resolved"
+        );
+        // A Java manifest's checksum is what it was before languages existed:
+        // `dep`, `dev` and `repo` lines only.
+        let canonical = format!(
+            "dep g:a:1.0\nrepo central {}\n",
+            crate::manifest::CENTRAL_URL
+        );
+        assert_eq!(
+            manifest_checksum(&java),
+            format!("sha256:{}", sha256_hex(canonical.as_bytes()))
+        );
+    }
+
+    fn compiler_graph() -> Resolution {
+        Resolution {
+            packages: vec![
+                package(
+                    "org.jetbrains.kotlin:kotlin-compiler-embeddable:2.4.20",
+                    true,
+                    Classpath::Compile,
+                ),
+                package("g:child:2.0", false, Classpath::Compile),
+            ],
+            roots: vec![Ga::new(
+                "org.jetbrains.kotlin",
+                "kotlin-compiler-embeddable",
+            )],
+            ..Resolution::default()
+        }
+    }
+
+    #[test]
+    fn a_tool_graph_round_trips_in_a_version_2_lockfile() {
+        let m = manifest("[dependencies]\n'g:a'='1.0'\n[kotlin]\nversion='2.4.20'");
+        let lock = Lockfile::from_resolution(&m, &resolution())
+            .with_tool("kotlin-compiler", &compiler_graph());
+        assert_eq!(lock.version, TOOLS_LOCK_VERSION);
+        let text = lock.render();
+        assert!(text.contains("version = 2\n"), "{text}");
+        assert!(
+            text.contains("\n[[tool]]\nname = \"kotlin-compiler\"\n"),
+            "{text}"
+        );
+        assert!(text.contains("\n[[tool.package]]\n"), "{text}");
+
+        let again = Lockfile::parse(&text, Path::new("jrs.lock")).unwrap();
+        assert_eq!(again.version, TOOLS_LOCK_VERSION);
+        assert_eq!(again.packages.len(), 3, "the project's graph is untouched");
+        let tool = again.tool("kotlin-compiler").unwrap();
+        assert_eq!(tool.roots, compiler_graph().roots);
+        assert_eq!(tool.packages.len(), 2);
+        assert_eq!(tool.packages[0].checksum.as_deref(), Some("sha1:abc123"));
+        assert!(again.tool("scala-compiler").is_none());
+        assert_eq!(again.all_packages().count(), 5);
+        assert!(again.matches(&m));
+        assert_eq!(again.render(), text, "rendering is stable");
+    }
+
+    #[test]
+    fn a_lockfile_without_tools_stays_version_1() {
+        let m = manifest("[dependencies]\n'g:a'='1.0'");
+        let text = Lockfile::from_resolution(&m, &resolution()).render();
+        assert!(text.contains("version = 1\n"), "{text}");
+        assert!(!text.contains("[[tool"), "{text}");
+    }
+
+    #[test]
+    fn a_lockfile_missing_a_languages_compiler_does_not_match() {
+        let m = manifest("[dependencies]\n'g:a'='1.0'\n[kotlin]\nversion='2.4.20'");
+        let without = Lockfile::from_resolution(&m, &resolution());
+        assert!(!without.matches(&m), "the Kotlin compiler is not pinned");
+        assert!(
+            without
+                .with_tool("kotlin-compiler", &compiler_graph())
+                .matches(&m)
+        );
+    }
+
+    #[test]
+    fn a_newer_lockfile_version_is_refused() {
+        let err = Lockfile::parse("version = 3\n", Path::new("jrs.lock"))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("version 3 is not supported"), "{err}");
+        assert!(err.contains("jrs update"), "{err}");
+        let err = Lockfile::parse("version = 2\n[[tool]]\nroots = []\n", Path::new("jrs.lock"))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("[[tool]] is missing `name`"), "{err}");
     }
 
     #[test]

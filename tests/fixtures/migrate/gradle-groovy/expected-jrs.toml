@@ -1,0 +1,16 @@
+[project]
+name = "spock-app"
+version = "0.3.0"
+
+[java]
+source = 21
+
+[groovy]
+version = "4.0.27"
+
+[dependencies]
+"com.google.guava:guava" = "33.4.8-jre"
+
+[dev-dependencies]
+"org.apache.groovy:groovy" = "4.0.27"
+"org.spockframework:spock-core" = "2.3-groovy-4.0"

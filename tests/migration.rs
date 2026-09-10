@@ -66,9 +66,106 @@ fn the_gradle_kotlin_fixture_translates_exactly() {
     );
 }
 
+/// kotlin-maven-plugin at `${kotlin.version}`: the stdlib it implies is left
+/// out, `<jvmTarget>` becomes java.source, `src/main/kotlin` stays Kotlin's
+/// own root, and the Spring compiler plugin is reported.
+#[test]
+fn the_maven_kotlin_fixture_translates_exactly() {
+    let (migration, dir) = migrate_fixture("maven-kotlin");
+    assert_eq!(migration.source, Source::Maven);
+    assert_eq!(migration.manifest.render(None), expected(&dir));
+
+    let migrated = migration.report.migrated.join("\n");
+    assert!(migrated.contains("[kotlin] version = 2.2.0"), "{migrated}");
+    assert!(
+        migrated.contains("org.jetbrains.kotlin:kotlin-stdlib:2.2.0 — left out"),
+        "{migrated}"
+    );
+    assert!(migrated.contains("<jvmTarget>"), "{migrated}");
+    assert!(
+        migrated.contains("src/main/kotlin is [kotlin]'s own root"),
+        "{migrated}"
+    );
+
+    let skipped = migration.report.not_migrated.join("\n");
+    assert!(skipped.contains("`spring`"), "{skipped}");
+    assert!(
+        skipped.contains("compiler plugins are not supported yet"),
+        "{skipped}"
+    );
+    assert!(!skipped.contains("no plugin system"), "{skipped}");
+}
+
+/// scala-maven-plugin's `<scalaVersion>`, with the Scala 3 library it implies
+/// declared by hand beside it.
+#[test]
+fn the_maven_scala_fixture_translates_exactly() {
+    let (migration, dir) = migrate_fixture("maven-scala");
+    assert_eq!(migration.manifest.render(None), expected(&dir));
+
+    let migrated = migration.report.migrated.join("\n");
+    assert!(migrated.contains("[scala] version = 3.7.1"), "{migrated}");
+    assert!(
+        migrated.contains("org.scala-lang:scala3-library_3:3.7.1 — left out"),
+        "{migrated}"
+    );
+    let skipped = migration.report.not_migrated.join("\n");
+    assert!(!skipped.contains("no plugin system"), "{skipped}");
+}
+
+/// `kotlin("jvm")`, `kotlin("...")` modules, `jvmToolchain` and a Kotlin
+/// compiler plugin, in the Kotlin DSL.
+#[test]
+fn the_gradle_kotlin_language_fixture_translates_exactly() {
+    let (migration, dir) = migrate_fixture("gradle-kotlin");
+    assert_eq!(migration.source, Source::Gradle);
+    assert_eq!(migration.manifest.render(None), expected(&dir));
+
+    let migrated = migration.report.migrated.join("\n");
+    assert!(migrated.contains("java.jdk = 21"), "{migrated}");
+    assert!(
+        migrated.contains("org.jetbrains.kotlin:kotlin-stdlib:2.2.0 — left out"),
+        "{migrated}"
+    );
+    let review = migration.report.needs_review.join("\n");
+    assert!(review.contains("kotlin-test-junit5"), "{review}");
+    assert!(review.contains("capability"), "{review}");
+
+    let skipped = migration.report.not_migrated.join("\n");
+    assert!(skipped.contains("plugin.spring"), "{skipped}");
+    assert!(
+        skipped.contains("compiler plugins are not supported yet"),
+        "{skipped}"
+    );
+    assert!(!skipped.contains("no plugin system"), "{skipped}");
+}
+
+/// Groovy for Spock tests only: the version comes from the test dependency,
+/// and that dependency stays, since it is what keeps Groovy off the runtime.
+#[test]
+fn the_gradle_groovy_fixture_translates_exactly() {
+    let (migration, dir) = migrate_fixture("gradle-groovy");
+    assert_eq!(migration.manifest.render(None), expected(&dir));
+
+    let migrated = migration.report.migrated.join("\n");
+    assert!(migrated.contains("[groovy] version = 4.0.27"), "{migrated}");
+    assert!(!migrated.contains("left out"), "{migrated}");
+    let skipped = migration.report.not_migrated.join("\n");
+    assert!(!skipped.contains("no plugin system"), "{skipped}");
+}
+
 #[test]
 fn every_expected_manifest_is_a_manifest_jrs_can_read() {
-    for name in ["maven", "gradle", "maven-extras", "gradle-kts"] {
+    for name in [
+        "maven",
+        "gradle",
+        "maven-extras",
+        "gradle-kts",
+        "maven-kotlin",
+        "maven-scala",
+        "gradle-kotlin",
+        "gradle-groovy",
+    ] {
         let (migration, dir) = migrate_fixture(name);
         let text = migration.render_manifest();
         let parsed = Manifest::parse(&text, &dir.join("jrs.toml"), &dir).unwrap();

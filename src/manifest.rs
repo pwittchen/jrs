@@ -10,7 +10,9 @@
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
+use crate::compile::lang::{self, Language};
 use crate::error::{IoResultExt, JrsError, Result};
+use crate::resolve::coord::is_range;
 
 pub const MANIFEST_FILE: &str = "jrs.toml";
 pub const LOCK_FILE: &str = "jrs.lock";
@@ -148,6 +150,24 @@ pub struct PackageConfig {
     /// finds — ones reached only by reflection or `ServiceLoader`, such as
     /// `jdk.crypto.ec` for TLS.
     pub add_modules: Vec<String>,
+}
+
+/// `[kotlin]`, `[scala]` or `[groovy]`: the table's presence turns the
+/// language on, and its `version` pins the compiler (`JVM_LANGUAGES.md` §4.1).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LanguageConfig {
+    pub language: Language,
+    /// The compiler's version, and the implied runtime library's.
+    pub version: String,
+    /// An extra main source root: `src/main/<lang>` unless set.
+    pub source_dir: PathBuf,
+    /// An extra test source root: `src/test/<lang>` unless set.
+    pub test_dir: PathBuf,
+    /// `kotlinc-args`, `scalac-args` or `groovyc-args`, appended verbatim
+    /// after jrs's own flags.
+    pub compiler_args: Vec<String>,
+    /// `java` flags for the JVM the compiler runs in: heap and stack size.
+    pub compiler_jvm_args: Vec<String>,
 }
 
 /// A `{placeholder}` in a task's value, expanded by jrs before the process
@@ -532,6 +552,8 @@ pub struct Manifest {
     pub run: RunConfig,
     pub test: TestConfig,
     pub package: PackageConfig,
+    /// The languages turned on besides Java, in `Language::FOREIGN` order.
+    pub languages: Vec<LanguageConfig>,
     pub dependencies: Vec<Dependency>,
     pub dev_dependencies: Vec<Dependency>,
     /// User repositories in declaration order, with Central appended last.
@@ -586,6 +608,9 @@ const TOP_KEYS: &[&str] = &[
     "run",
     "test",
     "package",
+    "kotlin",
+    "scala",
+    "groovy",
     "dependencies",
     "dev-dependencies",
     "repositories",
@@ -780,6 +805,7 @@ impl Manifest {
             },
         };
 
+        let languages = parse_languages(&table, &mut warnings)?;
         let dependencies = parse_dependencies(&table, "dependencies")?;
         let dev_dependencies = parse_dependencies(&table, "dev-dependencies")?;
         if let Some(d) = dev_dependencies.iter().find(|d| d.compile_only) {
@@ -817,6 +843,7 @@ impl Manifest {
             run,
             test,
             package,
+            languages,
             dependencies,
             dev_dependencies,
             repositories,
@@ -824,6 +851,8 @@ impl Manifest {
             hooks,
             warnings,
         };
+        let language_warnings = check_languages(&manifest)?;
+        manifest.warnings.extend(language_warnings);
         // What needs the whole manifest at once: references between tasks,
         // cycles, and where a placeholder is available.
         let task_warnings = crate::task::check(&manifest)?;
@@ -835,6 +864,48 @@ impl Manifest {
     #[must_use]
     pub fn task(&self, name: &str) -> Option<&TaskDef> {
         self.tasks.iter().find(|t| t.name == name)
+    }
+
+    /// The table that turns `language` on, when the manifest has one.
+    #[must_use]
+    pub fn language(&self, language: Language) -> Option<&LanguageConfig> {
+        self.languages.iter().find(|c| c.language == language)
+    }
+
+    /// The runtime libraries the languages imply, each with its language:
+    /// the ones the manifest does not declare itself, in either table
+    /// (`JVM_LANGUAGES.md` §4.3). They are never written into `jrs.toml`.
+    #[must_use]
+    pub fn implied_dependencies(&self) -> Vec<(Dependency, Language)> {
+        let declared = |group: &str, artifact: &str| {
+            self.dependencies
+                .iter()
+                .chain(&self.dev_dependencies)
+                .any(|d| d.group == group && d.artifact == artifact && d.classifier.is_none())
+        };
+        let mut implied = Vec::new();
+        for config in &self.languages {
+            for (group, artifact) in config.language.runtime_libraries(&config.version) {
+                if !declared(group, artifact) {
+                    implied.push((
+                        Dependency::new(group, artifact, &config.version),
+                        config.language,
+                    ));
+                }
+            }
+        }
+        implied
+    }
+
+    /// `[dependencies]` as resolution sees them: the declared ones, then the
+    /// implied runtime libraries as if declared last. Each implied library is
+    /// then a direct dependency, and beats a transitive copy under
+    /// nearest-wins; a declared dependency still wins a tie at the same depth.
+    #[must_use]
+    pub fn effective_dependencies(&self) -> Vec<Dependency> {
+        let mut dependencies = self.dependencies.clone();
+        dependencies.extend(self.implied_dependencies().into_iter().map(|(d, _)| d));
+        dependencies
     }
 
     // ---- resolved paths ---------------------------------------------------
@@ -890,6 +961,10 @@ impl Manifest {
     /// Used by `jrs init` and `jrs migrate`; the output is deliberately
     /// hand-formatted, since a generated manifest is something a human reads.
     #[must_use]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one short block per table, in the order jrs.toml lists them"
+    )]
     pub fn render(&self, header: Option<&str>) -> String {
         let mut s = String::new();
         if let Some(h) = header {
@@ -948,6 +1023,35 @@ impl Manifest {
             }
             if let Some(v) = java.jdk {
                 let _ = writeln!(s, "jdk = {v}");
+            }
+        }
+        for config in &self.languages {
+            let key = config.language.key();
+            let _ = writeln!(s, "\n[{key}]");
+            let _ = writeln!(s, "version = {}", quote(&config.version));
+            for (name, value, default) in [
+                ("source-dir", &config.source_dir, format!("src/main/{key}")),
+                ("test-dir", &config.test_dir, format!("src/test/{key}")),
+            ] {
+                let value = to_slash(value);
+                if value != default {
+                    let _ = writeln!(s, "{name} = {}", quote(&value));
+                }
+            }
+            if !config.compiler_args.is_empty() {
+                let _ = writeln!(
+                    s,
+                    "{} = {}",
+                    config.language.args_key(),
+                    quote_list(&config.compiler_args)
+                );
+            }
+            if !config.compiler_jvm_args.is_empty() {
+                let _ = writeln!(
+                    s,
+                    "compiler-jvm-args = {}",
+                    quote_list(&config.compiler_jvm_args)
+                );
             }
         }
         if !self.run.jvm_args.is_empty() {
@@ -1013,6 +1117,7 @@ pub fn blank(name: &str, version: &str, root: &Path) -> Manifest {
         run: RunConfig::default(),
         test: TestConfig::default(),
         package: PackageConfig::default(),
+        languages: Vec::new(),
         dependencies: Vec::new(),
         dev_dependencies: Vec::new(),
         repositories: vec![Repository {
@@ -1023,6 +1128,120 @@ pub fn blank(name: &str, version: &str, root: &Path) -> Manifest {
         hooks: Hooks::default(),
         warnings: Vec::new(),
     }
+}
+
+// ---- languages -------------------------------------------------------------
+
+/// `[kotlin]`, `[scala]` and `[groovy]`, each on its own: a version the
+/// compiler can be pinned at, and the directories and flags.
+fn parse_languages(table: &toml::Table, warnings: &mut Vec<String>) -> Result<Vec<LanguageConfig>> {
+    let mut out = Vec::new();
+    for language in Language::FOREIGN {
+        let key = language.key();
+        let args_key = language.args_key();
+        let known = [
+            "version",
+            "source-dir",
+            "test-dir",
+            args_key.as_str(),
+            "compiler-jvm-args",
+        ];
+        let Some(t) = section(table, key, &known, warnings)? else {
+            continue;
+        };
+        let version = match t.get("version") {
+            Some(toml::Value::String(v)) if !v.trim().is_empty() => v.trim().to_string(),
+            Some(toml::Value::String(_)) => {
+                return Err(JrsError::manifest(format!(
+                    "`{key}.version` must not be empty"
+                )));
+            }
+            Some(_) => {
+                return Err(JrsError::manifest(format!(
+                    "`{key}.version` must be a version string"
+                )));
+            }
+            None => {
+                return Err(JrsError::manifest(format!(
+                    "[{key}] needs `{key}.version`: the {language} compiler to build with, which \
+                     is also the version of its runtime library\n\n    [{key}]\n    \
+                     version = \"{}\"",
+                    language.starter_version().unwrap_or_default()
+                )));
+            }
+        };
+        if is_range(&version) {
+            return Err(JrsError::manifest(format!(
+                "`{key}.version` is the range `{version}`; the compiler is pinned at an exact \
+                 version, like every dependency"
+            )));
+        }
+        language
+            .check_version(&version)
+            .map_err(|e| JrsError::manifest(format!("`{key}.version` is {version}: {e}")))?;
+        out.push(LanguageConfig {
+            language,
+            source_dir: path_or(t, "source-dir", &format!("src/main/{key}"), key)?,
+            test_dir: path_or(t, "test-dir", &format!("src/test/{key}"), key)?,
+            compiler_args: string_array(t, &args_key, key)?,
+            compiler_jvm_args: string_array(t, "compiler-jvm-args", key)?,
+            version,
+        });
+    }
+    Ok(out)
+}
+
+/// What the language tables mean for the rest of the manifest: the source
+/// encoding kotlinc can read, the `javac-args` Groovy's joint `javac` can be
+/// handed, and a declared runtime library at another version than its
+/// compiler.
+fn check_languages(manifest: &Manifest) -> Result<Vec<String>> {
+    let mut warnings = Vec::new();
+    for config in &manifest.languages {
+        let key = config.language.key();
+        match config.language {
+            Language::Kotlin => {
+                let encoding = manifest
+                    .java
+                    .encoding
+                    .to_ascii_uppercase()
+                    .replace('_', "-");
+                if encoding != "UTF-8" && encoding != "UTF8" {
+                    warnings.push(format!(
+                        "`java.encoding` is {}, but kotlinc reads sources as UTF-8 only; the \
+                         Kotlin sources are read as UTF-8",
+                        manifest.java.encoding
+                    ));
+                }
+            }
+            Language::Groovy => {
+                lang::groovy_javac_args(&manifest.java.javac_args).map_err(|e| {
+                    JrsError::manifest(format!(
+                        "`java.javac-args`: {e}\n\n\
+                         with [groovy] on, groovyc runs javac itself, and hands it these"
+                    ))
+                })?;
+            }
+            Language::Java | Language::Scala => {}
+        }
+        for (group, artifact) in config.language.runtime_libraries(&config.version) {
+            if let Some(d) = manifest
+                .dependencies
+                .iter()
+                .chain(&manifest.dev_dependencies)
+                .find(|d| d.group == group && d.artifact == artifact && d.classifier.is_none())
+                && d.version != config.version
+            {
+                warnings.push(format!(
+                    "`{group}:{artifact}` is declared at {}, but `{key}.version` is {}; \
+                     kotlinc and scalac reject a runtime library newer than themselves, so \
+                     keep the two in step",
+                    d.version, config.version
+                ));
+            }
+        }
+    }
+    Ok(warnings)
 }
 
 // ---- tasks and hooks -------------------------------------------------------
@@ -2084,5 +2303,172 @@ post-package = ["checksum"]
         assert!(!text.contains("[java]"));
         assert!(!text.contains("[repositories]"));
         assert!(text.contains("name = \"app\""));
+    }
+
+    #[test]
+    fn each_language_table_parses_and_round_trips() {
+        let m = with(
+            "[kotlin]\nversion = '2.4.20'\nkotlinc-args = ['-Xjsr305=strict']\n\
+             compiler-jvm-args = ['-Xmx2g']\n\
+             [scala]\nversion = '3.9.0'\nsource-dir = 'src/main/sc'\nscalac-args = ['-deprecation']\n\
+             [groovy]\nversion = '5.1.2'\ntest-dir = 'spec'\ngroovyc-args = ['--compile-static']\n",
+        )
+        .unwrap();
+        assert!(m.warnings.is_empty(), "{:?}", m.warnings);
+        let keys: Vec<&str> = m.languages.iter().map(|c| c.language.key()).collect();
+        assert_eq!(keys, ["kotlin", "scala", "groovy"]);
+        let kotlin = m.language(Language::Kotlin).unwrap();
+        assert_eq!(kotlin.version, "2.4.20");
+        assert_eq!(kotlin.source_dir, PathBuf::from("src/main/kotlin"));
+        assert_eq!(kotlin.test_dir, PathBuf::from("src/test/kotlin"));
+        assert_eq!(kotlin.compiler_args, ["-Xjsr305=strict"]);
+        assert_eq!(kotlin.compiler_jvm_args, ["-Xmx2g"]);
+        let scala = m.language(Language::Scala).unwrap();
+        assert_eq!(scala.source_dir, PathBuf::from("src/main/sc"));
+        assert_eq!(scala.compiler_args, ["-deprecation"]);
+        let groovy = m.language(Language::Groovy).unwrap();
+        assert_eq!(groovy.test_dir, PathBuf::from("spec"));
+
+        let text = m.render(None);
+        assert!(text.contains("[kotlin]\nversion = \"2.4.20\"\n"), "{text}");
+        assert!(
+            !text.contains("src/main/kotlin"),
+            "defaults stay out:\n{text}"
+        );
+        let again = parse(&text).unwrap();
+        assert_eq!(again.languages, m.languages);
+        assert!(!with("").unwrap().render(None).contains("[kotlin]"));
+    }
+
+    #[test]
+    fn a_language_table_needs_a_version_it_can_pin() {
+        let err = with("[kotlin]\n").unwrap_err().to_string();
+        assert!(err.contains("`kotlin.version`"), "{err}");
+        assert!(err.contains("version = \""), "{err}");
+        let err = with("[scala]\nversion = 3\n").unwrap_err().to_string();
+        assert!(
+            err.contains("`scala.version` must be a version string"),
+            "{err}"
+        );
+        let err = with("[groovy]\nversion = '[4.0,5.0)'\n")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("range"), "{err}");
+        let err = with("[kotlin]\nversion = '1.9.24'\n")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("Kotlin 2.0 or newer"), "{err}");
+        let err = with("[scala]\nversion = '2.12.18'\n")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("2.12 is not supported"), "{err}");
+        let err = with("[groovy]\nversion = '3.0.22'\n")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("Groovy 4.0 or newer"), "{err}");
+        let err = with("[kotlin]\nversion = '2.4.20'\nsource-dir = '../elsewhere'\n")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("`kotlin.source-dir`"), "{err}");
+    }
+
+    #[test]
+    fn unknown_language_keys_warn() {
+        let m = with("[kotlin]\nversion = '2.4.20'\nscalac-args = ['-x']\n").unwrap();
+        assert_eq!(m.warnings.len(), 1, "{:?}", m.warnings);
+        assert!(
+            m.warnings[0].contains("`kotlin.scalac-args`"),
+            "{:?}",
+            m.warnings
+        );
+    }
+
+    #[test]
+    fn the_runtime_library_is_implied_unless_declared() {
+        let m = with("[kotlin]\nversion = '2.4.20'\n[dependencies]\n'g:a' = '1'\n").unwrap();
+        let effective: Vec<String> = m
+            .effective_dependencies()
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+        assert_eq!(
+            effective,
+            ["g:a:1", "org.jetbrains.kotlin:kotlin-stdlib:2.4.20"],
+            "the implied library comes last"
+        );
+        assert_eq!(m.implied_dependencies()[0].1, Language::Kotlin);
+        assert!(
+            !m.render(None).contains("kotlin-stdlib"),
+            "an implied library is never written into jrs.toml"
+        );
+
+        // A declaration in either table replaces it, and a Java manifest
+        // implies nothing.
+        let dev = with(
+            "[groovy]\nversion = '5.1.2'\n[dev-dependencies]\n'org.apache.groovy:groovy' = '5.1.2'\n",
+        )
+        .unwrap();
+        assert!(dev.implied_dependencies().is_empty());
+        assert!(dev.effective_dependencies().is_empty());
+        let main =
+            with("[kotlin]\nversion = '2.4.20'\n[dependencies]\n'org.jetbrains.kotlin:kotlin-stdlib' = '2.4.20'\n")
+                .unwrap();
+        assert!(main.implied_dependencies().is_empty());
+        assert_eq!(main.effective_dependencies(), main.dependencies);
+        assert!(with("").unwrap().implied_dependencies().is_empty());
+
+        // Scala 3.8 split its library in two, and both are implied.
+        let scala = with("[scala]\nversion = '3.9.0'\n").unwrap();
+        let implied: Vec<String> = scala
+            .implied_dependencies()
+            .iter()
+            .map(|(d, _)| d.to_string())
+            .collect();
+        assert_eq!(
+            implied,
+            [
+                "org.scala-lang:scala3-library_3:3.9.0",
+                "org.scala-lang:scala-library:3.9.0"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_runtime_library_declared_at_another_version_warns() {
+        let m = with(
+            "[kotlin]\nversion = '2.4.20'\n[dependencies]\n'org.jetbrains.kotlin:kotlin-stdlib' = '2.5.0'\n",
+        )
+        .unwrap();
+        assert_eq!(m.warnings.len(), 1, "{:?}", m.warnings);
+        assert!(
+            m.warnings[0].contains("declared at 2.5.0"),
+            "{:?}",
+            m.warnings
+        );
+    }
+
+    #[test]
+    fn kotlin_reads_utf8_only() {
+        let m = with("[java]\nencoding = 'ISO-8859-1'\n[kotlin]\nversion = '2.4.20'\n").unwrap();
+        assert!(
+            m.warnings
+                .iter()
+                .any(|w| w.contains("kotlinc reads sources as UTF-8")),
+            "{:?}",
+            m.warnings
+        );
+        let m = with("[java]\nencoding = 'utf8'\n[kotlin]\nversion = '2.4.20'\n").unwrap();
+        assert!(m.warnings.is_empty(), "{:?}", m.warnings);
+    }
+
+    #[test]
+    fn javac_args_groovy_cannot_hand_on_are_a_manifest_error() {
+        let err =
+            with("[java]\njavac-args = ['-Xlint:all', 'oops']\n[groovy]\nversion = '5.1.2'\n")
+                .unwrap_err();
+        assert_eq!(err.exit_code(), 2);
+        assert!(err.to_string().contains("`oops`"), "{err}");
+        // Without [groovy], javac-args are javac's own business.
+        with("[java]\njavac-args = ['-Xlint:all', 'oops']\n").unwrap();
     }
 }
