@@ -348,6 +348,17 @@ impl Ui {
         }
     }
 
+    /// One line of a subprocess's output as it arrives, blank ones included.
+    ///
+    /// # Panics
+    ///
+    /// If a thread panicked while holding the renderer lock.
+    pub fn passthrough_line(&self, stream: Stream, line: &str) {
+        let mut renderer = self.inner.renderer.lock().unwrap();
+        renderer.clear_live();
+        renderer.permanent(stream, line);
+    }
+
     /// Tear the live region down. Called before anything writes to the terminal
     /// behind jrs's back — a subprocess inheriting stdio, or a diagnostic.
     ///

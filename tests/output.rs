@@ -6,7 +6,7 @@
 //! only moves when the test says so, then assert on the bytes.
 
 use jrs::ui::{
-    CharsetChoice, DownloadState, Geometry, Live, TestState, Transfer, Ui, UiOptions, When,
+    CharsetChoice, DownloadState, Geometry, Live, Stream, TestState, Transfer, Ui, UiOptions, When,
     glyphs::{self, Outcome},
 };
 
@@ -331,6 +331,85 @@ fn quiet_output_is_empty_until_something_goes_wrong() {
     assert_eq!(
         capture.stderr(),
         "error: compilation failed (47 source files)\n"
+    );
+}
+
+/// A build with a code-generating `pre-compile` task and a fresh
+/// `post-package` one, as `cli.rs` plays it.
+fn play_a_hooked_build(ui: &Ui) {
+    ui.phase("Task", "build-info (pre-compile)");
+    let scope = ui.spinner("Task", "build-info");
+    ui.render_frame();
+    ui.passthrough_line(Stream::Err, "generated BuildInfo 1.0.0");
+    ui.passthrough_line(Stream::Err, "");
+    ui.render_frame();
+    scope.finish();
+
+    ui.phase("Compiling", "my-app v1.0.0 (48 source files)");
+    let scope = ui.spinner("Compiling", "48 source files");
+    ui.render_frame();
+    scope.finish();
+
+    ui.phase("Packaging", "target/my-app-1.0.0.jar");
+    ui.phase("Fresh", "checksum (task)");
+    ui.phase("Finished", "package in 1.84s");
+}
+
+#[test]
+fn a_hooked_build_puts_its_task_lines_in_place() {
+    let (plain, plain_capture) =
+        Ui::captured(options(When::Never, CharsetChoice::Ascii), geometry(WIDTH));
+    play_a_hooked_build(&plain);
+    let transcript = concat!(
+        "        Task build-info (pre-compile)\n",
+        "generated BuildInfo 1.0.0\n",
+        "\n",
+        "   Compiling my-app v1.0.0 (48 source files)\n",
+        "   Packaging target/my-app-1.0.0.jar\n",
+        "       Fresh checksum (task)\n",
+        "    Finished package in 1.84s\n",
+    );
+    assert_eq!(plain_capture.stderr(), transcript);
+    assert_eq!(
+        plain_capture.stdout(),
+        "",
+        "a hook's output never reaches stdout"
+    );
+
+    // The animated run leaves the same scrollback, and the ASCII charset keeps
+    // it ASCII.
+    let (animated, animated_capture) =
+        Ui::captured(options(When::Always, CharsetChoice::Ascii), geometry(WIDTH));
+    play_a_hooked_build(&animated);
+    let raw = animated_capture.stderr();
+    assert!(raw.is_ascii(), "{raw:?}");
+    let text = plain_text(&raw);
+    for line in transcript.lines().filter(|l| !l.is_empty()) {
+        assert!(text.contains(line), "the animated run lost {line:?}");
+    }
+    assert!(raw.contains("        Task | build-info"), "no task spinner");
+}
+
+#[test]
+fn a_failing_hooks_output_lands_before_the_error_line() {
+    let (ui, capture) = Ui::captured(options(When::Always, CharsetChoice::Ascii), geometry(WIDTH));
+    ui.phase("Task", "fail (post-compile)");
+    let scope = ui.spinner("Task", "fail");
+    ui.render_frame();
+    ui.passthrough_line(Stream::Err, "boom from the hook");
+    ui.render_frame();
+    scope.finish();
+    ui.suspend();
+    ui.error("task `fail` failed (exit code 3)");
+
+    let raw = capture.stderr();
+    let output = raw.find("boom from the hook").unwrap();
+    let error = raw.find("error: task `fail` failed (exit code 3)").unwrap();
+    assert!(output < error, "{raw:?}");
+    let erase = raw[..output].rfind("\x1b[1A\x1b[0J").unwrap();
+    assert!(
+        erase < output,
+        "the task's output must land in a clean terminal"
     );
 }
 

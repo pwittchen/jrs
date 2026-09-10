@@ -584,6 +584,207 @@ pub fn run_streaming(
     Ok(code)
 }
 
+// ---- running tasks ---------------------------------------------------------
+
+/// How a task's process starts (TASKS.md §4.2).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Launch {
+    /// A program and its arguments, with no shell in between.
+    Exec { program: PathBuf, args: Vec<String> },
+    /// A string for `sh -c` on Unix and `cmd /C` on Windows; `args` become its
+    /// positional parameters.
+    Shell { script: String, args: Vec<String> },
+}
+
+impl Launch {
+    /// The command line, for `--verbose`.
+    #[must_use]
+    pub fn describe(&self) -> String {
+        match self {
+            Launch::Exec { program, args } => describe(program, args),
+            Launch::Shell { script, args } => {
+                let shell = if cfg!(windows) { "cmd /C" } else { "sh -c" };
+                let mut s = format!("{shell} {script}");
+                for a in args {
+                    s.push(' ');
+                    s.push_str(a);
+                }
+                s
+            }
+        }
+    }
+}
+
+/// One task process: what to start, where, and what to add to the inherited
+/// environment.
+#[derive(Debug, Clone, Copy)]
+pub struct TaskProcess<'a> {
+    pub name: &'a str,
+    pub launch: &'a Launch,
+    pub cwd: &'a Path,
+    pub env: &'a [(String, std::ffi::OsString)],
+}
+
+impl TaskProcess<'_> {
+    fn command(&self) -> Command {
+        let mut command = match self.launch {
+            Launch::Exec { program, args } => {
+                let mut c = Command::new(program);
+                c.args(args);
+                c
+            }
+            Launch::Shell { script, args } => shell_command(self.name, script, args),
+        };
+        command.current_dir(self.cwd);
+        for (key, value) in self.env {
+            command.env(key, value);
+        }
+        command
+    }
+
+    fn start_error(&self, e: &std::io::Error) -> JrsError {
+        let program = match self.launch {
+            Launch::Exec { program, .. } => program.display().to_string(),
+            Launch::Shell { .. } => (if cfg!(windows) { "cmd" } else { "sh" }).to_string(),
+        };
+        JrsError::build(format!(
+            "could not start task `{}`: {program}: {e}",
+            self.name
+        ))
+    }
+}
+
+#[cfg(not(windows))]
+fn shell_command(name: &str, script: &str, args: &[String]) -> Command {
+    // `$0` is the task's name, so the arguments are `$1`, `$2`, ... as they
+    // would be in a script.
+    let mut c = Command::new("sh");
+    c.arg("-c").arg(script).arg(name).args(args);
+    c
+}
+
+#[cfg(windows)]
+fn shell_command(_name: &str, script: &str, args: &[String]) -> Command {
+    use std::os::windows::process::CommandExt;
+    // `cmd` parses its own command line, so the string goes to it untouched:
+    // its quoting rules apply, not the ones Rust uses for other programs.
+    let mut line = script.to_string();
+    for a in args {
+        line.push(' ');
+        if a.is_empty() || a.contains([' ', '\t', '"']) {
+            line.push('"');
+            line.push_str(&a.replace('"', "\"\""));
+            line.push('"');
+        } else {
+            line.push_str(a);
+        }
+    }
+    let mut c = Command::new("cmd");
+    c.args(["/D", "/S", "/C"]).raw_arg(format!("\"{line}\""));
+    c
+}
+
+/// Find `name` in the directories of `path`, the way the OS would, so that a
+/// missing program can be reported with where jrs looked.
+#[must_use]
+pub fn find_program(name: &str, path: &OsStr) -> Option<PathBuf> {
+    let candidates: Vec<String> = if cfg!(windows) && Path::new(name).extension().is_none() {
+        let extensions =
+            std::env::var("PATHEXT").unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".to_string());
+        extensions
+            .split(';')
+            .filter(|e| !e.is_empty())
+            .map(|e| format!("{name}{}", e.to_ascii_lowercase()))
+            .collect()
+    } else {
+        vec![name.to_string()]
+    };
+    std::env::split_paths(path)
+        .flat_map(|dir| candidates.iter().map(move |c| dir.join(c)))
+        .find(|p| is_executable(p))
+}
+
+#[cfg(unix)]
+fn is_executable(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::metadata(path).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+}
+
+#[cfg(not(unix))]
+fn is_executable(path: &Path) -> bool {
+    path.is_file()
+}
+
+/// Run a task a hook or a `depends-on` reached: stdin closed, and stdout and
+/// stderr both forwarded to jrs's stderr line by line as they arrive, since
+/// stdout belongs to the command's own output (TASKS.md §9.3).
+///
+/// # Errors
+///
+/// [`JrsError::Build`] if the process cannot be started or waited for. A
+/// non-zero exit is not an error: the code is returned.
+pub fn run_task_streamed(ui: &Ui, process: &TaskProcess<'_>) -> Result<i32> {
+    use std::io::BufRead;
+
+    let mut command = process.command();
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = command.spawn().map_err(|e| process.start_error(&e))?;
+
+    // stderr gets its own thread, as in `run_streaming`, so that a full pipe
+    // on one stream cannot stall the other.
+    let stderr = child.stderr.take();
+    let forward = ui.clone();
+    let drain = std::thread::spawn(move || {
+        if let Some(e) = stderr {
+            for line in std::io::BufReader::new(e).split(b'\n') {
+                let Ok(line) = line else { break };
+                forward.passthrough_line(Stream::Err, &text_line(&line));
+            }
+        }
+    });
+    if let Some(stdout) = child.stdout.take() {
+        for line in std::io::BufReader::new(stdout).split(b'\n') {
+            let Ok(line) = line else { break };
+            ui.passthrough_line(Stream::Err, &text_line(&line));
+        }
+    }
+
+    let status = child
+        .wait()
+        .map_err(|e| JrsError::build(format!("task `{}` did not finish: {e}", process.name)))?;
+    let _ = drain.join();
+    let code = status.code().unwrap_or(-1);
+    ui.verbose(format!("task `{}` exited with {code}", process.name));
+    Ok(code)
+}
+
+/// Run the task named on `jrs task <name>` with the terminal handed to it, as
+/// `jrs run` does for the program.
+///
+/// # Errors
+///
+/// [`JrsError::Build`] if the process cannot be started. A non-zero exit is
+/// not an error: the code is returned.
+pub fn run_task_inherited(ui: &Ui, process: &TaskProcess<'_>) -> Result<i32> {
+    ui.suspend();
+    let status = process
+        .command()
+        .status()
+        .map_err(|e| process.start_error(&e))?;
+    let code = status.code().unwrap_or(-1);
+    ui.verbose(format!("task `{}` exited with {code}", process.name));
+    Ok(code)
+}
+
+/// One line of output, without its `\r` on Windows.
+fn text_line(bytes: &[u8]) -> String {
+    let text = String::from_utf8_lossy(bytes);
+    text.strip_suffix('\r').unwrap_or(&text).to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

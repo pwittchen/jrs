@@ -150,6 +150,367 @@ pub struct PackageConfig {
     pub add_modules: Vec<String>,
 }
 
+/// A `{placeholder}` in a task's value, expanded by jrs before the process
+/// starts (TASKS.md §5.1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Placeholder {
+    Root,
+    Target,
+    ProjectName,
+    ProjectVersion,
+    Classes,
+    TestClasses,
+    Classpath,
+    RuntimeClasspath,
+    TestClasspath,
+    ClasspathArgfile,
+    Jar,
+}
+
+impl Placeholder {
+    pub const ALL: [Placeholder; 11] = [
+        Placeholder::Root,
+        Placeholder::Target,
+        Placeholder::ProjectName,
+        Placeholder::ProjectVersion,
+        Placeholder::Classes,
+        Placeholder::TestClasses,
+        Placeholder::Classpath,
+        Placeholder::RuntimeClasspath,
+        Placeholder::TestClasspath,
+        Placeholder::ClasspathArgfile,
+        Placeholder::Jar,
+    ];
+
+    /// The name between the braces.
+    #[must_use]
+    pub fn name(self) -> &'static str {
+        match self {
+            Placeholder::Root => "root",
+            Placeholder::Target => "target",
+            Placeholder::ProjectName => "project.name",
+            Placeholder::ProjectVersion => "project.version",
+            Placeholder::Classes => "classes",
+            Placeholder::TestClasses => "test-classes",
+            Placeholder::Classpath => "classpath",
+            Placeholder::RuntimeClasspath => "runtime-classpath",
+            Placeholder::TestClasspath => "test-classpath",
+            Placeholder::ClasspathArgfile => "classpath-argfile",
+            Placeholder::Jar => "jar",
+        }
+    }
+
+    /// The ones whose value needs the resolved dependency graph.
+    #[must_use]
+    pub fn is_classpath(self) -> bool {
+        matches!(
+            self,
+            Placeholder::Classpath
+                | Placeholder::RuntimeClasspath
+                | Placeholder::TestClasspath
+                | Placeholder::ClasspathArgfile
+        )
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Segment {
+    Text(String),
+    Placeholder(Placeholder),
+}
+
+/// A string that may hold placeholders, parsed once when the manifest loads
+/// so that a typo fails then rather than as a baffling tool error.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Template {
+    /// As written in `jrs.toml`.
+    pub raw: String,
+    pub segments: Vec<Segment>,
+}
+
+impl Template {
+    /// Parse `raw`. `{{` and `}}` are literal braces.
+    ///
+    /// # Errors
+    ///
+    /// A message (without the key, which the caller knows) for an unknown
+    /// placeholder, an unclosed `{` or a stray `}`.
+    pub fn parse(raw: &str) -> std::result::Result<Template, String> {
+        let mut segments = Vec::new();
+        let mut text = String::new();
+        let mut chars = raw.chars().peekable();
+        while let Some(c) = chars.next() {
+            match c {
+                '{' if chars.peek() == Some(&'{') => {
+                    chars.next();
+                    text.push('{');
+                }
+                '}' if chars.peek() == Some(&'}') => {
+                    chars.next();
+                    text.push('}');
+                }
+                '{' => {
+                    let mut name = String::new();
+                    loop {
+                        match chars.next() {
+                            Some('}') => break,
+                            Some(ch) => name.push(ch),
+                            None => {
+                                return Err(format!(
+                                    "`{raw}` has an unclosed `{{`; write `{{{{` for a literal brace"
+                                ));
+                            }
+                        }
+                    }
+                    let placeholder = Placeholder::ALL
+                        .into_iter()
+                        .find(|p| p.name() == name)
+                        .ok_or_else(|| {
+                            let known: Vec<String> = Placeholder::ALL
+                                .iter()
+                                .map(|p| format!("`{{{}}}`", p.name()))
+                                .collect();
+                            format!(
+                                "unknown placeholder `{{{name}}}` (known: {})",
+                                known.join(", ")
+                            )
+                        })?;
+                    if !text.is_empty() {
+                        segments.push(Segment::Text(std::mem::take(&mut text)));
+                    }
+                    segments.push(Segment::Placeholder(placeholder));
+                }
+                '}' => {
+                    return Err(format!(
+                        "`{raw}` has a stray `}}`; write `}}}}` for a literal brace"
+                    ));
+                }
+                _ => text.push(c),
+            }
+        }
+        if !text.is_empty() {
+            segments.push(Segment::Text(text));
+        }
+        Ok(Template {
+            raw: raw.to_string(),
+            segments,
+        })
+    }
+
+    pub fn placeholders(&self) -> impl Iterator<Item = Placeholder> + '_ {
+        self.segments.iter().filter_map(|s| match s {
+            Segment::Placeholder(p) => Some(*p),
+            Segment::Text(_) => None,
+        })
+    }
+
+    /// Substitute every placeholder with what `value` says it is.
+    ///
+    /// # Errors
+    ///
+    /// Whatever `value` returns for a placeholder it cannot supply.
+    pub fn expand(&self, mut value: impl FnMut(Placeholder) -> Result<String>) -> Result<String> {
+        let mut out = String::new();
+        for segment in &self.segments {
+            match segment {
+                Segment::Text(t) => out.push_str(t),
+                Segment::Placeholder(p) => out.push_str(&value(*p)?),
+            }
+        }
+        Ok(out)
+    }
+}
+
+/// A built-in command a task may depend on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Builtin {
+    Build,
+    Test,
+    Package,
+    Doc,
+}
+
+impl Builtin {
+    #[must_use]
+    pub fn name(self) -> &'static str {
+        match self {
+            Builtin::Build => "build",
+            Builtin::Test => "test",
+            Builtin::Package => "package",
+            Builtin::Doc => "doc",
+        }
+    }
+
+    fn parse(s: &str) -> Option<Builtin> {
+        [
+            Builtin::Build,
+            Builtin::Test,
+            Builtin::Package,
+            Builtin::Doc,
+        ]
+        .into_iter()
+        .find(|b| b.name() == s)
+    }
+
+    /// The hooks this command fires, in the order it reaches them. Commands
+    /// include each other, so their hooks do too.
+    #[must_use]
+    pub fn hooks(self) -> &'static [Hook] {
+        match self {
+            Builtin::Build => &[Hook::PreCompile, Hook::PostCompile],
+            Builtin::Test => &[
+                Hook::PreCompile,
+                Hook::PostCompile,
+                Hook::PreTest,
+                Hook::PostTest,
+            ],
+            Builtin::Package => &[Hook::PreCompile, Hook::PostCompile, Hook::PostPackage],
+            Builtin::Doc => &[Hook::PreCompile],
+        }
+    }
+}
+
+/// One entry of a task's `depends-on`.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum TaskRef {
+    Task(String),
+    Builtin(Builtin),
+}
+
+impl std::fmt::Display for TaskRef {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            TaskRef::Task(name) => f.write_str(name),
+            TaskRef::Builtin(b) => f.write_str(b.name()),
+        }
+    }
+}
+
+/// A fixed point in a built-in command where `[hooks]` runs tasks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Hook {
+    PreCompile,
+    PostCompile,
+    PreTest,
+    PostTest,
+    PostPackage,
+    PreRun,
+}
+
+impl Hook {
+    pub const ALL: [Hook; 6] = [
+        Hook::PreCompile,
+        Hook::PostCompile,
+        Hook::PreTest,
+        Hook::PostTest,
+        Hook::PostPackage,
+        Hook::PreRun,
+    ];
+
+    #[must_use]
+    pub fn name(self) -> &'static str {
+        match self {
+            Hook::PreCompile => "pre-compile",
+            Hook::PostCompile => "post-compile",
+            Hook::PreTest => "pre-test",
+            Hook::PostTest => "post-test",
+            Hook::PostPackage => "post-package",
+            Hook::PreRun => "pre-run",
+        }
+    }
+}
+
+impl std::fmt::Display for Hook {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.name())
+    }
+}
+
+/// What a task runs: at most one of these.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Action {
+    /// An argument vector, no shell involved.
+    Run(Vec<Template>),
+    /// One string for `sh -c` / `cmd /C`. No placeholders: the shell expands
+    /// the `JRS_*` variables itself.
+    Shell(String),
+    /// A `.java` file for the JDK's single-file source launcher.
+    Script(Template),
+}
+
+/// `[tasks.<name>]`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TaskDef {
+    pub name: String,
+    pub description: Option<String>,
+    /// `None` for a task that only aggregates its `depends-on`.
+    pub action: Option<Action>,
+    pub args: Vec<Template>,
+    pub depends_on: Vec<TaskRef>,
+    /// In declaration order.
+    pub env: Vec<(String, Template)>,
+    pub cwd: Option<Template>,
+    pub inputs: Vec<Template>,
+    pub outputs: Vec<Template>,
+    pub source_outputs: Vec<Template>,
+    pub resource_outputs: Vec<Template>,
+}
+
+impl TaskDef {
+    /// Every template the task holds, with the key it came from.
+    pub fn templates(&self) -> impl Iterator<Item = (&'static str, &Template)> + '_ {
+        let action: Vec<(&'static str, &Template)> = match &self.action {
+            Some(Action::Run(argv)) => argv.iter().map(|t| ("run", t)).collect(),
+            Some(Action::Script(t)) => vec![("script", t)],
+            Some(Action::Shell(_)) | None => Vec::new(),
+        };
+        action
+            .into_iter()
+            .chain(self.args.iter().map(|t| ("args", t)))
+            .chain(self.env.iter().map(|(_, t)| ("env", t)))
+            .chain(self.cwd.iter().map(|t| ("cwd", t)))
+            .chain(self.path_templates())
+    }
+
+    /// The templates that name files or directories.
+    pub fn path_templates(&self) -> impl Iterator<Item = (&'static str, &Template)> + '_ {
+        self.inputs
+            .iter()
+            .map(|t| ("inputs", t))
+            .chain(self.outputs.iter().map(|t| ("outputs", t)))
+            .chain(self.source_outputs.iter().map(|t| ("source-outputs", t)))
+            .chain(
+                self.resource_outputs
+                    .iter()
+                    .map(|t| ("resource-outputs", t)),
+            )
+    }
+
+    #[must_use]
+    pub fn uses(&self, placeholder: Placeholder) -> bool {
+        self.templates()
+            .any(|(_, t)| t.placeholders().any(|p| p == placeholder))
+    }
+}
+
+/// `[hooks]`: for each lifecycle point, the tasks it runs, in order.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Hooks(Vec<(Hook, Vec<String>)>);
+
+impl Hooks {
+    #[must_use]
+    pub fn tasks(&self, hook: Hook) -> &[String] {
+        self.0
+            .iter()
+            .find(|(h, _)| *h == hook)
+            .map_or(&[], |(_, names)| names.as_slice())
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = (Hook, &[String])> + '_ {
+        self.0.iter().map(|(h, names)| (*h, names.as_slice()))
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Manifest {
     /// Absolute path to `jrs.toml`.
@@ -175,6 +536,9 @@ pub struct Manifest {
     pub dev_dependencies: Vec<Dependency>,
     /// User repositories in declaration order, with Central appended last.
     pub repositories: Vec<Repository>,
+    /// `[tasks]`, in declaration order.
+    pub tasks: Vec<TaskDef>,
+    pub hooks: Hooks,
 
     /// Non-fatal complaints, surfaced by the CLI after the manifest loads.
     pub warnings: Vec<String>,
@@ -202,6 +566,20 @@ const RUN_KEYS: &[&str] = &["jvm-args"];
 const TEST_KEYS: &[&str] = &["jvm-args", "jacoco-version"];
 const PACKAGE_KEYS: &[&str] = &["add-modules"];
 const DEPENDENCY_KEYS: &[&str] = &["version", "classifier", "exclusions", "compile-only"];
+const TASK_KEYS: &[&str] = &[
+    "description",
+    "run",
+    "shell",
+    "script",
+    "args",
+    "depends-on",
+    "env",
+    "cwd",
+    "inputs",
+    "outputs",
+    "source-outputs",
+    "resource-outputs",
+];
 const TOP_KEYS: &[&str] = &[
     "project",
     "java",
@@ -211,6 +589,33 @@ const TOP_KEYS: &[&str] = &[
     "dependencies",
     "dev-dependencies",
     "repositories",
+    "tasks",
+    "hooks",
+];
+
+/// Every `jrs` subcommand. A task may not take one of these names, so that
+/// `depends-on` is never ambiguous and a task can never shadow a command
+/// (`cli.rs` has a test that keeps this in step with the command tree).
+pub const RESERVED_TASK_NAMES: &[&str] = &[
+    "build",
+    "test",
+    "run",
+    "package",
+    "doc",
+    "clean",
+    "tree",
+    "classpath",
+    "update",
+    "verify",
+    "outdated",
+    "add",
+    "remove",
+    "cache",
+    "init",
+    "migrate",
+    "completions",
+    "task",
+    "help",
 ];
 
 impl Manifest {
@@ -302,6 +707,11 @@ impl Manifest {
         reason = "`test` is the `[test]` table, named like `run` and `package` beside it; \
                   `text` is the manifest source"
     )]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one short step per top-level table, in the order a reader of jrs.toml \
+                  meets them; each table's own parsing is already a helper"
+    )]
     pub fn parse(text: &str, path: &Path, root: &Path) -> Result<Manifest> {
         let table: toml::Table = toml::from_str(text).map_err(|e| {
             let where_ = e.span().map_or_else(
@@ -389,8 +799,10 @@ impl Manifest {
             }
         }
         let repositories = parse_repositories(&table)?;
+        let tasks = parse_tasks(&table, &mut warnings)?;
+        let hooks = parse_hooks(&table, &mut warnings)?;
 
-        Ok(Manifest {
+        let mut manifest = Manifest {
             path: path.to_path_buf(),
             root: root.to_path_buf(),
             name,
@@ -408,8 +820,21 @@ impl Manifest {
             dependencies,
             dev_dependencies,
             repositories,
+            tasks,
+            hooks,
             warnings,
-        })
+        };
+        // What needs the whole manifest at once: references between tasks,
+        // cycles, and where a placeholder is available.
+        let task_warnings = crate::task::check(&manifest)?;
+        manifest.warnings.extend(task_warnings);
+        Ok(manifest)
+    }
+
+    /// The task `[tasks.<name>]` declares.
+    #[must_use]
+    pub fn task(&self, name: &str) -> Option<&TaskDef> {
+        self.tasks.iter().find(|t| t.name == name)
     }
 
     // ---- resolved paths ---------------------------------------------------
@@ -594,8 +1019,206 @@ pub fn blank(name: &str, version: &str, root: &Path) -> Manifest {
             name: CENTRAL_NAME.into(),
             url: CENTRAL_URL.into(),
         }],
+        tasks: Vec::new(),
+        hooks: Hooks::default(),
         warnings: Vec::new(),
     }
+}
+
+// ---- tasks and hooks -------------------------------------------------------
+
+/// `[tasks.*]`, structurally: types, names, actions, environment names. What
+/// needs every task at once is `task::check`'s.
+fn parse_tasks(table: &toml::Table, warnings: &mut Vec<String>) -> Result<Vec<TaskDef>> {
+    let Some(value) = table.get("tasks") else {
+        return Ok(Vec::new());
+    };
+    let tasks = value
+        .as_table()
+        .ok_or_else(|| JrsError::manifest("`tasks` must be a table of `[tasks.<name>]` tables"))?;
+    let mut out = Vec::with_capacity(tasks.len());
+    for (name, value) in tasks {
+        let section = format!("tasks.{name}");
+        validate_task_name(name)?;
+        let t = value
+            .as_table()
+            .ok_or_else(|| JrsError::manifest(format!("`{section}` must be a table")))?;
+        warn_unknown(t, TASK_KEYS, &format!("{section}."), warnings);
+
+        let template = |key: &str, raw: &str| {
+            Template::parse(raw).map_err(|e| JrsError::manifest(format!("`{section}.{key}`: {e}")))
+        };
+        let templates = |key: &str| -> Result<Vec<Template>> {
+            string_array(t, key, &section)?
+                .iter()
+                .map(|raw| template(key, raw))
+                .collect()
+        };
+
+        let mut actions = Vec::new();
+        if t.contains_key("run") {
+            let argv = templates("run")?;
+            if argv.first().is_none_or(|p| p.raw.trim().is_empty()) {
+                return Err(JrsError::manifest(format!(
+                    "`{section}.run` must name a program: `run = [\"program\", \"arg\", ...]`"
+                )));
+            }
+            actions.push(("run", Action::Run(argv)));
+        }
+        if let Some(script) = optional_string(t, "shell", &section)? {
+            actions.push(("shell", Action::Shell(script)));
+        }
+        if let Some(file) = optional_string(t, "script", &section)? {
+            actions.push(("script", Action::Script(template("script", &file)?)));
+        }
+        if actions.len() > 1 {
+            let keys: Vec<String> = actions.iter().map(|(k, _)| format!("`{k}`")).collect();
+            return Err(JrsError::manifest(format!(
+                "`{section}` has {}; a task runs exactly one of `run`, `shell` or `script`",
+                keys.join(" and ")
+            )));
+        }
+        let action = actions.pop().map(|(_, a)| a);
+        let depends_on = parse_depends_on(t, &section)?;
+        if action.is_none() && depends_on.is_empty() {
+            return Err(JrsError::manifest(format!(
+                "`{section}` does nothing: give it one of `run`, `shell` or `script`, \
+                 or a `depends-on` list to run"
+            )));
+        }
+        let env = parse_task_env(t, &section)?;
+        let cwd = optional_string(t, "cwd", &section)?
+            .map(|raw| template("cwd", &raw))
+            .transpose()?;
+
+        let task = TaskDef {
+            name: name.clone(),
+            description: optional_string(t, "description", &section)?,
+            action,
+            args: templates("args")?,
+            depends_on,
+            env,
+            cwd,
+            inputs: templates("inputs")?,
+            outputs: templates("outputs")?,
+            source_outputs: templates("source-outputs")?,
+            resource_outputs: templates("resource-outputs")?,
+        };
+        for (key, t) in task
+            .path_templates()
+            .chain(task.cwd.iter().map(|t| ("cwd", t)))
+        {
+            if let Some(p) = t.placeholders().find(|p| p.is_classpath()) {
+                return Err(JrsError::manifest(format!(
+                    "`{section}.{key}`: `{{{}}}` is a classpath, not a path; it cannot \
+                     name a file or directory",
+                    p.name()
+                )));
+            }
+        }
+        out.push(task);
+    }
+    Ok(out)
+}
+
+/// `depends-on`: task names, and the built-ins a task may depend on.
+fn parse_depends_on(t: &toml::Table, section: &str) -> Result<Vec<TaskRef>> {
+    let mut depends_on = Vec::new();
+    for entry in string_array(t, "depends-on", section)? {
+        let reference = match Builtin::parse(&entry) {
+            Some(b) => TaskRef::Builtin(b),
+            None if RESERVED_TASK_NAMES.contains(&entry.as_str()) => {
+                return Err(JrsError::manifest(format!(
+                    "`{section}.depends-on`: `{entry}` is a command a task cannot depend on; \
+                     the built-ins a task can depend on are `build`, `test`, `package` and `doc`"
+                )));
+            }
+            None => TaskRef::Task(entry),
+        };
+        if depends_on.contains(&reference) {
+            return Err(JrsError::manifest(format!(
+                "`{section}.depends-on` names `{reference}` twice"
+            )));
+        }
+        depends_on.push(reference);
+    }
+    Ok(depends_on)
+}
+
+/// A task's `env` table, in declaration order. `JRS_*` names are jrs's.
+fn parse_task_env(t: &toml::Table, section: &str) -> Result<Vec<(String, Template)>> {
+    let Some(value) = t.get("env") else {
+        return Ok(Vec::new());
+    };
+    let vars = value
+        .as_table()
+        .ok_or_else(|| JrsError::manifest(format!("`{section}.env` must be a table of strings")))?;
+    let mut env = Vec::with_capacity(vars.len());
+    for (key, value) in vars {
+        let raw = value
+            .as_str()
+            .ok_or_else(|| JrsError::manifest(format!("`{section}.env.{key}` must be a string")))?;
+        if key.is_empty() || key.contains(['=', '\0']) {
+            return Err(JrsError::manifest(format!(
+                "`{section}.env`: `{key}` is not an environment variable name"
+            )));
+        }
+        if key.to_ascii_uppercase().starts_with("JRS_") {
+            return Err(JrsError::manifest(format!(
+                "`{section}.env.{key}`: names starting with `JRS_` are jrs's own, \
+                 and are set for every task"
+            )));
+        }
+        let template = Template::parse(raw)
+            .map_err(|e| JrsError::manifest(format!("`{section}.env.{key}`: {e}")))?;
+        env.push((key.clone(), template));
+    }
+    Ok(env)
+}
+
+fn validate_task_name(name: &str) -> Result<()> {
+    let well_formed = name.starts_with(|c: char| c.is_ascii_lowercase())
+        && name
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-');
+    if !well_formed {
+        return Err(JrsError::manifest(format!(
+            "`tasks.{name}`: a task name is lowercase letters, digits and `-`, \
+             starting with a letter"
+        )));
+    }
+    if RESERVED_TASK_NAMES.contains(&name) {
+        return Err(JrsError::manifest(format!(
+            "`tasks.{name}`: `{name}` is a jrs command, so it cannot be a task name"
+        )));
+    }
+    Ok(())
+}
+
+fn parse_hooks(table: &toml::Table, warnings: &mut Vec<String>) -> Result<Hooks> {
+    let Some(t) = section(table, "hooks", &[], &mut Vec::new())? else {
+        return Ok(Hooks::default());
+    };
+    let mut hooks = Vec::new();
+    for key in t.keys() {
+        if !Hook::ALL.iter().any(|h| h.name() == key) {
+            warnings.push(format!("unknown key `hooks.{key}` in jrs.toml (ignored)"));
+        }
+    }
+    for hook in Hook::ALL {
+        let names = string_array(t, hook.name(), "hooks")?;
+        for (i, name) in names.iter().enumerate() {
+            if names[..i].contains(name) {
+                return Err(JrsError::manifest(format!(
+                    "`hooks.{hook}` names `{name}` twice"
+                )));
+            }
+        }
+        if !names.is_empty() {
+            hooks.push((hook, names));
+        }
+    }
+    Ok(Hooks(hooks))
 }
 
 // ---- parsing helpers -------------------------------------------------------
@@ -1286,6 +1909,171 @@ version = "1"
         assert_eq!(again.dependencies, original.dependencies);
         assert_eq!(again.dev_dependencies, original.dev_dependencies);
         assert_eq!(again.repositories, original.repositories);
+    }
+
+    /// A manifest with nothing but `[project]` and `extra`.
+    fn with(extra: &str) -> Result<Manifest> {
+        parse(&format!("[project]\nname='a'\nversion='1'\n{extra}"))
+    }
+
+    const TASKS: &str = r#"
+[tasks.build-info]
+description = "Generate BuildInfo.java"
+script = "build/GenerateBuildInfo.java"
+args = ["{target}/generated/sources", "{project.version}"]
+inputs = ["build/GenerateBuildInfo.java", ".git/HEAD"]
+outputs = ["{target}/generated/sources"]
+source-outputs = ["{target}/generated/sources"]
+
+[tasks.checksum]
+shell = "shasum -a 256 \"$JRS_JAR\" > \"$JRS_JAR.sha256\""
+
+[tasks.format]
+run = ["google-java-format", "--replace"]
+env = { MODE = "ci" }
+cwd = "src"
+
+[tasks.release]
+depends-on = ["package", "checksum"]
+
+[hooks]
+pre-compile = ["build-info"]
+post-package = ["checksum"]
+"#;
+
+    #[test]
+    fn the_task_example_from_the_proposal_parses() {
+        let m = with(TASKS).unwrap();
+        assert!(m.warnings.is_empty(), "{:?}", m.warnings);
+        let names: Vec<&str> = m.tasks.iter().map(|t| t.name.as_str()).collect();
+        assert_eq!(names, ["build-info", "checksum", "format", "release"]);
+        assert!(matches!(m.tasks[0].action, Some(Action::Script(_))));
+        assert!(matches!(m.tasks[1].action, Some(Action::Shell(_))));
+        assert!(matches!(&m.tasks[2].action, Some(Action::Run(argv)) if argv.len() == 2));
+        assert_eq!(m.tasks[2].env[0].0, "MODE");
+        assert!(m.tasks[3].action.is_none(), "release only aggregates");
+        assert_eq!(
+            m.tasks[3].depends_on,
+            [
+                TaskRef::Builtin(Builtin::Package),
+                TaskRef::Task("checksum".into())
+            ]
+        );
+        assert_eq!(m.hooks.tasks(Hook::PreCompile), ["build-info"]);
+        assert_eq!(m.hooks.tasks(Hook::PostPackage), ["checksum"]);
+        assert!(m.hooks.tasks(Hook::PreRun).is_empty());
+        assert_eq!(m.task("format").unwrap().name, "format");
+    }
+
+    #[test]
+    fn a_task_runs_exactly_one_action_or_aggregates() {
+        let err = with("[tasks.t]\nrun = ['x']\nshell = 'y'\n").unwrap_err();
+        assert!(err.to_string().contains("`run` and `shell`"), "{err}");
+        let err = with("[tasks.t]\ndescription = 'nothing'\n").unwrap_err();
+        assert!(err.to_string().contains("`tasks.t` does nothing"), "{err}");
+        let err = with("[tasks.t]\nrun = []\n").unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("`tasks.t.run` must name a program"),
+            "{err}"
+        );
+        let err = with("[tasks.t]\nrun = 'x y'\n").unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("`tasks.t.run` must be an array of strings"),
+            "{err}"
+        );
+        let err = with("[tasks.t]\nshell = ['x']\n").unwrap_err();
+        assert!(err.to_string().contains("`tasks.t.shell`"), "{err}");
+    }
+
+    #[test]
+    fn task_names_are_lowercase_and_never_a_command() {
+        for name in ["Build", "1st", "under_score"] {
+            let err = with(&format!("[tasks.{name}]\nshell = 'x'\n")).unwrap_err();
+            assert!(
+                err.to_string().contains("lowercase letters"),
+                "{name}: {err}"
+            );
+        }
+        for name in ["build", "test", "task", "clean", "help"] {
+            let err = with(&format!("[tasks.{name}]\nshell = 'x'\n")).unwrap_err();
+            assert!(
+                err.to_string().contains("is a jrs command"),
+                "{name}: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn depends_on_takes_tasks_and_four_built_ins() {
+        let m = with("[tasks.t]\ndepends-on = ['build', 'test', 'package', 'doc']\n").unwrap();
+        assert_eq!(m.tasks[0].depends_on.len(), 4);
+        let err = with("[tasks.t]\ndepends-on = ['run']\n").unwrap_err();
+        assert!(err.to_string().contains("cannot depend on"), "{err}");
+        let err = with("[tasks.t]\ndepends-on = ['build', 'build']\n").unwrap_err();
+        assert!(err.to_string().contains("names `build` twice"), "{err}");
+    }
+
+    #[test]
+    fn unknown_task_and_hook_keys_warn() {
+        let m = with("[tasks.t]\nshell = 'x'\nretries = 3\n[hooks]\npre-deploy = ['t']\n").unwrap();
+        assert_eq!(m.warnings.len(), 2, "{:?}", m.warnings);
+        assert!(m.warnings.iter().any(|w| w.contains("`tasks.t.retries`")));
+        assert!(m.warnings.iter().any(|w| w.contains("`hooks.pre-deploy`")));
+    }
+
+    #[test]
+    fn jrs_environment_names_belong_to_jrs() {
+        for key in ["JRS_TASK", "jrs_mine"] {
+            let err = with(&format!(
+                "[tasks.t]\nshell = 'x'\nenv = {{ {key} = 'v' }}\n"
+            ))
+            .unwrap_err();
+            assert!(
+                err.to_string().contains(&format!("`tasks.t.env.{key}`")),
+                "{err}"
+            );
+        }
+        let err = with("[tasks.t]\nshell = 'x'\nenv = { A = 1 }\n").unwrap_err();
+        assert!(err.to_string().contains("must be a string"), "{err}");
+    }
+
+    #[test]
+    fn placeholders_are_checked_when_the_manifest_loads() {
+        let err = with("[tasks.t]\nshell = 'x'\nargs = ['{tagret}/out']\n").unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("`tasks.t.args`: unknown placeholder `{tagret}`"),
+            "{err}"
+        );
+        let err = with("[tasks.t]\nrun = ['x', '{root']\n").unwrap_err();
+        assert!(err.to_string().contains("unclosed"), "{err}");
+        let err = with("[tasks.t]\nrun = ['x', 'a}b']\n").unwrap_err();
+        assert!(err.to_string().contains("stray"), "{err}");
+        let err = with("[tasks.t]\nshell = 'x'\ninputs = ['{classpath}']\n").unwrap_err();
+        assert!(
+            err.to_string().contains("is a classpath, not a path"),
+            "{err}"
+        );
+        // A shell string is the shell's to expand: braces there are literal.
+        with("[tasks.t]\nshell = 'echo ${HOME} {not-a-placeholder}'\n").unwrap();
+    }
+
+    #[test]
+    fn a_template_splits_into_text_and_placeholders() {
+        let t = Template::parse("{root}/a-{{b}}-{jar}").unwrap();
+        assert_eq!(
+            t.segments,
+            [
+                Segment::Placeholder(Placeholder::Root),
+                Segment::Text("/a-{b}-".into()),
+                Segment::Placeholder(Placeholder::Jar),
+            ]
+        );
+        assert_eq!(t.raw, "{root}/a-{{b}}-{jar}");
+        let plain = Template::parse("no braces").unwrap();
+        assert_eq!(plain.segments, [Segment::Text("no braces".into())]);
     }
 
     #[test]

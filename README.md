@@ -19,8 +19,10 @@ build script to write.
 
 jrs is an experimental, single-module build system, not a replacement for Maven
 or Gradle. It implements a deliberately narrow subset of what those tools do —
-there is no plugin system, no multi-module reactor, and no custom build
-lifecycle. It is offered as-is under the Apache 2.0 licence; evaluate it against
+there is no plugin system, no build DSL and no multi-module reactor. A project's
+own build steps are [tasks](#tasks-and-hooks): commands jrs runs as
+subprocesses at fixed points in its lifecycle, which they cannot replace or
+reorder. It is offered as-is under the Apache 2.0 licence; evaluate it against
 your own requirements before adopting it for production builds.
 
 ## Features
@@ -38,6 +40,8 @@ your own requirements before adopting it for production builds.
 - Packaging to a plain jar, a portable jar with its `lib/`, a self-contained fat
   jar, a `jlink` runtime image or a `jpackage` installer
 - Running the project's main class directly, and rebuilding on every change
+- User-defined tasks and lifecycle hooks, for code generators, post-packaging
+  steps and chores, run with the project's JDK and classpath
 - Javadoc, dependency trees with `--why`, outdated-dependency reports, and
   `jrs add` / `jrs remove`
 - Parallel resolution, download and compilation
@@ -277,6 +281,8 @@ internal = "https://repo.example.com/maven2"
 | `jrs init [--lib] [--name <name>] [path]` | Scaffold `jrs.toml`, a starter class and its test. |
 | `jrs migrate` | Generate `jrs.toml` from an existing `pom.xml` or Gradle build. |
 | `jrs completions <bash\|zsh\|fish>` | Print a shell completion script. See [Shell completions](#shell-completions). |
+| `jrs task <name> [--watch] [-- args...]` | Run a task from `jrs.toml`, and whatever it depends on. See [Tasks and hooks](#tasks-and-hooks). |
+| `jrs task --list` | List the tasks, their descriptions and the hooks that run them. |
 
 Global flags: `-v/--verbose`, `-q/--quiet`, `--offline`, `-j/--jobs <n>`,
 `--manifest-path <p>`, `--progress <auto|always|never>`,
@@ -433,6 +439,91 @@ the JDK it picked.
 
 JUnit XML reports land in `target/test-reports`, where CI systems look for
 them. `[test] jvm-args` sets the test JVM's arguments.
+
+## Tasks and hooks
+
+A task is a command jrs runs for you: a code generator before `javac`, a
+checksum after the jar, a chore on demand. Tasks are declared in `jrs.toml`,
+and `[hooks]` attaches them to the build:
+
+```toml
+[tasks.build-info]
+description = "Generate BuildInfo.java"
+script = "build/GenerateBuildInfo.java"            # a Java file, run with the project's JDK
+args = ["{target}/generated/sources", "{project.version}"]
+inputs = ["build/GenerateBuildInfo.java"]
+outputs = ["{target}/generated/sources"]
+source-outputs = ["{target}/generated/sources"]    # compiled with the main sources
+
+[tasks.checksum]
+description = "Write a SHA-256 next to the jar"
+shell = "shasum -a 256 \"$JRS_JAR\" > \"$JRS_JAR.sha256\""
+
+[tasks.release]
+description = "Package, then checksum"
+depends-on = ["package", "checksum"]
+
+[hooks]
+pre-compile = ["build-info"]
+post-package = ["checksum"]
+```
+
+```
+jrs task release                # run a task, and whatever it depends on
+jrs task build-info --watch     # again whenever its inputs change
+jrs task --list                 # every task, its description and hooks
+```
+
+Each task has one action:
+
+- **`run`** is a program and its arguments, passed to the OS without a shell,
+  so it behaves the same everywhere. `java` in a task is the project's JDK.
+- **`shell`** is a string for `sh -c`, or `cmd /C` on Windows. Pipes and
+  redirects work, but it is **not portable**: the same string goes to a
+  different shell on each platform.
+- **`script`** is a `.java` file run with the project's JDK, no compile step
+  needed. It is the portable way to write build logic.
+
+A task with no action, like `release`, only runs its `depends-on`. That list
+names other tasks, or `build`, `test`, `package` and `doc`, which run as their
+commands would. Each task, and each built-in, runs at most once per command.
+
+| Hook | Runs |
+| --- | --- |
+| `pre-compile` | Before the main sources are compiled. For code generation. |
+| `post-compile` | After the main classes and resources are in `target/classes`. |
+| `pre-test` | Before the test sources are compiled. |
+| `post-test` | After the tests, if they passed. |
+| `post-package` | After the jar is written. |
+| `pre-run` | Before `jrs run` starts the program. |
+
+Commands include each other, so `jrs package` runs the compile hooks too. A
+hook runs every time its point is reached. A task that declares both `inputs`
+and `outputs` is skipped, printing `Fresh`, while neither has changed; a task
+without them always runs.
+
+Placeholders such as `{root}`, `{target}`, `{classes}`, `{project.version}`,
+`{classpath}` (what `jrs classpath` prints) and `{jar}` are expanded in `run`,
+`args`, `cwd` and `env`. `shell` strings use environment variables instead:
+`JRS_ROOT`, `JRS_CLASSPATH`, `JRS_JAR` and the rest, with `JAVA_HOME` set to
+the project's JDK; a `shell` task's `args` arrive as `$1`, `$2`…. The full list is in
+[SPEC §7.6](specs/INITIAL_SPEC.md#76-tasks-and-hooks).
+
+Generated sources and resources must live under `target-dir`, since `jrs
+clean` must never delete anything you wrote and watch mode must not rebuild on
+a generator's own output. `source-outputs` of a `pre-compile` task are compiled
+with the main sources, and those of a `pre-test` task with the tests.
+
+A hook or dependency that fails stops the build with exit code `1`, after its
+own output. `jrs task <name>` returns the task's own exit code, as `jrs run`
+returns the program's.
+
+**Tasks run code.** `jrs build` on a freshly cloned project runs whatever its
+`[hooks]` name, as `gradle build` or `npm install` would. Read a project's
+`jrs.toml` before building it if you do not trust it. `tree`, `classpath`,
+`update`, `verify`, `outdated`, `add`, `remove`, `cache`, `init`, `migrate`,
+`completions` and `clean` never run a task, so inspecting a project with them
+is always safe.
 
 ## Annotation processors
 

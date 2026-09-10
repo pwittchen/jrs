@@ -5,7 +5,8 @@ most of what this document used to list: Windows and macOS in CI, SNAPSHOT
 dependencies, the long dependency form, cache maintenance, JVM arguments, JDK
 pinning, watch mode, Javadoc, test reports and selection, JUnit 4, coverage,
 the portable layout, runtime images, `add`/`remove`/`outdated`, `tree` filters,
-`classpath`, `init` templates, shell completions and the M5 benchmark.
+`classpath`, `init` templates, shell completions, the M5 benchmark, and
+user-defined tasks and lifecycle hooks (SPEC §7.6).
 
 What is left is below. Anything that touches a [non-goal](specs/INITIAL_SPEC.md#12-non-goals)
 or adds a crate is a spec-level decision (see the last section) — it needs a
@@ -34,7 +35,14 @@ spec change before it needs code.
   "not migrated" block is a candidate for translation. Classifiers, exclusions,
   `provided`/`compileOnly`, test-jars, annotation processors, Surefire's
   `argLine` and Gradle's JVM arguments now translate; profiles, `system` scope
-  and anything computed still do not.
+  and anything computed still do not. An `exec-maven-plugin` execution bound
+  to `generate-sources` would map cleanly onto a `pre-compile` task
+  ([TASKS.md §12](specs/TASKS.md#12-open-questions)).
+- **Task tool dependencies (T3).** Java tools from Maven Central —
+  `google-java-format`, Checkstyle, Flyway — as a task's own dependencies,
+  resolved as a graph separate from the project's and pinned in `jrs.lock`
+  ([TASKS.md §8](specs/TASKS.md#8-tool-dependencies-a-later-milestone)). Deferred
+  until tasks and hooks have seen real use; it changes the lockfile format.
 
 ## 4. Needs a spec decision first
 

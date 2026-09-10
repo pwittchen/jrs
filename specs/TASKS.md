@@ -3,11 +3,15 @@
 Design proposal for user-defined tasks and build hooks, in the spirit of
 Gradle's `tasks.register` / `dependsOn` / `doLast`, but declarative and small.
 
-Status: **proposal**. This crosses a line drawn in [SPEC §1.2](INITIAL_SPEC.md#12-non-goals)
-("plugin systems, custom task graphs, or a build DSL"), so per
-[ROADMAP §4](../ROADMAP.md#4-needs-a-spec-decision-first) it needs an INITIAL_SPEC.md
-change before it needs code. §2 below is that argument; §10 lists the exact
-INITIAL_SPEC.md edits it implies.
+Status: **T1 and T2 implemented; T3 (tool dependencies, §8) is not.** This
+crossed a line drawn in [SPEC §1.2](INITIAL_SPEC.md#12-non-goals) ("plugin
+systems, custom task graphs, or a build DSL"), so per
+[ROADMAP §4](../ROADMAP.md#4-needs-a-spec-decision-first) it needed an
+INITIAL_SPEC.md change before it needed code. §2 below is that argument; §10
+lists the INITIAL_SPEC.md edits, which have been made. This document is kept as
+the design record, corrected where the implementation settled a detail
+differently; [SPEC §7.6](INITIAL_SPEC.md#76-tasks-and-hooks) is the condensed
+contract.
 
 ---
 
@@ -134,7 +138,7 @@ Three concepts, no more:
 | `run` | one of | — | Argument vector: program, then arguments. No shell involved. |
 | `shell` | one of | — | One string, run by `sh -c` (Unix) or `cmd /C` (Windows). |
 | `script` | one of | — | A `.java` file, run with the project's JDK in source-launcher mode. |
-| `args` | no | `[]` | Extra arguments, for `script` (and appended to `run`). |
+| `args` | no | `[]` | Extra arguments: appended to `run`, passed to the `script`, and a `shell` string's positional parameters (`$1`…). |
 | `depends-on` | no | `[]` | Task names, or `build` / `test` / `package` / `doc`. |
 | `env` | no | `{}` | Extra environment variables, name → string. |
 | `cwd` | no | project root | Working directory, relative to the root. |
@@ -235,10 +239,15 @@ task table or in `[hooks]` are warnings. At parse time, before anything runs:
   fires that hook: `pre-compile = ["x"]` with `x` depending on `build` is a
   cycle through the built-in, reported as one;
 - `source-outputs` and `resource-outputs` outside `target-dir` are an error
-  (§7 says why);
+  (§7 says why); on a task no `pre-compile` or `pre-test` hook reaches they
+  are a warning, and ignored;
 - `env` may not set names starting with `JRS_` — those are jrs's (§5.2);
 - an unknown `{placeholder}` (§5.1) is an error, not an empty string, so typos
-  fail at parse time rather than as a baffling tool error.
+  fail at parse time rather than as a baffling tool error;
+- a classpath placeholder in a path-valued key (`cwd`, `inputs`, `outputs`,
+  `source-outputs`, `resource-outputs`) is an error;
+- `{jar}` in a task reachable from any hook other than `post-package` is an
+  error, unless the task depends on `package`.
 
 Tasks do **not** feed `manifest-checksum` in `jrs.lock`, because they don't
 change resolution. Adding a task does not re-resolve. (§8 is the exception.)
@@ -260,13 +269,13 @@ badly.
 | `{root}` | Project root (absolute). |
 | `{target}` | `project.target-dir` (absolute). |
 | `{project.name}`, `{project.version}` | From `[project]`. |
-| `{classes}` | `target/classes`. |
-| `{test-classes}` | `target/test-classes`. |
-| `{classpath}` | Compile classpath, joined with the platform separator. |
-| `{runtime-classpath}` | Runtime classpath (no `compile-only`). |
-| `{test-classpath}` | Test classpath, as `jrs classpath --test` prints it. |
+| `{classes}` | `target/classes` (absolute). |
+| `{test-classes}` | `target/test-classes` (absolute). |
+| `{classpath}` | Exactly what `jrs classpath` prints: `target/classes`, then the compile jars, joined with the platform separator. |
+| `{runtime-classpath}` | Exactly what `jrs classpath --runtime` prints (no `compile-only`). |
+| `{test-classpath}` | Exactly what `jrs classpath --test` prints. |
 | `{classpath-argfile}` | Path to an argfile holding `-cp <compile classpath>`, for `java @{classpath-argfile}`. |
-| `{jar}` | The packaged jar. Only valid in tasks run by `post-package` or depending on `package`. |
+| `{jar}` | The packaged jar. Only valid once `package` has run in the same invocation: in `post-package`, or in a task that depends on `package`. |
 | `{{`, `}}` | Literal braces. |
 
 `{classpath-argfile}` exists because of the "argfiles, not command lines" rule:
@@ -276,11 +285,20 @@ in an argument vector is exactly how you'd hit that. The argfile goes in
 
 A placeholder whose value is not available at the point the task runs — `{jar}`
 in a `pre-compile` task — is a manifest error when it can be decided
-statically, which with a fixed hook set it can.
+statically: `{jar}` in a task reachable from any hook other than
+`post-package`, unless the task depends on `package`. What cannot be decided
+statically is checked when the task runs: `jrs task checksum` on its own, with
+`checksum` using `{jar}` but not depending on `package`, is a build error
+telling the user to add `package` to `depends-on`.
+
+Classpath placeholders are refused in the path-valued keys (`cwd`, `inputs`,
+`outputs`, `source-outputs`, `resource-outputs`); a classpath is not a path.
 
 Classpath placeholders trigger dependency resolution if nothing else has: a
 standalone `jrs task` that mentions `{classpath}` resolves (lockfile-first, as
-always) but does not compile.
+always) but does not compile. `shell` tasks get no placeholders, but a `shell`
+string that mentions `JRS_CLASSPATH` or `JRS_RUNTIME_CLASSPATH` triggers
+resolution the same way.
 
 ### 5.2 Environment
 
@@ -295,7 +313,7 @@ Every task inherits jrs's environment, plus:
 | `JRS_ROOT`, `JRS_TARGET_DIR`, `JRS_CLASSES_DIR` | As the placeholders. |
 | `JRS_PROJECT_NAME`, `JRS_PROJECT_VERSION` | As the placeholders. |
 | `JRS_CLASSPATH`, `JRS_RUNTIME_CLASSPATH` | When dependencies have been resolved. |
-| `JRS_JAR` | In `post-package`. |
+| `JRS_JAR` | Once `package` has run in the same invocation, as `{jar}`. |
 | `JRS_OFFLINE` | `1` under `--offline`, so a task can honour it. |
 | `SOURCE_DATE_EPOCH` | `315532800` (1980-01-01), the timestamp jrs's own jars use. |
 
@@ -344,7 +362,11 @@ directory to the main compile unit's source list, alongside `project.source-dir`
 record-keeping as `src/main/resources` (SPEC §7.3).
 
 For a `pre-test` task the same keys feed the **test** compile unit and
-`target/test-classes` instead.
+`target/test-classes` instead; a task both hooks reach runs once, in
+`pre-compile`, and feeds the main unit. "A `pre-compile` task" means any task the
+`pre-compile` hook reaches, directly or through `depends-on`; likewise for
+`pre-test`. On a task that neither hook reaches, `source-outputs` and
+`resource-outputs` are ignored, with a manifest warning.
 
 Why generated directories must live under `target-dir`:
 
@@ -425,23 +447,30 @@ jrs task --list                 list tasks, their descriptions and hooks
   (`sh -c '<script>' <name> args…` → `$1…`; `%*` under `cmd`).
 - `--list` writes to **stdout**, since it is the command's real output, like
   `jrs tree`. Shell tasks are marked `(sh)`.
-- `jrs task` works with `--watch`: rerun whenever the task's `inputs`, the
-  manifest or the source trees change. Same loop as `build --watch`.
+- `jrs task` works with `--watch`: rerun whenever any task's `inputs`, the
+  manifest or the source trees change. Same loop as `build --watch`, which,
+  like `test --watch`, now also watches the `inputs` of every task. Nothing
+  under `target-dir` is ever watched.
 
 ### 9.2 Ordering
 
 - `depends-on` and hooks together form a DAG over tasks plus the built-in
-  commands. It is ordered topologically, with ties broken by **manifest
-  declaration order** — the same tie-break nearest-wins mediation uses, and the
-  reason `manifest.rs` already parses a `toml::Table` by hand (a `serde` derive
-  would lose that order).
+  commands. Ties are broken by **declaration order**, which concretely means:
+  `depends-on` entries run in the order the list names them, depth-first,
+  each one's dependencies before it; and a hook's tasks run in the order the
+  hook lists them. Order is kept because `manifest.rs` already parses a
+  `toml::Table` by hand (a `serde` derive would lose it).
 - Each task runs **at most once per invocation**, however many paths reach it.
+  So does each built-in: `build` in the `depends-on` of a task hooked into
+  `jrs test` does not build a second time.
 - Tasks run **serially** in v1. Parallel tasks would interleave output, which
   the verbatim-passthrough rule cannot untangle, and the tasks this is for are
   few and short. `--jobs` doesn't apply to them.
 - A built-in in `depends-on` runs as that command would, hooks included:
   `depends-on = ["package"]` runs `pre-compile`, `post-compile` and
-  `post-package` hooks.
+  `post-package` hooks. It does not print that command's `Finished` line or
+  summary box, which belong to the command actually invoked. `test` runs with
+  no filters, and `package` builds the plain thin jar.
 
 ### 9.3 Output
 
@@ -498,6 +527,11 @@ project with `jrs tree` or `jrs classpath` is always safe.
 ---
 
 ## 10. INITIAL_SPEC.md changes
+
+Applied along with T1 and T2. §1.2's code-generation bullet was also narrowed
+to "built-in code generators", since a generator can now run as a task; §5.1
+gained `jrs task <name> --watch` and §5.3.2 the `Fresh <name> (task)` line;
+§7.5 notes that task inputs are watched; §12's M7 records T3 as deferred.
 
 1. **§1.2**, replace the first bullet with:
    > - Plugin systems or a build DSL (Groovy/Kotlin/XML). Configuration is
@@ -563,8 +597,8 @@ Following CLAUDE.md's test layout:
   rejected with the key named; unknown task keys warn; built-in names refused
   as task names; `source-outputs` outside `target-dir` rejected; `JRS_` env
   rejected.
-- **Unit (`task.rs`)**: topological order with declaration-order ties; each
-  task once on a diamond; cycle messages name the path; the
+- **Unit (`task.rs`)**: `depends-on` and hook entries run in list order; each
+  task, and each built-in, once on a diamond; cycle messages name the path; the
   hook-through-built-in cycle; placeholder expansion and `{{`/`}}` escapes;
   unknown and unavailable placeholders rejected; fingerprint changes with an
   input's mtime, the argv, an env value, a snapshot jar's size.

@@ -85,6 +85,12 @@ Project + Classpath ──► compile ──► target/classes ──► package
 `dependencies()` (lockfile or fresh resolution → cache lookup → downloads) then
 `javac` with a staleness check, then a resource copy.
 
+User-defined tasks (`[tasks]`, `[hooks]`, SPEC §7.6) are planned in `task.rs`:
+ordering, cycle checks, placeholder expansion, the environment and fingerprints.
+`Session` in `cli.rs` fires the hooks at their fixed points and emits the
+`Task`/`Fresh` phase lines. Tasks are subprocesses; nothing a user writes runs
+inside jrs, and the built-in phases cannot be reordered.
+
 ### Layer boundaries that must hold
 
 These are the invariants the codebase is organised around; breaking one is a design
@@ -99,8 +105,8 @@ regression, not a style nit.
 - **Errors are values.** One `JrsError` enum (`error.rs`); library code never prints,
   and only the CLI layer renders. Exit codes: `0` ok, `1` build/test failure, `2` usage
   or manifest error. No `unwrap()` outside `#[cfg(test)]`.
-- **`ui` depends on nothing; `manifest`/`project`/`resolve` know nothing about
-  terminals.** The dependency arrows point one way, toward `cli`.
+- **`ui` depends on nothing; `manifest`/`project`/`resolve`/`task` know nothing
+  about terminals.** The dependency arrows point one way, toward `cli`.
 - **`target/` is fully disposable.** Nothing is written there that cannot be
   regenerated, so `jrs clean` can never lose user data. `target/.jrs/` is jrs's own
   scratch space (argfiles, fingerprints).

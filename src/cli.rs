@@ -5,8 +5,9 @@
 //! depends on holds here too: phase lines are emitted here, and the live scopes
 //! only add motion, so `--progress never` produces the same transcript.
 
-use std::cell::OnceCell;
+use std::cell::{OnceCell, RefCell};
 use std::collections::{HashMap, HashSet};
+use std::ffi::OsString;
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -21,7 +22,9 @@ use crate::edit;
 use crate::error::{IoResultExt, JrsError, Result, exit};
 use crate::image;
 use crate::lockfile::Lockfile;
-use crate::manifest::{self, Dependency, MANIFEST_FILE, Manifest, Repository};
+use crate::manifest::{
+    self, Builtin, Dependency, Hook, MANIFEST_FILE, Manifest, Repository, TaskDef, TaskRef,
+};
 use crate::migrate;
 use crate::package::{self, JarManifest};
 use crate::project::{self, Project, Snapshot};
@@ -31,6 +34,7 @@ use crate::resolve::metadata;
 use crate::resolve::repo::{Fetcher, Network};
 use crate::resolve::{self, Classpath, Resolution, UiReporter};
 use crate::runner;
+use crate::task;
 use crate::test as junit;
 use crate::toolchain::{self, Toolchain};
 use crate::ui::{self, CharsetChoice, Style, TreeNode, Ui, UiOptions, When};
@@ -180,6 +184,9 @@ pub enum Command {
     /// Generate API documentation into target/doc with javadoc.
     Doc,
 
+    /// Run a task from jrs.toml's [tasks], after whatever it depends on.
+    Task(TaskArgs),
+
     /// Remove the target directory.
     Clean,
 
@@ -280,6 +287,22 @@ pub enum Command {
 }
 
 #[derive(Debug, Args)]
+pub struct TaskArgs {
+    /// The task, as `[tasks.<name>]` names it.
+    #[arg(value_name = "NAME", required_unless_present = "list")]
+    pub name: Option<String>,
+    /// List the tasks, their descriptions and the hooks that run them.
+    #[arg(long, conflicts_with = "name")]
+    pub list: bool,
+    /// Run the task again whenever its inputs, a source or jrs.toml changes.
+    #[arg(long, conflicts_with = "list")]
+    pub watch: bool,
+    /// Arguments appended to the task's own command line, after `--`.
+    #[arg(last = true, value_name = "ARGS")]
+    pub args: Vec<String>,
+}
+
+#[derive(Debug, Default, Args)]
 pub struct TestArgs {
     /// Only run classes matching this regular expression.
     #[arg(long, value_name = "PATTERN")]
@@ -301,7 +324,7 @@ pub struct TestArgs {
     pub watch: bool,
 }
 
-#[derive(Debug, Args)]
+#[derive(Debug, Default, Args)]
 pub struct PackageArgs {
     /// Unpack every runtime dependency into the jar.
     #[arg(long, conflicts_with = "portable")]
@@ -360,6 +383,30 @@ pub fn main() -> i32 {
     }
 }
 
+/// Run one command line against a `Ui` the caller made, and return the exit
+/// code. This is how the integration tests drive whole commands — hooks and
+/// all — through a captured `Ui`, without spawning the binary.
+pub fn run_with<I, T>(args: I, ui: &Ui) -> i32
+where
+    I: IntoIterator<Item = T>,
+    T: Into<OsString> + Clone,
+{
+    let cli = match Cli::try_parse_from(args) {
+        Ok(cli) => cli,
+        Err(e) => {
+            ui.error(e.to_string().trim_end());
+            return exit::USAGE;
+        }
+    };
+    match dispatch(&cli, ui) {
+        Ok(code) => code,
+        Err(error) => {
+            report(ui, &error);
+            error.exit_code()
+        }
+    }
+}
+
 /// The live region comes down before any diagnostic is printed.
 fn report(ui: &Ui, error: &JrsError) {
     ui.suspend();
@@ -394,6 +441,7 @@ fn dispatch(cli: &Cli, ui: &Ui) -> Result<i32> {
         )]
         Command::Build { watch: true } => return watch(cli, ui, |s| s.build_command()),
         Command::Test(args) if args.watch => return watch(cli, ui, |s| s.test_command(args)),
+        Command::Task(args) if args.watch => return watch(cli, ui, |s| s.task_command(args)),
         _ => {}
     }
 
@@ -404,6 +452,7 @@ fn dispatch(cli: &Cli, ui: &Ui) -> Result<i32> {
         Command::Run { args } => session.run_command(args),
         Command::Package(args) => session.package_command(args),
         Command::Doc => session.doc_command(),
+        Command::Task(args) => session.task_command(args),
         Command::Clean => session.clean_command(),
         Command::Tree { depth, why } => session.tree_command(*depth, why.as_deref()),
         Command::Classpath { test, runtime } => session.classpath_command(*test, *runtime),
@@ -430,7 +479,9 @@ fn manifest_path(cli: &Cli) -> Result<PathBuf> {
 }
 
 /// One command's worth of state: the manifest, the user's configuration, the
-/// UI, and the clock.
+/// UI, and the clock — and what has already happened, since a task and a
+/// built-in command each run at most once per invocation, however many hooks
+/// and `depends-on` lists reach them.
 struct Session<'a> {
     manifest: Manifest,
     ui: &'a Ui,
@@ -439,6 +490,14 @@ struct Session<'a> {
     offline: bool,
     started: Instant,
     toolchain: OnceCell<Toolchain>,
+    resolution: OnceCell<Resolution>,
+    built: OnceCell<Built>,
+    /// Tasks already run (or found fresh) in this invocation.
+    ran: RefCell<HashSet<String>>,
+    /// Built-ins a `depends-on` has already run.
+    done: RefCell<HashSet<Builtin>>,
+    /// The jar, once `package` has written it.
+    jar: RefCell<Option<PathBuf>>,
 }
 
 impl<'a> Session<'a> {
@@ -459,6 +518,11 @@ impl<'a> Session<'a> {
             offline: cli.global.offline,
             started: Instant::now(),
             toolchain: OnceCell::new(),
+            resolution: OnceCell::new(),
+            built: OnceCell::new(),
+            ran: RefCell::new(HashSet::new()),
+            done: RefCell::new(HashSet::new()),
+            jar: RefCell::new(None),
         })
     }
 
@@ -488,15 +552,18 @@ impl<'a> Session<'a> {
         Ok(self.toolchain.get_or_init(|| toolchain).clone())
     }
 
-    /// What `--watch` keeps an eye on.
+    /// What `--watch` keeps an eye on: the manifest, the source trees, and
+    /// every task's inputs outside the target directory.
     fn watched_paths(&self) -> Vec<PathBuf> {
-        vec![
+        let mut paths = vec![
             self.manifest.path.clone(),
             self.manifest.source_path(),
             self.manifest.resource_path(),
             self.manifest.test_path(),
             self.manifest.test_resource_path(),
-        ]
+        ];
+        paths.extend(task::watched_inputs(&self.manifest));
+        paths
     }
 
     // ---- commands ---------------------------------------------------------
@@ -528,6 +595,7 @@ impl<'a> Session<'a> {
     fn run_command(&self, args: &[String]) -> Result<i32> {
         let main_class = self.manifest.require_main_class("run")?.to_string();
         let built = self.build()?;
+        self.hook(Hook::PreRun)?;
         let toolchain = self.toolchain()?;
 
         let mut classpath = vec![self.project().classes_dir()];
@@ -550,6 +618,17 @@ impl<'a> Session<'a> {
     }
 
     fn package_command(&self, args: &PackageArgs) -> Result<i32> {
+        let mut rows = self.package(args)?;
+        self.ui
+            .phase("Finished", format!("build in {}", self.elapsed()));
+        rows.push(("time", self.elapsed()));
+        self.ui.summary(&rows);
+        Ok(exit::SUCCESS)
+    }
+
+    /// Build, write the jar (and any image), then the `post-package` hook.
+    /// Returns the summary rows.
+    fn package(&self, args: &PackageArgs) -> Result<Vec<(&'static str, String)>> {
         let images = args.jlink || args.jpackage.is_some();
         if images {
             // An image starts its application with `java -jar`.
@@ -652,11 +731,9 @@ impl<'a> Session<'a> {
             rows.extend(self.images(args, &output, portable.then_some(lib_dir.as_path()))?);
         }
 
-        self.ui
-            .phase("Finished", format!("build in {}", self.elapsed()));
-        rows.push(("time", self.elapsed()));
-        self.ui.summary(&rows);
-        Ok(exit::SUCCESS)
+        *self.jar.borrow_mut() = Some(output);
+        self.hook(Hook::PostPackage)?;
+        Ok(rows)
     }
 
     /// `--jlink` and `--jpackage`: runtime images of the packaged jar.
@@ -741,11 +818,32 @@ impl<'a> Session<'a> {
     }
 
     fn test_command(&self, args: &TestArgs) -> Result<i32> {
+        let Some(outcome) = self.test(args)? else {
+            return Ok(exit::SUCCESS);
+        };
+        self.ui.phase(
+            "Finished",
+            format!("{} in {}", outcome.describe(), self.elapsed()),
+        );
+        if outcome.ok() {
+            Ok(exit::SUCCESS)
+        } else {
+            // The launcher already printed the failures verbatim; do not restate
+            // them, only say that the run failed.
+            Err(JrsError::test("tests failed"))
+        }
+    }
+
+    /// Build, compile the tests, run them, then — only if they passed — the
+    /// `post-test` hook. `None` when there are no tests to run.
+    fn test(&self, args: &TestArgs) -> Result<Option<junit::TestOutcome>> {
         let built = self.build()?;
+        self.hook(Hook::PreTest)?;
         let project = self.project();
         let toolchain = self.toolchain()?;
 
-        let sources = project.test_sources()?;
+        let generated = task::generated(&self.manifest, Hook::PreTest)?;
+        let sources = with_generated(project.test_sources()?, &generated.sources)?;
         if sources.is_empty() {
             self.ui.phase(
                 "Testing",
@@ -754,7 +852,7 @@ impl<'a> Session<'a> {
                     self.manifest.test_path().display()
                 ),
             );
-            return Ok(exit::SUCCESS);
+            return Ok(None);
         }
 
         // Tests compile against the main classes plus the test classpath.
@@ -787,6 +885,7 @@ impl<'a> Session<'a> {
             &project.test_classes_dir(),
             &project.work_dir().join("resources-test.list"),
         )?;
+        self.sync_generated(&generated.resources, &project.test_classes_dir(), "test")?;
 
         // The launcher, and JaCoCo when coverage is on, are internal
         // dependencies: resolved by jrs, never on the user's own classpath.
@@ -843,17 +942,10 @@ impl<'a> Session<'a> {
             self.coverage_report(&project, &toolchain, exec, &fetched[2])?;
         }
 
-        self.ui.phase(
-            "Finished",
-            format!("{} in {}", outcome.describe(), self.elapsed()),
-        );
         if outcome.ok() {
-            Ok(exit::SUCCESS)
-        } else {
-            // The launcher already printed the failures verbatim; do not restate
-            // them, only say that the run failed.
-            Err(JrsError::test("tests failed"))
+            self.hook(Hook::PostTest)?;
         }
+        Ok(Some(outcome))
     }
 
     /// Fetch jrs's own test-time tools, announcing the ones not cached yet.
@@ -913,11 +1005,24 @@ impl<'a> Session<'a> {
     }
 
     fn doc_command(&self) -> Result<i32> {
+        let index = self.doc()?;
+        self.ui.phase(
+            "Finished",
+            format!("{} in {}", index.display(), self.elapsed()),
+        );
+        Ok(exit::SUCCESS)
+    }
+
+    /// Document the main sources, generated ones included, so the
+    /// `pre-compile` hook runs first. Returns the index page.
+    fn doc(&self) -> Result<PathBuf> {
         let toolchain = self.toolchain()?;
         let javadoc = toolchain.tool("javadoc")?;
-        let resolution = self.dependencies(false)?;
+        let resolution = self.resolved()?;
+        self.hook(Hook::PreCompile)?;
         let project = self.project();
-        let sources = project.main_sources()?;
+        let generated = task::generated(&self.manifest, Hook::PreCompile)?;
+        let sources = with_generated(project.main_sources()?, &generated.sources)?;
         if sources.is_empty() {
             return Err(JrsError::build(format!(
                 "no .java files under {} to document",
@@ -949,15 +1054,7 @@ impl<'a> Session<'a> {
         let result = compile::javadoc(&javadoc, &unit, self.ui);
         scope.finish();
         result?;
-        self.ui.phase(
-            "Finished",
-            format!(
-                "{} in {}",
-                unit.output_dir.join("index.html").display(),
-                self.elapsed()
-            ),
-        );
-        Ok(exit::SUCCESS)
+        Ok(unit.output_dir.join("index.html"))
     }
 
     fn tree_command(&self, depth: Option<usize>, why: Option<&str>) -> Result<i32> {
@@ -1219,13 +1316,23 @@ impl<'a> Session<'a> {
         })
     }
 
-    /// Resolve, download, compile, copy resources.
+    /// Resolve, download, run the `pre-compile` hook, compile, copy resources,
+    /// run the `post-compile` hook. Once per invocation: a second call returns
+    /// the first build.
     fn build(&self) -> Result<Built> {
+        if let Some(built) = self.built.get() {
+            return Ok(built.clone());
+        }
         let toolchain = self.toolchain()?;
-        let resolution = self.dependencies(false)?;
+        let resolution = self.resolved()?;
         let project = self.project();
 
-        let sources = project.main_sources()?;
+        // Code generators run before the source tree is globbed, so what they
+        // write is compiled with the rest — and a project whose sources are
+        // all generated still builds.
+        self.hook(Hook::PreCompile)?;
+        let generated = task::generated(&self.manifest, Hook::PreCompile)?;
+        let sources = with_generated(project.main_sources()?, &generated.sources)?;
         if sources.is_empty() {
             return Err(JrsError::build(format!(
                 "no .java files under {}\n\n\
@@ -1284,6 +1391,8 @@ impl<'a> Session<'a> {
             self.ui
                 .verbose(format!("removed {} deleted resources", synced.removed));
         }
+        self.sync_generated(&generated.resources, &project.classes_dir(), "main")?;
+        self.hook(Hook::PostCompile)?;
 
         let classes = match outcome {
             compile::Outcome::Compiled { classes } => classes,
@@ -1292,9 +1401,249 @@ impl<'a> Session<'a> {
             }
         };
 
-        Ok(Built {
+        let built = Built {
             resolution,
             classes,
+        };
+        Ok(self.built.get_or_init(|| built).clone())
+    }
+
+    /// Mirror generated resource directories into `to`, each with its own
+    /// record of what it put there, as `src/main/resources` has (SPEC §7.3).
+    fn sync_generated(&self, dirs: &[PathBuf], to: &Path, unit: &str) -> Result<()> {
+        let work_dir = self.project().work_dir();
+        for (i, dir) in dirs.iter().enumerate() {
+            let record = work_dir.join(format!("resources-{unit}-generated-{i}.list"));
+            let synced = project::sync_resources(dir, to, &record)?;
+            if synced.copied + synced.removed > 0 {
+                self.ui.verbose(format!(
+                    "{}: copied {}, removed {}",
+                    dir.display(),
+                    synced.copied,
+                    synced.removed
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// The resolved graph, once per invocation: every phase and task that
+    /// needs it shares one resolution.
+    fn resolved(&self) -> Result<Resolution> {
+        if let Some(resolution) = self.resolution.get() {
+            return Ok(resolution.clone());
+        }
+        let resolution = self.dependencies(false)?;
+        Ok(self.resolution.get_or_init(|| resolution).clone())
+    }
+
+    // ---- tasks and hooks --------------------------------------------------
+
+    fn task_command(&self, args: &TaskArgs) -> Result<i32> {
+        let Some(name) = args.name.as_deref().filter(|_| !args.list) else {
+            return Ok(self.task_list());
+        };
+        if self.manifest.task(name).is_none() {
+            return Err(JrsError::usage(format!(
+                "there is no task `{name}` in {}\n\n`jrs task --list` shows the tasks there are",
+                self.manifest.path.display()
+            )));
+        }
+        let plan = task::plan(&self.manifest, &[TaskRef::Task(name.to_string())]);
+        // The named task comes last; what it depends on runs as a hook's
+        // tasks do, and only the named one gets the terminal.
+        for step in plan
+            .iter()
+            .filter(|s| **s != TaskRef::Task(name.to_string()))
+        {
+            self.step(step, None)?;
+        }
+        let code = match self.manifest.task(name) {
+            Some(def) if self.ran.borrow_mut().insert(name.to_string()) => {
+                self.run_task(def, None, Some(&args.args))?
+            }
+            _ => exit::SUCCESS,
+        };
+        if code == exit::SUCCESS {
+            self.ui
+                .phase("Finished", format!("task {name} in {}", self.elapsed()));
+        } else {
+            self.ui
+                .phase("Finished", format!("task {name} exited with {code}"));
+        }
+        Ok(code)
+    }
+
+    /// `jrs task --list`, on stdout: it is the command's real output.
+    fn task_list(&self) -> i32 {
+        let lines = task::list(&self.manifest);
+        if lines.is_empty() {
+            self.ui.phase(
+                "Finished",
+                format!("{} declares no [tasks]", self.manifest.path.display()),
+            );
+            return exit::SUCCESS;
+        }
+        self.ui.suspend();
+        for line in lines {
+            self.ui.println_out(line);
+        }
+        exit::SUCCESS
+    }
+
+    /// Run the tasks a lifecycle point names, and what they depend on. Every
+    /// time the point is reached, whether or not `javac` had anything to do:
+    /// skipping work is a task's own business, through its inputs and outputs.
+    fn hook(&self, hook: Hook) -> Result<()> {
+        let roots: Vec<TaskRef> = self
+            .manifest
+            .hooks
+            .tasks(hook)
+            .iter()
+            .map(|name| TaskRef::Task(name.clone()))
+            .collect();
+        for step in task::plan(&self.manifest, &roots) {
+            self.step(&step, Some(hook))?;
+        }
+        Ok(())
+    }
+
+    /// One step of a plan: a built-in runs as its command would, hooks
+    /// included; a task runs unless it already has. Either fails the command
+    /// when it fails.
+    fn step(&self, step: &TaskRef, hook: Option<Hook>) -> Result<()> {
+        match step {
+            TaskRef::Builtin(builtin) => self.builtin(*builtin),
+            TaskRef::Task(name) => {
+                if !self.ran.borrow_mut().insert(name.clone()) {
+                    return Ok(());
+                }
+                let Some(def) = self.manifest.task(name) else {
+                    return Ok(());
+                };
+                match self.run_task(def, hook, None)? {
+                    exit::SUCCESS => Ok(()),
+                    // Its output has been passed through already; this only
+                    // says which task it was.
+                    code => Err(JrsError::build(format!(
+                        "task `{name}` failed (exit code {code})"
+                    ))),
+                }
+            }
+        }
+    }
+
+    /// A built-in named in a `depends-on`: the command's work and its hooks,
+    /// without its `Finished` line and summary.
+    fn builtin(&self, builtin: Builtin) -> Result<()> {
+        if !self.done.borrow_mut().insert(builtin) {
+            return Ok(());
+        }
+        match builtin {
+            Builtin::Build => {
+                self.build()?;
+            }
+            Builtin::Test => {
+                if let Some(outcome) = self.test(&TestArgs::default())?
+                    && !outcome.ok()
+                {
+                    return Err(JrsError::test(format!(
+                        "tests failed ({})",
+                        outcome.describe()
+                    )));
+                }
+            }
+            Builtin::Package => {
+                self.package(&PackageArgs::default())?;
+            }
+            Builtin::Doc => {
+                self.doc()?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Run one task and return its exit code. `named` carries the arguments
+    /// of `jrs task <name> -- ...`: that task gets the terminal, like `jrs run`;
+    /// any other task has its output streamed to stderr.
+    fn run_task(&self, def: &TaskDef, hook: Option<Hook>, named: Option<&[String]>) -> Result<i32> {
+        if def.action.is_none() {
+            return Ok(exit::SUCCESS);
+        }
+        let toolchain = self.toolchain()?;
+        let classpaths = if task::needs_classpath(def) || self.resolution.get().is_some() {
+            Some(self.classpaths()?)
+        } else {
+            None
+        };
+        let jar = self.jar.borrow().clone();
+        let path = std::env::var_os("PATH");
+        let ctx = task::Context {
+            manifest: &self.manifest,
+            toolchain: &toolchain,
+            hook,
+            classpaths: classpaths.as_ref(),
+            jar: jar.as_deref(),
+            offline: self.offline,
+            path: path.as_deref(),
+        };
+        let prepared = task::prepare(def, &ctx, named.unwrap_or_default())?;
+        if prepared.is_fresh() {
+            self.ui.phase("Fresh", format!("{} (task)", def.name));
+            return Ok(exit::SUCCESS);
+        }
+
+        match hook {
+            Some(hook) => self.ui.phase("Task", format!("{} ({hook})", def.name)),
+            None => self.ui.phase("Task", &def.name),
+        }
+        self.ui.verbose(prepared.launch.describe());
+        self.ui.verbose(format!("in {}", prepared.cwd.display()));
+        for (key, value) in prepared.env.iter().filter(|(k, _)| k != "PATH") {
+            self.ui
+                .verbose(format!("{key}={}", value.to_string_lossy()));
+        }
+        let process = toolchain::TaskProcess {
+            name: &def.name,
+            launch: &prepared.launch,
+            cwd: &prepared.cwd,
+            env: &prepared.env,
+        };
+        let code = if named.is_some() {
+            toolchain::run_task_inherited(self.ui, &process)?
+        } else {
+            let scope = self.ui.spinner("Task", &def.name);
+            let code = toolchain::run_task_streamed(self.ui, &process);
+            scope.finish();
+            code?
+        };
+        if code == exit::SUCCESS {
+            prepared.record()?;
+        } else {
+            prepared.forget();
+        }
+        Ok(code)
+    }
+
+    /// The classpaths a task can name, as `jrs classpath` prints them — with
+    /// absolute class directories, since a task may run somewhere else.
+    fn classpaths(&self) -> Result<task::Classpaths> {
+        let resolution = self.resolved()?;
+        let project = self.project();
+        let absolute = |p: PathBuf| std::path::absolute(&p).unwrap_or(p);
+        let classes = absolute(project.classes_dir());
+        let test_classes = absolute(project.test_classes_dir());
+        let with = |dirs: Vec<PathBuf>, jars: Vec<PathBuf>| dirs.into_iter().chain(jars).collect();
+        Ok(task::Classpaths {
+            compile: with(
+                vec![classes.clone()],
+                resolution.classpath(Classpath::Compile),
+            ),
+            runtime: with(vec![classes.clone()], resolution.runtime_classpath()),
+            test: with(
+                vec![test_classes, classes],
+                resolution.classpath(Classpath::Test),
+            ),
         })
     }
 
@@ -1493,9 +1842,18 @@ impl<'a> Session<'a> {
     }
 }
 
+#[derive(Clone)]
 struct Built {
     resolution: Resolution,
     classes: usize,
+}
+
+/// A compile unit's sources: the tree's, then each generated directory's.
+fn with_generated(mut sources: Vec<PathBuf>, generated: &[PathBuf]) -> Result<Vec<PathBuf>> {
+    for dir in generated {
+        sources.extend(project::find_by_extension(dir, "java")?);
+    }
+    Ok(sources)
 }
 
 /// `14      3 downloaded`, for the summary.
@@ -2079,8 +2437,37 @@ mod tests {
             vec!["jrs", "init", "--lib"],
             vec!["jrs", "migrate"],
             vec!["jrs", "completions", "zsh"],
+            vec!["jrs", "task", "--list"],
+            vec!["jrs", "task", "format"],
+            vec!["jrs", "task", "format", "--watch"],
+            vec!["jrs", "task", "format", "--", "--check", "src"],
         ] {
             assert!(Cli::try_parse_from(&args).is_ok(), "{args:?} did not parse");
+        }
+    }
+
+    #[test]
+    fn a_task_takes_arguments_after_a_double_dash() {
+        match parse(&["jrs", "task", "format", "--", "--verbose", "-q"]).command {
+            Command::Task(t) => {
+                assert_eq!(t.name.as_deref(), Some("format"));
+                assert_eq!(t.args, vec!["--verbose", "-q"]);
+            }
+            other => panic!("expected task, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn no_task_can_take_a_command_name() {
+        // A task named like a command would make `depends-on` ambiguous and
+        // could shadow a future built-in, so the manifest refuses every name in
+        // this list — which must keep up with the command tree.
+        for command in Cli::command().get_subcommands() {
+            let name = command.get_name();
+            assert!(
+                manifest::RESERVED_TASK_NAMES.contains(&name),
+                "`{name}` is a command but not a reserved task name"
+            );
         }
     }
 
@@ -2092,6 +2479,9 @@ mod tests {
             vec!["jrs", "add", "--dev", "--compile-only", "g:a"],
             vec!["jrs", "add"],
             vec!["jrs", "completions", "powershell"],
+            vec!["jrs", "task"],
+            vec!["jrs", "task", "format", "--list"],
+            vec!["jrs", "task", "--list", "--watch"],
         ] {
             assert!(Cli::try_parse_from(&args).is_err(), "{args:?} parsed");
         }

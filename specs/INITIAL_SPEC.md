@@ -5,7 +5,7 @@ It expands the capability list from [README.md](README.md) into a concrete scope
 so that implementation can start from agreed contracts instead of ad-hoc decisions.
 
 Status: **implemented** — every milestone in the [Roadmap](#12-roadmap) has
-landed. The document still describes the design rather than the code, so where
+landed, except the tool dependencies M7 defers. The document still describes the design rather than the code, so where
 the two differ the code is authoritative; the deliberate divergences are listed
 in [§12.1](#121-where-the-implementation-diverges), and the decisions taken on
 [Open questions](#13-open-questions) are recorded there.
@@ -27,13 +27,16 @@ in [§12.1](#121-where-the-implementation-diverges), and the decisions taken on
 
 ### 1.2 Non-goals
 
-- Plugin systems, custom task graphs, or a build DSL (Groovy/Kotlin/XML).
-  Configuration is declarative TOML only.
+- Plugin systems or a build DSL (Groovy/Kotlin/XML). Configuration is
+  declarative TOML only. User-defined tasks (§7.6) are subprocesses jrs
+  launches at fixed lifecycle points; they cannot replace, remove or
+  reorder the built-in phases, and no user code runs inside jrs.
 - Multi-module / aggregator builds (v1 is one module per manifest).
 - Publishing artifacts to a repository (`deploy`/`publish`).
 - Non-Java JVM languages (Kotlin, Scala, Groovy).
 - Android, JPMS module descriptors, annotation-processor configuration,
-  code generation, or IDE project file generation.
+  built-in code generators, or IDE project file generation. A generator can
+  run as a task (§7.6); jrs does not ship one.
 - Being a drop-in Maven/Gradle replacement, or *building* from their build files.
   Reading `pom.xml` / `build.gradle` is confined to the one-shot `jrs migrate`
   command (§11); jrs never treats them as a build input at compile time.
@@ -134,6 +137,22 @@ jvm-args = ["-Dmode=test"]           # `java` flags for the test JVM
 [repositories]
 # optional; Maven Central is implicit and always last
 central = "https://repo1.maven.org/maven2"
+
+[tasks.build-info]
+# a user-defined task (§7.6): here a Java file run with the project's JDK
+script = "build/GenerateBuildInfo.java"
+args = ["{target}/generated/sources", "{project.version}"]
+inputs = ["build/GenerateBuildInfo.java"]
+outputs = ["{target}/generated/sources"]
+source-outputs = ["{target}/generated/sources"]   # compiled with the main sources
+
+[tasks.checksum]
+script = "build/Checksum.java"
+args = ["{jar}"]
+
+[hooks]
+pre-compile = ["build-info"]
+post-package = ["checksum"]
 ```
 
 ### 4.2 Field reference
@@ -161,6 +180,8 @@ central = "https://repo1.maven.org/maven2"
 | `dependencies.*` | no | `{}` | Key is `group:artifact` or `group:artifact:classifier`; value is a version, or a table with `version` and optionally `classifier`, `exclusions` (`group:artifact` patterns, `*` allowed) and `compile-only`. |
 | `dev-dependencies.*` | no | `{}` | Test classpath only; never packaged. Same forms, without `compile-only`. |
 | `repositories.*` | no | Central | Name → base URL. |
+| `tasks.<name>.*` | no | `{}` | A user-defined task: one action (`run`, `shell` or `script`) or none, plus `description`, `args`, `depends-on`, `env`, `cwd`, `inputs`, `outputs`, `source-outputs`, `resource-outputs` (§7.6). |
+| `hooks.*` | no | `{}` | Lifecycle point (`pre-compile`, `post-compile`, `pre-test`, `post-test`, `post-package`, `pre-run`) → list of task names (§7.6). |
 
 ### 4.3 Validation
 
@@ -221,6 +242,9 @@ jrs <command> [options]
 | `jrs init [--lib]` | Scaffold `jrs.toml`, a starter class and a starter JUnit test. |
 | `jrs migrate` | Generate `jrs.toml` from an existing `pom.xml` or Gradle build (§11). |
 | `jrs completions <shell>` | Print a bash, zsh or fish completion script. |
+| `jrs task <name> [-- args...]` | Run a user-defined task and whatever it depends on (§7.6). |
+| `jrs task <name> --watch` | The same, repeated on every change to the task's inputs, the manifest or the source trees (§7.5). |
+| `jrs task --list` | List the tasks, their descriptions and the hooks that run them, to stdout. |
 
 ### 5.2 Global flags
 
@@ -253,8 +277,8 @@ to a human, and never delays the work.
 #### 5.3.1 Rules
 
 - **stderr only.** Progress, spinners and banners go to stderr; stdout carries
-  only real output (`jrs tree`, `jrs run`'s program output, `--dry-run`
-  manifests), so pipes and redirects stay clean.
+  only real output (`jrs tree`, `jrs run`'s program output, the task
+  `jrs task` names, `--dry-run` manifests), so pipes and redirects stay clean.
 - **Degrade automatically.** Animation is off when stderr is not a TTY, under
   `--quiet` or `--verbose` (verbose interleaves subprocess output, which would
   fight the live region), when `NO_COLOR` or `TERM=dumb` is set, or when a CI
@@ -282,10 +306,15 @@ Cargo-style, right-aligned in 12 columns, verb in bold green:
 ```
     Resolving 14 dependencies
   Downloading guava-33.0.0-jre.jar
+        Fresh build-info (task)
     Compiling my-app v1.0.0 (47 source files)
     Packaging target/my-app-1.0.0.jar
-     Finished build in 2.31s
+         Task checksum (post-package)
+     Finished package in 2.31s
 ```
+
+A task prints `Task <name>`, with the hook that ran it in parentheses, or
+`Fresh <name> (task)` when its up-to-date check lets it be skipped (§7.6).
 
 #### 5.3.3 Spinners
 
@@ -401,6 +430,7 @@ src/
 ├── package.rs        # jar creation, MANIFEST.MF, fat-jar merging
 ├── runner.rs         # `java` invocation for run + test
 ├── test.rs           # test discovery and engine launch
+├── task.rs           # user tasks: plan, cycles, placeholders, env, fingerprints (§7.6)
 ├── ui/
 │   ├── mod.rs        # output mode detection (TTY, NO_COLOR, CI), phase lines
 │   ├── render.rs     # render thread, live region, cursor guard
@@ -518,6 +548,146 @@ mtime picture over the same sorted walk a build does. They run the command
 again once a change has settled. A failure is reported and waited out rather
 than ending the loop, since the next save is usually the fix. The manifest is
 re-read on every run.
+
+The `inputs` of every task (§7.6) are watched too, and `jrs task <name>
+--watch` runs the same loop. Nothing under `project.target-dir` is ever
+watched, so a task's output cannot retrigger it.
+
+### 7.6 Tasks and hooks
+
+A task is a named command in `[tasks.<name>]`, run as a subprocess. `[hooks]`
+attaches tasks to fixed points in the built-in commands. The built-in phases
+cannot be removed, replaced or reordered, and no user code runs inside jrs.
+
+**Actions.** A task has exactly one of:
+
+- `run` — an argument vector, with no shell. The program is looked up on
+  `PATH`, the JDK's `bin/` first, or taken relative to the root if it contains
+  a path separator. The portable choice.
+- `shell` — one string, for `sh -c` on Unix and `cmd /C` on Windows. Not
+  portable; `jrs task --list` marks it `(sh)`.
+- `script` — a `.java` file, run by the project's JDK in source-launcher mode
+  (`java <file> <args…>`). Portable, since it needs only the JDK jrs found.
+
+A task with no action only runs its `depends-on`; one with neither is a
+manifest error. `args` follow the action: appended to `run`, passed to the
+`script`, and a `shell` string's positional parameters (`$1`…). `depends-on` names
+tasks or the built-ins `build`, `test`, `package` and `doc`. `env` adds
+variables, `cwd` is relative to the root. Task names match `[a-z][a-z0-9-]*`
+and may not be a built-in command's name.
+
+**Hooks.** Each value is a list of task names; a hook cannot hold a command
+inline, so anything it runs can be run alone with `jrs task`.
+
+| Hook | Runs |
+| --- | --- |
+| `pre-compile` | After dependencies are resolved, before the main sources are globbed and compiled. |
+| `post-compile` | After main classes and resources are in `target/classes`. |
+| `pre-test` | After the main build, before test sources compile. |
+| `post-test` | After the test launcher, only if the tests passed. |
+| `post-package` | After the jar, and any image, is written. |
+| `pre-run` | After the build, before the program starts. |
+
+Commands include each other, so their hooks do too: `build` fires the two
+compile hooks, `test`, `package` and `run` add their own, and `doc` fires
+`pre-compile`, since it documents generated sources too. A hook runs every time
+its point is reached, whether or not `javac` had work to do; skipping work is
+the task's own business. `tree`, `classpath`, `update`, `verify`, `outdated`,
+`add`, `remove`, `cache`, `init`, `migrate`, `completions` and `clean` never
+run a task. That is a guarantee: inspecting a freshly cloned project is safe.
+
+**Ordering.** Tasks run serially, and each runs at most once per invocation.
+So does each built-in: `build` in the `depends-on` of a task hooked into
+`jrs test` does not build a second time. `depends-on` entries run in the order
+the list names them, depth-first, dependencies before dependents, and a hook's
+tasks run in the order the hook lists them. A built-in in `depends-on` runs as
+its command would, hooks included, but without that command's `Finished` line
+and summary box. `test` runs with no filters, and `package` builds the plain
+thin jar.
+
+**Validation**, at parse time (§4.3). Unknown keys in a task or in `[hooks]`
+warn. These are errors:
+
+- a `depends-on` or hook entry naming an unknown task;
+- a cycle, named in full (`a → b → a`), including one through a built-in, such
+  as a `pre-compile` task that depends on `build`;
+- `source-outputs` or `resource-outputs` outside `project.target-dir`;
+- an `env` name starting with `JRS_`;
+- an unknown placeholder, or a classpath placeholder in a path-valued key
+  (`cwd`, `inputs`, `outputs`, `source-outputs`, `resource-outputs`);
+- `{jar}` in a task reachable from any hook but `post-package`, unless the task
+  depends on `package`.
+
+Tasks do not feed `manifest-checksum`: adding one does not re-resolve.
+
+**Placeholders.** `run`, `args`, `cwd`, `env` values, `inputs`, `outputs` and
+the `*-outputs` lists are expanded before the process starts. `{{` and `}}` are
+literal braces.
+
+| Placeholder | Value |
+| --- | --- |
+| `{root}`, `{target}` | Project root and `project.target-dir`, absolute. |
+| `{project.name}`, `{project.version}` | From `[project]`. |
+| `{classes}`, `{test-classes}` | `target/classes`, `target/test-classes`, absolute. |
+| `{classpath}`, `{runtime-classpath}`, `{test-classpath}` | Exactly what `jrs classpath`, `jrs classpath --runtime` and `jrs classpath --test` print. `{classpath}` is `target/classes`, then the compile jars. |
+| `{classpath-argfile}` | `target/.jrs/tasks/<name>.cp.args`, holding `-cp <compile classpath>`, for `java @{classpath-argfile}`. A long classpath in an argument vector overflows the OS limit. |
+| `{jar}` | The packaged jar. |
+
+A classpath placeholder resolves dependencies if nothing else has, lockfile
+first; a standalone `jrs task` then resolves but does not compile. `{jar}` in a
+task run before `package` has run in the same invocation is a build error
+telling the user to add `package` to `depends-on`. `shell` strings get no
+placeholders, since the shell already expands `$VAR`; one that mentions
+`JRS_CLASSPATH` or `JRS_RUNTIME_CLASSPATH` resolves dependencies the same way.
+
+**Environment.** A task inherits jrs's environment, plus `JAVA_HOME` (the JDK
+of §7.1, pin honoured), `PATH` with `$JAVA_HOME/bin` first, `JRS_TASK`,
+`JRS_HOOK` (when a hook ran it), `JRS_ROOT`, `JRS_TARGET_DIR`,
+`JRS_CLASSES_DIR`, `JRS_PROJECT_NAME`, `JRS_PROJECT_VERSION`,
+`JRS_CLASSPATH` and `JRS_RUNTIME_CLASSPATH` (once resolved), `JRS_JAR` (once
+packaged), `JRS_OFFLINE=1` under `--offline`, and `SOURCE_DATE_EPOCH=315532800`,
+the timestamp jrs's own jars carry. The task's `env` wins over all of these
+except the `JRS_` names it may not set.
+
+**Up-to-date checks.** Only a task with both `inputs` and `outputs` can be
+skipped. Entries are files or directories relative to the root, a directory
+meaning everything under it, walked as sources are; there are no globs. The
+fingerprint covers the expanded action (argv or shell string, `args`, `cwd`,
+`env`), the JDK version, each input's path, size and mtime, and the value of
+every classpath placeholder the task uses, with each jar's size and mtime. It
+is written to `target/.jrs/tasks/<name>.fingerprint` after a successful run and
+deleted on failure. A task is fresh when the fingerprint matches and every
+output exists: it prints `Fresh <name> (task)` and does not run. `jrs clean`
+forgets every fingerprint.
+
+**Generated sources and resources.** The `source-outputs` and
+`resource-outputs` of tasks reached from `pre-compile` feed the main compile
+unit (every `.java` under them joins the source list) and `target/classes`
+(synced with the record-keeping of §7.3). Those of tasks reached from
+`pre-test` feed the test unit and `target/test-classes`; a task both hooks
+reach runs once, in `pre-compile`, and feeds the main unit. On a task no
+`pre-compile` or `pre-test` hook reaches they are ignored, with a manifest
+warning. They must lie under `project.target-dir`: `jrs clean` must never lose
+user data, watch mode must not retrigger on a generator's output, and the
+compile fingerprint already covers generated files through the source list.
+The "no `.java` files" check runs after `pre-compile`, so a project whose
+sources are all generated still builds.
+
+**Running.** `cli.rs` emits the phase line for every task (§5.3.2).
+
+- The task named on `jrs task <name>` inherits the terminal, as `jrs run`'s
+  program does, and receives the arguments after `--` (as positional
+  parameters, for `shell`). `jrs task` exits with its exit code.
+- Tasks run by hooks or as dependencies have stdin closed, and both output
+  streams passed through verbatim to stderr, so stdout stays the command's own.
+  One that exits non-zero stops the command with a build error naming it:
+  exit `1`, after its output.
+- A program that cannot be started is a build error naming it and the `PATH`
+  that was searched.
+- `--verbose` echoes the expanded command, the working directory and the
+  `JRS_` variables.
+- `jrs task --list` writes to stdout. Completions cover `jrs task` and its
+  flags, but not task names: nothing calls back into jrs at completion time.
 
 ---
 
@@ -936,6 +1106,18 @@ produces something runnable.
 - Deliberately last: migration is only useful once every feature it can
   translate into actually works, and it reuses `resolve/pom.rs` from M3.
 
+### M7 — Tasks
+- ☑ user-defined tasks and lifecycle hooks: `[tasks.*]`, `[hooks]`,
+  `jrs task`, `jrs task --list` (T1)
+- ☑ up-to-date checks, generated sources and resources, `jrs task --watch`
+  and task inputs in watch mode (T2)
+- Added after M1–M6 had landed; the design, and the argument for narrowing
+  §1.2, is in [TASKS.md](TASKS.md). §7.6 is the condensed contract.
+- Tool dependencies (T3) are deferred: a `main` action running Java tools
+  resolved from Maven Central as their own graph, pinned in `jrs.lock`. They
+  change the lockfile format and the resolver's inputs, so they wait until
+  T1 and T2 have seen real use (§13.12).
+
 Tick the corresponding README boxes as each lands — the README is the
 user-facing progress tracker, this document is the design behind it.
 
@@ -1038,3 +1220,18 @@ still the interesting part; the **decision** lines record what was settled on.
     towards the multi-module support §1.2 rules out.
     **Decision:** no. `<modules>` and `include` are listed in the report with a
     suggestion to run `jrs migrate --path <module>` on each.
+12. **User-defined build steps.** §1.2 first ruled out "plugin systems, custom
+    task graphs, or a build DSL". But real projects nearly always have a step
+    of their own: sources generated before `javac`, a jar signed or checksummed
+    after `jar`. A wrapper script handles chores, but cannot reach into the
+    middle of `jrs build`, and cannot see the pinned JDK or the resolved
+    classpath. Embedded scripting (Rhai, Lua), native or WASM plugins, and a
+    Java plugin API were the other candidates; each is a DSL or a plugin system
+    by another name.
+    **Decision:** tasks as subprocesses (§7.6, designed in [TASKS.md](TASKS.md)).
+    A task is a TOML table naming a command, which is what jrs already does
+    with `javac`, and it attaches only at fixed lifecycle points. There is still
+    no DSL, no plugin API, and no way to rewire the built-in pipeline; build
+    logic written in Java is a `script` task on the JDK's source launcher. §1.2
+    was narrowed to say so. Tool dependencies (TASKS.md §8) are deferred, since
+    they change the lockfile format and the resolver's inputs.

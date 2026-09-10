@@ -23,6 +23,7 @@ pub mod package;
 pub mod project;
 pub mod resolve;
 pub mod runner;
+pub mod task;
 pub mod test;
 pub mod toolchain;
 pub mod ui;

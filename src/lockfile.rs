@@ -382,8 +382,13 @@ mod tests {
         let excluded = manifest("[dependencies]\n'g:a'={version='1.0', exclusions=['x:y']}");
         let compile_only = manifest("[dependencies]\n'g:a'={version='1.0', compile-only=true}");
         let classified = manifest("[dependencies]\n'g:a:natives'='1.0'");
+        // Tasks do not change resolution, so adding one does not re-resolve.
+        let tasked = manifest(
+            "[dependencies]\n'g:a'='1.0'\n[tasks.t]\nshell='x'\n[hooks]\npost-compile=['t']",
+        );
 
         assert_eq!(manifest_checksum(&base), manifest_checksum(&same));
+        assert_eq!(manifest_checksum(&base), manifest_checksum(&tasked));
         assert_ne!(manifest_checksum(&base), manifest_checksum(&excluded));
         assert_ne!(manifest_checksum(&base), manifest_checksum(&compile_only));
         assert_ne!(manifest_checksum(&base), manifest_checksum(&classified));

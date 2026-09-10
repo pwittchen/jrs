@@ -651,7 +651,7 @@ mod tests {
                 );
             }
         }
-        assert!(jrs(Shell::Bash).contains("subs='build test run package doc clean tree"));
+        assert!(jrs(Shell::Bash).contains("subs='build test run package doc task clean tree"));
         // Nested subcommands are offered under their parent.
         assert!(jrs(Shell::Bash).contains("subs='path prune"));
         assert!(jrs(Shell::Fish).contains("__fish_seen_subcommand_from cache"));
