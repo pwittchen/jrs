@@ -46,9 +46,44 @@ See [SPEC.md](SPEC.md) for the design behind them.
 A JDK 17 or newer on `PATH`, or pointed at by `JAVA_HOME`. jrs shells out to
 `javac`, `java` and `jar`; it does not bundle a compiler.
 
-Building jrs itself requires a Rust toolchain with edition 2024 support.
+Building jrs from source requires a Rust toolchain with edition 2024 support; the
+prebuilt binaries do not.
 
 ## Installation
+
+### Prebuilt binaries
+
+Every tagged [release](https://github.com/pwittchen/jrs/releases) ships a binary
+for each of these platforms:
+
+| Platform | `TARGET` |
+| --- | --- |
+| macOS, Apple Silicon | `aarch64-apple-darwin` |
+| macOS, Intel | `x86_64-apple-darwin` |
+| Linux, x86_64 | `x86_64-unknown-linux-musl` |
+| Linux, ARM64 | `aarch64-unknown-linux-musl` |
+| Windows, x86_64 | `x86_64-pc-windows-msvc` |
+
+The Linux binaries are statically linked and run on any distribution. To install
+the latest release into `~/.local/bin` on macOS or Linux:
+
+```
+TARGET=aarch64-apple-darwin
+mkdir -p ~/.local/bin
+curl -fsSL "https://github.com/pwittchen/jrs/releases/latest/download/jrs-$TARGET.tar.gz" | tar -xz -C ~/.local/bin jrs
+```
+
+Make sure `~/.local/bin` is on your `PATH`. On Windows, in PowerShell:
+
+```
+curl.exe -fsSLO https://github.com/pwittchen/jrs/releases/latest/download/jrs-x86_64-pc-windows-msvc.zip
+tar -xf jrs-x86_64-pc-windows-msvc.zip jrs.exe
+```
+
+then move `jrs.exe` to a directory on your `PATH`. Each release also carries a
+`SHA256SUMS` file for verifying the downloads.
+
+### From source
 
 ```
 git clone https://github.com/pwittchen/jrs.git
@@ -60,11 +95,14 @@ This places the `jrs` binary in `~/.cargo/bin`.
 
 ## Uninstallation
 
+Delete the binary — `rm ~/.local/bin/jrs` for a prebuilt one, or
+
 ```
 cargo uninstall jrs
 ```
 
-This removes the binary but not the downloaded dependencies. To reclaim that
+if it was installed from source. This removes the binary but not the downloaded
+dependencies. To reclaim that
 space too, delete the [dependency cache](#dependency-cache) (for example
 `rm -rf ~/Library/Caches/jrs` on macOS, or whatever `JRS_CACHE_DIR` points at).
 Each project's `target/` directory is disposable and can be removed with
@@ -233,6 +271,19 @@ announce that they were skipped if there is none.
 
 CI runs `cargo fmt --check`, `cargo clippy --all-targets -D warnings`,
 `cargo build` and `cargo test` on every push and pull request against `master`.
+
+To cut a release, tag the tip of `master` and push the tag:
+
+```
+git tag v0.2.0
+git push origin v0.2.0
+```
+
+CI runs the same checks, writes the version into `Cargo.toml` and `Cargo.lock`,
+commits that to `master` and moves the tag onto the new commit, then builds the
+binaries for every platform above and publishes them as a GitHub release. Run
+`git pull` and `git fetch --tags --force` afterwards to pick up the version commit
+and the moved tag.
 
 ## Licence
 

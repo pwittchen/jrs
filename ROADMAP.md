@@ -146,9 +146,9 @@ Things jrs currently gets wrong or leaves loose. These come before new features.
 
 ## 7. jrs itself
 
-- **Prebuilt binaries.** Installation is `cargo install` from a clone. Tagged
-  GitHub releases with binaries for Linux, macOS and Windows, and eventually a
-  Homebrew formula, would remove the Rust toolchain requirement.
+- **Package managers.** Tagged releases publish prebuilt binaries for Linux,
+  macOS and Windows. A Homebrew formula (and perhaps Scoop and a `.deb`) would
+  make installing and upgrading them a one-liner.
 - **The M5 benchmark.** SPEC §12 asks for a benchmark against a fixture with
   about 20 transitive dependencies, run with and without `--progress never`.
   There is no checked-in harness for it yet.

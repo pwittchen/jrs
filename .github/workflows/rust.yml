@@ -2,8 +2,11 @@ name: Rust
 
 on:
   # Documentation-only changes cannot break the build, so they do not run it.
+  # Path filters are not evaluated for tag pushes, so a version tag always
+  # runs the full pipeline and then publishes a release (see `dist`).
   push:
     branches: [ "master" ]
+    tags: [ "v*" ]
     paths-ignore:
       - '**/*.md'
       - 'LICENSE'
@@ -49,3 +52,149 @@ jobs:
     # The tests that do reach Maven Central are gated behind a feature flag.
     - name: Run the network tests
       run: cargo test --verbose --features network-tests --test network
+
+  # A version tag sets the crate version: `v1.2.3` writes `version = "1.2.3"` to
+  # Cargo.toml and Cargo.lock, commits that to master and moves the tag onto the
+  # new commit, so the release is built from sources that report its version.
+  # Pushes made with the workflow's own token do not trigger further runs.
+  bump:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: write
+
+    outputs:
+      sha: ${{ steps.commit.outputs.sha }}
+
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    - name: Check the tag
+      run: |
+        version="${GITHUB_REF_NAME#v}"
+        if ! [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+          echo "::error::tag $GITHUB_REF_NAME is not of the form v<major>.<minor>.<patch>"
+          exit 1
+        fi
+        # The bump is pushed to master, which only works as a fast-forward.
+        if [ "$(git rev-parse HEAD)" != "$(git rev-parse origin/master)" ]; then
+          echo "::error::tag $GITHUB_REF_NAME must point at the tip of master"
+          exit 1
+        fi
+
+    - name: Set the version and commit it
+      id: commit
+      run: |
+        version="${GITHUB_REF_NAME#v}"
+        sed -i "0,/^version = \".*\"$/s//version = \"$version\"/" Cargo.toml
+        cargo update --workspace
+        if git diff --quiet; then
+          echo "Cargo.toml is already at $version"
+        else
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -am "Release $version"
+          git push origin HEAD:master
+          git tag -f "$GITHUB_REF_NAME"
+          git push -f origin "refs/tags/$GITHUB_REF_NAME"
+        fi
+        echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+  # Prebuilt binaries, built from the version commit. Asset names carry no
+  # version, so `releases/latest/download/<asset>` is a stable URL for the
+  # installation instructions in the README.
+  dist:
+    needs: bump
+
+    strategy:
+      matrix:
+        include:
+          # Linux binaries link musl statically, so they run on any distribution
+          # regardless of its glibc version.
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-24.04-arm
+          - target: x86_64-apple-darwin
+            os: macos-latest
+          - target: aarch64-apple-darwin
+            os: macos-latest
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+
+    runs-on: ${{ matrix.os }}
+
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        ref: ${{ needs.bump.outputs.sha }}
+
+    - name: Add the Rust target
+      run: rustup target add ${{ matrix.target }}
+
+    # ring compiles C for the target, which needs a musl-aware compiler.
+    - name: Install musl tools
+      if: contains(matrix.target, 'linux-musl')
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y musl-tools
+        target='${{ matrix.target }}'
+        echo "CC_${target//-/_}=musl-gcc" >> "$GITHUB_ENV"
+
+    # Link the MSVC runtime statically, so the binary does not depend on the
+    # Visual C++ redistributable being installed.
+    - name: Link the C runtime statically
+      if: contains(matrix.target, 'windows')
+      run: echo "RUSTFLAGS=-C target-feature=+crt-static" >> "$GITHUB_ENV"
+
+    - name: Build the release binary
+      run: cargo build --release --locked --target ${{ matrix.target }}
+
+    - name: Package
+      env:
+        TARGET: ${{ matrix.target }}
+      run: |
+        mkdir -p dist
+        cp LICENSE "target/$TARGET/release/"
+        cd "target/$TARGET/release"
+        if [[ "$TARGET" == *windows* ]]; then
+          7z a "$GITHUB_WORKSPACE/dist/jrs-$TARGET.zip" jrs.exe LICENSE
+        else
+          tar -czf "$GITHUB_WORKSPACE/dist/jrs-$TARGET.tar.gz" jrs LICENSE
+        fi
+
+    - uses: actions/upload-artifact@v4
+      with:
+        name: jrs-${{ matrix.target }}
+        path: dist/*
+        if-no-files-found: error
+
+  release:
+    needs: dist
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: write
+
+    steps:
+    - uses: actions/download-artifact@v4
+      with:
+        path: dist
+        merge-multiple: true
+
+    - name: Write checksums
+      working-directory: dist
+      run: sha256sum -- * > SHA256SUMS
+
+    - name: Publish the release
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: gh release create "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME" --generate-notes --verify-tag
