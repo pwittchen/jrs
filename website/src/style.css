@@ -107,25 +107,20 @@ code {
   padding-block: 5rem 3rem;
 }
 
-.hero-mark {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 1rem;
-  width: fit-content;
-}
-
 .hero-logo {
   width: 15rem;
 }
 
+/* Stretched to the height of the buttons beside it, by the .cta flex row. */
 .version {
+  display: inline-flex;
+  align-items: center;
   color: var(--accent);
   text-decoration: none;
   font-size: 0.85rem;
   border: 1px solid color-mix(in srgb, var(--accent) 45%, transparent);
-  border-radius: 999px;
-  padding: 0.15rem 0.7rem;
+  border-radius: 6px;
+  padding: 0 1rem;
 }
 
 .version:hover {
@@ -162,7 +157,9 @@ h1 {
 }
 
 .button {
-  display: inline-block;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.55rem;
   padding: 0.65rem 1.15rem;
   border: 1px solid var(--line);
   border-radius: 6px;
@@ -185,6 +182,22 @@ h1 {
 .button.primary:hover {
   background: #ff7440;
   border-color: #ff7440;
+}
+
+.icon {
+  flex: none;
+  width: 1.05em;
+  height: 1.05em;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2.2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.icon.filled {
+  fill: currentColor;
+  stroke: none;
 }
 
 /* ---- terminal ---------------------------------------------------------- */
