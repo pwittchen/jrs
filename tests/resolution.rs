@@ -10,7 +10,7 @@ use std::path::Path;
 use common::{FixtureRepo, Scratch};
 use jrs::lockfile::Lockfile;
 use jrs::manifest::Manifest;
-use jrs::resolve::coord::Ga;
+use jrs::resolve::coord::{Coord, Ga};
 use jrs::resolve::{self, Classpath};
 
 fn manifest(fixture: &FixtureRepo, body: &str) -> Manifest {
@@ -214,6 +214,156 @@ fn a_republished_jar_is_refused_against_the_lockfile() {
         .to_string();
     assert!(error.contains("against jrs.lock"), "{error}");
     assert!(!fetcher.cache().contains(&coord, "jar"));
+}
+
+#[test]
+fn a_manifest_exclusion_prunes_the_transitive_graph() {
+    let scratch = Scratch::new("resolve-manifest-exclusion");
+    let fixture = FixtureRepo::new(&scratch);
+    let excluded = manifest(
+        &fixture,
+        "[dependencies]\n\"org.example:lib\" = { version = \"1.0.0\", exclusions = [\"org.example:core\"] }",
+    );
+    let resolution = resolve::resolve(&excluded, &fixture.fetcher(), 4).unwrap();
+    assert_eq!(names(&resolution), vec!["org.example:lib:1.0.0"]);
+
+    let wildcard = manifest(
+        &fixture,
+        "[dependencies]\n\"org.example:lib\" = { version = \"1.0.0\", exclusions = [\"*:*\"] }",
+    );
+    let resolution = resolve::resolve(&wildcard, &fixture.fetcher(), 4).unwrap();
+    assert_eq!(names(&resolution), vec!["org.example:lib:1.0.0"]);
+}
+
+#[test]
+fn compile_only_dependencies_stay_off_the_runtime_classpath() {
+    let scratch = Scratch::new("resolve-compile-only");
+    let fixture = FixtureRepo::new(&scratch);
+    let only = manifest(
+        &fixture,
+        "[dependencies]\n\"org.example:lib\" = { version = \"1.0.0\", compile-only = true }",
+    );
+    let fetcher = fixture.fetcher();
+    let mut resolution = resolve::resolve(&only, &fetcher, 4).unwrap();
+    resolve::fetch_jars(&mut resolution, &fetcher, 4).unwrap();
+
+    // `lib` and what it brings in are compiled against, and tested against...
+    assert_eq!(resolution.classpath(Classpath::Compile).len(), 2);
+    assert_eq!(resolution.classpath(Classpath::Test).len(), 2);
+    // ...but never shipped or run with.
+    assert!(resolution.runtime_classpath().is_empty());
+    for package in &resolution.packages {
+        assert_eq!(package.classpath, Classpath::Provided, "{}", package.coord);
+    }
+
+    // Reached from ordinary compile code too, `core` is needed at runtime after all.
+    let both = manifest(
+        &fixture,
+        "[dependencies]\n\"org.example:lib\" = { version = \"1.0.0\", compile-only = true }\n\
+         \"org.example:core\" = \"1.0.0\"",
+    );
+    let mut resolution = resolve::resolve(&both, &fetcher, 4).unwrap();
+    resolve::fetch_jars(&mut resolution, &fetcher, 4).unwrap();
+    let runtime: Vec<String> = resolution
+        .runtime_classpath()
+        .iter()
+        .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+        .collect();
+    assert!(
+        runtime.contains(&"core-1.0.0.jar".to_string()),
+        "{runtime:?}"
+    );
+}
+
+#[test]
+fn a_classified_artifact_resolves_beside_the_main_one() {
+    let scratch = Scratch::new("resolve-classifier");
+    let fixture = FixtureRepo::new(&scratch);
+    let natives = Coord::new("org.example", "lib", "1.0.0").with_classifier(Some("natives".into()));
+    fixture.publish_jar(&natives, b"native code");
+
+    let manifest = manifest(
+        &fixture,
+        "[dependencies]\n\"org.example:lib\" = \"1.0.0\"\n\"org.example:lib:natives\" = \"1.0.0\"",
+    );
+    let fetcher = fixture.fetcher();
+    let mut resolution = resolve::resolve(&manifest, &fetcher, 4).unwrap();
+    resolve::fetch_jars(&mut resolution, &fetcher, 4).unwrap();
+
+    let jars: Vec<String> = resolution
+        .classpath(Classpath::Compile)
+        .iter()
+        .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(
+        jars,
+        vec!["lib-1.0.0.jar", "lib-1.0.0-natives.jar", "core-1.0.0.jar"],
+        "both artifacts of one coordinate, and the POM's dependencies once"
+    );
+
+    // The lockfile keeps them apart.
+    let path = scratch.join("jrs.lock");
+    Lockfile::from_resolution(&manifest, &resolution)
+        .write(&path)
+        .unwrap();
+    let mut again = Lockfile::load(&path).unwrap().unwrap().to_resolution();
+    resolve::locate_cached(&mut again, &fetcher);
+    assert_eq!(
+        again.classpath(Classpath::Compile),
+        resolution.classpath(Classpath::Compile)
+    );
+}
+
+#[test]
+fn a_compile_path_widens_what_a_test_path_already_walked() {
+    // testing -> shared -> leaf, walked first as test-only at depth 2;
+    // a -> b -> shared reaches `shared` from compile code a level later.
+    // `leaf` has to follow `shared` onto the compile classpath, or the program
+    // would run without it.
+    let scratch = Scratch::new("resolve-widen");
+    let fixture = FixtureRepo::new(&scratch);
+    let pom = |artifact: &str, deps: &[&str]| {
+        let deps: String = deps
+            .iter()
+            .map(|d| {
+                format!(
+                    "<dependency><groupId>w</groupId><artifactId>{d}</artifactId>\
+                     <version>1</version></dependency>"
+                )
+            })
+            .collect();
+        let coord = Coord::new("w", artifact, "1");
+        fixture.publish_pom(
+            &coord,
+            &format!(
+                "<project><groupId>w</groupId><artifactId>{artifact}</artifactId>\
+                 <version>1</version><dependencies>{deps}</dependencies></project>"
+            ),
+        );
+        fixture.publish_jar(&coord, artifact.as_bytes());
+    };
+    pom("testing", &["shared"]);
+    pom("shared", &["leaf"]);
+    pom("leaf", &[]);
+    pom("a", &["b"]);
+    pom("b", &["shared"]);
+
+    let manifest = manifest(
+        &fixture,
+        "[dependencies]\n\"w:a\" = \"1\"\n[dev-dependencies]\n\"w:testing\" = \"1\"",
+    );
+    let resolution = resolve::resolve(&manifest, &fixture.fetcher(), 4).unwrap();
+    for artifact in ["a", "b", "shared", "leaf"] {
+        assert_eq!(
+            resolution.get(&Ga::new("w", artifact)).unwrap().classpath,
+            Classpath::Compile,
+            "{artifact}"
+        );
+    }
+    assert_eq!(
+        resolution.get(&Ga::new("w", "testing")).unwrap().classpath,
+        Classpath::Test
+    );
 }
 
 #[test]

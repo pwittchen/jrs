@@ -27,8 +27,10 @@ dependencies {
     api group: 'org.slf4j', name: 'slf4j-api', version: '2.0.12'
     testImplementation libs.junit.jupiter
 
-    // things jrs deliberately refuses to guess at
+    // a processor runs from the compile classpath, as compile-only
     annotationProcessor 'org.projectlombok:lombok:1.18.30'
+
+    // things jrs deliberately refuses to guess at
     implementation "com.example:computed:$sharedVersion"
     implementation libs.does.not.exist
 }

@@ -109,12 +109,23 @@ source = 21                          # -> javac --release 21
 target = 21                          # optional; defaults to `source`
 encoding = "UTF-8"                   # default
 javac-args = ["-Xlint:all", "-Werror"]
+jdk = 21                             # optional; build with JDK 21 (§7.1)
+
+[run]
+jvm-args = ["-Xmx512m"]              # `java` flags for `jrs run`
+
+[test]
+jvm-args = ["-Dmode=test"]           # `java` flags for the test JVM
 
 [dependencies]
 # short form: version string
 "com.google.guava:guava" = "33.0.0-jre"
 # long form: table
 "org.apache.commons:commons-lang3" = { version = "3.14.0" }
+"jakarta.servlet:jakarta.servlet-api" = { version = "6.0.0", compile-only = true }
+"io.netty:netty-handler" = { version = "4.1.100.Final", exclusions = ["io.netty:netty-codec"] }
+# a classifier: in the key, or as `classifier = "..."` in the table
+"org.lwjgl:lwjgl:natives-linux" = "3.3.3"
 
 [dev-dependencies]
 # available only on the test classpath
@@ -141,8 +152,14 @@ central = "https://repo1.maven.org/maven2"
 | `java.target` | no | `java.source` | Only used when it differs from `source`. |
 | `java.encoding` | no | `UTF-8` | |
 | `java.javac-args` | no | `[]` | Appended verbatim, after jrs-generated flags. |
-| `dependencies.*` | no | `{}` | Key is `group:artifact`, value is a version or table. |
-| `dev-dependencies.*` | no | `{}` | Test classpath only; never packaged. |
+| `java.javadoc-args` | no | `[]` | Appended verbatim to `jrs doc`'s `javadoc` (§7.4). |
+| `java.jdk` | no | — | JDK feature version to build with (§7.1). |
+| `run.jvm-args` | no | `[]` | `java` flags for `jrs run`, before `-cp`. |
+| `test.jvm-args` | no | `[]` | `java` flags for the test JVM. |
+| `test.jacoco-version` | no | jrs's default | JaCoCo release for `jrs test --coverage` (§10.2). |
+| `package.add-modules` | no | `[]` | Modules a runtime image needs beyond what `jdeps` finds (§9.4). |
+| `dependencies.*` | no | `{}` | Key is `group:artifact` or `group:artifact:classifier`; value is a version, or a table with `version` and optionally `classifier`, `exclusions` (`group:artifact` patterns, `*` allowed) and `compile-only`. |
+| `dev-dependencies.*` | no | `{}` | Test classpath only; never packaged. Same forms, without `compile-only`. |
 | `repositories.*` | no | Central | Name → base URL. |
 
 ### 4.3 Validation
@@ -160,7 +177,18 @@ reproducible and offline-capable. Regenerated when `jrs.toml` changes or when
 
 The checksums are pins, not only a record: a jar downloaded while the lockfile
 is in use must match its recorded checksum as well as the repository's, or the
-download is discarded and the build fails (§8.3).
+download is discarded and the build fails (§8.3). A `-SNAPSHOT` is republished
+under one name by design, so it is recorded without a checksum.
+
+### 4.5 Editing the manifest
+
+`jrs add` and `jrs remove` change the dependency tables without rewriting the
+file: comments, order, quoting and line endings survive. The editor is
+line-based. It knows what jrs itself writes — one entry per line, a string or
+an inline table — and refuses anything else, with an error saying to edit the
+file by hand. That covers sub-table declarations, dotted keys and values
+spanning lines. The result must parse back as a manifest before it is written.
+If the new graph does not resolve, the original file is restored.
 
 ---
 
@@ -174,17 +202,25 @@ jrs <command> [options]
 
 | Command | Behaviour |
 | --- | --- |
-| `jrs build` | Resolve → compile main sources → copy resources. |
-| `jrs test` | `build` + compile test sources + run the test engine. |
-| `jrs run [-- args...]` | `build` + `java -cp <cp> <main-class> args...`. |
+| `jrs build [--watch]` | Resolve → compile main sources → copy resources. `--watch` repeats on every change (§7.5). |
+| `jrs test` | `build` + compile test sources + run the test engine (§10.2). |
+| `jrs run [-- args...]` | `build` + `java <run.jvm-args> -cp <cp> <main-class> args...`. |
 | `jrs package` | `build` + produce `target/<name>-<version>.jar`. |
+| `jrs package --portable` | Same, with the runtime dependencies in `target/lib/` (§9.3). |
 | `jrs package --fat` | Same, but with all runtime dependencies unpacked into the jar. |
+| `jrs package --jlink` / `--jpackage [type]` | Also a runtime image or a native package (§9.4). |
+| `jrs doc` | Generate Javadoc into `target/doc` (§7.4). |
 | `jrs clean` | Remove `target/`. |
-| `jrs tree` | Print the resolved dependency graph. |
-| `jrs update` | Re-resolve and rewrite `jrs.lock`. |
+| `jrs tree [--depth n] [--why artifact]` | Print the resolved dependency graph, `n` levels deep, or inverted from one artifact to the manifest. |
+| `jrs classpath [--test \| --runtime]` | Print the resolved classpath to stdout. |
+| `jrs update` | Re-resolve and rewrite `jrs.lock`; re-check every cached snapshot. |
 | `jrs verify` | Re-hash the cached jars against the checksums in `jrs.lock`; exit `1` on a mismatch. |
-| `jrs init` | Scaffold `jrs.toml` + `src/main/java/Main.java`. |
+| `jrs outdated` | List declared dependencies with newer releases, from `maven-metadata.xml`. |
+| `jrs add` / `jrs remove` | Edit `[dependencies]` / `[dev-dependencies]` in place, then re-resolve (§4.5). |
+| `jrs cache path` / `jrs cache prune` | Show or prune the shared cache (§8.6). |
+| `jrs init [--lib]` | Scaffold `jrs.toml`, a starter class and a starter JUnit test. |
 | `jrs migrate` | Generate `jrs.toml` from an existing `pom.xml` or Gradle build (§11). |
+| `jrs completions <shell>` | Print a bash, zsh or fish completion script. |
 
 ### 5.2 Global flags
 
@@ -342,17 +378,22 @@ src/
 ├── main.rs           # CLI entry; arg parsing, exit codes
 ├── lib.rs            # public API surface for tests
 ├── cli.rs            # command definitions and dispatch
+├── completions.rs    # bash/zsh/fish scripts, from the clap definition
+├── config.rs         # the per-user config file (§8.5)
 ├── manifest.rs       # jrs.toml parsing + validation + defaults
+├── edit.rs           # format-preserving edits to the dependency tables (§4.5)
 ├── lockfile.rs       # jrs.lock read/write
 ├── project.rs        # layout discovery, source globbing, target dir mgmt
-├── toolchain.rs      # locate javac/java/jar (JAVA_HOME, PATH), version probe
-├── compile.rs        # javac invocation, argfile generation, staleness check
+├── toolchain.rs      # locate the JDK (pin, JAVA_HOME, PATH), version probe
+├── compile.rs        # javac/javadoc invocation, argfiles, staleness check
+├── image.rs          # jdeps, jlink, jpackage (§9.4)
 ├── resolve/
 │   ├── mod.rs        # resolution algorithm, conflict mediation
 │   ├── coord.rs      # GAV parsing, comparison, version ordering
 │   ├── pom.rs        # POM XML parsing: deps, parent, properties, dependencyMgmt
+│   ├── metadata.rs   # maven-metadata.xml: versions, snapshot builds
 │   ├── repo.rs       # HTTP fetch, URL layout, checksum verification
-│   └── cache.rs      # local artifact store
+│   └── cache.rs      # local artifact store, pruning
 ├── migrate/
 │   ├── mod.rs        # build-system detection, manifest emission, report
 │   ├── maven.rs      # pom.xml → Manifest (reuses resolve::pom)
@@ -413,11 +454,31 @@ Project + Classpath ──► Compiler ──► target/classes/
 
 Result is cached for the process lifetime.
 
+A project may pin a JDK feature version. It is a version, not a path, since a
+path belongs to one machine and the manifest is committed. The pin comes from
+`java.jdk`, else `.java-version` (jenv, asdf, mise), else `.sdkmanrc`. A pinned
+version is looked for in this order:
+1. The user config's `[jdks]` table (§8.5).
+2. The JDK above, if it is that version.
+3. The JDKs installed in the usual places:
+   - SDKMAN!, asdf, mise, IntelliJ and Gradle toolchain directories
+   - `/Library/Java/JavaVirtualMachines`, `/usr/lib/jvm` and `Program Files`
+   - the `JAVA_HOME_<n>_<arch>` variables CI setups export
+
+Installed JDKs are identified by their `release` file, so looking costs reads
+and not JVM starts. The newest build of the pinned version wins. None found →
+an error naming the versions that were.
+
+Other JDK tools (`javadoc`, `jdeps`, `jlink`, `jpackage`) are taken from beside
+the selected `javac`, and a JDK that lacks one is an error naming it.
+
 ### 7.2 Compilation
 
 - Glob `**/*.java` under the source root.
 - Compute a staleness check: recompile everything if any source is newer than
-  the newest `.class` in `target/classes/`, or if the classpath changed.
+  the newest `.class` in `target/classes/`, or if the classpath changed —
+  including a jar's size or modification time, which is how a snapshot rebuilt
+  under the same path is noticed.
   (v1 is coarse-grained, all-or-nothing; per-file incremental compilation is
   explicitly out of scope — `javac` needs the full source set for correctness
   anyway when types are interdependent.)
@@ -441,6 +502,23 @@ the output directory is shared with `javac`, jrs records the resources it
 copied (`target/.jrs/resources-main.list`, `resources-test.list`) and only ever
 removes paths from that record — never a class file or a processor's output.
 
+### 7.4 Documentation
+
+`jrs doc` drives `javadoc` the way `javac` is driven: the main sources and the
+compile classpath go into `target/.jrs/javadoc.args`, the flags are
+`--release`, the encodings and a title, and `java.javadoc-args` is appended
+verbatim. The output goes to `target/doc`, which is emptied first so a deleted
+class does not keep its page. `javadoc`'s warnings are passed through verbatim.
+
+### 7.5 Watch mode
+
+`jrs build --watch` and `jrs test --watch` run the command, then poll the
+manifest, the source and resource trees every 300 ms. Each poll is a size and
+mtime picture over the same sorted walk a build does. They run the command
+again once a change has settled. A failure is reported and waited out rather
+than ending the loop, since the next save is usually the fix. The manifest is
+re-read on every run.
+
 ---
 
 ## 8. Dependency resolution
@@ -456,6 +534,14 @@ For `group:artifact:version`, the artifact URL is:
 
 Both are fetched; the POM drives transitive resolution.
 
+A classified artifact is `<artifact>-<version>-<classifier>.jar` in the same
+directory, described by the unclassified POM. A `-SNAPSHOT` published to a
+remote repository is stored under a timestamped name
+(`lib-1.0-20240101.120000-3.jar`). The `maven-metadata.xml` in the version
+directory names the current build. Without one, as in a local `~/.m2`, the
+plain `-SNAPSHOT` name is used. The `maven-metadata.xml` one level up lists
+every published version, which `jrs outdated` and `jrs add` read.
+
 ### 8.2 Algorithm
 
 1. Seed a work queue with the manifest's direct dependencies.
@@ -464,11 +550,22 @@ Both are fetched; the POM drives transitive resolution.
    `<dependencyManagement>` to fill in missing versions.
 4. Collect `<dependencies>` with scope in {`compile`, `runtime`} — skip
    `provided`, `system`, `test`, and any `<optional>true</optional>` entry.
-   Honour `<exclusions>`.
+   Honour `<exclusions>`, and the manifest's own. A `<type>` of `jar`,
+   `bundle`, `ejb` or `maven-plugin` is a jar; `test-jar` is the jar
+   classified `tests`; `pom` contributes dependencies but no jar; anything
+   else is skipped with a warning. A classifier is part of an artifact's
+   identity.
 5. Enqueue unseen coordinates; repeat until the queue drains.
 6. **Conflict mediation: nearest-wins** (Maven semantics) — the version at the
    shallowest depth from the root wins; ties broken by declaration order.
    Emit a warning naming both versions when they differ.
+   Every package also lands on one of three classpaths:
+   - compile: needed at runtime too
+   - provided: a `compile-only` dependency, and whatever only it brings in
+   - test
+
+   The widest one that reaches a package wins. A package widened after its own
+   dependencies were walked hands the wider classpath down to them.
 7. Write `jrs.lock`; build the classpath in stable, deterministic order
    (direct dependencies first, then transitives, each sorted by coordinate).
 
@@ -488,6 +585,15 @@ v1 rather than silently mishandled.
 - Downloads are written to a temp file and atomically renamed, so an
   interrupted run cannot leave a corrupt jar.
 - `--offline` uses the cache exclusively and errors on a miss.
+- When a cached snapshot is due, it is checked again against its repository.
+  It is due once a day (Maven's default policy), on every build when it came
+  from a `file://` repository, and whenever `jrs update` runs. If that
+  repository cannot be reached, the cached copy is used, with a warning.
+  Identical bytes are not rewritten, so a check that finds nothing new does
+  not force a recompile.
+- A cached file's last use is recorded in its access time, at most once a
+  day, for `jrs cache prune --unused-for` (§8.6). Its modification time, which
+  the compile fingerprint reads, is left alone.
 
 ### 8.4 Parallelism
 
@@ -511,6 +617,7 @@ unknown keys warn, errors name the key — and a missing file means every defaul
 | `proxy.url`, `proxy.no-proxy` | An explicit HTTP proxy. Without it, `HTTPS_PROXY` / `HTTP_PROXY` / `ALL_PROXY` / `NO_PROXY` apply. |
 | `mirrors.<repo>` | Fetch repository `<repo>` (Central included) from another URL; `*` covers every repository without a mirror of its own. `file://` repositories are never mirrored. |
 | `credentials.<repo>` | `username` + `password`, or `token`; each secret may instead be read from a variable named by `password-env` / `token-env`. |
+| `jdks.<n>` | The home of JDK `n`, for a pinned version jrs would not find on its own (§7.1). |
 
 - Credentials from `JRS_REPO_<NAME>_USERNAME` + `JRS_REPO_<NAME>_PASSWORD` or
   `JRS_REPO_<NAME>_TOKEN` override the file. They are sent only to the
@@ -521,6 +628,26 @@ unknown keys warn, errors name the key — and a missing file means every defaul
   retried up to three attempts in total with a doubling backoff. A 404 or 410
   moves on to the next repository; a 401 or 403 fails at once and says where
   credentials go.
+
+### 8.6 Cache maintenance
+
+The cache is shared and only grows, so it can be pruned. `jrs cache path`
+prints where it is. Pruning removes whole version directories, so an
+artifact's jar, POM, checksums and snapshot records go together, and parents
+left empty go too:
+
+- `jrs cache prune` keeps what some project's `jrs.lock` names and removes the
+  rest. Every build records its lockfile's path in `<cache>/.jrs/projects`.
+  This is machine-local bookkeeping, which is why it may hold absolute paths
+  when `jrs.lock` never does. Lockfiles that no longer exist are forgotten. An
+  empty record, or a lockfile that cannot be read, stops the prune rather than
+  risking a guess.
+- `jrs cache prune --unused-for <days>` removes what no build has used for that
+  long (§8.3), whatever references it.
+
+Either takes `--dry-run`. What a lockfile does not name — parent POMs, BOMs,
+the test launcher, JaCoCo — is pruned too, and downloaded again when next
+wanted.
 
 ---
 
@@ -538,6 +665,8 @@ unknown keys warn, errors name the key — and a missing file means every defaul
   ```
 - Deterministic output: entries sorted, fixed timestamps, so repeated builds
   are byte-identical.
+- The `Class-Path` names the runtime classpath: `compile-only` jars are left
+  out of it, as they are left out of `jrs run`, a fat jar and `lib/`.
 
 ### 9.2 Fat jar (`jrs package --fat`)
 
@@ -550,6 +679,39 @@ unknown keys warn, errors name the key — and a missing file means every defaul
     merged jar invalidates them.
   - Duplicate classes: first wins, with a warning naming both sources.
 - Requires `project.main-class`; error out clearly if it is missing.
+
+### 9.3 Portable layout (`jrs package --portable`)
+
+A thin jar's `Class-Path` points into the local cache, so it runs only on the
+machine that built it. The portable layout copies the runtime dependencies
+into `target/lib/` and writes relative `lib/<file>` entries, so the jar and its
+`lib/` ship together. `target/lib/` is emptied first. Jars keep their file
+names, except when two share one — the same artifact name in two groups — in
+which case both are prefixed with their group.
+
+### 9.4 Runtime images (`--jlink`, `--jpackage [type]`)
+
+Both are JDK tools, so jrs only drives them:
+
+1. `jdeps --print-module-deps --ignore-missing-deps --multi-release <release>`
+   over the application jar and every runtime dependency. `jdeps` does not
+   read `@argfiles` — handed one, it warns and succeeds with an empty answer
+   — so the jars go on the command line, in batches that fit the OS limit.
+   `package.add-modules` is added, for modules only reached by reflection or
+   `ServiceLoader`.
+2. `--jlink`: `jlink --add-modules <those> --strip-debug --no-header-files
+   --no-man-pages` into `target/image`. The application goes under `app/`, and
+   launchers go at `bin/<name>` and `bin/<name>.bat`. Each launcher runs the
+   image's own `java` with `$JAVA_OPTS`, `run.jvm-args`, then
+   `-jar app/<jar>`.
+3. `--jpackage`: `jpackage` with the same modules, the staged application,
+   `run.jvm-args` as `--java-options`, and an `--app-version` taken from the
+   version's leading numbers. It writes into `target/jpackage`. The type is
+   jpackage's own and passed through unchecked, since jpackage knows what the
+   platform can build.
+
+The image is built from the portable layout, or from the fat jar with `--fat`.
+Both need `project.main-class`.
 
 ---
 
@@ -587,6 +749,24 @@ unknown keys warn, errors name the key — and a missing file means every defaul
   ```
 - Pass the launcher's exit code through: non-zero → `jrs test` exits `1`.
 - Filtering (`jrs test --filter <pattern>`) maps to `--include-classname`.
+- `--include-tag` / `--exclude-tag` pass straight through. `--method
+  <class#method>` becomes `--select-method` and replaces the class-path scan,
+  since the launcher refuses to combine the two.
+- Reports: `--reports-dir target/test-reports` (emptied first), so JUnit XML
+  lands where CI systems look for it.
+- The launcher version follows the declared Jupiter version: `5.x.y` →
+  platform `1.x.y`; from JUnit 6 on, the two are the same. A project with only
+  `junit:junit` gets a fixed 1.x launcher. Its bundled Vintage engine runs
+  JUnit 4 tests, and with both declared, both kinds run.
+- `test.jvm-args` go before `-cp`.
+- Coverage (`jrs test --coverage`) uses JaCoCo, resolved as an internal
+  dependency like the launcher:
+  - The agent (`org.jacoco.agent`, classifier `runtime`) goes on the test JVM
+    as a `-javaagent`, recording to `target/jacoco.exec`.
+  - The CLI (`org.jacoco.cli`, classifier `nodeps`) then writes HTML and
+    `jacoco.xml` into `target/coverage`.
+  - The line and branch totals are read back out of the XML for the summary.
+  - A failing run still gets its report.
 
 ---
 
@@ -739,9 +919,16 @@ produces something runnable.
 ### M5 — Performance and polish
 - ☑ parallel execution to make build process faster
 - ☑ animated progress output: spinners, live download bars, ASCII summary (§5.3)
-- Benchmark against a fixture project with ~20 transitive dependencies;
+- ☑ benchmark against a fixture project with ~20 transitive dependencies;
   target: resolution dominated by network, not by jrs. Re-run the benchmark with
   `--progress never` to prove the renderer costs nothing measurable.
+  `cargo bench --bench resolution` serves a 22-artifact graph from a local
+  repository that adds latency to every request. Two findings:
+  - About 70–80% of wall time is network; jrs's own work takes around 15 ms.
+  - The first run showed the renderer did cost something: every live scope
+    waited out a render tick when it ended, roughly 90 ms a build. The render
+    thread now parks instead of sleeping and is woken to stop. The two modes
+    are now within noise of each other.
 
 ### M6 — Migration
 - ☑ migrating a project from Maven (`pom.xml`)
@@ -794,6 +981,11 @@ still the interesting part; the **decision** lines record what was settled on.
    `quick-xml`, `zip`, `rayon`, `thiserror`, `sha1`/`sha2`, `terminal_size`,
    and `libc` on unix for the signal handler. No `indicatif`, no `console`,
    no `walkdir` — see 10.
+   `jrs add`/`jrs remove` and shell completions looked as if they needed
+   `toml_edit` and `clap_complete`; both are hand-rolled instead. The first is
+   a line editor for the dependency tables that refuses what it cannot edit
+   safely (§4.5). The second is a generator driven by clap's own introspection
+   of the command definition.
 2. **Async or threads?** `rayon` + blocking `ureq` keeps the code simple and
    is likely fast enough given downloads are the bottleneck; `tokio` +
    `reqwest` scales better but colours the whole codebase.
@@ -818,14 +1010,16 @@ still the interesting part; the **decision** lines record what was settled on.
    versions and the depth the winner came from.
 7. **Test engines beyond JUnit 5.** JUnit 4 and TestNG are still common —
    pluggable engine selection, or JUnit 5 only?
-   **Decision:** JUnit 5 only. A project on JUnit 4 gets an error that says so
-   rather than a launcher that silently finds no tests.
+   **Decision:** the JUnit Platform only. JUnit 5 came first. JUnit 4 followed
+   through the Vintage engine, which the console launcher bundles, so a project
+   on `junit:junit` needs nothing else. JUnit 6 runs like 5. TestNG stays out:
+   it would mean a second launcher and a second output format to follow.
 8. **Windows support.** Path separators (`;` vs `:`) on the classpath and
    `.exe` suffixes on toolchain binaries need handling from the start if it is
    in scope at all.
    **Decision:** in scope, and handled — `Toolchain::classpath_separator`, the
-   `.exe` suffix, and `%LOCALAPPDATA%` for the cache. Untested on Windows: CI
-   runs on Linux only.
+   `.exe` suffix, `%LOCALAPPDATA%` for the cache, and drive letters in
+   `file://` URLs. CI runs the whole suite on Linux, macOS and Windows.
 9. **Gradle migration fidelity.** Pattern extraction (§11.3) is honest but
    limited. The alternative — shelling out to `gradle dependencies` and parsing
    its output — is far more accurate, at the cost of requiring a working Gradle

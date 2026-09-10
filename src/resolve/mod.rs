@@ -6,6 +6,7 @@
 
 pub mod cache;
 pub mod coord;
+pub mod metadata;
 pub mod pom;
 pub mod repo;
 
@@ -26,11 +27,18 @@ use crate::ui::{Live, Transfer, Ui};
 
 /// Which classpath a resolved package belongs to.
 ///
-/// `Compile` dominates: a package reached both ways is a compile dependency that
-/// tests also happen to see.
+/// The order is the dominance order: a package reached several ways lands on the
+/// widest classpath that reaches it. A compile dependency that tests also see is
+/// a compile dependency; one that a `compile-only` library also drags in still
+/// has to be there at runtime.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Classpath {
+    /// Compile, test and runtime.
     Compile,
+    /// Compile and test, but not runtime: `compile-only` and everything it
+    /// brings in (Maven's `provided`).
+    Provided,
+    /// Tests only.
     Test,
 }
 
@@ -38,6 +46,7 @@ impl Classpath {
     pub fn as_str(self) -> &'static str {
         match self {
             Classpath::Compile => "compile",
+            Classpath::Provided => "provided",
             Classpath::Test => "test",
         }
     }
@@ -45,6 +54,7 @@ impl Classpath {
     pub fn parse(s: &str) -> Classpath {
         match s {
             "test" => Classpath::Test,
+            "provided" => Classpath::Provided,
             _ => Classpath::Compile,
         }
     }
@@ -92,17 +102,27 @@ impl Resolution {
         self.packages.iter().find(|p| p.ga() == *ga)
     }
 
-    /// Jars for `javac -cp` and `java -cp`, in a stable order: direct
-    /// dependencies first, then transitives, each sorted by coordinate
-    /// (SPEC §8.2 step 7).
+    /// Jars for `javac -cp`, in a stable order: direct dependencies first, then
+    /// transitives, each sorted by coordinate (SPEC §8.2 step 7).
+    ///
+    /// `Compile` (or `Provided`) is what the main sources compile against, so
+    /// it includes `compile-only` jars; `Test` is everything. What a program
+    /// runs with is [`Resolution::runtime_classpath`].
     pub fn classpath(&self, which: Classpath) -> Vec<PathBuf> {
+        self.ordered(|p| which == Classpath::Test || p.classpath != Classpath::Test)
+    }
+
+    /// Jars for `java -cp` and for packaging: the compile classpath without
+    /// anything `compile-only`.
+    pub fn runtime_classpath(&self) -> Vec<PathBuf> {
+        self.ordered(|p| p.classpath == Classpath::Compile)
+    }
+
+    fn ordered(&self, include: impl Fn(&ResolvedPackage) -> bool) -> Vec<PathBuf> {
         let mut direct: Vec<&ResolvedPackage> = Vec::new();
         let mut transitive: Vec<&ResolvedPackage> = Vec::new();
         for p in &self.packages {
-            if which == Classpath::Compile && p.classpath == Classpath::Test {
-                continue;
-            }
-            if p.jar.is_none() {
+            if !include(p) || p.jar.is_none() {
                 continue;
             }
             if p.direct {
@@ -139,6 +159,8 @@ struct Pending {
     /// Exclusions inherited from every ancestor edge, plus this edge's own.
     exclusions: Vec<Ga>,
     parent: Option<Ga>,
+    /// Reached as `<type>pom</type>`: it contributes dependencies, not a jar.
+    pom_only: bool,
 }
 
 struct Selected {
@@ -185,16 +207,10 @@ pub fn resolve(manifest: &Manifest, fetcher: &Fetcher, jobs: usize) -> Result<Re
     let mut packaging: HashMap<Ga, String> = HashMap::new();
     let mut level: Vec<Pending> = seed(manifest);
 
-    let roots: Vec<Ga> = manifest
-        .dependencies
-        .iter()
-        .map(|d| Ga::new(&d.group, &d.artifact))
-        .collect();
-    let test_roots: Vec<Ga> = manifest
-        .dev_dependencies
-        .iter()
-        .map(|d| Ga::new(&d.group, &d.artifact))
-        .collect();
+    let root_ga =
+        |d: &Dependency| Ga::new(&d.group, &d.artifact).with_classifier(d.classifier.clone());
+    let roots: Vec<Ga> = manifest.dependencies.iter().map(root_ga).collect();
+    let test_roots: Vec<Ga> = manifest.dev_dependencies.iter().map(root_ga).collect();
 
     let mut depth = 1;
     while !level.is_empty() {
@@ -221,9 +237,7 @@ pub fn resolve(manifest: &Manifest, fetcher: &Fetcher, jobs: usize) -> Result<Re
                     }
                     // A package reached from the compile graph must end up on the
                     // compile classpath even if a test path found it first.
-                    if item.classpath == Classpath::Compile {
-                        existing.classpath = Classpath::Compile;
-                    }
+                    existing.classpath = existing.classpath.min(item.classpath);
                     existing.direct |= item.depth == 1;
                 }
                 None => {
@@ -250,7 +264,8 @@ pub fn resolve(manifest: &Manifest, fetcher: &Fetcher, jobs: usize) -> Result<Re
             admitted
                 .par_iter()
                 .enumerate()
-                .map(|(i, item)| ctx.effective(&item.coord).map(|e| (i, e)))
+                // A classified artifact is described by its unclassified POM.
+                .map(|(i, item)| ctx.effective(&item.coord.pom_coord()).map(|e| (i, e)))
                 .collect()
         });
 
@@ -259,10 +274,19 @@ pub fn resolve(manifest: &Manifest, fetcher: &Fetcher, jobs: usize) -> Result<Re
             let (i, eff) = result?;
             let parent = &admitted[i];
             let parent_ga = parent.coord.ga();
-            packaging.insert(parent_ga.clone(), eff.packaging.clone());
+            let kind = if parent.pom_only {
+                "pom".to_string()
+            } else if parent.coord.classifier.is_some() {
+                // `natives-linux` of a library is a jar whatever the library's
+                // own packaging says.
+                "jar".to_string()
+            } else {
+                eff.packaging.clone()
+            };
+            packaging.insert(parent_ga.clone(), kind);
             for dep in &eff.dependencies {
                 let dep = eff.manage(dep);
-                let Some(child) = admissible(&dep, parent, &eff, &ctx)? else {
+                let Some((child, pom_only)) = admissible(&dep, parent, &eff, &ctx)? else {
                     continue;
                 };
                 next.push(Pending {
@@ -275,6 +299,7 @@ pub fn resolve(manifest: &Manifest, fetcher: &Fetcher, jobs: usize) -> Result<Re
                         ex
                     },
                     parent: Some(parent_ga.clone()),
+                    pom_only,
                 });
             }
         }
@@ -285,6 +310,30 @@ pub fn resolve(manifest: &Manifest, fetcher: &Fetcher, jobs: usize) -> Result<Re
             return Err(JrsError::resolve(
                 "dependency graph is more than 64 levels deep; refusing to continue",
             ));
+        }
+    }
+
+    // A package can be widened — from test to compile, say — after its own
+    // dependencies were walked with the narrower classpath, when a deeper path
+    // to it turns up. The widening has to reach them too, or the program would
+    // run without them.
+    loop {
+        let mut changed = false;
+        for (parent, children) in &edges {
+            let Some(widest) = selected.get(parent).map(|s| s.classpath) else {
+                continue;
+            };
+            for child in children {
+                if let Some(c) = selected.get_mut(child)
+                    && widest < c.classpath
+                {
+                    c.classpath = widest;
+                    changed = true;
+                }
+            }
+        }
+        if !changed {
+            break;
         }
     }
 
@@ -322,11 +371,21 @@ fn seed(manifest: &Manifest) -> Vec<Pending> {
     let mut out = Vec::new();
     let mut push = |d: &Dependency, classpath: Classpath| {
         out.push(Pending {
-            coord: Coord::new(&d.group, &d.artifact, &d.version),
-            classpath,
+            coord: Coord::new(&d.group, &d.artifact, &d.version)
+                .with_classifier(d.classifier.clone()),
+            classpath: if d.compile_only {
+                Classpath::Provided
+            } else {
+                classpath
+            },
             depth: 1,
-            exclusions: Vec::new(),
+            exclusions: d
+                .exclusions
+                .iter()
+                .map(|e| Ga::new(&e.group, &e.artifact))
+                .collect(),
             parent: None,
+            pom_only: false,
         });
     };
     for d in &manifest.dependencies {
@@ -338,25 +397,40 @@ fn seed(manifest: &Manifest) -> Vec<Pending> {
     out
 }
 
-/// Decide whether a child dependency is walked at all (SPEC §8.2 step 4).
+/// Decide whether a child dependency is walked at all (SPEC §8.2 step 4), and
+/// if so as which coordinate, and whether it is a POM with no jar.
 fn admissible(
     dep: &PomDependency,
     parent: &Pending,
     eff: &Effective,
     ctx: &Context,
-) -> Result<Option<Coord>> {
+) -> Result<Option<(Coord, bool)>> {
     if dep.optional || !dep.scope().is_transitive() {
         return Ok(None);
     }
-    if dep.kind != "jar" || dep.classifier.is_some() {
-        // Only plain jars land on a classpath; anything else is reported rather
-        // than silently mis-resolved.
-        return Ok(None);
-    }
+    // `<type>` names a kind of file. Most kinds are jars under another name;
+    // a `test-jar` is the jar classified `tests`; a `pom` contributes its
+    // dependencies and nothing else. What cannot go on a classpath at all is
+    // reported rather than silently mis-resolved.
+    let (classifier, pom_only) = match dep.kind.as_str() {
+        "jar" | "bundle" | "ejb" | "maven-plugin" => (dep.classifier.clone(), false),
+        "test-jar" => (
+            Some(dep.classifier.clone().unwrap_or_else(|| "tests".into())),
+            false,
+        ),
+        "pom" => (None, true),
+        other => {
+            ctx.warn(format!(
+                "`{}` depends on `{}` of type `{other}`, which does not go on a \
+                 classpath; skipped",
+                eff.coord,
+                dep.ga()
+            ));
+            return Ok(None);
+        }
+    };
     let ga = dep.ga();
-    if parent.exclusions.iter().any(|e| {
-        (e.group == "*" || e.group == ga.group) && (e.artifact == "*" || e.artifact == ga.artifact)
-    }) {
+    if parent.exclusions.iter().any(|e| ga.excluded_by(e)) {
         return Ok(None);
     }
     let Some(version) = &dep.version else {
@@ -381,7 +455,10 @@ fn admissible(
         ));
         return Ok(None);
     }
-    Ok(Some(Coord::new(&ga.group, &ga.artifact, version)))
+    Ok(Some((
+        Coord::new(&ga.group, &ga.artifact, version).with_classifier(classifier),
+        pom_only,
+    )))
 }
 
 struct Context<'a> {
@@ -472,6 +549,12 @@ pub fn fetch_jars(resolution: &mut Resolution, fetcher: &Fetcher, jobs: usize) -
                     // its place in the graph by contributing dependencies.
                     return Ok((i, None, None));
                 }
+                if p.coord.is_snapshot() {
+                    // A snapshot is republished under the same name by design,
+                    // so there is nothing stable to pin.
+                    let (path, _origin) = fetcher.jar(&p.coord)?;
+                    return Ok((i, Some(path), None));
+                }
                 // A checksum carried over from the lockfile pins any download.
                 let (path, _origin) = fetcher.jar_pinned(&p.coord, p.checksum.as_deref())?;
                 // It is not recomputed for a jar that was already cached:
@@ -506,6 +589,9 @@ pub enum Integrity {
     NotCached,
     /// The lockfile records no checksum jrs can check.
     Unpinned,
+    /// A snapshot, which is republished under one name by design and so is
+    /// never pinned.
+    Snapshot,
     Mismatch {
         expected: String,
         actual: String,
@@ -541,6 +627,7 @@ pub fn verify_cached(
                 let path = cache.path_for(&p.coord, "jar");
                 let integrity = match p.checksum.as_deref() {
                     _ if !path.is_file() => Integrity::NotCached,
+                    _ if p.coord.is_snapshot() => Integrity::Snapshot,
                     None => Integrity::Unpinned,
                     Some(pin) => {
                         let bytes = std::fs::read(&path).map_err(|e| JrsError::io(&path, e))?;

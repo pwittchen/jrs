@@ -11,8 +11,11 @@
 
 pub mod cli;
 pub mod compile;
+pub mod completions;
 pub mod config;
+pub mod edit;
 pub mod error;
+pub mod image;
 pub mod lockfile;
 pub mod manifest;
 pub mod migrate;

@@ -22,3 +22,9 @@ zip = { version = "8.6.0", default-features = false, features = ["deflate"] }
 
 [target."cfg(unix)".dependencies]
 libc = "0.2.189"
+
+# SPEC §12, M5: resolution against a latency-injecting local repository, in both
+# progress modes. A plain `main`, so no benchmarking crate is needed.
+[[bench]]
+name = "resolution"
+harness = false

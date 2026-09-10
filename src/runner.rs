@@ -10,9 +10,18 @@ use crate::error::Result;
 use crate::toolchain::{Toolchain, run_inherited};
 use crate::ui::Ui;
 
-/// Build the argument list for `java -cp <cp> <main-class> args...`.
-pub fn java_args(classpath: &[PathBuf], main_class: &str, program_args: &[String]) -> Vec<String> {
-    let mut args = Vec::with_capacity(program_args.len() + 3);
+/// Build the argument list for `java <jvm-args> -cp <cp> <main-class> args...`.
+///
+/// JVM arguments (`[run] jvm-args`) go first: anything after the main class
+/// belongs to the program.
+pub fn java_args(
+    jvm_args: &[String],
+    classpath: &[PathBuf],
+    main_class: &str,
+    program_args: &[String],
+) -> Vec<String> {
+    let mut args = Vec::with_capacity(jvm_args.len() + program_args.len() + 3);
+    args.extend(jvm_args.iter().cloned());
     if !classpath.is_empty() {
         args.push("-cp".to_string());
         args.push(Toolchain::classpath(classpath));
@@ -25,12 +34,13 @@ pub fn java_args(classpath: &[PathBuf], main_class: &str, program_args: &[String
 /// Run the project's main class, returning its exit code.
 pub fn run_main(
     toolchain: &Toolchain,
+    jvm_args: &[String],
     classpath: &[PathBuf],
     main_class: &str,
     program_args: &[String],
     ui: &Ui,
 ) -> Result<i32> {
-    let args = java_args(classpath, main_class, program_args);
+    let args = java_args(jvm_args, classpath, main_class, program_args);
     run_inherited(ui, &toolchain.java, &args)
 }
 
@@ -41,6 +51,7 @@ mod tests {
     #[test]
     fn arguments_are_ordered_for_java() {
         let args = java_args(
+            &[],
             &[PathBuf::from("/classes"), PathBuf::from("/dep.jar")],
             "com.example.Main",
             &["--flag".into(), "value".into()],
@@ -52,15 +63,32 @@ mod tests {
     }
 
     #[test]
+    fn jvm_arguments_come_before_the_main_class() {
+        let args = java_args(
+            &["-Xmx256m".into(), "--enable-preview".into()],
+            &[PathBuf::from("/classes")],
+            "Main",
+            &["-Xmx1g".into()],
+        );
+        assert_eq!(&args[..2], &["-Xmx256m", "--enable-preview"]);
+        assert_eq!(args[2], "-cp");
+        assert_eq!(args[4], "Main");
+        assert_eq!(
+            args[5], "-Xmx1g",
+            "the same flag after the main class is the program's"
+        );
+    }
+
+    #[test]
     fn program_arguments_are_passed_through_untouched() {
         // Anything after `--` belongs to the program, including things that look
         // like jrs flags.
-        let args = java_args(&[], "Main", &["--verbose".into(), "-q".into()]);
+        let args = java_args(&[], &[], "Main", &["--verbose".into(), "-q".into()]);
         assert_eq!(args, vec!["Main", "--verbose", "-q"]);
     }
 
     #[test]
     fn an_empty_classpath_emits_no_cp_flag() {
-        assert_eq!(java_args(&[], "Main", &[]), vec!["Main"]);
+        assert_eq!(java_args(&[], &[], "Main", &[]), vec!["Main"]);
     }
 }

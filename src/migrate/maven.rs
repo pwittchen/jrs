@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 
 use super::{Migration, Report, Source};
 use crate::error::{IoResultExt, JrsError, Result};
-use crate::manifest::{self, Dependency, Manifest, Repository};
+use crate::manifest::{self, Dependency, Exclusion, Manifest, Repository};
 use crate::resolve::coord::{Scope, is_range};
 use crate::resolve::pom::{self, Effective, Element, Pom};
 
@@ -36,6 +36,8 @@ pub fn migrate(pom_path: &Path, root: &Path) -> Result<Migration> {
     read_layout(pom, &mut out, &mut report);
     read_main_class(pom, &mut out, &mut report);
     read_dependencies(&effective, &mut out, &mut report);
+    read_annotation_processors(&effective, pom, &mut out, &mut report);
+    read_test_settings(&effective, pom, &mut out, &mut report);
     read_repositories(&effective, &mut out, &mut report);
     read_the_rest(pom, &mut report);
 
@@ -249,23 +251,30 @@ fn read_dependencies(effective: &Effective, out: &mut Manifest, report: &mut Rep
             report.skipped(format!("{key} — <optional>true</optional>"));
             continue;
         }
-        if managed.kind != "jar" {
-            report.skipped(format!(
-                "{key} — <type>{}</type> is not a jar",
-                managed.kind
-            ));
-            continue;
-        }
-        if let Some(classifier) = &managed.classifier {
-            report.skipped(format!("{key} — <classifier>{classifier}</classifier>"));
-            continue;
-        }
+        // `<type>` names a kind of file; the jar-shaped ones translate, and a
+        // test-jar is simply the jar classified `tests`.
+        let classifier = match managed.kind.as_str() {
+            "jar" | "bundle" | "ejb" => managed.classifier.clone(),
+            "test-jar" => Some(
+                managed
+                    .classifier
+                    .clone()
+                    .unwrap_or_else(|| "tests".to_string()),
+            ),
+            other => {
+                report.skipped(format!(
+                    "{key} — <type>{other}</type> does not go on a classpath"
+                ));
+                continue;
+            }
+        };
 
         let scope = managed.scope();
-        let target = match scope {
-            Scope::Compile | Scope::Runtime => &mut out.dependencies,
-            Scope::Test => &mut out.dev_dependencies,
-            Scope::Provided | Scope::System | Scope::Import => {
+        let (target, compile_only) = match scope {
+            Scope::Compile | Scope::Runtime => (&mut out.dependencies, false),
+            Scope::Provided => (&mut out.dependencies, true),
+            Scope::Test => (&mut out.dev_dependencies, false),
+            Scope::System | Scope::Import => {
                 report.skipped(format!(
                     "{key} — <scope>{}</scope> has no equivalent in jrs.toml",
                     scope.as_str()
@@ -294,21 +303,162 @@ fn read_dependencies(effective: &Effective, out: &mut Manifest, report: &mut Rep
             version
         };
 
-        if !managed.exclusions.is_empty() {
+        let mut dep = Dependency::new(&managed.group, &managed.artifact, version);
+        dep.classifier = classifier;
+        dep.compile_only = compile_only;
+        dep.exclusions = managed
+            .exclusions
+            .iter()
+            .map(|e| Exclusion {
+                group: e.group.clone(),
+                artifact: e.artifact.clone(),
+            })
+            .collect();
+        if target.iter().any(|d| d.key() == dep.key()) {
             report.skipped(format!(
-                "{key} — {} <exclusion> entries; jrs.toml has no exclusions, so the \
-                 resolved graph may be wider than Maven's",
-                managed.exclusions.len()
+                "{} — declared twice in the same scope; kept the first",
+                dep.key()
             ));
+            continue;
         }
 
-        target.push(Dependency {
-            group: managed.group.clone(),
-            artifact: managed.artifact.clone(),
-            version,
-        });
-        report.migrated(format!("{key} ({})", scope.as_str()));
+        let mut notes = vec![scope.as_str().to_string()];
+        if compile_only {
+            notes.push("as compile-only".to_string());
+        }
+        if !dep.exclusions.is_empty() {
+            notes.push(format!("{} exclusions", dep.exclusions.len()));
+        }
+        report.migrated(format!("{} ({})", dep.key(), notes.join(", ")));
+        target.push(dep);
     }
+}
+
+/// `maven-surefire-plugin`'s `<argLine>` and `<systemPropertyVariables>` are
+/// the test JVM's arguments.
+fn read_test_settings(effective: &Effective, pom: &Pom, out: &mut Manifest, report: &mut Report) {
+    let Some(config) = plugin(pom, "maven-surefire-plugin").and_then(|p| p.configuration.as_ref())
+    else {
+        return;
+    };
+    let mut args = Vec::new();
+    if let Some(line) = config.text_of("argLine") {
+        let line = pom::interpolate(line, &effective.properties);
+        if line.contains("${") || line.contains("@{") {
+            // Usually `@{argLine}`, filled in at build time by JaCoCo's plugin.
+            report.skipped(format!(
+                "surefire <argLine>{line}</argLine> — refers to a property another \
+                 plugin sets at build time; use `jrs test --coverage` for JaCoCo"
+            ));
+        } else {
+            args.extend(split_arguments(&line));
+        }
+    }
+    if let Some(props) = config.child("systemPropertyVariables") {
+        for p in &props.children {
+            let value = pom::interpolate(p.text.trim(), &effective.properties);
+            args.push(format!("-D{}={value}", p.name));
+        }
+    }
+    if !args.is_empty() {
+        report.migrated(format!(
+            "test.jvm-args = {args:?} (from maven-surefire-plugin)"
+        ));
+        out.test.jvm_args = args;
+    }
+}
+
+/// `<annotationProcessorPaths>`: jrs has no processor path (SPEC §1.2), but a
+/// processor on the compile classpath runs all the same, so each becomes a
+/// compile-only dependency. Since JDK 23 `javac` wants `-proc:full` for that.
+fn read_annotation_processors(
+    effective: &Effective,
+    pom: &Pom,
+    out: &mut Manifest,
+    report: &mut Report,
+) {
+    let Some(paths) = plugin(pom, "maven-compiler-plugin")
+        .and_then(|p| p.configuration.as_ref())
+        .and_then(|c| c.child("annotationProcessorPaths"))
+    else {
+        return;
+    };
+    let mut added = Vec::new();
+    for path in &paths.children {
+        let (Some(group), Some(artifact)) = (path.text_of("groupId"), path.text_of("artifactId"))
+        else {
+            continue;
+        };
+        let group = pom::interpolate(group, &effective.properties);
+        let artifact = pom::interpolate(artifact, &effective.properties);
+        let managed = effective
+            .managed
+            .get(&crate::resolve::coord::Ga::new(&group, &artifact))
+            .and_then(|m| m.version.clone());
+        let Some(version) = path
+            .text_of("version")
+            .map(|v| pom::interpolate(v, &effective.properties))
+            .or(managed)
+            .filter(|v| !v.contains("${"))
+        else {
+            report.skipped(format!(
+                "annotation processor {group}:{artifact} — no version could be read"
+            ));
+            continue;
+        };
+        if out
+            .dependencies
+            .iter()
+            .any(|d| d.group == group && d.artifact == artifact)
+        {
+            added.push(format!("{group}:{artifact}"));
+            continue;
+        }
+        let mut dep = Dependency::new(&group, &artifact, version);
+        dep.compile_only = true;
+        added.push(dep.key());
+        out.dependencies.push(dep);
+    }
+    if added.is_empty() {
+        return;
+    }
+    let has_flag = out.java.javac_args.iter().any(|a| a.starts_with("-proc:"));
+    if out.java.source.is_some_and(|s| s >= 21) && !has_flag {
+        out.java.javac_args.push("-proc:full".to_string());
+    }
+    report.review(format!(
+        "annotation processors {} — put on the compile classpath as compile-only \
+         dependencies; javac from JDK 23 on runs them only with `-proc:full` in \
+         java.javac-args{}",
+        added.join(", "),
+        if out.java.javac_args.iter().any(|a| a == "-proc:full") {
+            ", which was added"
+        } else {
+            ", which JDK 17 does not accept, so it was not added"
+        }
+    ));
+}
+
+/// Split a command line on whitespace, keeping double-quoted runs together.
+fn split_arguments(line: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut current = String::new();
+    let mut quoted = false;
+    for c in line.chars() {
+        match c {
+            '"' => quoted = !quoted,
+            c if c.is_whitespace() && !quoted => {
+                if !current.is_empty() {
+                    out.push(std::mem::take(&mut current));
+                }
+            }
+            c => current.push(c),
+        }
+    }
+    if !current.is_empty() {
+        out.push(current);
+    }
+    out
 }
 
 fn read_repositories(effective: &Effective, out: &mut Manifest, report: &mut Report) {
@@ -509,7 +659,7 @@ mod tests {
         let dir = Dir::new("scopes");
         let migration = dir.migrate(FULL);
         let m = &migration.manifest;
-        assert_eq!(m.dependencies.len(), 1);
+        assert_eq!(m.dependencies.len(), 2);
         assert_eq!(
             m.dependencies[0].to_string(),
             "com.google.guava:guava:33.0.0-jre"
@@ -520,10 +670,98 @@ mod tests {
             "org.junit.jupiter:junit-jupiter:5.10.2"
         );
 
+        // `provided` is what `compile-only` is for.
+        let servlet = &m.dependencies[1];
+        assert_eq!(servlet.artifact, "jakarta.servlet-api");
+        assert!(servlet.compile_only);
+
         let skipped = migration.report.not_migrated.join("\n");
-        assert!(skipped.contains("jakarta.servlet-api"), "{skipped}");
-        assert!(skipped.contains("provided"), "{skipped}");
         assert!(skipped.contains("lombok"), "{skipped}");
+        assert!(!skipped.contains("jakarta.servlet-api"), "{skipped}");
+    }
+
+    #[test]
+    fn classifiers_test_jars_and_system_scope() {
+        let dir = Dir::new("classifiers");
+        let migration = dir.migrate(
+            "<project><groupId>g</groupId><artifactId>a</artifactId><version>1</version>\
+             <dependencies>\
+             <dependency><groupId>org.lwjgl</groupId><artifactId>lwjgl</artifactId>\
+             <version>3.3.3</version><classifier>natives-linux</classifier></dependency>\
+             <dependency><groupId>g</groupId><artifactId>core</artifactId>\
+             <version>1.0</version><type>test-jar</type><scope>test</scope></dependency>\
+             <dependency><groupId>g</groupId><artifactId>war</artifactId>\
+             <version>1.0</version><type>war</type></dependency>\
+             <dependency><groupId>g</groupId><artifactId>local</artifactId>\
+             <version>1.0</version><scope>system</scope></dependency>\
+             </dependencies></project>",
+        );
+        let m = &migration.manifest;
+        assert_eq!(m.dependencies.len(), 1);
+        assert_eq!(m.dependencies[0].key(), "org.lwjgl:lwjgl:natives-linux");
+        assert_eq!(
+            m.dev_dependencies[0].classifier.as_deref(),
+            Some("tests"),
+            "a test-jar is the jar classified `tests`"
+        );
+        let skipped = migration.report.not_migrated.join("\n");
+        assert!(skipped.contains("<type>war</type>"), "{skipped}");
+        assert!(skipped.contains("system"), "{skipped}");
+    }
+
+    #[test]
+    fn surefire_arguments_become_test_jvm_arguments() {
+        let dir = Dir::new("surefire");
+        let migration = dir.migrate(
+            "<project><groupId>g</groupId><artifactId>a</artifactId><version>1</version>\
+             <properties><heap>512m</heap></properties>\
+             <build><plugins><plugin><artifactId>maven-surefire-plugin</artifactId>\
+             <configuration><argLine>-Xmx${heap} -Dname=\"two words\"</argLine>\
+             <systemPropertyVariables><env>test</env></systemPropertyVariables>\
+             </configuration></plugin></plugins></build></project>",
+        );
+        assert_eq!(
+            migration.manifest.test.jvm_args,
+            vec!["-Xmx512m", "-Dname=two words", "-Denv=test"]
+        );
+
+        let jacoco = dir.migrate(
+            "<project><groupId>g</groupId><artifactId>a</artifactId><version>1</version>\
+             <build><plugins><plugin><artifactId>maven-surefire-plugin</artifactId>\
+             <configuration><argLine>@{argLine} -Xmx1g</argLine></configuration>\
+             </plugin></plugins></build></project>",
+        );
+        assert!(jacoco.manifest.test.jvm_args.is_empty());
+        let skipped = jacoco.report.not_migrated.join("\n");
+        assert!(skipped.contains("--coverage"), "{skipped}");
+    }
+
+    #[test]
+    fn annotation_processor_paths_become_compile_only_dependencies() {
+        let dir = Dir::new("processors");
+        let migration = dir.migrate(
+            "<project><groupId>g</groupId><artifactId>a</artifactId><version>1</version>\
+             <properties><maven.compiler.release>21</maven.compiler.release></properties>\
+             <build><plugins><plugin><artifactId>maven-compiler-plugin</artifactId>\
+             <configuration><annotationProcessorPaths><path>\
+             <groupId>org.mapstruct</groupId><artifactId>mapstruct-processor</artifactId>\
+             <version>1.5.5.Final</version></path></annotationProcessorPaths>\
+             </configuration></plugin></plugins></build></project>",
+        );
+        let m = &migration.manifest;
+        assert_eq!(m.dependencies[0].key(), "org.mapstruct:mapstruct-processor");
+        assert!(m.dependencies[0].compile_only);
+        assert_eq!(m.java.javac_args, vec!["-proc:full"]);
+        let review = migration.report.needs_review.join("\n");
+        assert!(review.contains("-proc:full"), "{review}");
+    }
+
+    #[test]
+    fn arguments_split_on_whitespace_outside_quotes() {
+        assert_eq!(
+            split_arguments(" -Xmx1g   -Da=\"b c\" -ea "),
+            vec!["-Xmx1g", "-Da=b c", "-ea"]
+        );
     }
 
     #[test]
@@ -642,7 +880,7 @@ mod tests {
     }
 
     #[test]
-    fn exclusions_are_reported_since_jrs_toml_cannot_express_them() {
+    fn exclusions_are_carried_over() {
         let dir = Dir::new("exclusions");
         let migration = dir.migrate(
             "<project><groupId>g</groupId><artifactId>a</artifactId><version>1</version>\
@@ -651,9 +889,15 @@ mod tests {
              <artifactId>y</artifactId></exclusion></exclusions></dependency>\
              </dependencies></project>",
         );
-        assert_eq!(migration.manifest.dependencies.len(), 1);
-        let skipped = migration.report.not_migrated.join("\n");
-        assert!(skipped.contains("<exclusion>"), "{skipped}");
+        let dep = &migration.manifest.dependencies[0];
+        assert_eq!(dep.exclusions.len(), 1);
+        assert_eq!(dep.exclusions[0].to_string(), "x:y");
+        assert!(migration.report.not_migrated.is_empty());
+        assert!(
+            migration
+                .render_manifest()
+                .contains(r#""g:lib" = { version = "1.0", exclusions = ["x:y"] }"#)
+        );
     }
 
     #[test]
@@ -744,7 +988,7 @@ mod tests {
         let text = migration.render_manifest();
         let parsed = Manifest::parse(&text, &dir.path.join("jrs.toml"), &dir.path).unwrap();
         assert_eq!(parsed.name, "my-app");
-        assert_eq!(parsed.dependencies.len(), 1);
+        assert_eq!(parsed.dependencies.len(), 2);
         assert_eq!(parsed.dev_dependencies.len(), 1);
         assert!(parsed.warnings.is_empty(), "{:?}", parsed.warnings);
     }

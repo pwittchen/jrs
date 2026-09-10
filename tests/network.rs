@@ -22,7 +22,6 @@ use jrs::resolve::coord::Ga;
 use jrs::resolve::repo::Fetcher;
 use jrs::resolve::{self, Classpath};
 use jrs::test as junit;
-use jrs::toolchain::Toolchain;
 use jrs::ui::{CharsetChoice, Ui, UiOptions, When};
 
 fn silent_ui() -> Ui {
@@ -186,10 +185,19 @@ fn a_project_with_dependencies_compiles_tests_and_runs_them() {
             ascii: true,
             launcher_version: launcher.version.clone(),
             work_dir: project.work_dir(),
+            reports_dir: Some(project.target_dir().join("test-reports")),
+            ..Default::default()
         },
         &silent_ui(),
     )
     .unwrap();
+    assert!(
+        project
+            .target_dir()
+            .join("test-reports/TEST-junit-jupiter.xml")
+            .is_file(),
+        "JUnit XML should land where CI looks for it"
+    );
 
     assert!(
         outcome.ok(),
@@ -200,4 +208,34 @@ fn a_project_with_dependencies_compiles_tests_and_runs_them() {
     assert_eq!(outcome.passed, 2);
     assert_eq!(outcome.failed, 0);
     assert_eq!(outcome.describe(), "2 tests, 2 passed");
+}
+
+#[test]
+fn centrals_version_list_names_newer_releases() {
+    let scratch = Scratch::new("net-metadata");
+    let metadata = fetcher(&scratch)
+        .metadata("com.google.guava", "guava")
+        .unwrap();
+    assert!(metadata.versions.iter().any(|v| v == "33.0.0-jre"));
+    // `jrs outdated` stays on the flavour a project is on.
+    let newer = jrs::resolve::metadata::newest(&metadata.versions, "33.0.0-android").unwrap();
+    assert!(newer.ends_with("-android"), "{newer}");
+    assert!(
+        jrs::resolve::metadata::newest_release(&metadata)
+            .is_some_and(|v| !jrs::resolve::metadata::is_prerelease(&v))
+    );
+}
+
+#[test]
+fn a_classified_artifact_downloads_from_central() {
+    // JaCoCo's agent is only published classified, which is how `jrs test
+    // --coverage` gets it.
+    let scratch = Scratch::new("net-classifier");
+    let (jar, _) = fetcher(&scratch)
+        .jar(&junit::jacoco_agent(junit::JACOCO_VERSION))
+        .unwrap();
+    assert!(jar.ends_with(format!(
+        "org.jacoco.agent-{}-runtime.jar",
+        junit::JACOCO_VERSION
+    )));
 }

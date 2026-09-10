@@ -23,8 +23,9 @@ cargo fmt --check
 cargo clippy --all-targets -- -D warnings
 ```
 
-CI (`.github/workflows/rust.yml`) runs exactly those four plus the network tests, on
-push and PR against `master`. Changes that only touch `*.md` or `LICENSE` are excluded
+CI (`.github/workflows/rust.yml`) runs exactly those four on Linux, macOS and
+Windows (`fmt` on Linux only), plus the network tests on Linux, on push and PR
+against `master`. Changes that only touch `*.md` or `LICENSE` are excluded
 via `paths-ignore` — they cannot break the build, so they do not run it. A `v*` tag
 push runs the same checks, then `bump` writes the tag's version into `Cargo.toml`
 and `Cargo.lock`, commits it to `master` and moves the tag onto that commit, the
@@ -39,6 +40,7 @@ cargo test --test build                             # one integration suite
 cargo test --test output the_ascii_fallback         # one integration test
 cargo test resolve::                                # unit tests in one module
 cargo test --features network-tests --test network  # the Maven Central tests
+cargo bench --bench resolution                      # SPEC §12 M5: network vs jrs vs renderer
 ```
 
 Driving jrs against a Java project:
@@ -148,5 +150,7 @@ The crate list is deliberately minimal and was argued through in SPEC §13: `cla
 `toml`+`serde`, `ureq` (blocking, rustls), `quick-xml`, `zip`, `rayon`, `thiserror`,
 `sha1`/`sha2`, `terminal_size`, `libc` on unix. Nothing is `async` — `rayon` plus
 blocking IO, since downloads dominate. No `indicatif`, no `console`, no `walkdir`: the
-progress UI and the directory walk are hand-written on purpose. Adding a dependency is
+progress UI and the directory walk are hand-written on purpose. So are the
+`jrs.toml` editor behind `jrs add`/`remove` (`edit.rs`) and the shell completions
+(`completions.rs`): no `toml_edit`, no `clap_complete`. Adding a dependency is
 a spec-level decision.

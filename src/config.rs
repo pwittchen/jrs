@@ -76,10 +76,13 @@ pub struct Config {
     pub mirrors: BTreeMap<String, String>,
     /// Repository name → credentials, with the environment already applied.
     pub credentials: BTreeMap<String, Credentials>,
+    /// JDK feature version → its home, for a JDK a project pins that jrs would
+    /// not find on its own.
+    pub jdks: BTreeMap<u32, PathBuf>,
     pub warnings: Vec<String>,
 }
 
-const TOP_KEYS: &[&str] = &["jobs", "proxy", "mirrors", "credentials"];
+const TOP_KEYS: &[&str] = &["jobs", "proxy", "mirrors", "credentials", "jdks"];
 const PROXY_KEYS: &[&str] = &["url", "no-proxy"];
 const CREDENTIAL_KEYS: &[&str] = &["username", "password", "password-env", "token", "token-env"];
 
@@ -219,6 +222,23 @@ impl Config {
                     }
                 };
                 config.credentials.insert(repo.clone(), credentials);
+            }
+        }
+
+        if let Some(value) = table.get("jdks") {
+            let t = value
+                .as_table()
+                .ok_or_else(|| fail("`jdks` must be a table of version = path".into()))?;
+            for (version, home) in t {
+                let v: u32 = version.parse().map_err(|_| {
+                    fail(format!(
+                        "`jdks.{version}`: the key must be a Java feature version, like `21`"
+                    ))
+                })?;
+                let home = home
+                    .as_str()
+                    .ok_or_else(|| fail(format!("`jdks.{version}` must be a path string")))?;
+                config.jdks.insert(v, PathBuf::from(home));
             }
         }
 
@@ -483,6 +503,15 @@ token = "ghp_x"
         assert!(parse("jobs = 0").is_err());
         assert!(parse("jobs = 'many'").is_err());
         assert!(parse("[proxy]\nno-proxy = ['x']").is_err());
+    }
+
+    #[test]
+    fn jdk_homes_are_keyed_by_feature_version() {
+        let config = parse("[jdks]\n21 = '/opt/jdk-21'\n'17' = '/opt/jdk-17'").unwrap();
+        assert_eq!(config.jdks[&21], PathBuf::from("/opt/jdk-21"));
+        assert_eq!(config.jdks[&17], PathBuf::from("/opt/jdk-17"));
+        assert!(parse("[jdks]\nlatest = '/opt/jdk'").is_err());
+        assert!(parse("[jdks]\n21 = 21").is_err());
     }
 
     #[test]

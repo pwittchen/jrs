@@ -396,7 +396,11 @@ impl Ui {
             let ui = self.clone();
             Some(std::thread::spawn(move || {
                 while ui.inner.running.load(Ordering::SeqCst) {
-                    std::thread::sleep(TICK);
+                    // Parked rather than asleep, so ending a scope wakes the
+                    // thread at once: a `sleep` here made every phase wait out
+                    // up to a tick when it finished, which the M5 benchmark
+                    // measured at ~90 ms a build.
+                    std::thread::park_timeout(TICK);
                     if !ui.inner.running.load(Ordering::SeqCst) {
                         break;
                     }
@@ -464,6 +468,7 @@ impl LiveScope {
         let Some(ui) = self.ui.take() else { return };
         ui.inner.running.store(false, Ordering::SeqCst);
         if let Some(t) = self.thread.take() {
+            t.thread().unpark();
             let _ = t.join();
         }
         ui.suspend();

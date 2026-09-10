@@ -37,9 +37,38 @@ fn the_gradle_fixture_translates_exactly() {
     assert_eq!(migration.manifest.render(None), expected(&dir));
 }
 
+/// The long form in use: classifiers, exclusions, compile-only, a test-jar,
+/// annotation processors and the test JVM's arguments.
+#[test]
+fn the_maven_extras_fixture_translates_exactly() {
+    let (migration, dir) = migrate_fixture("maven-extras");
+    assert_eq!(migration.manifest.render(None), expected(&dir));
+
+    let skipped = migration.report.not_migrated.join("\n");
+    assert!(skipped.contains("legacy-native"), "{skipped}");
+    assert!(skipped.contains("system"), "{skipped}");
+    let review = migration.report.needs_review.join("\n");
+    assert!(review.contains("annotation processors"), "{review}");
+}
+
+/// The Kotlin DSL, with exclusion closures, `isTransitive = false`, a classified
+/// coordinate, compile-only, and JVM arguments for both run and test.
+#[test]
+fn the_gradle_kotlin_fixture_translates_exactly() {
+    let (migration, dir) = migrate_fixture("gradle-kts");
+    assert_eq!(migration.source, Source::Gradle);
+    assert_eq!(migration.manifest.render(None), expected(&dir));
+
+    let review = migration.report.needs_review.join("\n");
+    assert!(
+        review.contains("JDK 17 does not accept"),
+        "a Java 17 project must not get -proc:full: {review}"
+    );
+}
+
 #[test]
 fn every_expected_manifest_is_a_manifest_jrs_can_read() {
-    for name in ["maven", "gradle"] {
+    for name in ["maven", "gradle", "maven-extras", "gradle-kts"] {
         let (migration, dir) = migrate_fixture(name);
         let text = migration.render_manifest();
         let parsed = Manifest::parse(&text, &dir.join("jrs.toml"), &dir).unwrap();
@@ -58,8 +87,6 @@ fn the_maven_report_names_what_it_could_not_translate() {
     let skipped = migration.report.not_migrated.join("\n");
 
     // Each of these is in the fixture precisely so the report is exercised.
-    assert!(skipped.contains("jakarta.servlet-api"), "{skipped}");
-    assert!(skipped.contains("provided"), "{skipped}");
     assert!(skipped.contains("lombok"), "{skipped}");
     assert!(skipped.contains("optional"), "{skipped}");
     assert!(skipped.contains("maven-antrun-plugin"), "{skipped}");
@@ -80,8 +107,10 @@ fn the_gradle_report_opens_by_admitting_it_is_approximate() {
     assert!(preamble.contains("approximate"), "{preamble}");
     assert!(preamble.contains("review"), "{preamble}");
 
+    let review = migration.report.needs_review.join("\n");
+    assert!(review.contains("annotation processors"), "{review}");
+
     let skipped = migration.report.not_migrated.join("\n");
-    assert!(skipped.contains("annotationProcessor"), "{skipped}");
     assert!(skipped.contains("sharedVersion"), "{skipped}");
     assert!(skipped.contains("does.not.exist"), "{skipped}");
     assert!(skipped.contains("core, web"), "{skipped}");

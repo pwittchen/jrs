@@ -5,11 +5,13 @@ main-class = "com.example.GradleMain"
 
 [java]
 source = 21
+javac-args = ["-proc:full"]
 
 [dependencies]
 "com.google.guava:guava" = "33.0.0-jre"
 "org.apache.commons:commons-lang3" = "3.14.0"
 "org.slf4j:slf4j-api" = "2.0.12"
+"org.projectlombok:lombok" = { version = "1.18.30", compile-only = true }
 
 [dev-dependencies]
 "org.junit.jupiter:junit-jupiter" = "5.10.2"

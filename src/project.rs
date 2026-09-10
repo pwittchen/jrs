@@ -220,6 +220,54 @@ fn up_to_date(source: &Path, destination: &Path) -> Result<bool> {
     }
 }
 
+/// A cheap picture of a set of files — path, size and mtime — for `--watch`.
+/// Two pictures differ exactly when a file was added, removed or changed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Snapshot(Vec<(PathBuf, u64, Option<SystemTime>)>);
+
+impl Snapshot {
+    /// Every file under `roots` (a root may itself be a file, or not exist).
+    pub fn take(roots: &[PathBuf]) -> Snapshot {
+        let mut files = Vec::new();
+        for root in roots {
+            if root.is_file() {
+                files.push(root.clone());
+            } else if let Ok(found) = find_all(root) {
+                files.extend(found);
+            }
+        }
+        files.sort();
+        files.dedup();
+        Snapshot(
+            files
+                .into_iter()
+                .filter_map(|p| {
+                    let meta = std::fs::metadata(&p).ok()?;
+                    Some((p, meta.len(), meta.modified().ok()))
+                })
+                .collect(),
+        )
+    }
+
+    /// The first path that differs between two pictures, for the message.
+    pub fn first_difference<'a>(&'a self, other: &'a Snapshot) -> Option<&'a Path> {
+        for (a, b) in self.0.iter().zip(&other.0) {
+            if a != b {
+                return Some(if a.0 <= b.0 { &a.0 } else { &b.0 });
+            }
+        }
+        let longer = if self.0.len() > other.0.len() {
+            self
+        } else {
+            other
+        };
+        longer
+            .0
+            .get(self.0.len().min(other.0.len()))
+            .map(|e| e.0.as_path())
+    }
+}
+
 /// The most recent mtime among `paths`, or `None` if there are none.
 pub fn newest_mtime(paths: &[PathBuf]) -> Option<SystemTime> {
     paths
@@ -409,6 +457,29 @@ mod tests {
             copy_tree(&tree.root.join("absent"), &tree.root.join("out")).unwrap(),
             0
         );
+    }
+
+    #[test]
+    fn a_snapshot_changes_when_a_file_does() {
+        let tree = Tree::new("snapshot");
+        tree.write("src/A.java", "class A {}");
+        let manifest = tree.write("jrs.toml", "[project]");
+        let roots = vec![tree.root.join("src"), manifest, tree.root.join("absent")];
+
+        let first = Snapshot::take(&roots);
+        assert_eq!(first, Snapshot::take(&roots), "nothing changed");
+
+        tree.write("src/B.java", "class B {}");
+        let second = Snapshot::take(&roots);
+        assert_ne!(first, second);
+        assert!(
+            first
+                .first_difference(&second)
+                .is_some_and(|p| p.ends_with("B.java") || p.ends_with("jrs.toml"))
+        );
+
+        tree.write("src/A.java", "class A { int changed; }");
+        assert_ne!(second, Snapshot::take(&roots));
     }
 
     #[test]

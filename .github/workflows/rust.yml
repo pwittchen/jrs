@@ -22,7 +22,19 @@ env:
 jobs:
   build:
 
-    runs-on: ubuntu-latest
+    # Classpath separators, `.exe` suffixes, `%LOCALAPPDATA%` and drive-letter
+    # paths are only exercised where they occur, so every platform jrs ships a
+    # binary for runs the whole suite.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ ubuntu-latest, macos-latest, windows-latest ]
+
+    runs-on: ${{ matrix.os }}
+
+    defaults:
+      run:
+        shell: bash
 
     steps:
     - uses: actions/checkout@v7
@@ -44,7 +56,9 @@ jobs:
         echo "::remove-matcher owner=java::"
         echo "::remove-matcher owner=maven-javac::"
 
+    # Formatting does not depend on the platform; checking it once is enough.
     - name: Check formatting
+      if: runner.os == 'Linux'
       run: cargo fmt --check
 
     - name: Lint
@@ -59,7 +73,9 @@ jobs:
       run: cargo test --verbose
 
     # The tests that do reach Maven Central are gated behind a feature flag.
+    # They exercise the network, not the platform, so Linux alone runs them.
     - name: Run the network tests
+      if: runner.os == 'Linux'
       run: cargo test --verbose --features network-tests --test network
 
   # A version tag sets the crate version: `v1.2.3` writes `version = "1.2.3"` to

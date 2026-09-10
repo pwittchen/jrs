@@ -86,8 +86,13 @@ fn wrap_header(name: &str, value: &str) -> String {
 /// read as two entries, and the classpath would silently lose a jar. Emitting a
 /// `file:` URL with the reserved characters percent-encoded avoids that.
 pub fn class_path_entry(path: &Path) -> String {
-    let mut out = String::from("file:");
-    for byte in path.to_string_lossy().bytes() {
+    format!("file:{}", url_encode(&path.to_string_lossy()))
+}
+
+/// Percent-encode everything a `Class-Path` URL cannot carry verbatim.
+fn url_encode(text: &str) -> String {
+    let mut out = String::new();
+    for byte in text.bytes() {
         match byte {
             b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' => out.push(byte as char),
             b'/' | b'-' | b'_' | b'.' | b'~' | b'+' | b':' => out.push(byte as char),
@@ -96,6 +101,53 @@ pub fn class_path_entry(path: &Path) -> String {
         }
     }
     out
+}
+
+/// The portable layout: copy the runtime dependencies into `lib_dir` and return
+/// the `Class-Path` entries, relative to the jar beside it, that point at them.
+///
+/// A thin jar whose `Class-Path` names the cache runs only on the machine that
+/// built it; a jar with a `lib/` beside it can be zipped up and shipped.
+/// `lib_dir` is emptied first — it lives under `target/`, and a dependency that
+/// was dropped must not linger there. Each jar keeps its own file name, except
+/// when two dependencies share one (the same artifact name in two groups): then
+/// both get their group as a prefix, so neither shadows the other.
+///
+/// `libraries` are `(group, jar)` pairs in classpath order, and the entries
+/// come back in the same order.
+pub fn copy_libraries(
+    libraries: &[(String, PathBuf)],
+    lib_dir: &Path,
+    prefix: &str,
+) -> Result<Vec<String>> {
+    if lib_dir.exists() {
+        std::fs::remove_dir_all(lib_dir).path(lib_dir)?;
+    }
+    std::fs::create_dir_all(lib_dir).path(lib_dir)?;
+
+    let file_name = |p: &Path| {
+        p.file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default()
+    };
+    let mut entries = Vec::with_capacity(libraries.len());
+    for (group, jar) in libraries {
+        let name = file_name(jar);
+        let shared = libraries
+            .iter()
+            .filter(|(_, other)| file_name(other) == name)
+            .count()
+            > 1;
+        let name = if shared {
+            format!("{group}.{name}")
+        } else {
+            name
+        };
+        let destination = lib_dir.join(&name);
+        std::fs::copy(jar, &destination).path(&destination)?;
+        entries.push(format!("{prefix}/{}", url_encode(&name)));
+    }
+    Ok(entries)
 }
 
 #[derive(Debug)]
@@ -741,6 +793,47 @@ mod tests {
         assert_eq!(
             folded,
             "Class-Path: file:/cache/a%20b/one.jar file:/cache/two.jar"
+        );
+    }
+
+    #[test]
+    fn the_portable_layout_copies_dependencies_beside_the_jar() {
+        let tree = Tree::new("portable");
+        let a = tree.write("cache/org/one/core/1.0/core-1.0.jar", b"one");
+        let b = tree.write("cache/org/two/core/1.0/core-1.0.jar", b"two");
+        let c = tree.write(
+            "cache/org/x/lib with space/2.0/lib with space-2.0.jar",
+            b"x",
+        );
+        let lib = tree.root.join("target/lib");
+        tree.write("target/lib/stale.jar", b"from an earlier build");
+
+        let entries = copy_libraries(
+            &[
+                ("org.one".into(), a),
+                ("org.two".into(), b),
+                ("org.x".into(), c),
+            ],
+            &lib,
+            "lib",
+        )
+        .unwrap();
+        assert_eq!(
+            entries,
+            vec![
+                "lib/org.one.core-1.0.jar",
+                "lib/org.two.core-1.0.jar",
+                "lib/lib%20with%20space-2.0.jar",
+            ]
+        );
+        assert_eq!(
+            std::fs::read(lib.join("org.two.core-1.0.jar")).unwrap(),
+            b"two"
+        );
+        assert!(lib.join("lib with space-2.0.jar").is_file());
+        assert!(
+            !lib.join("stale.jar").exists(),
+            "a dropped dependency lingered"
         );
     }
 

@@ -14,21 +14,22 @@ use std::path::Path;
 
 use super::{Migration, Report, Source};
 use crate::error::{IoResultExt, Result};
-use crate::manifest::{self, Dependency, Manifest};
+use crate::manifest::{self, Dependency, Exclusion, Manifest};
 
 const PREAMBLE: &str = "Gradle migration is approximate. jrs reads the declarative \
                         parts of a build script by pattern, not by running Gradle, \
                         so review the manifest below before relying on it.";
 
 /// Configurations that land on the main classpath.
-const MAIN_CONFIGS: &[&str] = &[
-    "implementation",
-    "api",
-    "compileOnly",
-    "runtimeOnly",
-    "compile",
-    "runtime",
-];
+const MAIN_CONFIGS: &[&str] = &["implementation", "api", "runtimeOnly", "compile", "runtime"];
+
+/// Compiled against but not shipped: `compile-only`.
+const COMPILE_ONLY_CONFIGS: &[&str] = &["compileOnly", "compileOnlyApi", "providedCompile"];
+
+/// Annotation processors. jrs has no processor path (SPEC §1.2), but `javac`
+/// runs a processor it finds on the compile classpath, so these become
+/// compile-only dependencies.
+const PROCESSOR_CONFIGS: &[&str] = &["annotationProcessor"];
 
 /// Configurations that land on the test classpath.
 const TEST_CONFIGS: &[&str] = &[
@@ -42,12 +43,10 @@ const TEST_CONFIGS: &[&str] = &[
 
 /// Configurations jrs knows about but has nowhere to put.
 const REPORTED_CONFIGS: &[&str] = &[
-    "annotationProcessor",
     "testAnnotationProcessor",
     "kapt",
     "developmentOnly",
     "providedRuntime",
-    "providedCompile",
 ];
 
 pub fn migrate(build_file: &Path, root: &Path) -> Result<Migration> {
@@ -90,6 +89,7 @@ pub fn migrate(build_file: &Path, root: &Path) -> Result<Migration> {
     read_java(&script, &mut out, &mut report);
     read_main_class(&script, &mut out, &mut report);
     read_dependencies(&script, &catalog, &mut out, &mut report);
+    read_jvm_args(&script, &mut out, &mut report);
     read_repositories(&script, &mut out, &mut report);
     report_the_unreadable(&script, &settings, &mut report);
 
@@ -223,14 +223,7 @@ fn read_catalog(root: &Path, report: &mut Report) -> Catalog {
             ));
             continue;
         };
-        entries.insert(
-            alias.clone(),
-            Dependency {
-                group,
-                artifact,
-                version,
-            },
-        );
+        entries.insert(alias.clone(), Dependency::new(group, artifact, version));
     }
 
     if !entries.is_empty() {
@@ -291,14 +284,34 @@ fn read_main_class(script: &str, out: &mut Manifest, report: &mut Report) {
 }
 
 fn read_dependencies(script: &str, catalog: &Catalog, out: &mut Manifest, report: &mut Report) {
+    // The declaration whose `{ exclude ... }` closure is still open, and how
+    // deep inside it the scan is.
+    let mut closure: Option<(Target, usize, usize)> = None;
+    let mut processors = Vec::new();
+
     for line in block_lines(script, "dependencies") {
         let trimmed = line.trim();
+        let (opens, closes) = (trimmed.matches('{').count(), trimmed.matches('}').count());
+        if let Some((target, index, depth)) = &mut closure {
+            if let Some(exclusion) = parse_exclude(trimmed) {
+                table(out, *target)[*index].exclusions.push(exclusion);
+            }
+            *depth = (*depth + opens).saturating_sub(closes);
+            if *depth == 0 {
+                closure = None;
+            }
+            continue;
+        }
+
         let Some(config) = leading_word(trimmed) else {
             continue;
         };
-
         let target = if MAIN_CONFIGS.contains(&config.as_str()) {
             Target::Main
+        } else if COMPILE_ONLY_CONFIGS.contains(&config.as_str()) {
+            Target::CompileOnly
+        } else if PROCESSOR_CONFIGS.contains(&config.as_str()) {
+            Target::Processor
         } else if TEST_CONFIGS.contains(&config.as_str()) {
             Target::Test
         } else if REPORTED_CONFIGS.contains(&config.as_str()) {
@@ -311,63 +324,219 @@ fn read_dependencies(script: &str, catalog: &Catalog, out: &mut Manifest, report
             continue;
         };
 
-        // `libs.foo.bar`, resolved through the version catalog.
-        if let Some(reference) = catalog_reference(trimmed) {
-            match catalog.get(&reference) {
-                Some(dep) => {
-                    push(out, target, dep.clone(), report, config.as_str());
-                }
-                None => report.skipped(format!(
-                    "`{config} libs.{reference}` — no such alias in the version \
-                     catalog; add it to jrs.toml by hand"
-                )),
-            }
+        // Everything up to a trailing closure is the declaration itself.
+        let (declaration, inline_closure) = match trimmed.find('{') {
+            Some(at) => (&trimmed[..at], Some(&trimmed[at..])),
+            None => (trimmed, None),
+        };
+        let Some(mut dep) = read_declaration(declaration, &config, catalog, report) else {
             continue;
+        };
+        if let Some(body) = inline_closure {
+            dep.exclusions.extend(parse_exclude(body));
         }
-
-        // `implementation 'g:a:v'` / `implementation("g:a:v")`
-        let literals = quoted(trimmed);
-        if let Some(dep) = literals.first().and_then(|s| parse_gav(s)) {
-            push(out, target, dep, report, config.as_str());
-            continue;
+        if target == Target::Processor {
+            processors.push(dep.key());
         }
-
-        // `implementation group: 'g', name: 'a', version: 'v'`
-        if let Some(dep) = parse_map_notation(trimmed) {
-            push(out, target, dep, report, config.as_str());
-            continue;
+        let index = push(out, target, dep, report, config.as_str());
+        if opens > closes {
+            closure = Some((target, index, opens - closes));
         }
+    }
 
-        if literals.len() == 1 {
-            let literal = &literals[0];
-            let why = if literal.contains('$') {
-                "interpolated from a variable, which jrs cannot evaluate \
-                 without running Gradle"
+    if !processors.is_empty() {
+        let has_flag = out.java.javac_args.iter().any(|a| a.starts_with("-proc:"));
+        let added = out.java.source.is_some_and(|s| s >= 21) && !has_flag;
+        if added {
+            out.java.javac_args.push("-proc:full".to_string());
+        }
+        report.review(format!(
+            "annotation processors {} — put on the compile classpath as compile-only \
+             dependencies; javac from JDK 23 on runs them only with `-proc:full` in \
+             java.javac-args{}",
+            processors.join(", "),
+            if added {
+                ", which was added"
             } else {
-                "not a group:artifact:version coordinate"
-            };
-            report.skipped(format!("`{trimmed}` — `{literal}` is {why}"));
-        } else {
-            report.skipped(format!(
-                "`{trimmed}` — built from a variable or an expression, which jrs \
-                 cannot evaluate without running Gradle"
-            ));
-        }
+                ", which JDK 17 does not accept, so it was not added"
+            }
+        ));
     }
 }
 
-#[derive(Clone, Copy)]
+/// One dependency declaration, without its closure: a catalog reference, a
+/// `g:a:v` literal, or the map notation.
+fn read_declaration(
+    text: &str,
+    config: &str,
+    catalog: &Catalog,
+    report: &mut Report,
+) -> Option<Dependency> {
+    // `libs.foo.bar`, resolved through the version catalog.
+    if let Some(reference) = catalog_reference(text) {
+        let found = catalog.get(&reference).cloned();
+        if found.is_none() {
+            report.skipped(format!(
+                "`{config} libs.{reference}` — no such alias in the version \
+                 catalog; add it to jrs.toml by hand"
+            ));
+        }
+        return found;
+    }
+
+    // `implementation 'g:a:v'` / `implementation("g:a:v")`
+    let literals = quoted(text);
+    if let Some(dep) = literals.first().and_then(|s| parse_gav(s)) {
+        return Some(dep);
+    }
+
+    // `implementation group: 'g', name: 'a', version: 'v'`
+    if let Some(dep) = parse_map_notation(text) {
+        return Some(dep);
+    }
+
+    let trimmed = text.trim();
+    if literals.len() == 1 {
+        let literal = &literals[0];
+        let why = if literal.contains('$') {
+            "interpolated from a variable, which jrs cannot evaluate \
+             without running Gradle"
+        } else {
+            "not a group:artifact:version coordinate"
+        };
+        report.skipped(format!("`{trimmed}` — `{literal}` is {why}"));
+    } else {
+        report.skipped(format!(
+            "`{trimmed}` — built from a variable or an expression, which jrs \
+             cannot evaluate without running Gradle"
+        ));
+    }
+    None
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum Target {
     Main,
+    CompileOnly,
+    Processor,
     Test,
 }
 
-fn push(out: &mut Manifest, target: Target, dep: Dependency, report: &mut Report, config: &str) {
-    report.migrated(format!("{} ({config})", dep.key()));
+fn table(out: &mut Manifest, target: Target) -> &mut Vec<Dependency> {
     match target {
-        Target::Main => out.dependencies.push(dep),
-        Target::Test => out.dev_dependencies.push(dep),
+        Target::Test => &mut out.dev_dependencies,
+        _ => &mut out.dependencies,
     }
+}
+
+/// Add a dependency, returning its index in its table.
+///
+/// `compileOnly` and `annotationProcessor` naming the same library is the usual
+/// Lombok setup, and becomes one compile-only entry; a plain `implementation`
+/// of it wins over both.
+fn push(
+    out: &mut Manifest,
+    target: Target,
+    mut dep: Dependency,
+    report: &mut Report,
+    config: &str,
+) -> usize {
+    dep.compile_only = matches!(target, Target::CompileOnly | Target::Processor);
+    let entries = table(out, target);
+    if let Some(index) = entries.iter().position(|d| d.key() == dep.key()) {
+        if target == Target::Main {
+            entries[index].compile_only = false;
+        }
+        report.migrated(format!(
+            "{} ({config}, merged with an earlier declaration)",
+            dep.key()
+        ));
+        return index;
+    }
+    report.migrated(format!("{} ({config})", dep.key()));
+    entries.push(dep);
+    entries.len() - 1
+}
+
+/// `exclude group: 'x', module: 'y'`, `exclude(group = "x")`, or
+/// `transitive = false`, which excludes everything.
+fn parse_exclude(text: &str) -> Option<Exclusion> {
+    let compact: String = text.chars().filter(|c| !c.is_whitespace()).collect();
+    if compact.contains("transitive=false") || compact.contains("isTransitive=false") {
+        return Some(Exclusion {
+            group: "*".into(),
+            artifact: "*".into(),
+        });
+    }
+    let at = text.find("exclude")?;
+    let rest = &text[at + "exclude".len()..];
+    let field = |key: &str| -> Option<String> {
+        let at = rest.find(key)?;
+        let after = rest[at + key.len()..].trim_start();
+        after
+            .starts_with([':', '='])
+            .then(|| quoted(after).into_iter().next())
+            .flatten()
+    };
+    let group = field("group");
+    let module = field("module");
+    if group.is_none() && module.is_none() {
+        return None;
+    }
+    Some(Exclusion {
+        group: group.unwrap_or_else(|| "*".into()),
+        artifact: module.unwrap_or_else(|| "*".into()),
+    })
+}
+
+/// `applicationDefaultJvmArgs` for `jrs run`; the test task's `jvmArgs` and
+/// `systemProperty` for `jrs test`.
+fn read_jvm_args(script: &str, out: &mut Manifest, report: &mut Report) {
+    if let Some(line) = script
+        .lines()
+        .find(|l| l.trim().starts_with("applicationDefaultJvmArgs"))
+    {
+        let args = quoted(line);
+        if !args.is_empty() {
+            report.migrated(format!("run.jvm-args = {args:?}"));
+            out.run.jvm_args = args;
+        }
+    }
+
+    let mut test_args = Vec::new();
+    for line in blocks_where(script, is_test_block) {
+        let trimmed = line.trim();
+        if trimmed.starts_with("jvmArgs") {
+            test_args.extend(quoted(trimmed));
+        } else if trimmed.starts_with("systemProperty") && !trimmed.starts_with("systemProperties")
+        {
+            if let [key, value] = quoted(trimmed).as_slice() {
+                test_args.push(format!("-D{key}={value}"));
+            }
+        } else if trimmed.contains("useTestNG") {
+            report.skipped(
+                "`useTestNG()` — jrs runs JUnit 5, and JUnit 4 through the Vintage \
+                 engine; TestNG is not supported"
+                    .to_string(),
+            );
+        }
+    }
+    if !test_args.is_empty() {
+        report.migrated(format!("test.jvm-args = {test_args:?}"));
+        out.test.jvm_args = test_args;
+    }
+}
+
+/// `test { }`, and the `tasks.test` / `tasks.withType(Test)` spellings of it.
+fn is_test_block(header: &str) -> bool {
+    let compact: String = header.chars().filter(|c| !c.is_whitespace()).collect();
+    compact.starts_with("test{")
+        || compact.starts_with("tasks.test")
+        || compact.starts_with("tasks.withType(Test")
+        || compact.starts_with("tasks.withType<Test>")
+        || compact.starts_with("tasks.named<Test>")
+        || compact.starts_with("tasks.named('test'")
+        || compact.starts_with("tasks.named(\"test\"")
 }
 
 fn read_repositories(script: &str, out: &mut Manifest, report: &mut Report) {
@@ -516,6 +685,11 @@ pub fn quoted(line: &str) -> Vec<String> {
 
 /// The lines inside a top-level `name { ... }` block, brace-balanced.
 pub fn block_lines<'a>(script: &'a str, name: &str) -> Vec<&'a str> {
+    blocks_where(script, |header| header.starts_with(name))
+}
+
+/// The lines inside every block whose opening line satisfies `header`.
+fn blocks_where(script: &str, header: impl Fn(&str) -> bool) -> Vec<&str> {
     let mut out = Vec::new();
     let mut depth = 0usize;
     let mut inside = false;
@@ -524,7 +698,7 @@ pub fn block_lines<'a>(script: &'a str, name: &str) -> Vec<&'a str> {
         let opens = line.matches('{').count();
         let closes = line.matches('}').count();
         if !inside {
-            if line.trim().starts_with(name) && opens > 0 {
+            if header(line.trim()) && opens > 0 {
                 depth = opens.saturating_sub(closes);
                 inside = depth > 0;
             }
@@ -576,35 +750,39 @@ fn catalog_reference(line: &str) -> Option<String> {
     (!reference.is_empty()).then_some(reference.trim_end_matches('.').to_string())
 }
 
+/// `g:a:v`, `g:a:v:classifier`, or `g:a:v@jar`.
 fn parse_gav(text: &str) -> Option<Dependency> {
-    let parts: Vec<&str> = text.split(':').collect();
-    if parts.len() != 3 || parts.iter().any(|p| p.trim().is_empty()) {
-        return None;
-    }
     // `"com.example:thing:$version"` is a Groovy template, not a coordinate.
     // Accepting it would put a literal `$version` in the manifest, which is a
     // worse outcome than saying jrs could not read the line.
     if text.contains('$') {
         return None;
     }
-    Some(Dependency {
-        group: parts[0].trim().to_string(),
-        artifact: parts[1].trim().to_string(),
-        version: parts[2].trim().to_string(),
-    })
+    let (text, extension) = match text.split_once('@') {
+        Some((coordinate, ext)) => (coordinate, Some(ext)),
+        None => (text, None),
+    };
+    if extension.is_some_and(|e| e != "jar") {
+        return None;
+    }
+    let parts: Vec<&str> = text.split(':').map(str::trim).collect();
+    if !(3..=4).contains(&parts.len()) || parts.iter().any(|p| p.is_empty()) {
+        return None;
+    }
+    let mut dep = Dependency::new(parts[0], parts[1], parts[2]);
+    dep.classifier = parts.get(3).map(|c| c.to_string());
+    Some(dep)
 }
 
-/// `implementation group: 'g', name: 'a', version: 'v'`
+/// `implementation group: 'g', name: 'a', version: 'v'` (and `classifier:`).
 fn parse_map_notation(line: &str) -> Option<Dependency> {
     let field = |key: &str| -> Option<String> {
         let at = line.find(&format!("{key}:"))?;
         quoted(&line[at..]).into_iter().next()
     };
-    Some(Dependency {
-        group: field("group")?,
-        artifact: field("name")?,
-        version: field("version")?,
-    })
+    let mut dep = Dependency::new(field("group")?, field("name")?, field("version")?);
+    dep.classifier = field("classifier");
+    Some(dep)
 }
 
 /// `JavaVersion.VERSION_21`, `21`, `'1.8'`, `JavaVersion.VERSION_1_8`.
@@ -743,12 +921,100 @@ application {
     }
 
     #[test]
-    fn annotation_processors_and_unknown_plugins_are_reported() {
+    fn unknown_plugins_are_reported() {
         let dir = Dir::new("unsupported");
         let skipped = dir.migrate(GROOVY).report.not_migrated.join("\n");
-        assert!(skipped.contains("annotationProcessor"), "{skipped}");
         assert!(skipped.contains("shadow"), "{skipped}");
         assert!(!skipped.contains("id 'java'"), "{skipped}");
+    }
+
+    #[test]
+    fn compile_only_and_annotation_processors_become_one_compile_only_entry() {
+        let dir = Dir::new("processors");
+        let migration = dir.migrate(GROOVY);
+        let lombok = migration
+            .manifest
+            .dependencies
+            .iter()
+            .find(|d| d.artifact == "lombok")
+            .unwrap();
+        assert!(lombok.compile_only);
+        assert_eq!(
+            migration
+                .manifest
+                .dependencies
+                .iter()
+                .filter(|d| d.artifact == "lombok")
+                .count(),
+            1
+        );
+        assert_eq!(migration.manifest.java.javac_args, vec!["-proc:full"]);
+        let review = migration.report.needs_review.join("\n");
+        assert!(review.contains("annotation processors"), "{review}");
+    }
+
+    #[test]
+    fn classifiers_and_exclusions_are_read() {
+        let dir = Dir::new("extras");
+        let m = dir
+            .migrate(
+                "dependencies {\n\
+                 \x20 implementation 'org.lwjgl:lwjgl:3.3.3:natives-linux'\n\
+                 \x20 implementation group: 'io.netty', name: 'netty-transport-native-epoll', \
+                 version: '4.1.100.Final', classifier: 'linux-x86_64'\n\
+                 \x20 implementation('com.google.guava:guava:33.0.0-jre') {\n\
+                 \x20   exclude group: 'com.google.code.findbugs', module: 'jsr305'\n\
+                 \x20   exclude module: 'checker-qual'\n\
+                 \x20 }\n\
+                 \x20 implementation('g:solo:1.0') { transitive = false }\n\
+                 \x20 implementation 'g:after:1.0'\n\
+                 }\n",
+            )
+            .manifest;
+        let keys: Vec<String> = m.dependencies.iter().map(|d| d.key()).collect();
+        assert_eq!(
+            keys,
+            vec![
+                "org.lwjgl:lwjgl:natives-linux",
+                "io.netty:netty-transport-native-epoll:linux-x86_64",
+                "com.google.guava:guava",
+                "g:solo",
+                "g:after",
+            ]
+        );
+        let exclusions: Vec<String> = m.dependencies[2]
+            .exclusions
+            .iter()
+            .map(|e| e.to_string())
+            .collect();
+        assert_eq!(
+            exclusions,
+            vec!["com.google.code.findbugs:jsr305", "*:checker-qual"]
+        );
+        assert_eq!(m.dependencies[3].exclusions[0].to_string(), "*:*");
+        assert!(m.dependencies[4].exclusions.is_empty());
+    }
+
+    #[test]
+    fn jvm_arguments_are_read_for_run_and_test() {
+        let dir = Dir::new("jvm-args");
+        let migration = dir.migrate(
+            "application {\n  mainClass = 'x.Y'\n  applicationDefaultJvmArgs = ['-Xmx1g', '-Dmode=prod']\n}\n\
+             tasks.test {\n  useJUnitPlatform()\n  jvmArgs '-Xmx256m'\n  \
+             systemProperty 'env', 'test'\n}\n",
+        );
+        let m = &migration.manifest;
+        assert_eq!(m.run.jvm_args, vec!["-Xmx1g", "-Dmode=prod"]);
+        assert_eq!(m.test.jvm_args, vec!["-Xmx256m", "-Denv=test"]);
+
+        let testng = dir.migrate("test {\n  useTestNG()\n}\n");
+        assert!(
+            testng
+                .report
+                .not_migrated
+                .iter()
+                .any(|s| s.contains("TestNG"))
+        );
     }
 
     #[test]
@@ -894,6 +1160,15 @@ junit = "org.junit.jupiter:junit-jupiter:5.10.2"
     #[test]
     fn an_interpolated_coordinate_is_refused_rather_than_written_out() {
         assert_eq!(parse_gav("com.example:thing:1.0").unwrap().version, "1.0");
+        assert_eq!(
+            parse_gav("com.example:thing:1.0:tests")
+                .unwrap()
+                .classifier
+                .as_deref(),
+            Some("tests")
+        );
+        assert!(parse_gav("com.example:thing:1.0@jar").is_some());
+        assert!(parse_gav("com.example:thing:1.0@aar").is_none());
         assert!(parse_gav("com.example:thing:$version").is_none());
         assert!(parse_gav("com.example:thing:${version}").is_none());
 

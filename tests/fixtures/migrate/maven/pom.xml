@@ -42,13 +42,15 @@
       <scope>test</scope>
     </dependency>
 
-    <!-- deliberately unsupported, so the report has something to say -->
+    <!-- supplied by the servlet container: compile-only -->
     <dependency>
       <groupId>jakarta.servlet</groupId>
       <artifactId>jakarta.servlet-api</artifactId>
       <version>6.0.0</version>
       <scope>provided</scope>
     </dependency>
+
+    <!-- deliberately unsupported, so the report has something to say -->
     <dependency>
       <groupId>org.projectlombok</groupId>
       <artifactId>lombok</artifactId>

@@ -15,23 +15,73 @@ use crate::error::{IoResultExt, JrsError, Result};
 pub const MANIFEST_FILE: &str = "jrs.toml";
 pub const LOCK_FILE: &str = "jrs.lock";
 
-/// A declared dependency: a `group:artifact` key and an exact version.
+/// A declared dependency: a `group:artifact` key and an exact version, plus
+/// what the long table form adds.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Dependency {
     pub group: String,
     pub artifact: String,
     pub version: String,
+    /// `natives-linux`, `tests`, ...: a file published beside the main jar.
+    pub classifier: Option<String>,
+    /// Transitive dependencies not to walk, as `group:artifact` (`*` allowed).
+    pub exclusions: Vec<Exclusion>,
+    /// On the compile and test classpaths, but not the runtime one (Maven's
+    /// `provided`, Gradle's `compileOnly`): an API the runtime supplies, or an
+    /// annotation-only library.
+    pub compile_only: bool,
+}
+
+/// An exclusion from a dependency's transitive graph.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Exclusion {
+    pub group: String,
+    pub artifact: String,
+}
+
+impl std::fmt::Display for Exclusion {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}:{}", self.group, self.artifact)
+    }
 }
 
 impl Dependency {
+    pub fn new(
+        group: impl Into<String>,
+        artifact: impl Into<String>,
+        version: impl Into<String>,
+    ) -> Dependency {
+        Dependency {
+            group: group.into(),
+            artifact: artifact.into(),
+            version: version.into(),
+            classifier: None,
+            exclusions: Vec::new(),
+            compile_only: false,
+        }
+    }
+
+    /// `group:artifact`, or `group:artifact:classifier` — unique within a table.
     pub fn key(&self) -> String {
-        format!("{}:{}", self.group, self.artifact)
+        match &self.classifier {
+            Some(c) => format!("{}:{}:{c}", self.group, self.artifact),
+            None => format!("{}:{}", self.group, self.artifact),
+        }
+    }
+
+    /// True when the short `"g:a" = "version"` form says everything.
+    pub fn is_plain(&self) -> bool {
+        self.exclusions.is_empty() && !self.compile_only
     }
 }
 
 impl std::fmt::Display for Dependency {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}:{}:{}", self.group, self.artifact, self.version)
+        write!(f, "{}:{}:{}", self.group, self.artifact, self.version)?;
+        if let Some(c) = &self.classifier {
+            write!(f, ":{c}")?;
+        }
+        Ok(())
     }
 }
 
@@ -52,6 +102,12 @@ pub struct JavaConfig {
     pub target: Option<u32>,
     pub encoding: String,
     pub javac_args: Vec<String>,
+    /// Appended verbatim to `jrs doc`'s `javadoc` invocation.
+    pub javadoc_args: Vec<String>,
+    /// The JDK feature version to build with, when the project pins one. A
+    /// version, not a path: a path is a property of one machine, and the
+    /// manifest is committed.
+    pub jdk: Option<u32>,
 }
 
 impl Default for JavaConfig {
@@ -61,8 +117,35 @@ impl Default for JavaConfig {
             target: None,
             encoding: "UTF-8".to_string(),
             javac_args: Vec::new(),
+            javadoc_args: Vec::new(),
+            jdk: None,
         }
     }
+}
+
+/// `[run]`: how `jrs run` starts the JVM.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RunConfig {
+    /// Placed before `-cp`: `-Xmx512m`, `-Dkey=value`, `--enable-preview`.
+    pub jvm_args: Vec<String>,
+}
+
+/// `[test]`: how `jrs test` starts the test JVM.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TestConfig {
+    pub jvm_args: Vec<String>,
+    /// The JaCoCo release `jrs test --coverage` uses, for a JDK newer than
+    /// jrs's default knows about.
+    pub jacoco_version: Option<String>,
+}
+
+/// `[package]`: runtime images.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PackageConfig {
+    /// Modules added to a `--jlink` / `--jpackage` runtime beyond those `jdeps`
+    /// finds — ones reached only by reflection or `ServiceLoader`, such as
+    /// `jdk.crypto.ec` for TLS.
+    pub add_modules: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -83,6 +166,9 @@ pub struct Manifest {
     pub target_dir: PathBuf,
 
     pub java: JavaConfig,
+    pub run: RunConfig,
+    pub test: TestConfig,
+    pub package: PackageConfig,
     pub dependencies: Vec<Dependency>,
     pub dev_dependencies: Vec<Dependency>,
     /// User repositories in declaration order, with Central appended last.
@@ -102,10 +188,24 @@ const PROJECT_KEYS: &[&str] = &[
     "test-resource-dir",
     "target-dir",
 ];
-const JAVA_KEYS: &[&str] = &["source", "target", "encoding", "javac-args"];
+const JAVA_KEYS: &[&str] = &[
+    "source",
+    "target",
+    "encoding",
+    "javac-args",
+    "javadoc-args",
+    "jdk",
+];
+const RUN_KEYS: &[&str] = &["jvm-args"];
+const TEST_KEYS: &[&str] = &["jvm-args", "jacoco-version"];
+const PACKAGE_KEYS: &[&str] = &["add-modules"];
+const DEPENDENCY_KEYS: &[&str] = &["version", "classifier", "exclusions", "compile-only"];
 const TOP_KEYS: &[&str] = &[
     "project",
     "java",
+    "run",
+    "test",
+    "package",
     "dependencies",
     "dev-dependencies",
     "repositories",
@@ -230,32 +330,49 @@ impl Manifest {
                 let target = optional_release(t, "target")?.filter(|t| Some(*t) != source);
                 let encoding =
                     optional_string(t, "encoding", "java")?.unwrap_or_else(|| "UTF-8".into());
-                let javac_args = match t.get("javac-args") {
-                    None => Vec::new(),
-                    Some(v) => v
-                        .as_array()
-                        .ok_or_else(|| {
-                            JrsError::manifest("`java.javac-args` must be an array of strings")
-                        })?
-                        .iter()
-                        .map(|a| {
-                            a.as_str().map(str::to_string).ok_or_else(|| {
-                                JrsError::manifest("`java.javac-args` must be an array of strings")
-                            })
-                        })
-                        .collect::<Result<Vec<_>>>()?,
-                };
+                let javac_args = string_array(t, "javac-args", "java")?;
+                let javadoc_args = string_array(t, "javadoc-args", "java")?;
+                let jdk = optional_release(t, "jdk")?;
                 JavaConfig {
                     source,
                     target,
                     encoding,
                     javac_args,
+                    javadoc_args,
+                    jdk,
                 }
             }
         };
 
+        let run = match section(&table, "run", RUN_KEYS, &mut warnings)? {
+            None => RunConfig::default(),
+            Some(t) => RunConfig {
+                jvm_args: string_array(t, "jvm-args", "run")?,
+            },
+        };
+        let test = match section(&table, "test", TEST_KEYS, &mut warnings)? {
+            None => TestConfig::default(),
+            Some(t) => TestConfig {
+                jvm_args: string_array(t, "jvm-args", "test")?,
+                jacoco_version: optional_string(t, "jacoco-version", "test")?,
+            },
+        };
+        let package = match section(&table, "package", PACKAGE_KEYS, &mut warnings)? {
+            None => PackageConfig::default(),
+            Some(t) => PackageConfig {
+                add_modules: string_array(t, "add-modules", "package")?,
+            },
+        };
+
         let dependencies = parse_dependencies(&table, "dependencies")?;
         let dev_dependencies = parse_dependencies(&table, "dev-dependencies")?;
+        if let Some(d) = dev_dependencies.iter().find(|d| d.compile_only) {
+            return Err(JrsError::manifest(format!(
+                "`dev-dependencies.\"{}\"`: `compile-only` only means something in \
+                 [dependencies]; a dev-dependency is never on the runtime classpath anyway",
+                d.key()
+            )));
+        }
         for dev in &dev_dependencies {
             if dependencies.iter().any(|d| d.key() == dev.key()) {
                 warnings.push(format!(
@@ -279,6 +396,9 @@ impl Manifest {
             test_resource_dir,
             target_dir,
             java,
+            run,
+            test,
+            package,
             dependencies,
             dev_dependencies,
             repositories,
@@ -362,6 +482,8 @@ impl Manifest {
             || java.target.is_some()
             || java.encoding != "UTF-8"
             || !java.javac_args.is_empty()
+            || !java.javadoc_args.is_empty()
+            || java.jdk.is_some()
         {
             let _ = writeln!(s, "\n[java]");
             if let Some(v) = java.source {
@@ -376,21 +498,43 @@ impl Manifest {
                 let _ = writeln!(s, "encoding = {}", quote(&java.encoding));
             }
             if !java.javac_args.is_empty() {
-                let args: Vec<String> = java.javac_args.iter().map(|a| quote(a)).collect();
-                let _ = writeln!(s, "javac-args = [{}]", args.join(", "));
+                let _ = writeln!(s, "javac-args = {}", quote_list(&java.javac_args));
             }
+            if !java.javadoc_args.is_empty() {
+                let _ = writeln!(s, "javadoc-args = {}", quote_list(&java.javadoc_args));
+            }
+            if let Some(v) = java.jdk {
+                let _ = writeln!(s, "jdk = {v}");
+            }
+        }
+        if !self.run.jvm_args.is_empty() {
+            let _ = writeln!(s, "\n[run]");
+            let _ = writeln!(s, "jvm-args = {}", quote_list(&self.run.jvm_args));
+        }
+        if self.test != TestConfig::default() {
+            let _ = writeln!(s, "\n[test]");
+            if !self.test.jvm_args.is_empty() {
+                let _ = writeln!(s, "jvm-args = {}", quote_list(&self.test.jvm_args));
+            }
+            if let Some(v) = &self.test.jacoco_version {
+                let _ = writeln!(s, "jacoco-version = {}", quote(v));
+            }
+        }
+        if !self.package.add_modules.is_empty() {
+            let _ = writeln!(s, "\n[package]");
+            let _ = writeln!(s, "add-modules = {}", quote_list(&self.package.add_modules));
         }
 
         if !self.dependencies.is_empty() {
             let _ = writeln!(s, "\n[dependencies]");
             for d in &self.dependencies {
-                let _ = writeln!(s, "{} = {}", quote(&d.key()), quote(&d.version));
+                let _ = writeln!(s, "{}", render_dependency(d));
             }
         }
         if !self.dev_dependencies.is_empty() {
             let _ = writeln!(s, "\n[dev-dependencies]");
             for d in &self.dev_dependencies {
-                let _ = writeln!(s, "{} = {}", quote(&d.key()), quote(&d.version));
+                let _ = writeln!(s, "{}", render_dependency(d));
             }
         }
         let extra: Vec<&Repository> = self
@@ -422,6 +566,9 @@ pub fn blank(name: &str, version: &str, root: &Path) -> Manifest {
         test_resource_dir: PathBuf::from("src/test/resources"),
         target_dir: PathBuf::from("target"),
         java: JavaConfig::default(),
+        run: RunConfig::default(),
+        test: TestConfig::default(),
+        package: PackageConfig::default(),
         dependencies: Vec::new(),
         dev_dependencies: Vec::new(),
         repositories: vec![Repository {
@@ -450,29 +597,68 @@ fn parse_dependencies(table: &toml::Table, section: &str) -> Result<Vec<Dependen
         .as_table()
         .ok_or_else(|| JrsError::manifest(format!("`{section}` must be a table")))?;
 
-    let mut out = Vec::with_capacity(deps.len());
+    let mut out: Vec<Dependency> = Vec::with_capacity(deps.len());
     for (key, value) in deps {
-        let (group, artifact) = split_coordinate(key, section)?;
-        let version = match value {
-            toml::Value::String(v) => v.clone(),
+        let (group, artifact, key_classifier) = split_coordinate(key, section)?;
+        let mut dep = Dependency::new(group, artifact, "");
+        dep.classifier = key_classifier;
+        let name = |k: &str| format!("`{section}.\"{key}\".{k}`");
+        match value {
+            toml::Value::String(v) => dep.version = v.clone(),
             toml::Value::Table(t) => {
-                let known = ["version"];
                 for k in t.keys() {
-                    if !known.contains(&k.as_str()) {
+                    if !DEPENDENCY_KEYS.contains(&k.as_str()) {
                         return Err(JrsError::manifest(format!(
-                            "`{section}.\"{key}\"`: unknown key `{k}` \
-                             (expected only `version`)"
+                            "`{section}.\"{key}\"`: unknown key `{k}` (expected `version`, \
+                             `classifier`, `exclusions` or `compile-only`)"
                         )));
                     }
                 }
-                t.get("version")
+                dep.version = t
+                    .get("version")
                     .and_then(|v| v.as_str())
                     .ok_or_else(|| {
                         JrsError::manifest(format!(
                             "`{section}.\"{key}\"` is missing a `version` string"
                         ))
                     })?
-                    .to_string()
+                    .to_string();
+                if let Some(c) = optional_string(t, "classifier", &format!("{section}.\"{key}\""))?
+                {
+                    if dep.classifier.as_ref().is_some_and(|k| *k != c) {
+                        return Err(JrsError::manifest(format!(
+                            "{} says `{c}`, but the key names another classifier",
+                            name("classifier")
+                        )));
+                    }
+                    dep.classifier = Some(c).filter(|c| !c.is_empty());
+                }
+                for pattern in string_array(t, "exclusions", &format!("{section}.\"{key}\""))? {
+                    let (g, a) = pattern
+                        .split_once(':')
+                        .filter(|(g, a)| !g.is_empty() && !a.is_empty() && !a.contains(':'))
+                        .ok_or_else(|| {
+                            JrsError::manifest(format!(
+                                "{}: `{pattern}` is not a `group:artifact` pattern \
+                                 (`*` may stand for either half)",
+                                name("exclusions")
+                            ))
+                        })?;
+                    dep.exclusions.push(Exclusion {
+                        group: g.to_string(),
+                        artifact: a.to_string(),
+                    });
+                }
+                dep.compile_only = match t.get("compile-only") {
+                    None => false,
+                    Some(toml::Value::Boolean(b)) => *b,
+                    Some(_) => {
+                        return Err(JrsError::manifest(format!(
+                            "{} must be `true` or `false`",
+                            name("compile-only")
+                        )));
+                    }
+                };
             }
             _ => {
                 return Err(JrsError::manifest(format!(
@@ -480,32 +666,121 @@ fn parse_dependencies(table: &toml::Table, section: &str) -> Result<Vec<Dependen
                      with a `version` key"
                 )));
             }
-        };
-        if version.trim().is_empty() {
+        }
+        if dep.version.trim().is_empty() {
             return Err(JrsError::manifest(format!(
                 "`{section}.\"{key}\"` has an empty version"
             )));
         }
-        out.push(Dependency {
-            group,
-            artifact,
-            version,
-        });
+        if out.iter().any(|d| d.key() == dep.key()) {
+            return Err(JrsError::manifest(format!(
+                "`{section}` declares `{}` twice",
+                dep.key()
+            )));
+        }
+        out.push(dep);
     }
     Ok(out)
 }
 
-fn split_coordinate(key: &str, section: &str) -> Result<(String, String)> {
-    let mut parts = key.split(':');
-    let group = parts.next().unwrap_or("");
-    let artifact = parts.next().unwrap_or("");
-    if group.is_empty() || artifact.is_empty() || parts.next().is_some() {
-        return Err(JrsError::manifest(format!(
+/// `group:artifact`, or `group:artifact:classifier`.
+///
+/// A third segment that starts with a digit is a version, not a classifier —
+/// classifiers are words like `natives-linux` or `tests` — and gets the error
+/// that says where the version goes.
+fn split_coordinate(key: &str, section: &str) -> Result<(String, String, Option<String>)> {
+    let parts: Vec<&str> = key.split(':').collect();
+    let bad = || {
+        JrsError::manifest(format!(
             "`{section}.\"{key}\"`: dependency keys must be `group:artifact` \
              (the version belongs on the right-hand side)"
-        )));
+        ))
+    };
+    match parts.as_slice() {
+        [g, a] if !g.is_empty() && !a.is_empty() => Ok((g.to_string(), a.to_string(), None)),
+        [g, a, c]
+            if !g.is_empty()
+                && !a.is_empty()
+                && !c.is_empty()
+                && !c.starts_with(|ch: char| ch.is_ascii_digit()) =>
+        {
+            Ok((g.to_string(), a.to_string(), Some(c.to_string())))
+        }
+        _ => Err(bad()),
     }
-    Ok((group.to_string(), artifact.to_string()))
+}
+
+/// An optional sub-table, with its unknown keys turned into warnings.
+fn section<'a>(
+    table: &'a toml::Table,
+    name: &str,
+    known: &[&str],
+    warnings: &mut Vec<String>,
+) -> Result<Option<&'a toml::Table>> {
+    let Some(value) = table.get(name) else {
+        return Ok(None);
+    };
+    let t = value
+        .as_table()
+        .ok_or_else(|| JrsError::manifest(format!("`{name}` must be a table")))?;
+    warn_unknown(t, known, &format!("{name}."), warnings);
+    Ok(Some(t))
+}
+
+fn string_array(t: &toml::Table, key: &str, section: &str) -> Result<Vec<String>> {
+    let bad = || JrsError::manifest(format!("`{section}.{key}` must be an array of strings"));
+    match t.get(key) {
+        None => Ok(Vec::new()),
+        Some(v) => v
+            .as_array()
+            .ok_or_else(bad)?
+            .iter()
+            .map(|a| a.as_str().map(str::to_string).ok_or_else(bad))
+            .collect(),
+    }
+}
+
+/// One `[dependencies]` line: the short form when it says everything, the
+/// inline table otherwise.
+fn render_dependency(d: &Dependency) -> String {
+    let (key, value) = dependency_entry(d);
+    format!("{} = {value}", quote(&key))
+}
+
+/// A dependency as a table entry: its key, unquoted, and its value as TOML.
+/// `jrs add` writes exactly this, so an added line reads like a generated one.
+pub fn dependency_entry(d: &Dependency) -> (String, String) {
+    // The classifier goes in the key when it can, so two classifiers of one
+    // artifact stay two distinct keys.
+    let key_classifier = d
+        .classifier
+        .as_ref()
+        .filter(|c| !c.starts_with(|ch: char| ch.is_ascii_digit()));
+    let key = match key_classifier {
+        Some(c) => format!("{}:{}:{c}", d.group, d.artifact),
+        None => format!("{}:{}", d.group, d.artifact),
+    };
+    let table_classifier = d.classifier.as_ref().filter(|_| key_classifier.is_none());
+    if d.is_plain() && table_classifier.is_none() {
+        return (key, quote(&d.version));
+    }
+    let mut fields = vec![format!("version = {}", quote(&d.version))];
+    if let Some(c) = table_classifier {
+        fields.push(format!("classifier = {}", quote(c)));
+    }
+    if !d.exclusions.is_empty() {
+        let patterns: Vec<String> = d.exclusions.iter().map(|e| e.to_string()).collect();
+        fields.push(format!("exclusions = {}", quote_list(&patterns)));
+    }
+    if d.compile_only {
+        fields.push("compile-only = true".to_string());
+    }
+    (key, format!("{{ {} }}", fields.join(", ")))
+}
+
+fn quote_list(items: &[String]) -> String {
+    let quoted: Vec<String> = items.iter().map(|a| quote(a)).collect();
+    format!("[{}]", quoted.join(", "))
 }
 
 fn parse_repositories(table: &toml::Table) -> Result<Vec<Repository>> {
@@ -559,7 +834,9 @@ fn optional_string(t: &toml::Table, key: &str, section: &str) -> Result<Option<S
 fn path_or(t: &toml::Table, key: &str, default: &str, section: &str) -> Result<PathBuf> {
     let raw = optional_string(t, key, section)?.unwrap_or_else(|| default.to_string());
     let path = PathBuf::from(&raw);
-    if path.is_absolute() || raw.contains("..") {
+    // `has_root` as well as `is_absolute`: on Windows `/abs` is not absolute
+    // (it has no drive), but it still escapes the project.
+    if path.is_absolute() || path.has_root() || raw.contains("..") {
         return Err(JrsError::manifest(format!(
             "`{section}.{key}` must be a relative path inside the project (got `{raw}`)"
         )));
@@ -567,7 +844,7 @@ fn path_or(t: &toml::Table, key: &str, default: &str, section: &str) -> Result<P
     Ok(path)
 }
 
-/// `java.source` / `java.target` accept both `21` and `"21"`.
+/// `java.source` / `java.target` / `java.jdk` accept both `21` and `"21"`.
 fn optional_release(t: &toml::Table, key: &str) -> Result<Option<u32>> {
     match t.get(key) {
         None => Ok(None),
@@ -700,19 +977,110 @@ internal = "https://nexus.example.com/repository/maven-public/"
         assert_eq!(
             m.dependencies,
             vec![
-                Dependency {
-                    group: "com.google.guava".into(),
-                    artifact: "guava".into(),
-                    version: "33.0.0-jre".into()
-                },
-                Dependency {
-                    group: "org.apache.commons".into(),
-                    artifact: "commons-lang3".into(),
-                    version: "3.14.0".into()
-                },
+                Dependency::new("com.google.guava", "guava", "33.0.0-jre"),
+                Dependency::new("org.apache.commons", "commons-lang3", "3.14.0"),
             ]
         );
         assert_eq!(m.dev_dependencies.len(), 1);
+    }
+
+    #[test]
+    fn the_long_form_carries_classifiers_exclusions_and_compile_only() {
+        let m = parse(
+            r#"
+[project]
+name = "a"
+version = "1"
+[dependencies]
+"org.lwjgl:lwjgl" = "3.3.3"
+"org.lwjgl:lwjgl:natives-linux" = "3.3.3"
+"io.netty:netty-transport-native-epoll" = { version = "4.1.100.Final", classifier = "linux-x86_64" }
+"com.google.guava:guava" = { version = "33.0.0-jre", exclusions = ["com.google.code.findbugs:jsr305", "org.checkerframework:*"] }
+"jakarta.servlet:jakarta.servlet-api" = { version = "6.0.0", compile-only = true }
+"#,
+        )
+        .unwrap();
+        let d = &m.dependencies;
+        assert_eq!(d[0].classifier, None);
+        assert_eq!(d[1].classifier.as_deref(), Some("natives-linux"));
+        assert_eq!(d[1].key(), "org.lwjgl:lwjgl:natives-linux");
+        assert_eq!(d[2].classifier.as_deref(), Some("linux-x86_64"));
+        assert_eq!(
+            d[3].exclusions,
+            vec![
+                Exclusion {
+                    group: "com.google.code.findbugs".into(),
+                    artifact: "jsr305".into()
+                },
+                Exclusion {
+                    group: "org.checkerframework".into(),
+                    artifact: "*".into()
+                },
+            ]
+        );
+        assert!(d[4].compile_only);
+        assert!(!d[3].compile_only);
+
+        // Rendering round-trips, classifiers and all.
+        let again = parse(&m.render(None)).unwrap();
+        assert_eq!(again.dependencies, m.dependencies);
+    }
+
+    #[test]
+    fn malformed_long_forms_name_the_key() {
+        let base = "[project]\nname='a'\nversion='1'\n";
+        let err = parse(&format!(
+            "{base}[dependencies]\n'g:a' = {{ version = '1', exclusions = ['nope'] }}"
+        ))
+        .unwrap_err();
+        assert!(err.to_string().contains("exclusions"), "{err}");
+        let err = parse(&format!(
+            "{base}[dependencies]\n'g:a' = {{ version = '1', compile-only = 'yes' }}"
+        ))
+        .unwrap_err();
+        assert!(err.to_string().contains("compile-only"), "{err}");
+        let err = parse(&format!(
+            "{base}[dev-dependencies]\n'g:a' = {{ version = '1', compile-only = true }}"
+        ))
+        .unwrap_err();
+        assert!(err.to_string().contains("[dependencies]"), "{err}");
+        let err = parse(&format!(
+            "{base}[dependencies]\n'g:a:x' = {{ version = '1', classifier = 'y' }}"
+        ))
+        .unwrap_err();
+        assert!(err.to_string().contains("classifier"), "{err}");
+        let err = parse(&format!(
+            "{base}[dependencies]\n'g:a' = {{ version = '1', scope = 'provided' }}"
+        ))
+        .unwrap_err();
+        assert!(err.to_string().contains("compile-only"), "{err}");
+    }
+
+    #[test]
+    fn jvm_arguments_and_the_pinned_jdk_are_read() {
+        let m = parse(
+            "[project]\nname='a'\nversion='1'\n[java]\njdk = 21\n\
+             [run]\njvm-args = ['-Xmx256m', '--enable-preview']\n\
+             [test]\njvm-args = ['-Dmode=test']\njacoco-version = '0.8.15'\n\
+             [package]\nadd-modules = ['jdk.crypto.ec']",
+        )
+        .unwrap();
+        assert!(m.warnings.is_empty(), "{:?}", m.warnings);
+        assert_eq!(m.java.jdk, Some(21));
+        assert_eq!(m.run.jvm_args, vec!["-Xmx256m", "--enable-preview"]);
+        assert_eq!(m.test.jvm_args, vec!["-Dmode=test"]);
+        assert_eq!(m.test.jacoco_version.as_deref(), Some("0.8.15"));
+        assert_eq!(m.package.add_modules, vec!["jdk.crypto.ec"]);
+
+        let again = parse(&m.render(None)).unwrap();
+        assert_eq!(again.java, m.java);
+        assert_eq!(again.run, m.run);
+        assert_eq!(again.test, m.test);
+        assert_eq!(again.package, m.package);
+
+        let err =
+            parse("[project]\nname='a'\nversion='1'\n[run]\njvm-args = '-Xmx1g'").unwrap_err();
+        assert!(err.to_string().contains("run.jvm-args"), "{err}");
     }
 
     #[test]

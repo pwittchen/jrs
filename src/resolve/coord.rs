@@ -11,11 +11,17 @@ use std::fmt;
 
 use crate::error::{JrsError, Result};
 
-/// A `group:artifact` pair — the identity a dependency graph dedupes on.
+/// A `group:artifact` pair, plus a classifier when there is one — the identity
+/// a dependency graph dedupes on.
+///
+/// The classifier is part of the identity because a classified artifact is a
+/// different file: `lwjgl` and `lwjgl:natives-linux` are both needed at once, and
+/// mediating one against the other would drop half of the library.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct Ga {
     pub group: String,
     pub artifact: String,
+    pub classifier: Option<String>,
 }
 
 impl Ga {
@@ -23,23 +29,52 @@ impl Ga {
         Ga {
             group: group.into(),
             artifact: artifact.into(),
+            classifier: None,
         }
+    }
+
+    pub fn with_classifier(mut self, classifier: Option<String>) -> Ga {
+        self.classifier = classifier;
+        self
+    }
+
+    /// `group:artifact`, or `group:artifact:classifier`.
+    pub fn parse(s: &str) -> Option<Ga> {
+        let mut parts = s.splitn(3, ':');
+        let group = parts.next().filter(|p| !p.is_empty())?;
+        let artifact = parts.next().filter(|p| !p.is_empty())?;
+        let classifier = parts.next().filter(|p| !p.is_empty()).map(str::to_string);
+        Some(Ga::new(group, artifact).with_classifier(classifier))
+    }
+
+    /// Whether an exclusion pattern (`*` wildcards allowed) covers this artifact.
+    /// Exclusions name a group and artifact only, so they match every classifier.
+    pub fn excluded_by(&self, pattern: &Ga) -> bool {
+        (pattern.group == "*" || pattern.group == self.group)
+            && (pattern.artifact == "*" || pattern.artifact == self.artifact)
     }
 }
 
 impl fmt::Display for Ga {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}:{}", self.group, self.artifact)
+        write!(f, "{}:{}", self.group, self.artifact)?;
+        if let Some(c) = &self.classifier {
+            write!(f, ":{c}")?;
+        }
+        Ok(())
     }
 }
 
-/// A full `group:artifact:version` triple.
+/// A full `group:artifact:version` triple, with an optional classifier.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Coord {
     pub group: String,
     pub artifact: String,
     pub version: String,
+    pub classifier: Option<String>,
 }
+
+pub const SNAPSHOT_SUFFIX: &str = "-SNAPSHOT";
 
 impl Coord {
     pub fn new(
@@ -51,43 +86,93 @@ impl Coord {
             group: group.into(),
             artifact: artifact.into(),
             version: version.into(),
+            classifier: None,
         }
     }
 
+    pub fn with_classifier(mut self, classifier: Option<String>) -> Coord {
+        self.classifier = classifier;
+        self
+    }
+
+    /// `group:artifact:version`, or Gradle's `group:artifact:version:classifier`.
     pub fn parse(s: &str) -> Result<Coord> {
         let parts: Vec<&str> = s.split(':').collect();
-        if parts.len() != 3 || parts.iter().any(|p| p.is_empty()) {
+        if !(3..=4).contains(&parts.len()) || parts.iter().any(|p| p.is_empty()) {
             return Err(JrsError::resolve(format!(
                 "`{s}` is not a `group:artifact:version` coordinate"
             )));
         }
-        Ok(Coord::new(parts[0], parts[1], parts[2]))
+        Ok(Coord::new(parts[0], parts[1], parts[2])
+            .with_classifier(parts.get(3).map(|c| c.to_string())))
     }
 
     pub fn ga(&self) -> Ga {
-        Ga::new(&self.group, &self.artifact)
+        Ga::new(&self.group, &self.artifact).with_classifier(self.classifier.clone())
     }
 
-    /// `guava-33.0.0-jre.jar`
+    /// The coordinate whose POM describes this one: a classified artifact shares
+    /// the POM of the artifact it sits beside.
+    pub fn pom_coord(&self) -> Coord {
+        Coord::new(&self.group, &self.artifact, &self.version)
+    }
+
+    /// `1.0-SNAPSHOT`: a version that may be republished under the same name.
+    pub fn is_snapshot(&self) -> bool {
+        self.version.ends_with(SNAPSHOT_SUFFIX)
+    }
+
+    /// `guava-33.0.0-jre.jar`, `lwjgl-3.3.3-natives-linux.jar`.
+    ///
+    /// A POM has no classifier: a classified artifact is an extra file published
+    /// beside the main one, described by the same POM.
     pub fn file_name(&self, ext: &str) -> String {
-        format!("{}-{}.{ext}", self.artifact, self.version)
+        self.file_name_as(ext, &self.version)
+    }
+
+    /// Like [`Coord::file_name`], with the version in the file name replaced —
+    /// a timestamped snapshot lives in the `-SNAPSHOT` directory under a name like
+    /// `lib-1.0-20240101.120000-3.jar`.
+    pub fn file_name_as(&self, ext: &str, file_version: &str) -> String {
+        match &self.classifier {
+            Some(c) if ext != "pom" && !ext.starts_with("pom.") => {
+                format!("{}-{file_version}-{c}.{ext}", self.artifact)
+            }
+            _ => format!("{}-{file_version}.{ext}", self.artifact),
+        }
     }
 
     /// `com/google/guava/guava/33.0.0-jre/guava-33.0.0-jre.jar` (SPEC §8.1).
     pub fn repo_path(&self, ext: &str) -> String {
+        self.repo_path_as(ext, &self.version)
+    }
+
+    pub fn repo_path_as(&self, ext: &str, file_version: &str) -> String {
         format!(
-            "{}/{}/{}/{}",
+            "{}/{}",
+            self.version_dir(),
+            self.file_name_as(ext, file_version)
+        )
+    }
+
+    /// `com/google/guava/guava/33.0.0-jre`, where every file of a version lives.
+    pub fn version_dir(&self) -> String {
+        format!(
+            "{}/{}/{}",
             self.group.replace('.', "/"),
             self.artifact,
-            self.version,
-            self.file_name(ext)
+            self.version
         )
     }
 }
 
 impl fmt::Display for Coord {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}:{}:{}", self.group, self.artifact, self.version)
+        write!(f, "{}:{}:{}", self.group, self.artifact, self.version)?;
+        if let Some(c) = &self.classifier {
+            write!(f, ":{c}")?;
+        }
+        Ok(())
     }
 }
 
@@ -96,6 +181,7 @@ impl Ord for Coord {
         self.group
             .cmp(&other.group)
             .then_with(|| self.artifact.cmp(&other.artifact))
+            .then_with(|| self.classifier.cmp(&other.classifier))
             .then_with(|| compare_versions(&self.version, &other.version))
             // `1.0` and `1.0.0` compare equal as versions but are distinct
             // coordinates; break the tie so `Ord` and `Eq` stay consistent.
@@ -294,8 +380,59 @@ mod tests {
             Coord::new("g", "a", "1.0")
         );
         assert!(Coord::parse("g:a").is_err());
-        assert!(Coord::parse("g:a:1.0:jar").is_err());
+        assert!(Coord::parse("g:a:1.0:natives:extra").is_err());
         assert!(Coord::parse("g::1.0").is_err());
+    }
+
+    #[test]
+    fn a_classifier_names_a_file_beside_the_main_artifact() {
+        let c = Coord::parse("org.lwjgl:lwjgl:3.3.3:natives-linux").unwrap();
+        assert_eq!(c.classifier.as_deref(), Some("natives-linux"));
+        assert_eq!(c.to_string(), "org.lwjgl:lwjgl:3.3.3:natives-linux");
+        assert_eq!(
+            c.repo_path("jar"),
+            "org/lwjgl/lwjgl/3.3.3/lwjgl-3.3.3-natives-linux.jar"
+        );
+        assert_eq!(
+            c.repo_path("jar.sha1"),
+            "org/lwjgl/lwjgl/3.3.3/lwjgl-3.3.3-natives-linux.jar.sha1"
+        );
+        // ...but it is described by the unclassified POM.
+        assert_eq!(c.repo_path("pom"), "org/lwjgl/lwjgl/3.3.3/lwjgl-3.3.3.pom");
+        assert_eq!(c.pom_coord(), Coord::new("org.lwjgl", "lwjgl", "3.3.3"));
+        assert_ne!(c.ga(), Ga::new("org.lwjgl", "lwjgl"));
+        assert_eq!(c.ga().to_string(), "org.lwjgl:lwjgl:natives-linux");
+    }
+
+    #[test]
+    fn group_artifact_pairs_parse_with_or_without_a_classifier() {
+        assert_eq!(Ga::parse("g:a"), Some(Ga::new("g", "a")));
+        assert_eq!(
+            Ga::parse("g:a:tests"),
+            Some(Ga::new("g", "a").with_classifier(Some("tests".into())))
+        );
+        assert_eq!(Ga::parse("g"), None);
+        assert_eq!(Ga::parse(":a"), None);
+    }
+
+    #[test]
+    fn exclusions_match_every_classifier_and_honour_wildcards() {
+        let natives = Ga::new("g", "a").with_classifier(Some("natives".into()));
+        assert!(natives.excluded_by(&Ga::new("g", "a")));
+        assert!(natives.excluded_by(&Ga::new("*", "a")));
+        assert!(natives.excluded_by(&Ga::new("g", "*")));
+        assert!(!natives.excluded_by(&Ga::new("g", "b")));
+    }
+
+    #[test]
+    fn timestamped_snapshots_keep_their_directory() {
+        let c = Coord::new("g", "lib", "1.0-SNAPSHOT");
+        assert!(c.is_snapshot());
+        assert!(!Coord::new("g", "lib", "1.0").is_snapshot());
+        assert_eq!(
+            c.repo_path_as("jar", "1.0-20240101.120000-3"),
+            "g/lib/1.0-SNAPSHOT/lib-1.0-20240101.120000-3.jar"
+        );
     }
 
     #[test]

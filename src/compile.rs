@@ -81,10 +81,28 @@ impl CompileUnit {
     }
 
     /// Everything that, if changed, means the previous output cannot be reused.
+    ///
+    /// A jar's path names its version, so a new version is already a new
+    /// classpath. A snapshot is the exception — a new build lands at the same
+    /// path — which is why each jar's size and modification time are in here
+    /// too. Both come from one `stat`, which costs nothing next to `javac`.
     fn fingerprint(&self) -> String {
         let mut s = String::new();
         s.push_str(&self.flags().join("\u{1}"));
         s.push('\n');
+        for entry in &self.classpath {
+            if let Ok(meta) = std::fs::metadata(entry)
+                && meta.is_file()
+            {
+                let modified = meta
+                    .modified()
+                    .ok()
+                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map(|d| d.as_nanos())
+                    .unwrap_or_default();
+                s.push_str(&format!("jar {} {modified}\n", meta.len()));
+            }
+        }
         for source in &self.sources {
             s.push_str(&source.display().to_string());
             s.push('\n');
@@ -161,6 +179,81 @@ pub fn compile(toolchain: &Toolchain, unit: &CompileUnit, ui: &Ui) -> Result<Out
 
     let classes = project::find_by_extension(&unit.output_dir, "class")?.len();
     Ok(Outcome::Compiled { classes })
+}
+
+/// One `javadoc` run over the main sources.
+#[derive(Debug)]
+pub struct DocUnit {
+    pub sources: Vec<PathBuf>,
+    pub output_dir: PathBuf,
+    pub classpath: Vec<PathBuf>,
+    pub release: u32,
+    pub encoding: String,
+    /// `java.javadoc-args`, appended verbatim after jrs's own flags.
+    pub extra_args: Vec<String>,
+    /// `my-app 1.0.0`, for the page and window titles.
+    pub title: String,
+    pub work_dir: PathBuf,
+}
+
+impl DocUnit {
+    fn flags(&self) -> Vec<String> {
+        let mut args = vec![
+            "--release".to_string(),
+            self.release.to_string(),
+            "-encoding".to_string(),
+            self.encoding.clone(),
+            "-docencoding".to_string(),
+            "UTF-8".to_string(),
+            "-charset".to_string(),
+            "UTF-8".to_string(),
+            "-d".to_string(),
+            self.output_dir.display().to_string(),
+            "-doctitle".to_string(),
+            self.title.clone(),
+            "-windowtitle".to_string(),
+            self.title.clone(),
+            // Progress chatter off; warnings and errors still come through.
+            "-quiet".to_string(),
+        ];
+        if !self.classpath.is_empty() {
+            args.push("-cp".to_string());
+            args.push(Toolchain::classpath(&self.classpath));
+        }
+        args.extend(self.extra_args.iter().cloned());
+        args
+    }
+}
+
+/// Generate API documentation with `javadoc`, driven like `javac`: an argfile
+/// in, output passed through verbatim.
+///
+/// The output directory is emptied first, so a class that was deleted does not
+/// keep its page. Nothing is skipped on a rerun: `javadoc` is fast next to the
+/// question of which pages a change touched.
+pub fn javadoc(javadoc: &Path, unit: &DocUnit, ui: &Ui) -> Result<()> {
+    if unit.output_dir.exists() {
+        std::fs::remove_dir_all(&unit.output_dir).path(&unit.output_dir)?;
+    }
+    std::fs::create_dir_all(&unit.output_dir).path(&unit.output_dir)?;
+    std::fs::create_dir_all(&unit.work_dir).path(&unit.work_dir)?;
+
+    let argfile = unit.work_dir.join("javadoc.args");
+    std::fs::write(&argfile, render_argfile(&unit.flags(), &unit.sources)).path(&argfile)?;
+    let output = run_captured(ui, javadoc, &[format!("@{}", argfile.display())])?;
+    if !output.stderr.trim().is_empty() {
+        ui.passthrough(Stream::Err, output.stderr.trim_end());
+    }
+    if !output.stdout.trim().is_empty() {
+        ui.passthrough(Stream::Err, output.stdout.trim_end());
+    }
+    if !output.ok() {
+        return Err(JrsError::build(format!(
+            "javadoc failed ({} source files)",
+            unit.sources.len()
+        )));
+    }
+    Ok(())
 }
 
 /// Render a `javac` argfile.

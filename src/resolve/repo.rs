@@ -15,6 +15,7 @@ use sha1::Digest;
 
 use super::cache::Cache;
 use super::coord::Coord;
+use super::metadata::Metadata;
 use crate::config::{Credentials, ProxyConfig};
 use crate::error::{IoResultExt, JrsError, Result};
 use crate::manifest::Repository;
@@ -48,6 +49,9 @@ impl Default for Network {
 /// Jars larger than this are almost certainly a misconfigured mirror serving an
 /// HTML error page or a tarball; refuse rather than fill the disk.
 const MAX_ARTIFACT_BYTES: u64 = 512 * 1024 * 1024;
+
+/// How long a cached snapshot is trusted before its repository is asked again.
+const SNAPSHOT_RECHECK: Duration = Duration::from_secs(24 * 60 * 60);
 
 /// Where a byte-count for the live download bars is published.
 ///
@@ -95,6 +99,8 @@ pub struct Fetcher {
     downloaded: AtomicU64,
     warnings: Mutex<Vec<String>>,
     network: Network,
+    /// Re-check every cached snapshot, whatever its age (`jrs update`).
+    refresh_snapshots: bool,
 }
 
 /// An HTTP agent that reports statuses as values, through `proxy` when given.
@@ -150,7 +156,15 @@ impl Fetcher {
             downloaded: AtomicU64::new(0),
             warnings: Mutex::new(Vec::new()),
             network: Network::default(),
+            refresh_snapshots: false,
         }
+    }
+
+    /// Ask the repositories about every cached snapshot again, however recently
+    /// it was checked.
+    pub fn refreshing_snapshots(mut self, refresh: bool) -> Fetcher {
+        self.refresh_snapshots = refresh;
+        self
     }
 
     /// Reach remote repositories with `network`'s proxy, credentials and retry
@@ -183,7 +197,7 @@ impl Fetcher {
 
     /// A POM's bytes. Small, so they are read whole and not reported on.
     pub fn pom(&self, coord: &Coord) -> Result<Vec<u8>> {
-        let (path, _) = self.artifact(coord, "pom", false, None)?;
+        let (path, _) = self.artifact(&coord.pom_coord(), "pom", false, None)?;
         std::fs::read(&path).path(&path)
     }
 
@@ -212,7 +226,23 @@ impl Fetcher {
     ) -> Result<(PathBuf, Origin)> {
         let cached = self.cache.path_for(coord, ext);
         if cached.is_file() {
-            return Ok((cached, Origin::Cache));
+            if !coord.is_snapshot() || self.offline || !self.snapshot_due(coord, ext) {
+                super::cache::mark_used(&cached);
+                return Ok((cached, Origin::Cache));
+            }
+            // A snapshot is republished under the same name by design, so a
+            // cached one is only trusted until it is due for a re-check. A
+            // repository that cannot be reached is not a reason to fail a build
+            // that has a perfectly usable copy.
+            return self.download(coord, ext, report, None).or_else(|e| {
+                let reason = e.to_string();
+                self.warn(format!(
+                    "could not re-check the snapshot `{coord}` ({ext}); using the \
+                         cached copy: {}",
+                    reason.lines().next().unwrap_or_default()
+                ));
+                Ok((cached, Origin::Cache))
+            });
         }
         if self.offline {
             return Err(JrsError::resolve(format!(
@@ -221,69 +251,197 @@ impl Fetcher {
                 cached.display()
             )));
         }
+        self.download(coord, ext, report, pin.filter(|_| !coord.is_snapshot()))
+    }
 
+    /// Fetch from the first repository that has it, verify, and cache.
+    fn download(
+        &self,
+        coord: &Coord,
+        ext: &str,
+        report: bool,
+        pin: Option<&str>,
+    ) -> Result<(PathBuf, Origin)> {
         let id = if report {
             self.reporter.start(&coord.file_name(ext))
         } else {
             0
         };
-
-        let mut misses = Vec::new();
-        for repo in &self.repos {
-            match self.fetch_one(repo, coord, ext, report, id) {
-                Ok(Some(bytes)) => {
-                    if report {
-                        self.reporter.verifying(id);
-                    }
-                    let verified = self
-                        .verify(repo, coord, ext, &bytes)
-                        .and_then(|()| check_pin(coord, ext, pin, &bytes));
-                    if let Err(e) = verified {
-                        if report {
-                            self.reporter.finish(id);
-                        }
-                        return Err(e);
-                    }
-                    let path = self.cache.store(coord, ext, &bytes)?;
-                    if ext == "jar" {
-                        // POMs and checksum files are traffic, not artifacts;
-                        // the summary counts what ends up on the classpath.
-                        self.downloaded.fetch_add(1, Ordering::Relaxed);
-                    }
-                    if report {
-                        self.reporter.finish(id);
-                    }
-                    return Ok((path, Origin::Network));
-                }
-                Ok(None) => misses.push(repo.name.clone()),
-                Err(e) => {
-                    if report {
-                        self.reporter.finish(id);
-                    }
-                    return Err(e);
-                }
-            }
-        }
-
+        let result = self.download_reported(coord, ext, report, id, pin);
         if report {
             self.reporter.finish(id);
         }
+        result
+    }
+
+    fn download_reported(
+        &self,
+        coord: &Coord,
+        ext: &str,
+        report: bool,
+        id: u64,
+        pin: Option<&str>,
+    ) -> Result<(PathBuf, Origin)> {
+        let cached = self.cache.path_for(coord, ext);
+        let mut misses = Vec::new();
+        for repo in &self.repos {
+            // A snapshot in a remote repository is stored under a timestamped
+            // name that only its `maven-metadata.xml` knows.
+            let timestamped = if coord.is_snapshot() {
+                self.snapshot_file_version(repo, coord, ext)?
+            } else {
+                None
+            };
+            if let Some(v) = &timestamped
+                && cached.is_file()
+                && self
+                    .cache
+                    .snapshot_record(coord, ext)
+                    .is_some_and(|r| r.file_version == *v)
+            {
+                // The build the cache holds is still the current one.
+                self.cache.record_snapshot(coord, ext, v, &repo.name)?;
+                return Ok((cached, Origin::Cache));
+            }
+            let file_version = timestamped.as_deref().unwrap_or(&coord.version);
+            let remote = coord.repo_path_as(ext, file_version);
+
+            let Some(bytes) = self.fetch_one(repo, &remote, report, id)? else {
+                misses.push(repo.name.clone());
+                continue;
+            };
+            if report {
+                self.reporter.verifying(id);
+            }
+            self.verify(repo, coord, ext, &remote, &bytes)?;
+            check_pin(coord, ext, pin, &bytes)?;
+
+            if coord.is_snapshot() {
+                // Rewriting identical bytes would move the jar's mtime, and with
+                // it the compile fingerprint, for nothing.
+                let unchanged = std::fs::read(&cached).is_ok_and(|old| old == bytes);
+                let path = if unchanged {
+                    cached.clone()
+                } else {
+                    self.cache.store(coord, ext, &bytes)?
+                };
+                self.cache
+                    .record_snapshot(coord, ext, file_version, &repo.name)?;
+                if unchanged {
+                    return Ok((path, Origin::Cache));
+                }
+            } else {
+                self.cache.store(coord, ext, &bytes)?;
+            }
+            if ext == "jar" {
+                // POMs and checksum files are traffic, not artifacts; the
+                // summary counts what ends up on the classpath.
+                self.downloaded.fetch_add(1, Ordering::Relaxed);
+            }
+            return Ok((cached, Origin::Network));
+        }
+
         Err(JrsError::resolve(format!(
             "could not find `{coord}` ({ext})\n\nlooked in: {}",
             misses.join(", ")
         )))
     }
 
-    /// `Ok(None)` means "this repository does not have it"; keep looking.
-    fn fetch_one(
+    /// Whether a cached snapshot should be checked against its repository again:
+    /// once a day, which is Maven's default update policy; on every build when
+    /// it came from a local directory, where checking is free and `mvn install`
+    /// is expected to show up at once; and whenever `jrs update` asks.
+    fn snapshot_due(&self, coord: &Coord, ext: &str) -> bool {
+        if self.refresh_snapshots {
+            return true;
+        }
+        let Some(record) = self.cache.snapshot_record(coord, ext) else {
+            return true;
+        };
+        let local = self
+            .repos
+            .iter()
+            .any(|r| r.name == record.repo && local_repo_root(&r.url).is_some());
+        let age = record.checked.elapsed().unwrap_or(Duration::MAX);
+        local || age > SNAPSHOT_RECHECK
+    }
+
+    /// The version in the file name of `coord`'s current snapshot build in
+    /// `repo`, or `None` for the plain `-SNAPSHOT` name.
+    fn snapshot_file_version(
         &self,
         repo: &Repository,
         coord: &Coord,
         ext: &str,
+    ) -> Result<Option<String>> {
+        let path = format!("{}/maven-metadata.xml", coord.version_dir());
+        let Some(bytes) = self.fetch_one(repo, &path, false, 0)? else {
+            return Ok(None);
+        };
+        let classifier = coord.classifier.as_deref().filter(|_| ext != "pom");
+        Ok(Metadata::parse(&bytes)
+            .ok()
+            .and_then(|m| m.snapshot_file_version(&coord.version, ext, classifier)))
+    }
+
+    /// Every version the repositories list for `group:artifact`, merged.
+    ///
+    /// Never cached: the answer changes whenever anything is published, and the
+    /// commands that ask (`jrs outdated`, `jrs add`) are asking precisely that.
+    pub fn metadata(&self, group: &str, artifact: &str) -> Result<Metadata> {
+        if self.offline {
+            return Err(JrsError::resolve(format!(
+                "cannot ask a repository which versions of `{group}:{artifact}` exist: \
+                 --offline was given"
+            )));
+        }
+        let dir = format!("{}/{artifact}", group.replace('.', "/"));
+        let mut merged: Option<Metadata> = None;
+        let mut looked = Vec::new();
+        for repo in &self.repos {
+            looked.push(repo.name.clone());
+            // `mvn install` writes the local variant of the file.
+            let mut names = vec!["maven-metadata.xml"];
+            if local_repo_root(&repo.url).is_some() {
+                names.push("maven-metadata-local.xml");
+            }
+            for name in names {
+                let Some(bytes) = self.fetch_one(repo, &format!("{dir}/{name}"), false, 0)? else {
+                    continue;
+                };
+                let Ok(found) = Metadata::parse(&bytes) else {
+                    self.warn(format!(
+                        "`{}` serves an unreadable {name} for `{group}:{artifact}`",
+                        repo.name
+                    ));
+                    continue;
+                };
+                let m = merged.get_or_insert_with(Metadata::default);
+                for v in found.versions {
+                    if !m.versions.contains(&v) {
+                        m.versions.push(v);
+                    }
+                }
+                m.release = m.release.take().or(found.release);
+                m.latest = m.latest.take().or(found.latest);
+            }
+        }
+        merged.ok_or_else(|| {
+            JrsError::resolve(format!(
+                "no repository lists versions of `{group}:{artifact}`\n\nlooked in: {}",
+                looked.join(", ")
+            ))
+        })
+    }
+
+    /// `Ok(None)` means "this repository does not have it"; keep looking.
+    fn fetch_one(
+        &self,
+        repo: &Repository,
+        path: &str,
         report: bool,
         id: u64,
     ) -> Result<Option<Vec<u8>>> {
-        let path = coord.repo_path(ext);
         if let Some(base) = local_repo_root(&repo.url) {
             let file = base.join(path.replace('/', std::path::MAIN_SEPARATOR_STR));
             return match std::fs::read(&file) {
@@ -414,13 +572,19 @@ impl Fetcher {
     /// A mismatch deletes nothing — the bytes are not in the cache yet — and
     /// fails loudly. A *missing* checksum is a warning: some internal mirrors
     /// do not publish them, and refusing to build would be worse than saying so.
-    fn verify(&self, repo: &Repository, coord: &Coord, ext: &str, bytes: &[u8]) -> Result<()> {
+    fn verify(
+        &self,
+        repo: &Repository,
+        coord: &Coord,
+        ext: &str,
+        remote: &str,
+        bytes: &[u8],
+    ) -> Result<()> {
         for (suffix, compute) in [
             ("sha1", sha1_hex as fn(&[u8]) -> String),
             ("sha256", sha256_hex as fn(&[u8]) -> String),
         ] {
-            let checksum_ext = format!("{ext}.{suffix}");
-            let published = match self.fetch_one(repo, coord, &checksum_ext, false, 0) {
+            let published = match self.fetch_one(repo, &format!("{remote}.{suffix}"), false, 0) {
                 Ok(Some(raw)) => raw,
                 // A checksum file that will not download is not a reason to fail
                 // the build; it is a reason to say the artifact went unverified.
@@ -556,6 +720,11 @@ pub fn digest_as(pin: &str, bytes: &[u8]) -> Option<String> {
 /// The filesystem root behind a `file://` URL, if that is what this is.
 fn local_repo_root(url: &str) -> Option<PathBuf> {
     let rest = url.strip_prefix("file://")?;
+    // `file:///C:/x` names the drive path `C:/x`, not `/C:/x`.
+    let bytes = rest.as_bytes();
+    if bytes.len() >= 3 && bytes[0] == b'/' && bytes[1].is_ascii_alphabetic() && bytes[2] == b':' {
+        return Some(PathBuf::from(&rest[1..]));
+    }
     // `file:///abs/path` leaves a leading slash; `file://./rel` does not.
     Some(PathBuf::from(if rest.is_empty() { "/" } else { rest }))
 }
@@ -597,8 +766,17 @@ fn hex(bytes: &[u8]) -> String {
 }
 
 /// Build a `file://` URL for `dir` — used by tests and by `--offline` fixtures.
+///
+/// Separators are always `/`, so the URL can sit in a TOML string: a Windows
+/// path's backslashes would read as escapes there.
 pub fn file_url(dir: &Path) -> String {
-    format!("file://{}", dir.display())
+    let path = dir.display().to_string().replace('\\', "/");
+    if path.starts_with('/') {
+        format!("file://{path}")
+    } else {
+        // `C:/Users/...` becomes `file:///C:/Users/...`.
+        format!("file:///{path}")
+    }
 }
 
 #[cfg(test)]
@@ -1014,6 +1192,123 @@ mod tests {
         );
         assert_eq!(digest_as("md5:x", b"abc"), None);
         assert_eq!(digest_as("no-prefix", b"abc"), None);
+    }
+
+    #[test]
+    fn file_urls_survive_windows_paths() {
+        assert_eq!(file_url(Path::new("/tmp/repo")), "file:///tmp/repo");
+        assert_eq!(
+            local_repo_root("file:///tmp/repo"),
+            Some(PathBuf::from("/tmp/repo"))
+        );
+        assert_eq!(
+            local_repo_root("file:///C:/Users/ci/repo"),
+            Some(PathBuf::from("C:/Users/ci/repo"))
+        );
+        assert_eq!(local_repo_root("https://x"), None);
+    }
+
+    fn publish_snapshot(fx: &Fixture, build: u32, bytes: &[u8]) {
+        let coord = Coord::new("org.example", "thing", "1.0-SNAPSHOT");
+        let stamp = format!("1.0-20240101.12000{build}-{build}");
+        let path = fx.repo().join(coord.repo_path_as("jar", &stamp));
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, bytes).unwrap();
+        std::fs::write(path.with_extension("jar.sha1"), sha1_hex(bytes)).unwrap();
+        std::fs::write(
+            path.parent().unwrap().join("maven-metadata.xml"),
+            format!(
+                "<metadata><versioning><snapshotVersions><snapshotVersion>\
+                 <extension>jar</extension><value>{stamp}</value>\
+                 </snapshotVersion></snapshotVersions></versioning></metadata>"
+            ),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn a_timestamped_snapshot_is_found_through_its_metadata() {
+        let fx = Fixture::new("snapshot");
+        publish_snapshot(&fx, 1, b"first build");
+        let coord = Coord::new("org.example", "thing", "1.0-SNAPSHOT");
+
+        let fetcher = fx.fetcher(false);
+        let (path, origin) = fetcher.jar(&coord).unwrap();
+        assert_eq!(origin, Origin::Network);
+        assert_eq!(std::fs::read(&path).unwrap(), b"first build");
+        assert!(
+            path.ends_with("thing-1.0-SNAPSHOT.jar"),
+            "{}",
+            path.display()
+        );
+
+        // A new build is published. A local repository is re-checked on every
+        // build, so the next fetch picks it up.
+        publish_snapshot(&fx, 2, b"second build");
+        let (path, origin) = fx.fetcher(false).jar(&coord).unwrap();
+        assert_eq!(origin, Origin::Network);
+        assert_eq!(std::fs::read(&path).unwrap(), b"second build");
+
+        // Nothing new: the cached build is kept, and not rewritten.
+        let (_, origin) = fx.fetcher(false).jar(&coord).unwrap();
+        assert_eq!(origin, Origin::Cache);
+    }
+
+    #[test]
+    fn a_snapshot_that_cannot_be_rechecked_falls_back_to_the_cache() {
+        let fx = Fixture::new("snapshot-gone");
+        publish_snapshot(&fx, 1, b"first build");
+        let coord = Coord::new("org.example", "thing", "1.0-SNAPSHOT");
+        fx.fetcher(false).jar(&coord).unwrap();
+
+        std::fs::remove_dir_all(fx.repo()).unwrap();
+        let fetcher = fx.fetcher(false);
+        let (path, origin) = fetcher.jar(&coord).unwrap();
+        assert_eq!(origin, Origin::Cache);
+        assert_eq!(std::fs::read(path).unwrap(), b"first build");
+        assert!(
+            fetcher
+                .take_warnings()
+                .iter()
+                .any(|w| w.contains("cached copy")),
+        );
+    }
+
+    #[test]
+    fn a_plainly_named_snapshot_resolves_without_metadata() {
+        // What `mvn install` leaves in ~/.m2: no timestamps, no remote metadata.
+        let fx = Fixture::new("snapshot-local");
+        let coord = Coord::new("org.example", "thing", "1.0-SNAPSHOT");
+        fx.publish(&coord, "jar", b"installed", true);
+        let (path, _) = fx.fetcher(false).jar(&coord).unwrap();
+        assert_eq!(std::fs::read(path).unwrap(), b"installed");
+    }
+
+    #[test]
+    fn versions_are_listed_from_every_repository() {
+        let fx = Fixture::new("metadata");
+        let dir = fx.repo().join("org/example/thing");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("maven-metadata.xml"),
+            "<metadata><versioning><release>1.1</release><versions>\
+             <version>1.0</version><version>1.1</version></versions></versioning></metadata>",
+        )
+        .unwrap();
+        let m = fx.fetcher(false).metadata("org.example", "thing").unwrap();
+        assert_eq!(m.versions, vec!["1.0", "1.1"]);
+        assert_eq!(m.release.as_deref(), Some("1.1"));
+
+        let err = fx
+            .fetcher(false)
+            .metadata("org.example", "absent")
+            .unwrap_err();
+        assert!(err.to_string().contains("no repository lists"), "{err}");
+        let err = fx
+            .fetcher(true)
+            .metadata("org.example", "thing")
+            .unwrap_err();
+        assert!(err.to_string().contains("--offline"), "{err}");
     }
 
     #[test]

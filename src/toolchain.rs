@@ -6,12 +6,14 @@
 //! captured (so the live region can be torn down before diagnostics appear) and
 //! inherited (so an interactive program owns the terminal).
 
+use std::collections::BTreeMap;
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::OnceLock;
 
 use crate::error::{JrsError, Result};
+use crate::resolve::coord::compare_versions;
 use crate::ui::{Stream, Ui};
 
 /// The lowest release jrs is willing to drive. `--release` needs JDK 9+, and 17
@@ -38,6 +40,103 @@ impl Toolchain {
             .get_or_init(|| Toolchain::probe().map_err(|e| e.to_string()))
             .clone()
             .map_err(JrsError::Toolchain)
+    }
+
+    /// The JDK a project builds with: the one it pins, when it pins one, and
+    /// [`Toolchain::discover`]'s otherwise.
+    ///
+    /// A pinned version is looked for in the user's `[jdks]` table first, then
+    /// at `JAVA_HOME` / `PATH`, then among the JDKs installed where installers
+    /// and version managers put them. When several patch releases of it are
+    /// installed, the newest wins.
+    pub fn select(pin: Option<&JdkPin>, configured: &BTreeMap<u32, PathBuf>) -> Result<Toolchain> {
+        let Some(pin) = pin else {
+            return Toolchain::discover();
+        };
+        if let Some(home) = configured.get(&pin.version) {
+            let toolchain = Toolchain::probe_home(home)?;
+            if toolchain.version != pin.version {
+                return Err(JrsError::toolchain(format!(
+                    "the jrs config file says JDK {} is at {}, but that is JDK {}",
+                    pin.version,
+                    home.display(),
+                    toolchain.version
+                )));
+            }
+            return Ok(toolchain);
+        }
+        let default = Toolchain::discover().ok();
+        if let Some(toolchain) = &default
+            && toolchain.version == pin.version
+        {
+            return Ok(toolchain.clone());
+        }
+
+        let installed = installed_jdks();
+        let best = installed
+            .iter()
+            .filter(|(v, _)| feature_version(v) == Some(pin.version))
+            .max_by(|a, b| compare_versions(&a.0, &b.0));
+        if let Some((_, home)) = best {
+            return Toolchain::probe_home(home);
+        }
+
+        let mut versions: Vec<u32> = installed
+            .iter()
+            .filter_map(|(v, _)| feature_version(v))
+            .chain(default.as_ref().map(|t| t.version))
+            .collect();
+        versions.sort();
+        versions.dedup();
+        let seen = if versions.is_empty() {
+            "found no JDK at all".to_string()
+        } else {
+            let list: Vec<String> = versions.iter().map(u32::to_string).collect();
+            format!("found JDK {}", list.join(", "))
+        };
+        Err(JrsError::toolchain(format!(
+            "{} pins JDK {v}, but none is installed where jrs looks ({seen})\n\n\
+             install JDK {v}, or say where it is in {}:\n\n    [jdks]\n    {v} = \"/path/to/jdk-{v}\"",
+            pin.from,
+            crate::config::default_path()
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|| "the jrs config file".to_string()),
+            v = pin.version,
+        )))
+    }
+
+    /// Another JDK tool — `javadoc`, `jdeps`, `jlink`, `jpackage` — beside
+    /// `javac`, or an error naming the JDK that lacks it.
+    pub fn tool(&self, name: &str) -> Result<PathBuf> {
+        let path = self
+            .javac
+            .parent()
+            .unwrap_or(Path::new("."))
+            .join(exe(name));
+        if path.is_file() {
+            return Ok(path);
+        }
+        Err(JrsError::toolchain(format!(
+            "the JDK at {} has no `{name}`\n\nsome distributions leave it out; \
+             install a full JDK",
+            self.javac
+                .parent()
+                .and_then(Path::parent)
+                .unwrap_or(Path::new("."))
+                .display()
+        )))
+    }
+
+    fn probe_home(home: &Path) -> Result<Toolchain> {
+        let javac = home.join("bin").join(exe("javac"));
+        if !javac.is_file() {
+            return Err(JrsError::toolchain(format!(
+                "{} is not a JDK: there is no {}",
+                home.display(),
+                javac.display()
+            )));
+        }
+        Toolchain::probe_javac(javac, Some(home.to_path_buf()))
     }
 
     fn probe() -> Result<Toolchain> {
@@ -70,7 +169,10 @@ impl Toolchain {
                 (found, home)
             }
         };
+        Toolchain::probe_javac(javac, home)
+    }
 
+    fn probe_javac(javac: PathBuf, home: Option<PathBuf>) -> Result<Toolchain> {
         let bin = javac.parent().unwrap_or(Path::new("."));
         let java = bin.join(exe("java"));
         let jar = bin.join(exe("jar"));
@@ -159,6 +261,156 @@ pub fn parse_javac_version(text: &str) -> Option<u32> {
     } else {
         Some(first)
     }
+}
+
+/// A JDK feature version a project pins, and what pinned it — for messages.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JdkPin {
+    pub version: u32,
+    pub from: String,
+}
+
+/// The JDK a project pins: `java.jdk` in the manifest, else `.java-version`
+/// (jenv, asdf, mise), else `.sdkmanrc` (SDKMAN!) in the project root.
+pub fn project_pin(manifest_jdk: Option<u32>, root: &Path) -> Option<JdkPin> {
+    let pin = |version, from: &str| {
+        Some(JdkPin {
+            version,
+            from: from.to_string(),
+        })
+    };
+    if let Some(v) = manifest_jdk {
+        return pin(v, "`java.jdk` in jrs.toml");
+    }
+    if let Ok(text) = std::fs::read_to_string(root.join(".java-version"))
+        && let Some(v) = text
+            .lines()
+            .map(str::trim)
+            .find(|l| !l.is_empty() && !l.starts_with('#'))
+            .and_then(pinned_feature)
+    {
+        return pin(v, ".java-version");
+    }
+    if let Ok(text) = std::fs::read_to_string(root.join(".sdkmanrc"))
+        && let Some(v) = text
+            .lines()
+            .find_map(|l| l.trim().strip_prefix("java="))
+            .and_then(|v| pinned_feature(v.trim()))
+    {
+        return pin(v, ".sdkmanrc");
+    }
+    None
+}
+
+/// The feature version in a version manager's spelling of a JDK: `21`,
+/// `21.0.2`, `temurin-21.0.2+13`, `21.0.2-tem`, `corretto-17`, `1.8`.
+pub fn pinned_feature(spec: &str) -> Option<u32> {
+    let token = spec
+        .split(['-', '_', '+'])
+        .find(|t| t.starts_with(|c: char| c.is_ascii_digit()))?;
+    feature_version(token)
+}
+
+/// `21.0.5` → 21, `1.8.0_432` → 8.
+fn feature_version(version: &str) -> Option<u32> {
+    let mut parts = version.split(['.', '_']);
+    let first: u32 = parts.next()?.parse().ok()?;
+    if first == 1 {
+        parts.next()?.parse().ok()
+    } else {
+        Some(first)
+    }
+}
+
+/// Every JDK installed where installers and version managers put them, as
+/// (`JAVA_VERSION` from its `release` file, home).
+///
+/// The `release` file is read rather than `javac -version` run, so looking at
+/// a dozen installed JDKs costs a dozen small reads, not a dozen JVM starts.
+fn installed_jdks() -> Vec<(String, PathBuf)> {
+    let mut roots: Vec<PathBuf> = Vec::new();
+    if let Some(home) = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")) {
+        let home = PathBuf::from(home);
+        for relative in [
+            ".sdkman/candidates/java",
+            ".jdks",
+            ".asdf/installs/java",
+            ".local/share/mise/installs/java",
+            ".gradle/jdks",
+            "Library/Java/JavaVirtualMachines",
+        ] {
+            roots.push(home.join(relative));
+        }
+    }
+    for dir in [
+        "/Library/Java/JavaVirtualMachines",
+        "/usr/lib/jvm",
+        "/usr/java",
+        "/opt/java",
+    ] {
+        roots.push(PathBuf::from(dir));
+    }
+    if cfg!(windows) {
+        for var in ["ProgramFiles", "ProgramW6432"] {
+            if let Some(dir) = std::env::var_os(var) {
+                for vendor in [
+                    "Java",
+                    "Eclipse Adoptium",
+                    "Microsoft",
+                    "Zulu",
+                    "Amazon Corretto",
+                    "BellSoft",
+                ] {
+                    roots.push(PathBuf::from(&dir).join(vendor));
+                }
+            }
+        }
+    }
+
+    // `actions/setup-java` exports `JAVA_HOME_<version>_<arch>` for every JDK
+    // it installs, which is how a CI matrix gets several side by side.
+    let mut homes: Vec<PathBuf> = std::env::vars_os()
+        .filter(|(k, _)| k.to_string_lossy().starts_with("JAVA_HOME_"))
+        .map(|(_, v)| PathBuf::from(v))
+        .collect();
+    homes.sort();
+    for root in roots {
+        let Ok(entries) = std::fs::read_dir(&root) else {
+            continue;
+        };
+        let mut dirs: Vec<PathBuf> = entries.flatten().map(|e| e.path()).collect();
+        dirs.sort();
+        for dir in dirs {
+            // macOS bundles keep the JDK under Contents/Home.
+            homes.push(dir.join("Contents").join("Home"));
+            homes.push(dir);
+        }
+    }
+
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    for home in homes {
+        if !home.join("bin").join(exe("javac")).is_file() {
+            continue;
+        }
+        // SDKMAN!'s `current` is a link to one of its siblings.
+        if !seen.insert(home.canonicalize().unwrap_or_else(|_| home.clone())) {
+            continue;
+        }
+        if let Some(version) = release_version(&home) {
+            out.push((version, home));
+        }
+    }
+    out
+}
+
+/// `JAVA_VERSION="21.0.5"` from a JDK's `release` file.
+fn release_version(home: &Path) -> Option<String> {
+    let text = std::fs::read_to_string(home.join("release")).ok()?;
+    text.lines()
+        .find_map(|l| l.strip_prefix("JAVA_VERSION="))
+        .map(|v| v.trim().trim_matches('"').to_string())
+        .filter(|v| !v.is_empty())
 }
 
 fn exe(name: &str) -> String {
@@ -332,5 +584,108 @@ mod tests {
     #[test]
     fn an_empty_classpath_is_an_empty_string() {
         assert_eq!(Toolchain::classpath(&[]), "");
+    }
+
+    #[test]
+    fn version_manager_spellings_name_a_feature_version() {
+        assert_eq!(pinned_feature("21"), Some(21));
+        assert_eq!(pinned_feature("21.0.2"), Some(21));
+        assert_eq!(pinned_feature("temurin-21.0.2+13"), Some(21));
+        assert_eq!(pinned_feature("21.0.2-tem"), Some(21));
+        assert_eq!(pinned_feature("corretto-17"), Some(17));
+        assert_eq!(pinned_feature("openjdk64-17.0.2"), Some(17));
+        assert_eq!(pinned_feature("1.8"), Some(8));
+        assert_eq!(pinned_feature("8.0.432-zulu"), Some(8));
+        assert_eq!(pinned_feature("system"), None);
+    }
+
+    #[test]
+    fn a_project_pins_its_jdk_in_the_manifest_or_beside_it() {
+        let dir = std::env::temp_dir().join(format!("jrs-pin-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        assert_eq!(project_pin(None, &dir), None);
+
+        std::fs::write(dir.join(".sdkmanrc"), "# sdkman\njava=17.0.14-zulu\n").unwrap();
+        assert_eq!(project_pin(None, &dir).unwrap().version, 17);
+        assert_eq!(project_pin(None, &dir).unwrap().from, ".sdkmanrc");
+
+        std::fs::write(dir.join(".java-version"), "temurin-21\n").unwrap();
+        assert_eq!(project_pin(None, &dir).unwrap().version, 21);
+
+        let manifest = project_pin(Some(25), &dir).unwrap();
+        assert_eq!(manifest.version, 25);
+        assert!(manifest.from.contains("java.jdk"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_jdk_release_file_names_its_version() {
+        let dir = std::env::temp_dir().join(format!("jrs-release-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("release"),
+            "IMPLEMENTOR=\"Eclipse Adoptium\"\nJAVA_VERSION=\"21.0.5\"\n",
+        )
+        .unwrap();
+        assert_eq!(release_version(&dir).as_deref(), Some("21.0.5"));
+        assert_eq!(feature_version("21.0.5"), Some(21));
+        assert_eq!(feature_version("1.8.0_432"), Some(8));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_pinned_jdk_that_is_not_installed_says_where_it_goes() {
+        let pin = JdkPin {
+            version: 3,
+            from: ".java-version".into(),
+        };
+        let err = Toolchain::select(Some(&pin), &BTreeMap::new())
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains(".java-version pins JDK 3"), "{err}");
+        assert!(err.contains("[jdks]"), "{err}");
+    }
+
+    #[test]
+    fn a_configured_home_must_be_the_version_it_claims() {
+        let Ok(default) = Toolchain::discover() else {
+            eprintln!("SKIPPED toolchain::a_configured_home_must_be_the_version_it_claims: no JDK");
+            return;
+        };
+        let Some(home) = default.javac.parent().and_then(Path::parent) else {
+            return;
+        };
+        let wrong = default.version + 1;
+        let configured: BTreeMap<u32, PathBuf> = [(wrong, home.to_path_buf())].into();
+        let pin = JdkPin {
+            version: wrong,
+            from: "`java.jdk` in jrs.toml".into(),
+        };
+        let err = Toolchain::select(Some(&pin), &configured)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains(&format!("that is JDK {}", default.version)),
+            "{err}"
+        );
+
+        let right: BTreeMap<u32, PathBuf> = [(default.version, home.to_path_buf())].into();
+        let pin = JdkPin {
+            version: default.version,
+            from: "test".into(),
+        };
+        assert_eq!(
+            Toolchain::select(Some(&pin), &right).unwrap().version,
+            default.version
+        );
+        assert!(default.tool("javadoc").is_ok() || default.tool("javadoc").is_err());
+        assert!(
+            default
+                .tool("no-such-tool")
+                .unwrap_err()
+                .to_string()
+                .contains("no-such-tool")
+        );
     }
 }

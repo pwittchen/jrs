@@ -149,6 +149,7 @@ fn running_the_main_class_passes_arguments_through() {
     project::copy_tree(&manifest.resource_path(), &project.classes_dir()).unwrap();
 
     let args = runner::java_args(
+        &[],
         &[project.classes_dir()],
         manifest.main_class.as_deref().unwrap(),
         &["everyone".to_string()],
@@ -337,7 +338,7 @@ fn a_project_compiles_against_a_resolved_dependency() {
     let mut runtime = vec![project.classes_dir()];
     runtime.extend(classpath.clone());
     let output = std::process::Command::new(&toolchain.java)
-        .args(runner::java_args(&runtime, "com.example.App", &[]))
+        .args(runner::java_args(&[], &runtime, "com.example.App", &[]))
         .output()
         .unwrap();
     assert!(
@@ -362,6 +363,37 @@ fn a_project_compiles_against_a_resolved_dependency() {
     let output = std::process::Command::new(&toolchain.java)
         .arg("-jar")
         .arg(&fat)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "HI!");
+
+    // So does the portable layout, moved somewhere the cache is not: its
+    // Class-Path is relative to the jar.
+    let shipped = scratch.join("shipped");
+    let groups: Vec<(String, PathBuf)> = classpath
+        .iter()
+        .map(|jar| ("org.example".to_string(), jar.clone()))
+        .collect();
+    let class_path = package::copy_libraries(&groups, &shipped.join("lib"), "lib").unwrap();
+    package::write_thin_jar(
+        &project.classes_dir(),
+        &shipped.join("app.jar"),
+        &JarManifest {
+            main_class: Some("com.example.App".into()),
+            class_path,
+        },
+    )
+    .unwrap();
+    std::fs::remove_dir_all(&fixture.cache).unwrap();
+    let output = std::process::Command::new(&toolchain.java)
+        .arg("-jar")
+        .arg(shipped.join("app.jar"))
+        .current_dir(&scratch.path)
         .output()
         .unwrap();
     assert!(

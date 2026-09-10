@@ -12,7 +12,7 @@ use std::fmt::Write as _;
 use std::path::Path;
 
 use crate::error::{IoResultExt, JrsError, Result};
-use crate::manifest::Manifest;
+use crate::manifest::{Dependency, Manifest};
 use crate::resolve::coord::{Coord, Ga};
 use crate::resolve::repo::sha256_hex;
 use crate::resolve::{Classpath, Resolution, ResolvedPackage};
@@ -126,6 +126,9 @@ impl Lockfile {
             let _ = writeln!(s, "group = \"{}\"", p.coord.group);
             let _ = writeln!(s, "artifact = \"{}\"", p.coord.artifact);
             let _ = writeln!(s, "version = \"{}\"", p.coord.version);
+            if let Some(c) = &p.coord.classifier {
+                let _ = writeln!(s, "classifier = \"{c}\"");
+            }
             let _ = writeln!(s, "classpath = \"{}\"", p.classpath.as_str());
             let _ = writeln!(s, "packaging = \"{}\"", p.packaging);
             let _ = writeln!(s, "depth = {}", p.depth);
@@ -148,8 +151,7 @@ fn read_gas(table: &toml::Table, key: &str) -> Vec<Ga> {
         .map(|a| {
             a.iter()
                 .filter_map(|v| v.as_str())
-                .filter_map(|s| s.split_once(':'))
-                .map(|(g, a)| Ga::new(g, a))
+                .filter_map(Ga::parse)
                 .collect()
         })
         .unwrap_or_default()
@@ -176,7 +178,11 @@ fn read_package(value: &toml::Value, path: &Path) -> Result<ResolvedPackage> {
             })
     };
     Ok(ResolvedPackage {
-        coord: Coord::new(field("group")?, field("artifact")?, field("version")?),
+        coord: Coord::new(field("group")?, field("artifact")?, field("version")?).with_classifier(
+            t.get("classifier")
+                .and_then(|v| v.as_str())
+                .map(str::to_string),
+        ),
         classpath: Classpath::parse(
             t.get("classpath")
                 .and_then(|v| v.as_str())
@@ -204,12 +210,24 @@ fn read_package(value: &toml::Value, path: &Path) -> Result<ResolvedPackage> {
 /// Deliberately narrow: changing `main-class` or `javac-args` must not invalidate
 /// a perfectly good lockfile.
 pub fn manifest_checksum(manifest: &Manifest) -> String {
+    // The long form's extras are appended only when present, so a lockfile
+    // written before they existed still matches the manifest it was made from.
+    let line = |d: &Dependency| {
+        let mut s = d.to_string();
+        for e in &d.exclusions {
+            let _ = write!(s, " exclude={e}");
+        }
+        if d.compile_only {
+            s.push_str(" compile-only");
+        }
+        s
+    };
     let mut canonical = String::new();
     for d in &manifest.dependencies {
-        let _ = writeln!(canonical, "dep {d}");
+        let _ = writeln!(canonical, "dep {}", line(d));
     }
     for d in &manifest.dev_dependencies {
-        let _ = writeln!(canonical, "dev {d}");
+        let _ = writeln!(canonical, "dev {}", line(d));
     }
     for r in &manifest.repositories {
         let _ = writeln!(canonical, "repo {} {}", r.name, r.url);
@@ -277,6 +295,28 @@ mod tests {
     }
 
     #[test]
+    fn classifiers_and_compile_only_survive_the_round_trip() {
+        let m = manifest("[dependencies]\n'g:a'='1.0'");
+        let mut r = resolution();
+        r.packages[1].coord.classifier = Some("natives-linux".into());
+        r.packages[1].classpath = Classpath::Provided;
+        r.roots = vec![Ga::new("g", "a").with_classifier(Some("natives-linux".into()))];
+        let again = Lockfile::parse(
+            &Lockfile::from_resolution(&m, &r).render(),
+            Path::new("jrs.lock"),
+        )
+        .unwrap();
+        let child = again
+            .packages
+            .iter()
+            .find(|p| p.coord.artifact == "child")
+            .unwrap();
+        assert_eq!(child.coord.classifier.as_deref(), Some("natives-linux"));
+        assert_eq!(child.classpath, Classpath::Provided);
+        assert_eq!(again.roots, r.roots);
+    }
+
+    #[test]
     fn no_absolute_paths_are_written_down() {
         let m = manifest("[dependencies]\n'g:a'='1.0'");
         let text = Lockfile::from_resolution(&m, &resolution()).render();
@@ -306,8 +346,14 @@ mod tests {
         let dev = manifest("[dependencies]\n'g:a'='1.0'\n[dev-dependencies]\n'g:t'='1.0'");
         let repo =
             manifest("[dependencies]\n'g:a'='1.0'\n[repositories]\nx='https://example.com/m2'");
+        let excluded = manifest("[dependencies]\n'g:a'={version='1.0', exclusions=['x:y']}");
+        let compile_only = manifest("[dependencies]\n'g:a'={version='1.0', compile-only=true}");
+        let classified = manifest("[dependencies]\n'g:a:natives'='1.0'");
 
         assert_eq!(manifest_checksum(&base), manifest_checksum(&same));
+        assert_ne!(manifest_checksum(&base), manifest_checksum(&excluded));
+        assert_ne!(manifest_checksum(&base), manifest_checksum(&compile_only));
+        assert_ne!(manifest_checksum(&base), manifest_checksum(&classified));
         assert_ne!(manifest_checksum(&base), manifest_checksum(&bumped));
         assert_ne!(manifest_checksum(&base), manifest_checksum(&added));
         assert_ne!(manifest_checksum(&base), manifest_checksum(&dev));

@@ -1,125 +1,42 @@
 # jrs — Roadmap
 
-Every milestone in [SPEC.md §12](SPEC.md#12-roadmap) has landed. This document
-is the forward-looking list: known gaps in what jrs does today, and features
-worth building next.
+Every milestone in [SPEC.md §12](SPEC.md#12-roadmap) has landed, and so has
+most of what this document used to list: Windows and macOS in CI, SNAPSHOT
+dependencies, the long dependency form, cache maintenance, JVM arguments, JDK
+pinning, watch mode, Javadoc, test reports and selection, JUnit 4, coverage,
+the portable layout, runtime images, `add`/`remove`/`outdated`, `tree` filters,
+`classpath`, `init` templates, shell completions and the M5 benchmark.
 
-Items are grouped by area and, within each group, roughly ordered by value for
-effort. Anything that touches a [non-goal](SPEC.md#12-non-goals) or adds a crate
-is a spec-level decision (see the last section) — it needs a SPEC.md change
-before it needs code.
+What is left is below. Anything that touches a [non-goal](SPEC.md#12-non-goals)
+or adds a crate is a spec-level decision (see the last section) — it needs a
+SPEC.md change before it needs code.
 
 ---
 
-## 1. Correctness gaps
+## 1. Build and compilation
 
-Things jrs currently gets wrong or leaves loose. These come before new features.
-
-- **Windows is handled but untested.** Classpath separators, `.exe` suffixes
-  and `%LOCALAPPDATA%` are implemented (SPEC §13.8), but CI runs on Linux only.
-  Add `windows-latest` and `macos-latest` to the CI matrix.
-
-## 2. Dependency resolution
-
-- **SNAPSHOT dependencies.** There is no `maven-metadata.xml` handling, so
-  timestamped snapshots published to a remote repository cannot be resolved,
-  and nothing re-checks a snapshot once it is cached.
-- **A richer long-form dependency table.** The table form accepts only
-  `version`. Useful additions:
-  - `exclusions = ["group:artifact", ...]`, which the resolver already
-    implements for POM-declared exclusions;
-  - a compile-only scope (Maven `provided`, Gradle `compileOnly`) for APIs
-    supplied at runtime (servlet API, Lombok);
-  - `classifier`, for artifacts such as platform-specific natives. Classified
-    and non-`jar` transitive dependencies are currently skipped.
-- **Cache maintenance.** The shared cache only grows. `jrs cache prune` (drop
-  entries no lockfile references, or anything unused for N days) and
-  `jrs cache path` would help, especially on CI.
-- **Gradle Module Metadata.** Resolution reads POMs only. Libraries that
-  publish richer variant information in `.module` files fall back to their POM,
-  which is usually, but not always, equivalent.
-
-## 3. Build and compilation
-
-- **Per-project JVM arguments.** There is no way to pass `-Xmx`, `-D` system
-  properties or `--enable-preview` to `jrs run` or to the test JVM. A
-  `[run] jvm-args` (and `[test] jvm-args`) key would cover it.
-- **Annotation processors.** Since JDK 23, `javac` no longer runs processors
-  found on the classpath implicitly, so Lombok, MapStruct, Dagger and similar
-  need `javac-args = ["-proc:full"]` today. Until there is a proper answer, the
-  README should document that workaround. The proper answer is a processor path
-  declared separately from the compile classpath. Configuring processors is a
-  non-goal, so that needs a spec change (see §8).
-- **JDK selection per project.** The toolchain is `JAVA_HOME`, then `PATH`.
-  Honouring a project-pinned JDK (for example a `java.home`, or reading
-  `.java-version` / `.sdkmanrc`) would make builds more portable across
-  machines.
-- **Watch mode.** `jrs build --watch` / `jrs test --watch` rebuilding on change.
-  A polling loop over the existing sorted directory walk keeps it
-  dependency-free.
 - **Finer-grained incremental compilation.** The staleness check is
   all-or-nothing by design (SPEC §7.2). Worth revisiting only if large projects
-  show `javac` time dominating a no-dependency-change rebuild.
-- **Javadoc.** `jrs doc`, driving `javadoc` the same way `javac` is driven, with
-  an argfile.
+  show `javac` time dominating a no-dependency-change rebuild; the M5 benchmark
+  harness is the place to measure it first.
 
-## 4. Testing
+## 2. Packaging
 
-- **CI-friendly reports.** Pass `--reports-dir target/test-reports` to the
-  console launcher so JUnit XML lands where CI systems pick it up. It is almost
-  free.
-- **Richer selection.** `--filter` maps to class names only. Tag
-  include/exclude (`--include-tag`, `--exclude-tag`) and method-level selection
-  are natural next flags.
-- **JUnit 4 via the Vintage engine.** JUnit 5 only was a deliberate decision
-  (SPEC §13.7), but the Vintage engine runs JUnit 4 tests on the same Platform
-  launcher jrs already drives. It could bring JUnit 4 projects in at little cost.
-  TestNG remains out of scope.
-- **Coverage.** Attaching the JaCoCo agent to the test JVM and writing a report
-  under `target/`.
-
-## 5. Packaging and distribution of user projects
-
-- **A portable thin-jar layout.** A thin jar's `Class-Path` points at absolute
-  paths in the local cache, so it only runs on the machine that built it.
-  Add a layout that copies runtime dependencies into `target/lib/` and writes
-  relative `Class-Path` entries, ready to zip and ship.
-- **Runtime images.** `jrs package --jlink` / `--jpackage` for a trimmed
-  runtime or a native installer. Both are JDK tools, so this stays within
-  "driver, not reimplementation".
 - **Shading.** Package relocation for conflicting dependencies was ruled out
-  for v1 (SPEC §13.5). Duplicate classes are reported today; relocation is the
-  next step if real projects hit it.
+  for v1 (SPEC §13.5). Duplicate classes are reported today; relocation — which
+  means rewriting class files' constant pools — is the next step if real
+  projects hit it.
 
-## 6. CLI and ergonomics
+## 3. jrs itself
 
-- **`jrs add` / `jrs remove`.** Edit `[dependencies]` from the command line,
-  optionally resolving the latest release. Rewriting `jrs.toml` without losing
-  comments and ordering needs a format-preserving TOML editor, which means a new
-  crate (see §8).
-- **`jrs outdated`.** List dependencies with newer releases, read from
-  `maven-metadata.xml`. It shares its groundwork with SNAPSHOT support.
-- **`jrs tree` filters.** `--why <artifact>` (the inverted path to a
-  dependency) and `--depth <n>`. The mediation data is already in the
-  resolution.
-- **`jrs classpath [--test]`.** Print the resolved classpath to stdout for
-  editors, language servers and ad-hoc `java` invocations. This gives most of
-  the IDE benefit without generating IDE project files, which is a non-goal.
-- **`jrs init` templates.** For example `--lib` (no main class) and a starter
-  JUnit test, so `jrs test` works straight after scaffolding.
-- **Shell completions.** Generated from the clap definition. This adds
-  `clap_complete` (see §8).
-
-## 7. jrs itself
-
-- **The M5 benchmark.** SPEC §12 asks for a benchmark against a fixture with
-  about 20 transitive dependencies, run with and without `--progress never`.
-  There is no checked-in harness for it yet.
 - **Migration fidelity.** Keep growing the `tests/fixtures/migrate/` corpus
   from real-world `pom.xml` and Gradle builds. Every construct that lands in the
-  "not migrated" block is a candidate for translation.
+  "not migrated" block is a candidate for translation. Classifiers, exclusions,
+  `provided`/`compileOnly`, test-jars, annotation processors, Surefire's
+  `argLine` and Gradle's JVM arguments now translate; profiles, `system` scope
+  and anything computed still do not.
 
-## 8. Needs a spec decision first
+## 4. Needs a spec decision first
 
 These cross a line drawn in SPEC §1.2 or §13 (or the dependency list). They are
 listed so the discussion has a home, not because they are planned.
@@ -127,9 +44,10 @@ listed so the discussion has a home, not because they are planned.
 | Idea | What it crosses |
 | --- | --- |
 | Multi-module builds / workspaces | Non-goal: one module per manifest |
-| Annotation-processor path in the manifest | Non-goal: no annotation-processor configuration |
+| Annotation-processor path in the manifest | Non-goal: no annotation-processor configuration. Processors on the compile classpath, as `compile-only` dependencies with `-proc:full`, work today |
 | JPMS (`module-info.java`, module path) | Non-goal |
 | Kotlin or other JVM languages | Non-goal |
+| TestNG | SPEC §13.7: the JUnit Platform only (Jupiter and Vintage) |
 | Version ranges | SPEC §8.2 rejects them rather than guessing |
 | Highest-wins mediation (opt-in) | SPEC §13.6 chose nearest-wins |
-| `toml_edit` for `jrs add`, `clap_complete` for completions | SPEC §13.1 minimal crate list |
+| Gradle Module Metadata (`.module` files) | Its rich versions (`strictly`, `prefer`, `reject`, ranges), dependency constraints and capabilities do not fit nearest-wins and the no-ranges rule (SPEC §8.2); honouring them means a different resolver. Reading `.module` files also needs a JSON parser |

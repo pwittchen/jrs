@@ -1,0 +1,23 @@
+[project]
+name = "kts-app"
+version = "2.1.0"
+main-class = "com.example.App"
+
+[java]
+source = 17
+
+[run]
+jvm-args = ["-Xmx1g", "-Dapp.mode=prod"]
+
+[test]
+jvm-args = ["-Xmx256m", "-Denv=test"]
+
+[dependencies]
+"com.google.guava:guava" = { version = "33.0.0-jre", exclusions = ["com.google.code.findbugs:jsr305"] }
+"org.lwjgl:lwjgl:natives-linux" = "3.3.3"
+"com.fasterxml.jackson.core:jackson-databind" = { version = "2.17.0", exclusions = ["*:*"] }
+"org.projectlombok:lombok" = { version = "1.18.34", compile-only = true }
+"org.postgresql:postgresql" = "42.7.3"
+
+[dev-dependencies]
+"junit:junit" = "4.13.2"
