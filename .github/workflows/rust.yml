@@ -35,6 +35,15 @@ jobs:
         distribution: temurin
         java-version: '21'
 
+    # setup-java registers problem matchers that turn javac and JVM error lines
+    # into annotations. Here those lines only come from test fixtures that fail
+    # on purpose, so the annotations are noise on a green build.
+    - name: Drop the Java problem matchers
+      run: |
+        echo "::remove-matcher owner=javac::"
+        echo "::remove-matcher owner=java::"
+        echo "::remove-matcher owner=maven-javac::"
+
     - name: Check formatting
       run: cargo fmt --check
 
