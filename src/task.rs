@@ -1090,7 +1090,10 @@ mod tests {
         assert_eq!(*program, root.join("bin/tool"));
         assert_eq!(args[0], "app-1.0.0");
         assert_eq!(args[1], "{literal}");
-        assert_eq!(args[2], root.join("target/classes").display().to_string());
+        assert_eq!(
+            args[2],
+            root.join("target").join("classes").display().to_string()
+        );
         assert_eq!(args[3], root.join("target").display().to_string());
         assert_eq!(args[4], "extra", "`--` arguments come last");
         assert_eq!(p.cwd, root.join("target"));
