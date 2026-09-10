@@ -276,16 +276,20 @@ pub fn jlink(
     }
 
     // A project named `java` (or `keytool`, ...) would overwrite the runtime's
-    // own launcher, and the image would then run itself instead of the JVM.
+    // own launcher, and the image would then run itself instead of the JVM. On
+    // Windows the runtime's launcher is `java.exe`, which `cmd` picks over
+    // `java.bat`, so there the project's launcher would never run at all.
     let bin = output.join("bin");
     let sh = bin.join(app.name);
     let bat = bin.join(format!("{}.bat", app.name));
-    for launcher in [&sh, &bat] {
-        if launcher.exists() {
+    let exe = bin.join(format!("{}.exe", app.name));
+    for existing in [&sh, &bat, &exe] {
+        if existing.exists() {
             return Err(JrsError::build(format!(
-                "cannot write the launcher {}: the Java runtime already has a file there\n\n\
-                 rename the project so its launcher does not replace one of the runtime's own",
-                launcher.display()
+                "cannot write the launcher for {}: the Java runtime already has {}\n\n\
+                 rename the project so its launcher does not clash with one of the runtime's own",
+                app.name,
+                existing.display()
             )));
         }
     }
