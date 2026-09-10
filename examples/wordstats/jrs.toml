@@ -1,0 +1,17 @@
+[project]
+name = "wordstats"
+version = "1.0.0"
+main-class = "com.example.wordstats.Main"
+
+[java]
+source = 17
+javac-args = ["-Xlint:all"]
+
+[dependencies]
+# short form; pulls in a parent POM and a handful of transitive jars
+"com.google.guava:guava" = "33.3.1-jre"
+# long form; no transitive dependencies
+"org.apache.commons:commons-lang3" = { version = "3.17.0" }
+
+[dev-dependencies]
+"org.junit.jupiter:junit-jupiter" = "5.11.4"

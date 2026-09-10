@@ -78,6 +78,10 @@ my-project/
 └── target/                   # generated, git-ignored
 ```
 
+[`examples/wordstats`](examples/wordstats) is a complete sample project, with
+Maven Central dependencies, resources, a `ServiceLoader` plugin and JUnit 5
+tests, for trying every command end to end.
+
 ## The manifest
 
 ```toml

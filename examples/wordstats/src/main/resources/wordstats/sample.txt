@@ -1,0 +1,18 @@
+A build system has one job: turn sources into something that runs, and do it the
+same way every time. The sources change, the dependencies change, the machine
+changes, but the build should not care. A build that works on one machine and
+fails on another is not a build, it is a guess.
+
+Dependencies are where builds usually go wrong. A project declares a handful of
+dependencies, each dependency brings its own dependencies, and somewhere in that
+graph two of them disagree about a version. The build has to pick one version,
+and it has to pick the same version every time, or the café down the street
+will ship a different program than the one you tested.
+
+Tests are the other half of the job. A build that compiles but never runs the
+tests is naïve about what it produced. Run the tests, report the failures
+clearly, and exit with a code a script can trust.
+
+Then package it. A jar is only a zip file with a manifest, but a jar built twice
+from the same sources should be the same jar, byte for byte, so that anyone can
+check that the program they run is the program that was built.
