@@ -6,9 +6,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 `jrs` is a Java build system written in Rust: it builds, tests, runs and packages a
 single-module Java project from one `jrs.toml` manifest, resolving dependencies from
-Maven Central. It shells out to `javac`, `java` and `jar` — it is a driver, not a
-reimplementation of the JDK. Kotlin, Scala and Groovy compile alongside Java
-(`specs/JVM_LANGUAGES.md`, SPEC §7.7): their compilers are resolved from Maven
+Maven Central. It shells out to `javac`, `java` and the other JDK tools — it is a
+driver, not a reimplementation of the JDK. Kotlin, Scala and Groovy compile alongside
+Java (`specs/JVM_LANGUAGES.md`, SPEC §7.7): their compilers are resolved from Maven
 Central as isolated tool graphs, pinned in `jrs.lock`'s `[[tool]]` blocks, and
 run on the project's JDK — still a driver.
 
@@ -92,7 +92,7 @@ Project + Classpath ──► compile ──► target/classes ──► package
 `cli.rs` owns dispatch. `Session` holds one command's manifest, UI and clock, and
 `Session::build()` is the shared spine of `build`/`test`/`run`/`package`:
 `dependencies()` (lockfile or fresh resolution → cache lookup → downloads) then
-`javac` with a staleness check, then a resource copy.
+the compile unit with a staleness check, then a resource copy.
 
 A compile unit (`compile/mod.rs`) is ordered steps that share one output
 directory and one fingerprint: the compiler of the unit's other language, then
@@ -113,14 +113,15 @@ These are the invariants the codebase is organised around; breaking one is a des
 regression, not a style nit.
 
 - **Only `ui/` touches the terminal.** Build code reports progress by mutating shared
-  state that a single render thread reads. No `println!`/`eprintln!` outside `ui/`.
+  state that a single render thread reads. No `println!`/`eprintln!` outside `ui/`
+  and tests.
   This is what makes `--progress never` and the animated mode provably the same build,
   and what lets `tests/output.rs` snapshot the output without a TTY.
 - **Phase lines are emitted by `cli.rs`, unconditionally.** Live scopes (`ui.spinner`,
   `ui.downloads`) only add motion on top; they never own a line that plain mode needs.
 - **Errors are values.** One `JrsError` enum (`error.rs`); library code never prints,
   and only the CLI layer renders. Exit codes: `0` ok, `1` build/test failure, `2` usage
-  or manifest error. No `unwrap()` outside `#[cfg(test)]`.
+  or manifest error. No `unwrap()` outside `#[cfg(test)]`, except on lock poisoning.
 - **`ui` depends on nothing; `manifest`/`project`/`resolve`/`task` know nothing
   about terminals.** The dependency arrows point one way, toward `cli`.
 - **`target/` is fully disposable.** Nothing is written there that cannot be

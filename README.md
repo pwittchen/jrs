@@ -138,8 +138,9 @@ jrs test            # compile the tests and run them
 
 `jrs init --lib` scaffolds a library instead: no main class, just a starter
 class and its test. Both templates declare JUnit 5 as a dev-dependency, so the
-first build downloads it. `jrs init --lang kotlin` (or `scala`, or `groovy`)
-scaffolds the same in another language; see
+first build downloads it. `jrs init --lang kotlin` scaffolds the same in
+Kotlin, `--lang scala` in Scala with MUnit tests, and `--lang groovy` Java
+code with Spock specs; see
 [Kotlin, Scala and Groovy](#kotlin-scala-and-groovy).
 
 A whole project is one manifest and a source tree:
@@ -153,7 +154,7 @@ my-project/
 │   ├── main/kotlin/          # with [kotlin]; likewise scala/ and groovy/
 │   ├── main/resources/       # copied into the jar
 │   └── test/java/            # test sources
-└── target/                   # generated, git-ignored
+└── target/                   # generated; git-ignore it
 ```
 
 [`examples`](examples) holds complete sample projects for trying every command
@@ -325,7 +326,8 @@ Global flags: `-v/--verbose`, `-q/--quiet`, `--offline`, `-j/--jobs <n>`,
 `--manifest-path <p>`, `--progress <auto|always|never>`,
 `--color <auto|always|never>`, `--charset <auto|unicode|ascii>`.
 
-Exit codes: `0` success, `1` build or test failure, `2` usage or manifest error.
+Exit codes: `0` success, `1` build or test failure, `2` usage or manifest error,
+`101` internal error.
 
 `jrs package` writes a thin jar whose `Class-Path` points at the cached
 dependency jars, so `java -jar` works without a classpath argument on the
@@ -378,9 +380,10 @@ jrs cache prune --unused-for 30       # drop what no build has used in 30 days
 ```
 
 Every project jrs builds is recorded in the cache, so a plain `prune` keeps
-exactly what those projects' lockfiles name, their pinned compilers included. It also drops the parent POMs,
-BOMs, test launchers and JaCoCo jars that only a fresh resolution or a
-`--coverage` run needs; those are downloaded again when they are next wanted.
+exactly what those projects' lockfiles name, their pinned compilers included.
+It also drops the parent POMs, BOMs, test launchers and JaCoCo jars that only
+a fresh resolution or a `--coverage` run needs; those are downloaded again
+when they are next wanted.
 `--unused-for` goes by when each artifact was last used. jrs records that in
 the file's access time at most once a day, so it works even on filesystems
 mounted `noatime`.
@@ -427,7 +430,6 @@ password-env = "NEXUS_PASSWORD"           # or `password`, `token`, `token-env`
   do not change `jrs.lock`.
 - **Proxy**: without a `[proxy]` table, `HTTPS_PROXY`, `HTTP_PROXY`,
   `ALL_PROXY` and `NO_PROXY` from the environment apply.
-
 - **JDKs**: `[jdks]` maps a Java feature version to a JDK home, for a
   project that pins a version installed somewhere jrs does not look.
 
@@ -449,7 +451,7 @@ A pinned version is looked up in the user configuration's `[jdks]` table
 first, then at `JAVA_HOME` / `PATH`, then among the JDKs installed in the
 usual places:
 - SDKMAN!, asdf, mise, IntelliJ and Gradle toolchains in your home directory
-- `/Library/Java/JavaVirtualMachines` and `/usr/lib/jvm`
+- `/Library/Java/JavaVirtualMachines`, `/usr/lib/jvm`, `/usr/java` and `/opt/java`
 - `Program Files` on Windows
 - `JAVA_HOME_<version>_<arch>`, as exported by `actions/setup-java`
 
@@ -590,8 +592,8 @@ Placeholders such as `{root}`, `{target}`, `{classes}`, `{project.version}`,
 `{classpath}` (what `jrs classpath` prints) and `{jar}` are expanded in `run`,
 `args`, `cwd` and `env`. `shell` strings use environment variables instead:
 `JRS_ROOT`, `JRS_CLASSPATH`, `JRS_JAR` and the rest, with `JAVA_HOME` set to
-the project's JDK; a `shell` task's `args` arrive as `$1`, `$2`…. The full list is in
-[SPEC §7.6](specs/INITIAL_SPEC.md#76-tasks-and-hooks).
+the project's JDK; a `shell` task's `args` arrive as `$1`, `$2`…. The full
+list is in [SPEC §7.6](specs/INITIAL_SPEC.md#76-tasks-and-hooks).
 
 Generated sources and resources must live under `target-dir`, since `jrs
 clean` must never delete anything you wrote and watch mode must not rebuild on
@@ -688,9 +690,10 @@ cargo test --features network-tests --test network
 The integration tests build real Java fixture projects, so they need a JDK; they
 announce that they were skipped if there is none.
 
-CI runs `cargo fmt --check`, `cargo clippy --all-targets -D warnings`,
-`cargo build` and `cargo test` on Linux, macOS and Windows, on every push and
-pull request against `master`.
+CI runs `cargo fmt --check` (on Linux), `cargo clippy --all-targets -- -D
+warnings`, `cargo build` and `cargo test` on Linux, macOS and Windows, plus the
+network tests on Linux, on every push and pull request against `master` that
+touches more than Markdown or `LICENSE`.
 
 The M5 benchmark from SPEC §12 resolves a graph of about twenty artifacts from a
 local repository that adds latency to every request. It runs with

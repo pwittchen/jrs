@@ -336,7 +336,7 @@ traversal as source globbing (`project::find_all`). **No glob syntax in v1**:
 directories cover the common cases, and globbing would mean either a new crate
 or another hand-written matcher. If it's needed, it comes later.
 
-The fingerprint follows the pattern of `compile.rs`:
+The fingerprint follows the pattern of `compile/mod.rs`:
 
 - the expanded action (argv or shell string, `args`, `cwd`, `env`),
 - the JDK version, since a `script` task's output can depend on it,
@@ -408,7 +408,7 @@ args = ["--replace", "{root}/src/main/java"]
 
 - A new action kind, `main = "<class>"`, runs `java -cp <tool classpath> <class> <args>`.
   `script` tasks may take `dependencies` too, as their `-cp`.
-- `[tasks.<name>.dependencies]` uses the `[dependencies]` value forms (§4.2),
+- `[tasks.<name>.dependencies]` uses the `[dependencies]` value forms (SPEC §4.2),
   without `compile-only`.
 - Each task's dependencies are resolved **as their own graph**, never merged
   into the project's: a formatter's Guava must not mediate against the
@@ -444,7 +444,8 @@ jrs task --list                 list tasks, their descriptions and hooks
   completion time.
 - Arguments after `--` are appended to the argument vector of the named task
   (not its dependencies). For `shell` tasks they become positional parameters
-  (`sh -c '<script>' <name> args…` → `$1…`; `%*` under `cmd`).
+  (`sh -c '<script>' <name> args…` → `$1…`); under `cmd` they are appended to
+  the command line.
 - `--list` writes to **stdout**, since it is the command's real output, like
   `jrs tree`. Shell tasks are marked `(sh)`.
 - `jrs task` works with `--watch`: rerun whenever any task's `inputs`, the
@@ -565,7 +566,7 @@ No new crates. `toml` already parses the tables, `std::process` spawns, and
 | `manifest.rs` | `TaskDef`, `Action { Run, Shell, Script }`, `Hooks`; parsed by hand like the rest, order preserved, per-key diagnostics, unknown keys → warnings. Pure structural validation: kinds, names, `target-dir` containment, `JRS_` env names. |
 | `task.rs` (new) | Everything that doesn't touch a process or a terminal: the plan (DAG, cycle detection incl. through built-ins, topological order with declaration-order ties), placeholder expansion, placeholder-availability checks per hook, the environment map, fingerprint compute/read/write. Knows nothing about `Ui`. |
 | `toolchain.rs` | The spawn helper of §9.3: argv/shell/script → `Command`, env, cwd, streamed passthrough; an inherited variant for the named task. |
-| `cli.rs` | `Command::Task { name, list, args, watch }`; `Session::hooks(Hook)` called from `build()`, `test_command`, `package_command`, `run_command`, `doc_command`; `task_command`; phase lines; turning a failed task into `JrsError`. `Session::build()` gains the `pre-compile` call between `dependencies()` and source globbing, and the `post-compile` call after the resource sync. |
+| `cli.rs` | `Command::Task(TaskArgs)` (`name`, `list`, `watch`, `args`); `Session::hook(Hook)` called from `build()`, `test_command`, `package_command`, `run_command`, `doc_command`; `task_command`; phase lines; turning a failed task into `JrsError`. `Session::build()` gains the `pre-compile` call between `dependencies()` and source globbing, and the `post-compile` call after the resource sync. |
 | `project.rs` | Main/test source lists accept extra roots (the `source-outputs`). |
 | `completions.rs` | Nothing by hand. The new subcommand is picked up from the clap definition. |
 

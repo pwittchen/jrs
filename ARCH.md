@@ -7,7 +7,7 @@ of the code as it is. The design the code follows is
 [specs/JVM_LANGUAGES.md](specs/JVM_LANGUAGES.md) for Kotlin, Scala and Groovy and
 [specs/TASKS.md](specs/TASKS.md) for tasks and hooks. Module doc comments cite
 those by section (`SPEC §8.2`), and SPEC §12.1 lists the four places where the
-code deliberately diverges from them.
+code deliberately diverges from SPEC.
 
 ## Contents
 
@@ -38,7 +38,7 @@ are resolved like dependencies and run on the project's JDK too.
                          ┌──────────────────────────────────────────┐
   jrs.toml ─────────────►│                   jrs                    │
   jrs.lock ◄────────────►│                                          │
-  ~/.config/jrs/config ─►│  manifest → resolve → compile → package  │
+  config.toml ──────────►│  manifest → resolve → compile → package  │
                          │                 │          │        │    │
                          └─────────────────┼──────────┼────────┼────┘
                                            │          │        │
@@ -46,7 +46,7 @@ are resolved like dependencies and run on the project's JDK too.
                ▼                                      ▼        ▼
    ┌───────────────────────┐       ┌───────────────────────────────────────┐
    │ Maven repositories    │       │ The JDK (subprocesses)                │
-   │  • [repositories] …   │       │  javac · java · jar · javadoc         │
+   │  • [repositories] …   │       │  javac · java · javadoc               │
    │  • Maven Central last │       │  jdeps · jlink · jpackage             │
    │  • file:// in tests   │       │  kotlinc/scalac/groovyc (java @file)  │
    └──────────┬────────────┘       │  java … ConsoleLauncher (JUnit)       │
@@ -175,7 +175,7 @@ What the layering buys:
  cli::main()
    │
    ▼
- Cli::try_parse_from(args) ── Err ──► clap prints it ─► --help/--version: exit 0
+ Cli::try_parse() ─────────── Err ──► clap prints it ─► --help/--version: exit 0
    │ Ok                                                  anything else:  exit 2
    ▼
  Ui::new(global flags)       --progress, --color, --charset, -v, -q; the
@@ -214,7 +214,7 @@ it, it runs **at most once per invocation**.
  ├── resolution : OnceCell<Resolution>      the project's graph
  ├── tools      : OnceCell<Vec<Tool>>       each compiler's own graph
  ├── built      : OnceCell<Built>           the result of build()
- ├── ran        : RefCell<HashSet<task>>    tasks already run or found fresh
+ ├── ran        : RefCell<HashSet<String>>  tasks already run or found fresh
  ├── done       : RefCell<HashSet<Builtin>> built-ins a depends-on already ran
  └── jar        : RefCell<Option<PathBuf>>  set once package has written it
 ```
@@ -256,7 +256,8 @@ add to it:
 ```
 
 Every phase line (`Resolving`, `Downloading`, `Compiling`, `Fresh`, `Testing`,
-`Packaging`, `Task`, `Finished`) is printed by these methods, unconditionally.
+`Packaging`, `Running`, `Task`, `Finished`, …) is printed by these methods,
+unconditionally.
 The spinner or download bars around a phase are a separate `LiveScope` that
 only adds motion. See [§11](#11-the-output-layer).
 
@@ -600,7 +601,8 @@ poisoning, which is documented under each function's `# Panics`.
      └── .jrs/                    jrs's own scratch space
          ├── javac-main.args  javac-test.args  kotlinc-main.args  …
          ├── main.fingerprint  test.fingerprint
-         ├── resources-main.list  resources-test.list
+         ├── resources-main.list  resources-test.list  resources-*-generated-*.list
+         ├── tasks/                 <task>.fingerprint  <task>.cp.args
          └── javadoc.args  junit-palette.properties  jpackage-input/
 
  shared cache  (JRS_CACHE_DIR, or ~/Library/Caches/jrs, $XDG_CACHE_HOME/jrs,
@@ -610,7 +612,8 @@ poisoning, which is documented under each function's `# Panics`.
  └── .jrs/projects                the lockfiles of every project built with it,
                                   which `jrs cache prune` keeps alive
 
- user config   (JRS_CONFIG, or ~/.config/jrs/config.toml, %APPDATA%\jrs\config.toml)
+ user config   (JRS_CONFIG, or $XDG_CONFIG_HOME/jrs/config.toml,
+               ~/.config/jrs/config.toml, %APPDATA%\jrs\config.toml)
                jobs, [proxy], [mirrors], [credentials.<repo>], [jdks]
 ```
 

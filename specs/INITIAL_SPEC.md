@@ -1,7 +1,7 @@
 # jrs — Design Specification
 
 Working design document for `jrs`, a Java build system written in Rust.
-It expands the capability list from [README.md](README.md) into a concrete scope,
+It expands the capability list from [README.md](../README.md) into a concrete scope,
 so that implementation can start from agreed contracts instead of ad-hoc decisions.
 
 Status: **implemented** — every milestone in the [Roadmap](#12-roadmap) has
@@ -420,12 +420,12 @@ errors, resolution failures and panics always land in a clean terminal — §6.2
 ## 6. Architecture
 
 Single binary, library-first: all logic lives in `src/lib.rs` modules so it can
-be unit-tested without spawning the CLI. `main.rs` is argument parsing plus a
-call into the library.
+be unit-tested without spawning the CLI. `main.rs` is five lines: a call into
+`cli::main()`, which parses the arguments, and an exit with its code.
 
 ```
 src/
-├── main.rs           # CLI entry; arg parsing, exit codes
+├── main.rs           # five-line entry point: exit(cli::main())
 ├── lib.rs            # public API surface for tests
 ├── cli.rs            # command definitions and dispatch
 ├── completions.rs    # bash/zsh/fish scripts, from the clap definition
@@ -484,8 +484,8 @@ Project + Classpath ──► Compiler ──► target/classes/
 - **Shell out to the JDK.** `javac`, `java` and `jar` are located once and
   invoked as subprocesses. No JNI, no bundled compiler.
 - **Argfiles over long command lines.** Source lists and classpaths are written
-  to `target/.jrs/javac.args` and passed as `@argfile`, sidestepping OS
-  command-line length limits.
+  to `target/.jrs/javac-main.args` (and `javac-test.args`) and passed as
+  `@argfile`, sidestepping OS command-line length limits.
 - **Errors are values.** A single `JrsError` enum with `thiserror`; the CLI
   layer decides how to render it. No `unwrap()` outside tests.
 - **Toolchain output is passed through verbatim.** `javac` diagnostics are
@@ -1019,9 +1019,9 @@ Both need `project.main-class`.
   `tests/fixtures/`, each built end to end through the library API.
   Network-dependent tests are gated behind a feature flag or run against a
   local file:// repository fixture so CI stays hermetic.
-- CI (`.github/workflows/rust.yml`) already runs `cargo build` + `cargo test`;
-  it will need a JDK setup step (`actions/setup-java`) before integration tests
-  can pass.
+- CI (`.github/workflows/rust.yml`) runs `cargo build` + `cargo test` on Linux,
+  macOS and Windows with a JDK from `actions/setup-java`, and the network tests
+  on Linux.
 
 ### 10.2 Running the user's tests (`jrs test`)
 
@@ -1131,8 +1131,8 @@ Reported, not translated:
 - `provided`/`system` scopes, `<optional>`, `<classifier>`, `<type>` other
   than `jar`.
 - Any plugin other than `maven-compiler-plugin`, `maven-jar-plugin`,
-  `maven-surefire-plugin` and `maven-shade-plugin` — each is named in the
-  report as unmigrated.
+  `maven-surefire-plugin`, `maven-shade-plugin` and the language plugins of
+  §11.6 — each is named in the report as unmigrated.
 - Profiles: only the default-active ones are read; the rest are listed.
 
 ### 11.3 Gradle (`build.gradle`, `build.gradle.kts`)

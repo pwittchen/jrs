@@ -114,7 +114,7 @@ src/test/kotlin/com/example/orders/OrderTest.kt
 
 ```
 $ jrs build
-    Resolving 3 declared dependencies
+    Resolving 3 declared dependencies and the Kotlin compiler
   Downloading kotlin-compiler-embeddable (Kotlin compiler)
     Compiling orders v1.0.0 (2 Kotlin + 1 Java source files)
      Finished build in 6.84s
@@ -271,6 +271,7 @@ manifest-checksum = "sha256:…"
 
 [[tool]]
 name = "kotlin-compiler"
+roots = ["org.jetbrains.kotlin:kotlin-compiler-embeddable"]
 [[tool.package]]
 group = "org.jetbrains.kotlin"
 artifact = "kotlin-compiler-embeddable"
@@ -399,7 +400,7 @@ style of the rest of the codebase. There is no trait-object registry.
 
 ```
 src/compile/
-├── mod.rs        # CompileUnit (steps), fingerprint, is_stale, argfile dialects
+├── mod.rs        # CompileUnit (steps), fingerprint, is_stale, argfiles
 ├── javac.rs      # today's compile.rs body; javadoc stays here too
 └── lang.rs       # enum Language { Java, Kotlin, Scala, Groovy }:
                   #   extension, default dirs, compiler coordinate + main class,
@@ -489,7 +490,7 @@ starter in `src/main/<lang>`, and a starter test:
 | --- | --- |
 | `kotlin` | `junit-jupiter` + `kotlin-test-junit5` |
 | `scala` | `munit_3` |
-| `groovy` | a Java main class, with `spock-core` (`-groovy-4.0`) tests, since tests are where Groovy usually lives |
+| `groovy` | a Java main class, with `spock-core` (`-groovy-5.0`) tests, since tests are where Groovy usually lives |
 
 `--lang java` is the default. Completions pick up the flag from the clap
 definition.
@@ -538,7 +539,7 @@ an input build paired with its expected `jrs.toml`.
    `[[tool]]` blocks and the version-2 rule.
 5. **§5.1**, `jrs init --lang`.
 6. **§6**, the `compile/` module tree.
-7. **New §7.6 "Other JVM languages"**, condensed from §4–§6 of this document.
+7. **New §7.7 "Other JVM languages"**, condensed from §4–§6 of this document.
    **§7.2** points to it for multi-step units.
 8. **§9.2**, the Groovy extension-module merge rule.
 9. **§10.2**, the launcher-from-resolved-graph rule and the `*Spec` pattern.
@@ -559,9 +560,9 @@ and `zip` merges the Groovy descriptors.
 | Where | What |
 | --- | --- |
 | `manifest.rs` | `LanguageConfig { version, source_dir, test_dir, compiler_args, compiler_jvm_args }` per language, parsed by hand like `[java]`. Minimum-version check. `effective_dependencies()` with the implied library, flagged `implied` so `render()` skips it. |
-| `compile/` | §6.4. `CompileUnit` grows `steps`, and the fingerprint covers them all. `Dialect`-aware argfiles. |
+| `compile/` | §6.4. `CompileUnit` grows `steps`, and the fingerprint covers them all. One `java` argfile per compiler run (§5.3). |
 | `project.rs` | `main_sources()` / `test_sources()` return a `Sources` value: roots × extensions, grouped by language. Also the "language not enabled" and "one non-Java language per unit" checks. |
-| `resolve/` | `resolve_tool(name, coords, repositories, fetcher)`, the isolated graph shared with TASKS.md T3. |
+| `resolve/` | `resolve_tool(roots, fetcher, jobs)`, the isolated graph shared with TASKS.md T3. |
 | `lockfile.rs` | `[[tool]]` read/write, version 2 only when present, the `lang` lines in `manifest_checksum`. |
 | `cli.rs` | `Session::tools()` (lockfile-first, like `dependencies()`). `build()` and `test_command` build multi-step units. The phase-line wording. `init --lang`. `watched_paths`. |
 | `test.rs` | Launcher from the resolved graph, the default `*Spec` pattern, multi-root coverage sources. |
