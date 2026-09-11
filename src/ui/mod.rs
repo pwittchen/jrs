@@ -489,6 +489,19 @@ impl Ui {
             self.println_out(line);
         }
     }
+
+    /// The `--timings` table, printed after the summary: one row per phase
+    /// with its wall time and share of `total`, then the total. The same lines
+    /// in every mode but quiet, which prints none; it is a report about the
+    /// build, so it goes to stderr with the rest of the transcript.
+    pub fn timings(&self, rows: &[(String, Duration)], total: Duration) {
+        if self.inner.mode == Mode::Quiet {
+            return;
+        }
+        for line in render_timings(rows, total, self.inner.color) {
+            self.permanent(Stream::Err, &line);
+        }
+    }
 }
 
 /// Holds the live region for the duration of a phase, and takes it down again.
@@ -623,6 +636,46 @@ pub fn render_summary(rows: &[(&str, String)], g: &GlyphSet, color: bool) -> Vec
         ));
     }
     lines.push(glyphs::paint(color, Style::Dim, bottom));
+    lines
+}
+
+/// The `--timings` table: a dim header, a row per phase — its label, its
+/// time right-aligned, its share of `total` — and a bold total. Columns are
+/// as wide as their widest cell, so the layout depends on the labels alone.
+#[must_use]
+pub fn render_timings(rows: &[(String, Duration)], total: Duration, color: bool) -> Vec<String> {
+    let times: Vec<String> = rows.iter().map(|(_, d)| format_duration(*d)).collect();
+    let total_time = format_duration(total);
+    let label_width = rows
+        .iter()
+        .map(|(l, _)| l.chars().count())
+        .chain(["phase".len(), "total".len()])
+        .max()
+        .unwrap_or(0);
+    let time_width = times
+        .iter()
+        .chain(std::iter::once(&total_time))
+        .map(String::len)
+        .chain(std::iter::once("time".len()))
+        .max()
+        .unwrap_or(0);
+
+    let header = format!(
+        "  {:<label_width$}  {:>time_width$}   share",
+        "phase", "time"
+    );
+    let mut lines = vec![glyphs::paint(color, Style::Dim, header)];
+    for ((label, took), time) in rows.iter().zip(&times) {
+        let share = if total.is_zero() {
+            String::new()
+        } else {
+            format!("{:>5.1}%", 100.0 * took.as_secs_f64() / total.as_secs_f64())
+        };
+        let line = format!("  {label:<label_width$}  {time:>time_width$}  {share}");
+        lines.push(line.trim_end().to_string());
+    }
+    let total_line = format!("  {:<label_width$}  {total_time:>time_width$}", "total");
+    lines.push(glyphs::paint(color, Style::Bold, total_line));
     lines
 }
 

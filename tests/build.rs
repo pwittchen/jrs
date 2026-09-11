@@ -8,12 +8,13 @@ mod common;
 
 use std::path::{Path, PathBuf};
 
-use common::{FixtureRepo, Scratch, copy_dir, fixtures};
+use common::{FAKE_LAUNCHER_1, FAKE_LAUNCHER_6, FixtureRepo, Scratch, copy_dir, fixtures};
 use jrs::cli;
 use jrs::compile::{self, CompileUnit};
 use jrs::manifest::Manifest;
 use jrs::package::{self, JarManifest};
 use jrs::project::{self, Project};
+use jrs::resolve::coord::Coord;
 use jrs::resolve::{self, Classpath};
 use jrs::runner;
 use jrs::toolchain::Toolchain;
@@ -92,6 +93,7 @@ fn a_multi_file_project_compiles_and_packages() {
         &JarManifest {
             main_class: manifest.main_class.clone(),
             class_path: Vec::new(),
+            ..JarManifest::default()
         },
     )
     .unwrap();
@@ -117,6 +119,7 @@ fn the_packaged_jar_runs() {
         &JarManifest {
             main_class: manifest.main_class.clone(),
             class_path: Vec::new(),
+            ..JarManifest::default()
         },
     )
     .unwrap();
@@ -361,6 +364,7 @@ fn a_project_compiles_against_a_resolved_dependency() {
         &JarManifest {
             main_class: Some("com.example.App".into()),
             class_path: Vec::new(),
+            ..JarManifest::default()
         },
     )
     .unwrap();
@@ -390,6 +394,7 @@ fn a_project_compiles_against_a_resolved_dependency() {
         &JarManifest {
             main_class: Some("com.example.App".into()),
             class_path,
+            ..JarManifest::default()
         },
     )
     .unwrap();
@@ -783,6 +788,486 @@ fn a_shell_task_runs_under_cmd_on_windows() {
             .trim(),
         "hello"
     );
+}
+
+// ---- java agents and the JVMs' environment ---------------------------------
+//
+// An agent jar with a `Premain-Class`, and a stand-in for JUnit's console
+// launcher, are compiled at test time and published into the fixture
+// repository, so `jrs run` and `jrs test` load a real `-javaagent` without the
+// network. They drive the binary with a cache of their own, as the polyglot
+// tests below do. `--debug` is not started here: its JVM would wait for a
+// debugger; `cli.rs` and `runner.rs` test how it is built.
+
+const MARKER_AGENT: &str = "package agent;\n\n\
+    public final class Marker {\n    private Marker() {}\n\n    \
+    public static void premain(String args, java.lang.instrument.Instrumentation inst) {\n        \
+    System.setProperty(\"jrs.agent\", \"marker 1.0\");\n    }\n}\n";
+
+/// Stands in for JUnit's console launcher: says what its JVM was given, then
+/// prints the summary block jrs takes its counts from.
+const FAKE_LAUNCHER: &str = "package org.junit.platform.console;\n\n\
+    public final class ConsoleLauncher {\n    private ConsoleLauncher() {}\n\n    \
+    public static void main(String[] args) {\n        \
+    System.out.println(\"agent=\" + System.getProperty(\"jrs.agent\")\n            \
+    + \" greeting=\" + System.getenv(\"GREETING\"));\n        \
+    System.out.println(\"[         1 tests found           ]\");\n        \
+    System.out.println(\"[         1 tests successful      ]\");\n        \
+    System.out.println(\"[         0 tests failed          ]\");\n    }\n}\n";
+
+const AGENT_APP: &str = "package com.example;\n\n\
+    public class App {\n    public static void main(String[] args) {\n        \
+    System.out.println(System.getProperty(\"jrs.agent\") + \"|\" + System.getenv(\"GREETING\")\n            \
+    + \"|\" + java.nio.file.Path.of(\"\").toAbsolutePath().getFileName());\n    }\n}\n";
+
+const AGENT_TABLES: &str = r#"[run]
+java-agents = ["org.example.agents:marker-agent"]
+env = { GREETING = "hi from {project.name} {project.version}" }
+cwd = "work"
+
+[test]
+java-agents = ["org.example.agents:marker-agent"]
+env = { GREETING = "tests of {project.name}" }
+
+[dependencies]
+"org.example.agents:marker-agent" = "1.0"
+
+[dev-dependencies]
+"org.junit.platform:junit-platform-console-standalone" = "1.10.2"
+"#;
+
+/// Compile the one class `class` from `source` and publish it as `coord`,
+/// with `manifest` as its jar's manifest.
+fn publish_class(
+    fixture: &FixtureRepo,
+    scratch: &Scratch,
+    toolchain: &Toolchain,
+    coord: &Coord,
+    (class, source): (&str, &str),
+    manifest: &str,
+) {
+    let work = scratch.join(&format!("{}-build", coord.artifact));
+    let file = work
+        .join("src")
+        .join(format!("{}.java", class.replace('.', "/")));
+    std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+    std::fs::write(&file, source).unwrap();
+    let classes = work.join("classes");
+    let output = std::process::Command::new(&toolchain.javac)
+        .args(["--release", "17", "-d"])
+        .arg(&classes)
+        .arg(&file)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let manifest_file = work.join("MANIFEST.MF");
+    std::fs::write(&manifest_file, manifest).unwrap();
+    let jar = work.join("out.jar");
+    let output = std::process::Command::new(&toolchain.jar)
+        .arg("--create")
+        .arg("--file")
+        .arg(&jar)
+        .arg("--manifest")
+        .arg(&manifest_file)
+        .arg("-C")
+        .arg(&classes)
+        .arg(".")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    fixture.publish_pom(
+        coord,
+        &format!(
+            "<project><groupId>{}</groupId><artifactId>{}</artifactId>\
+             <version>{}</version></project>",
+            coord.group, coord.artifact, coord.version
+        ),
+    );
+    fixture.publish_jar(coord, &std::fs::read(&jar).unwrap());
+}
+
+/// A project that prints what its JVM was given, with `tables` in its
+/// manifest, the marker agent and the stand-in launcher in its repository.
+fn agent_project(scratch: &Scratch, toolchain: &Toolchain, tables: &str) -> Polyglot {
+    let fixture = FixtureRepo::new(scratch);
+    publish_class(
+        &fixture,
+        scratch,
+        toolchain,
+        &Coord::new("org.example.agents", "marker-agent", "1.0"),
+        ("agent.Marker", MARKER_AGENT),
+        "Premain-Class: agent.Marker\n",
+    );
+    publish_class(
+        &fixture,
+        scratch,
+        toolchain,
+        &Coord::new(
+            "org.junit.platform",
+            "junit-platform-console-standalone",
+            "1.10.2",
+        ),
+        ("org.junit.platform.console.ConsoleLauncher", FAKE_LAUNCHER),
+        "Created-By: jrs tests\n",
+    );
+    scratch.write(
+        "app/jrs.toml",
+        &format!(
+            "[project]\nname = \"agents\"\nversion = \"1.0.0\"\n\
+             main-class = \"com.example.App\"\n\n{tables}\n{}",
+            fixture.manifest_section()
+        ),
+    );
+    scratch.write("app/src/main/java/com/example/App.java", AGENT_APP);
+    scratch.write(
+        "app/src/test/java/com/example/AppTest.java",
+        "package com.example;\n\nclass AppTest {}\n",
+    );
+    std::fs::create_dir_all(scratch.join("app/work")).unwrap();
+    Polyglot {
+        root: scratch.join("app"),
+        cache: scratch.join("jrs-cache"),
+        config: scratch.join("no-config.toml"),
+    }
+}
+
+#[test]
+fn run_and_test_load_their_agents_and_get_their_environment() {
+    let toolchain = require_jdk!();
+    let scratch = Scratch::new("agents-env");
+    let app = agent_project(&scratch, &toolchain, AGENT_TABLES);
+
+    let (code, stdout, stderr) = app.jrs(&["-v", "run"]);
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(
+        stdout.trim(),
+        "marker 1.0|hi from agents 1.0.0|work",
+        "the agent ran, the environment was set, and the program ran in run.cwd"
+    );
+    let java = stderr
+        .lines()
+        .find(|l| l.contains("com.example.App") && l.contains(" -cp "))
+        .unwrap_or_else(|| panic!("no java command line in:\n{stderr}"));
+    let agent = java.find("-javaagent:").unwrap();
+    assert!(agent < java.find(" -cp ").unwrap(), "{java}");
+    assert!(java[agent..].contains("marker-agent-1.0.jar"), "{java}");
+
+    let (code, stdout, stderr) = app.jrs(&["test"]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(
+        stdout.contains("agent=marker 1.0 greeting=tests of agents"),
+        "{stdout}"
+    );
+    assert!(stderr.contains("1 tests, 1 passed"), "{stderr}");
+}
+
+#[test]
+fn an_agent_the_graph_does_not_hold_where_the_jvm_looks_is_a_manifest_error() {
+    let toolchain = require_jdk!();
+    let scratch = Scratch::new("agents-missing");
+    let app = agent_project(
+        &scratch,
+        &toolchain,
+        "[run]\njava-agents = [\"io.opentelemetry.javaagent:opentelemetry-javaagent\"]\n\n\
+         [dev-dependencies]\n\"org.example.agents:marker-agent\" = \"1.0\"\n",
+    );
+    let (code, _, stderr) = app.jrs(&["run"]);
+    assert_eq!(code, 2, "{stderr}");
+    assert!(
+        stderr.contains(
+            "`run.java-agents` names `io.opentelemetry.javaagent:opentelemetry-javaagent`, \
+             which is not in the resolved dependency graph"
+        ),
+        "{stderr}"
+    );
+    assert!(stderr.contains("[dependencies]"), "{stderr}");
+
+    // A dev-dependency is there for the tests, but not for `jrs run`.
+    let manifest = app.root.join("jrs.toml");
+    let text = std::fs::read_to_string(&manifest).unwrap();
+    std::fs::write(
+        &manifest,
+        text.replace(
+            "io.opentelemetry.javaagent:opentelemetry-javaagent",
+            "org.example.agents:marker-agent",
+        ),
+    )
+    .unwrap();
+    let (code, _, stderr) = app.jrs(&["run"]);
+    assert_eq!(code, 2, "{stderr}");
+    assert!(stderr.contains("only on the test classpath"), "{stderr}");
+}
+
+#[cfg(unix)]
+#[test]
+fn a_jlink_image_launches_with_the_run_agents() {
+    let toolchain = require_jdk!();
+    let scratch = Scratch::new("agents-jlink");
+    let app = agent_project(&scratch, &toolchain, AGENT_TABLES);
+
+    let (code, _, stderr) = app.jrs(&["package", "--jlink"]);
+    assert_eq!(code, 0, "{stderr}");
+    let launcher = app.root.join("target/image/bin/agents");
+    let output = std::process::Command::new(&launcher)
+        .env_remove("GREETING")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    // The agent is baked in; `run.env` belongs to `jrs run`, not the image.
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.starts_with("marker 1.0|null|"), "{stdout}");
+
+    // A fat jar has no agent jar left to point at.
+    let (code, _, stderr) = app.jrs(&["package", "--fat", "--jlink"]);
+    assert_eq!(code, 2, "{stderr}");
+    assert!(
+        stderr.contains("an image or a distribution of a fat jar"),
+        "{stderr}"
+    );
+}
+
+// ---- runtime-only dependencies and local jars ------------------------------
+//
+// These resolve, so they drive the jrs binary with a cache and a config of
+// their own, as the Kotlin tests below do: nothing they publish may reach the
+// user's cache.
+
+/// Run the jrs binary against the project at `root`, isolated from the user.
+fn jrs_isolated(scratch: &Scratch, root: &Path, args: &[&str]) -> (i32, String, String) {
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_jrs"))
+        .arg("--manifest-path")
+        .arg(root)
+        .args([
+            "--progress",
+            "never",
+            "--color",
+            "never",
+            "--charset",
+            "ascii",
+        ])
+        .args(args)
+        .env("JRS_CACHE_DIR", scratch.join("jrs-cache"))
+        .env("JRS_CONFIG", scratch.join("no-config.toml"))
+        .output()
+        .unwrap();
+    (
+        output.status.code().unwrap_or(-1),
+        String::from_utf8_lossy(&output.stdout).into_owned(),
+        String::from_utf8_lossy(&output.stderr).into_owned(),
+    )
+}
+
+/// Compile one class, `class` (fully qualified) holding `body`, into a jar at
+/// `jar`.
+fn class_jar(toolchain: &Toolchain, scratch: &Scratch, class: &str, body: &str, jar: &Path) {
+    let (package, name) = class.rsplit_once('.').unwrap();
+    let work = scratch.join(&format!("class-jar/{name}"));
+    let _ = std::fs::remove_dir_all(&work);
+    let source = work.join(format!("src/{}/{name}.java", package.replace('.', "/")));
+    std::fs::create_dir_all(source.parent().unwrap()).unwrap();
+    std::fs::write(
+        &source,
+        format!("package {package};\n\npublic final class {name} {{\n{body}\n}}\n"),
+    )
+    .unwrap();
+    let classes = work.join("classes");
+    let status = std::process::Command::new(&toolchain.javac)
+        .args(["--release", "17", "-d"])
+        .arg(&classes)
+        .arg(&source)
+        .status()
+        .unwrap();
+    assert!(status.success());
+    std::fs::create_dir_all(jar.parent().unwrap()).unwrap();
+    package::write_thin_jar(&classes, jar, &JarManifest::default()).unwrap();
+}
+
+/// Finds its driver the way JDBC does: by name, at run time.
+const REFLECTIVE_APP: &str = "package com.example;\n\n\
+    public class App {\n    public static void main(String[] args) throws Exception {\n        \
+    Class<?> driver = Class.forName(\"org.example.driver.Driver\");\n        \
+    System.out.println(\"loaded \" + driver.getMethod(\"name\").invoke(null));\n    }\n}\n";
+
+#[test]
+fn a_runtime_only_dependency_runs_and_ships_but_is_not_compiled_against() {
+    let toolchain = require_jdk!();
+    let scratch = Scratch::new("build-runtime-only");
+    let fixture = FixtureRepo::new(&scratch);
+    let driver = scratch.join("driver.jar");
+    class_jar(
+        &toolchain,
+        &scratch,
+        "org.example.driver.Driver",
+        "    public static String name() { return \"driver 1.0\"; }",
+        &driver,
+    );
+    let coord = jrs::resolve::coord::Coord::new("org.example", "driver", "1.0.0");
+    fixture.publish_pom(
+        &coord,
+        "<project><groupId>org.example</groupId><artifactId>driver</artifactId>\
+         <version>1.0.0</version></project>",
+    );
+    fixture.publish_jar(&coord, &std::fs::read(&driver).unwrap());
+    scratch.write(
+        "app/jrs.toml",
+        &format!(
+            "[project]\nname = \"app\"\nversion = \"1.0.0\"\nmain-class = \"com.example.App\"\n\n\
+             [dependencies]\n\"org.example:driver\" = {{ version = \"1.0.0\", runtime-only = true }}\n\n{}",
+            fixture.manifest_section()
+        ),
+    );
+    scratch.write("app/src/main/java/com/example/App.java", REFLECTIVE_APP);
+    let root = scratch.join("app");
+
+    let (code, stdout, stderr) = jrs_isolated(&scratch, &root, &["run"]);
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(stdout.trim(), "loaded driver 1.0");
+    let lock = std::fs::read_to_string(root.join("jrs.lock")).unwrap();
+    assert!(lock.contains("classpath = \"runtime\""), "{lock}");
+
+    let classpath = |args: &[&str]| jrs_isolated(&scratch, &root, args).1;
+    assert!(!classpath(&["classpath"]).contains("driver-1.0.0.jar"));
+    assert!(classpath(&["classpath", "--runtime"]).contains("driver-1.0.0.jar"));
+    assert!(classpath(&["classpath", "--test"]).contains("driver-1.0.0.jar"));
+    let (_, tree, stderr) = jrs_isolated(&scratch, &root, &["tree"]);
+    assert!(
+        tree.contains("org.example:driver:1.0.0 (runtime-only)"),
+        "{tree}{stderr}"
+    );
+
+    // The fat jar carries it, and runs with nothing else...
+    let (code, _, stderr) = jrs_isolated(&scratch, &root, &["package", "--fat"]);
+    assert_eq!(code, 0, "{stderr}");
+    let output = std::process::Command::new(&toolchain.java)
+        .arg("-jar")
+        .arg(root.join("target/app-1.0.0.jar"))
+        .output()
+        .unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout).trim(),
+        "loaded driver 1.0",
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    // ...and so does the portable layout's lib/.
+    let (code, _, stderr) = jrs_isolated(&scratch, &root, &["package", "--portable"]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(root.join("target/lib/driver-1.0.0.jar").is_file());
+
+    // Code that names the driver's class does not compile: it is not on
+    // javac's classpath.
+    scratch.write(
+        "app/src/main/java/com/example/Direct.java",
+        "package com.example;\n\nclass Direct {\n    String name = org.example.driver.Driver.name();\n}\n",
+    );
+    let (code, stdout, stderr) = jrs_isolated(&scratch, &root, &["build"]);
+    assert_eq!(code, 1, "{stdout}{stderr}");
+    assert!(
+        format!("{stdout}{stderr}").contains("org.example.driver"),
+        "{stdout}{stderr}"
+    );
+}
+
+const SHOUTER: &str =
+    "    public static String shout(String s) { return s.toUpperCase() + \"!\"; }";
+
+const SHOUTING_APP: &str = "package com.example;\n\nimport org.example.Shouter;\n\n\
+    public class App {\n    public static void main(String[] args) {\n        \
+    System.out.println(Shouter.shout(\"hi\"));\n    }\n}\n";
+
+#[test]
+fn a_local_jar_builds_runs_ships_and_is_pinned_by_its_path() {
+    let toolchain = require_jdk!();
+    let scratch = Scratch::new("build-local-jar");
+    let root = scratch.join("app");
+    let jar = root.join("libs/shouter.jar");
+    class_jar(&toolchain, &scratch, "org.example.Shouter", SHOUTER, &jar);
+    scratch.write(
+        "app/jrs.toml",
+        "[project]\nname = \"app\"\nversion = \"1.0.0\"\nmain-class = \"com.example.App\"\n\n\
+         [dependencies]\nshouter = { path = \"libs/shouter.jar\" }\n",
+    );
+    scratch.write("app/src/main/java/com/example/App.java", SHOUTING_APP);
+    let jrs = |args: &[&str]| jrs_isolated(&scratch, &root, args);
+
+    let (code, stdout, stderr) = jrs(&["run"]);
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(stdout.trim(), "HI!");
+
+    let lock = std::fs::read_to_string(root.join("jrs.lock")).unwrap();
+    assert!(lock.contains("version = 1\n"), "{lock}");
+    assert!(
+        lock.contains("[[local]]\nname = \"shouter\"\npath = \"libs/shouter.jar\""),
+        "{lock}"
+    );
+    assert!(
+        !lock.contains(&scratch.path.display().to_string()),
+        "no absolute paths:\n{lock}"
+    );
+    let (_, tree, _) = jrs(&["tree"]);
+    assert!(tree.contains("shouter = libs/shouter.jar"), "{tree}");
+    let (code, why, stderr) = jrs(&["tree", "--why", "shouter"]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(why.contains("app v1.0.0 [dependencies]"), "{why}");
+    let (code, _, stderr) = jrs(&["outdated"]);
+    assert_eq!(
+        code, 0,
+        "a local jar has no newer release to ask for: {stderr}"
+    );
+    let (code, _, stderr) = jrs(&["verify"]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stderr.contains("Verified"), "{stderr}");
+
+    // The portable layout ships it in lib/, under its own file name.
+    let (code, _, stderr) = jrs(&["package", "--portable"]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(root.join("target/lib/shouter.jar").is_file());
+    let output = std::process::Command::new(&toolchain.java)
+        .arg("-jar")
+        .arg(root.join("target/app-1.0.0.jar"))
+        .current_dir(&scratch.path)
+        .output()
+        .unwrap();
+    assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "HI!");
+
+    // New bytes under the same name fail the build until they are pinned.
+    class_jar(
+        &toolchain,
+        &scratch,
+        "org.example.Shouter",
+        &format!("{SHOUTER}\n    public static String whisper(String s) {{ return s; }}"),
+        &jar,
+    );
+    let (code, _, stderr) = jrs(&["build"]);
+    assert_eq!(code, 1, "{stderr}");
+    assert!(
+        stderr.contains("has changed since jrs.lock pinned it"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("libs/shouter.jar"), "{stderr}");
+    assert_eq!(jrs(&["verify"]).0, 1);
+    let (code, _, stderr) = jrs(&["update"]);
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(jrs(&["run"]).0, 0);
+
+    // A jar that is not there is a manifest error that names it.
+    std::fs::remove_file(&jar).unwrap();
+    let (code, _, stderr) = jrs(&["build"]);
+    assert_eq!(code, 2, "{stderr}");
+    assert!(stderr.contains("libs/shouter.jar"), "{stderr}");
+    assert!(stderr.contains("does not exist"), "{stderr}");
 }
 
 // ---- Kotlin, Scala and Groovy (JVM_LANGUAGES.md) ---------------------------
@@ -1258,4 +1743,946 @@ fn the_fixture_manifest_is_the_one_the_repository_ships() {
         2
     );
     assert_eq!(manifest.source_dir, Path::new("src/main/java"));
+}
+
+// ---- --timings and project.jrs-version --------------------------------------
+
+/// The rows of `target/.jrs/timings.txt`, by phase.
+fn timings_file(root: &Path) -> Vec<(String, u128)> {
+    let text = std::fs::read_to_string(root.join("target/.jrs/timings.txt")).unwrap();
+    let mut lines = text.lines();
+    assert!(
+        lines.next().unwrap().starts_with("# jrs "),
+        "no comment line:\n{text}"
+    );
+    assert_eq!(lines.next(), Some("phase\tms"), "{text}");
+    lines
+        .map(|l| {
+            let (phase, ms) = l.split_once('\t').unwrap();
+            (phase.to_string(), ms.parse().unwrap())
+        })
+        .collect()
+}
+
+#[test]
+fn build_timings_follow_the_summary_and_are_written_to_target() {
+    let _toolchain = require_jdk!();
+    let scratch = Scratch::new("timings-build");
+    let root = hello_project(&scratch).root;
+
+    // Without the flag, no table and no file.
+    let (code, _, stderr) = jrs(&root, &["build"]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(!stderr.contains("  phase "), "{stderr}");
+    assert!(!root.join("target/.jrs/timings.txt").exists());
+
+    std::fs::remove_dir_all(root.join("target")).unwrap();
+    let (code, stdout, stderr) = jrs(&root, &["build", "--timings"]);
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(stdout, "", "the report goes to stderr");
+    let summary = line_of(&stderr, "        time ");
+    let header = line_of(&stderr, "  phase ");
+    assert!(summary < header, "the table follows the summary:\n{stderr}");
+    assert!(
+        header < line_of(&stderr, "  compile main: javac "),
+        "{stderr}"
+    );
+    assert!(
+        line_of(&stderr, "  compile main: javac ") < line_of(&stderr, "  resources main "),
+        "{stderr}"
+    );
+    assert!(
+        stderr
+            .trim_end()
+            .lines()
+            .last()
+            .unwrap()
+            .starts_with("  total "),
+        "{stderr}"
+    );
+
+    let rows = timings_file(&root);
+    let phases: Vec<&str> = rows.iter().map(|(p, _)| p.as_str()).collect();
+    assert_eq!(phases, ["compile main: javac", "resources main", "total"]);
+    let (_, total) = rows.last().unwrap();
+    let sum: u128 = rows[..rows.len() - 1].iter().map(|(_, ms)| ms).sum();
+    assert!(sum <= *total, "the phases do not overlap: {rows:?}");
+
+    // A second build is fresh, and says so in the report.
+    let (code, _, stderr) = jrs(&root, &["build", "--timings"]);
+    assert_eq!(code, 0, "{stderr}");
+    let phases: Vec<String> = timings_file(&root).into_iter().map(|(p, _)| p).collect();
+    assert_eq!(phases, ["compile main (fresh)", "resources main", "total"]);
+}
+
+#[test]
+fn quiet_timings_print_nothing_but_still_write_the_file() {
+    let _toolchain = require_jdk!();
+    let scratch = Scratch::new("timings-quiet");
+    let root = hello_project(&scratch).root;
+    // The mode is the `Ui`'s, decided before dispatch, as `cli::main` does
+    // from `-q`.
+    let (ui, capture) = Ui::captured(
+        UiOptions {
+            quiet: true,
+            progress: When::Never,
+            color: When::Never,
+            charset: CharsetChoice::Ascii,
+            ..Default::default()
+        },
+        Geometry {
+            width: 100,
+            height: 24,
+        },
+    );
+    let code = cli::run_with(
+        [
+            "jrs",
+            "--manifest-path",
+            &root.display().to_string(),
+            "-q",
+            "build",
+            "--timings",
+        ],
+        &ui,
+    );
+    assert_eq!(code, 0, "{}", capture.stderr());
+    assert_eq!(
+        (capture.stdout(), capture.stderr()),
+        (String::new(), String::new())
+    );
+    assert_eq!(timings_file(&root).last().unwrap().0, "total");
+}
+
+#[test]
+fn run_timings_come_before_the_program_starts() {
+    let _toolchain = require_jdk!();
+    let scratch = Scratch::new("timings-run");
+    let root = hello_project(&scratch).root;
+    let (code, _, stderr) = jrs(&root, &["run", "--timings", "--", "world"]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(
+        line_of(&stderr, "  total ") < line_of(&stderr, "Running com.example.Hello"),
+        "the program's run is not a build phase:\n{stderr}"
+    );
+    let text = std::fs::read_to_string(root.join("target/.jrs/timings.txt")).unwrap();
+    assert!(text.starts_with("# jrs run --timings"), "{text}");
+}
+
+#[test]
+fn package_timings_include_the_task_hooks_and_packaging() {
+    let _toolchain = require_jdk!();
+    let scratch = Scratch::new("timings-package");
+    let root = generating_project(&scratch, "", "");
+    let (code, _, stderr) = jrs(&root, &["package", "--timings"]);
+    assert_eq!(code, 0, "{stderr}");
+    let phases: Vec<String> = timings_file(&root).into_iter().map(|(p, _)| p).collect();
+    assert_eq!(
+        phases,
+        [
+            "task build-info (pre-compile)",
+            "compile main: javac",
+            "resources main",
+            "packaging",
+            "total"
+        ]
+    );
+    // Run again: the task is fresh, and so is the unit.
+    let (code, _, stderr) = jrs(&root, &["package", "--timings"]);
+    assert_eq!(code, 0, "{stderr}");
+    let phases: Vec<String> = timings_file(&root).into_iter().map(|(p, _)| p).collect();
+    assert_eq!(phases[0], "task build-info (pre-compile, fresh)");
+    assert_eq!(phases[1], "compile main (fresh)");
+}
+
+#[test]
+fn a_project_needing_a_newer_jrs_stops_before_any_warning() {
+    let scratch = Scratch::new("jrs-version");
+    scratch.write(
+        "app/jrs.toml",
+        "[project]\nname = \"app\"\nversion = \"1.0.0\"\njrs-version = \"999.0\"\n\
+         future-key = true\n\n[future-table]\nkey = 1\n",
+    );
+    let (code, stdout, stderr) = jrs(&scratch.join("app"), &["build"]);
+    assert_eq!(code, 2, "{stderr}");
+    assert_eq!(stdout, "");
+    assert!(
+        !stderr.contains("warning"),
+        "an older jrs names the version, not the keys it does not know:\n{stderr}"
+    );
+    assert!(stderr.contains("needs jrs 999.0 or newer"), "{stderr}");
+    assert!(
+        stderr.contains(&format!("this is jrs {}", env!("CARGO_PKG_VERSION"))),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("https://github.com/pwittchen/jrs/releases"),
+        "{stderr}"
+    );
+
+    // A version this jrs satisfies is kept, and shows in the model.
+    scratch.write(
+        "ok/jrs.toml",
+        "[project]\nname = \"ok\"\nversion = \"1.0.0\"\njrs-version = \"0.1\"\n",
+    );
+    let (code, stdout, stderr) = jrs(&scratch.join("ok"), &["metadata", "--no-deps"]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stdout.contains("\"jrs-version\": \"0.1\""), "{stdout}");
+}
+
+// ---- packaging: attributes, sources, Javadoc, distributions, native images --
+
+fn zip_names(path: &Path) -> Vec<String> {
+    let mut archive = zip::ZipArchive::new(std::fs::File::open(path).unwrap()).unwrap();
+    (0..archive.len())
+        .map(|i| archive.by_index(i).unwrap().name().to_string())
+        .collect()
+}
+
+fn zip_text(path: &Path, name: &str) -> String {
+    let mut archive = zip::ZipArchive::new(std::fs::File::open(path).unwrap()).unwrap();
+    let mut entry = archive
+        .by_name(name)
+        .unwrap_or_else(|e| panic!("{name} in {}: {e}", path.display()));
+    let mut text = String::new();
+    std::io::Read::read_to_string(&mut entry, &mut text).unwrap();
+    text
+}
+
+/// Run a program and return its stdout, failing the test if it fails.
+fn run_ok(command: &mut std::process::Command) -> String {
+    let output = command.output().unwrap();
+    assert!(
+        output.status.success(),
+        "{command:?} failed:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8_lossy(&output.stdout).replace("\r\n", "\n")
+}
+
+const VERSION_JAVA: &str = "package com.example;\n\npublic final class Version {\n    \
+    public static void main(String[] args) {\n        \
+    Package p = Version.class.getPackage();\n        \
+    System.out.println(p.getImplementationTitle() + \" \" + p.getImplementationVersion());\n    \
+    }\n}\n";
+
+#[test]
+fn manifest_attributes_reach_every_kind_of_jar() {
+    let toolchain = require_jdk!();
+    let scratch = Scratch::new("package-attributes");
+    let root = hello_with(
+        &scratch,
+        "[package.manifest]\nImplementation-Title = \"{project.name}\"\n\
+         Implementation-Version = \"{project.version}\"\n\
+         Automatic-Module-Name = \"com.example.hello\"\n",
+        &[("src/main/java/com/example/Version.java", VERSION_JAVA)],
+    );
+    let jar = root.join("target/hello-1.0.0.jar");
+    for flag in [None, Some("--portable"), Some("--fat")] {
+        let mut args = vec!["package"];
+        args.extend(flag);
+        let (code, _, stderr) = jrs(&root, &args);
+        assert_eq!(code, 0, "{flag:?}: {stderr}");
+
+        let manifest = zip_text(&jar, "META-INF/MANIFEST.MF");
+        assert!(
+            manifest.contains("Main-Class: com.example.Hello\n"),
+            "{manifest}"
+        );
+        let ours: Vec<&str> = manifest
+            .lines()
+            .skip_while(|l| !l.starts_with("Implementation-Title"))
+            .take(3)
+            .collect();
+        assert_eq!(
+            ours,
+            [
+                "Implementation-Title: hello",
+                "Implementation-Version: 1.0.0",
+                "Automatic-Module-Name: com.example.hello"
+            ],
+            "{flag:?}: {manifest}"
+        );
+        // What `Package` reports at run time is what the manifest says.
+        let out = run_ok(
+            std::process::Command::new(&toolchain.java)
+                .arg("-cp")
+                .arg(&jar)
+                .arg("com.example.Version"),
+        );
+        assert_eq!(out.trim(), "hello 1.0.0", "{flag:?}");
+    }
+}
+
+#[test]
+fn an_attribute_jrs_writes_itself_is_a_manifest_error() {
+    let scratch = Scratch::new("package-owned-attribute");
+    let root = hello_with(
+        &scratch,
+        "[package.manifest]\nMain-Class = \"com.example.Other\"\n",
+        &[],
+    );
+    let (code, _, stderr) = jrs(&root, &["package"]);
+    assert_eq!(code, 2, "{stderr}");
+    assert!(
+        stderr.contains("`package.manifest.Main-Class`: `Main-Class` belongs to jrs"),
+        "{stderr}"
+    );
+}
+
+#[test]
+fn sources_and_javadoc_jars_hold_what_the_build_compiled() {
+    let _toolchain = require_jdk!();
+    let scratch = Scratch::new("package-sources-javadoc");
+    let root = generating_project(&scratch, "", "");
+    let (code, _, stderr) = jrs(&root, &["package", "--sources", "--javadoc"]);
+    assert_eq!(code, 0, "{stderr}");
+
+    let sources = root.join("target/app-1.2.3-sources.jar");
+    let javadoc = root.join("target/app-1.2.3-javadoc.jar");
+    // The generated source is there as well as the written one.
+    assert_eq!(
+        zip_names(&sources),
+        [
+            "META-INF/MANIFEST.MF",
+            "com/example/App.java",
+            "com/example/BuildInfo.java"
+        ]
+    );
+    assert!(zip_text(&sources, "com/example/BuildInfo.java").contains("\"1.2.3\""));
+    let pages = zip_names(&javadoc);
+    assert!(pages.iter().any(|p| p == "index.html"), "{pages:?}");
+    assert!(
+        pages.iter().any(|p| p == "com/example/BuildInfo.html"),
+        "{pages:?}"
+    );
+    assert!(
+        line_of(&stderr, "Documenting") < line_of(&stderr, "javadoc.jar"),
+        "{stderr}"
+    );
+
+    // Both are byte-identical from one build to the next.
+    let before = (
+        std::fs::read(&sources).unwrap(),
+        std::fs::read(&javadoc).unwrap(),
+    );
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    let (code, _, stderr) = jrs(&root, &["package", "--sources", "--javadoc"]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(
+        std::fs::read(&sources).unwrap() == before.0,
+        "the sources jar changed"
+    );
+    assert!(
+        std::fs::read(&javadoc).unwrap() == before.1,
+        "the Javadoc jar changed"
+    );
+}
+
+const SHOUTER_JAVA: &str = "package org.example;\npublic final class Shouter {\n\
+    public static String shout(String s) { return s.toUpperCase() + \"!\"; }\n}\n";
+
+const LIB_TASK_JAVA: &str = "package org.example;\npublic final class LibTask implements Runnable {\n\
+     public void run() {}\n}\n";
+
+const SHIPPING_APP_JAVA: &str = "package com.example;\n\n\
+    import java.util.ServiceLoader;\nimport org.example.Shouter;\n\n\
+    public class App {\n    public static void main(String[] args) {\n        \
+    long providers = ServiceLoader.load(Runnable.class).stream().count();\n        \
+    System.out.println(Shouter.shout(\"hi\") + \" mode=\" + System.getProperty(\"mode\")\n            \
+    + \" providers=\" + providers + \" args=\" + String.join(\"|\", args));\n    }\n}\n";
+
+/// An application with a dependency from the fixture repository, run through
+/// the jrs binary with a cache of its own, as [`Polyglot`] is. The dependency,
+/// `org.example:shouter`, registers a `Runnable` service, and so does the
+/// application: a fat jar has to keep both.
+fn shipping_app(scratch: &Scratch, toolchain: &Toolchain) -> Polyglot {
+    let fixture = FixtureRepo::new(scratch);
+    let shouter = scratch.write("library/src/org/example/Shouter.java", SHOUTER_JAVA);
+    let task = scratch.write("library/src/org/example/LibTask.java", LIB_TASK_JAVA);
+    let classes = scratch.join("library/classes");
+    let status = std::process::Command::new(&toolchain.javac)
+        .arg("-d")
+        .arg(&classes)
+        .args([&shouter, &task])
+        .status()
+        .unwrap();
+    assert!(status.success());
+    scratch.write(
+        "library/classes/META-INF/services/java.lang.Runnable",
+        "org.example.LibTask\n",
+    );
+    let jar = scratch.join("shouter.jar");
+    package::write_thin_jar(&classes, &jar, &JarManifest::default()).unwrap();
+    let coord = jrs::resolve::coord::Coord::new("org.example", "shouter", "1.0.0");
+    fixture.publish_pom(
+        &coord,
+        "<project><groupId>org.example</groupId><artifactId>shouter</artifactId>\
+         <version>1.0.0</version></project>",
+    );
+    fixture.publish_jar(&coord, &std::fs::read(&jar).unwrap());
+
+    scratch.write(
+        "app/jrs.toml",
+        &format!(
+            "[project]\nname = \"app\"\nversion = \"1.0.0\"\nmain-class = \"com.example.App\"\n\n\
+             [run]\njvm-args = [\"-Dmode=dist\"]\n\n\
+             [dependencies]\n\"org.example:shouter\" = \"1.0.0\"\n\n{}",
+            fixture.manifest_section()
+        ),
+    );
+    scratch.write("app/src/main/java/com/example/App.java", SHIPPING_APP_JAVA);
+    scratch.write(
+        "app/src/main/java/com/example/AppTask.java",
+        "package com.example;\npublic final class AppTask implements Runnable {\n\
+         public void run() {}\n}\n",
+    );
+    scratch.write(
+        "app/src/main/resources/META-INF/services/java.lang.Runnable",
+        "com.example.AppTask\n",
+    );
+    Polyglot {
+        root: scratch.join("app"),
+        cache: scratch.join("jrs-cache"),
+        config: scratch.join("no-config.toml"),
+    }
+}
+
+#[test]
+fn a_distribution_zip_unpacks_into_a_launcher_that_runs() {
+    let toolchain = require_jdk!();
+    let scratch = Scratch::new("package-dist");
+    let app = shipping_app(&scratch, &toolchain);
+    let (code, _, stderr) = app.jrs(&["package", "--dist"]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stderr.contains("Archiving"), "{stderr}");
+
+    let zip = app.root.join("target/app-1.0.0.zip");
+    assert_eq!(
+        zip_names(&zip),
+        [
+            "app-1.0.0/app-1.0.0.jar",
+            "app-1.0.0/bin/app",
+            "app-1.0.0/bin/app.bat",
+            "app-1.0.0/lib/shouter-1.0.0.jar"
+        ]
+    );
+    let bat = zip_text(&zip, "app-1.0.0/bin/app.bat");
+    assert!(
+        bat.contains("\"%JAVACMD%\" %JAVA_OPTS% -Dmode=dist -jar \"%DIR%\\app-1.0.0.jar\" %*"),
+        "{bat}"
+    );
+
+    // A second build zips the same bytes.
+    let first = std::fs::read(&zip).unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    let (code, _, stderr) = app.jrs(&["package", "--dist"]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(std::fs::read(&zip).unwrap() == first, "the zip changed");
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        let unpacked = scratch.join("unpacked");
+        zip::ZipArchive::new(std::fs::File::open(&zip).unwrap())
+            .unwrap()
+            .extract(&unpacked)
+            .unwrap();
+        // The distribution needs nothing the build left behind.
+        std::fs::remove_dir_all(&app.cache).unwrap();
+        let launcher = unpacked.join("app-1.0.0/bin/app");
+        let mode = std::fs::metadata(&launcher).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o755, "the launcher lost its executable bit");
+
+        let bin = toolchain.java.parent().unwrap();
+        let out = run_ok(
+            std::process::Command::new(&launcher)
+                .args(["one", "two words"])
+                .env("JAVA_HOME", bin.parent().unwrap())
+                .env_remove("JAVA_OPTS"),
+        );
+        assert_eq!(out, "HI! mode=dist providers=2 args=one|two words\n");
+
+        // Without JAVA_HOME, the java on PATH.
+        let out = run_ok(
+            std::process::Command::new(&launcher)
+                .arg("x")
+                .env_remove("JAVA_HOME")
+                .env_remove("JAVA_OPTS")
+                .env("PATH", format!("{}:/usr/bin:/bin", bin.display())),
+        );
+        assert_eq!(out, "HI! mode=dist providers=2 args=x\n");
+    }
+}
+
+#[test]
+fn a_fat_jar_keeps_the_projects_services_and_its_dependencys() {
+    let toolchain = require_jdk!();
+    let scratch = Scratch::new("package-fat-services");
+    let app = shipping_app(&scratch, &toolchain);
+    let (code, _, stderr) = app.jrs(&["package", "--fat", "--dist"]);
+    assert_eq!(code, 0, "{stderr}");
+
+    let jar = app.root.join("target/app-1.0.0.jar");
+    assert_eq!(
+        zip_text(&jar, "META-INF/services/java.lang.Runnable"),
+        "com.example.AppTask\norg.example.LibTask\n"
+    );
+    let out = run_ok(
+        std::process::Command::new(&toolchain.java)
+            .arg("-jar")
+            .arg(&jar),
+    );
+    assert_eq!(out, "HI! mode=null providers=2 args=\n");
+    // A fat distribution is the jar alone, with no lib/.
+    assert_eq!(
+        zip_names(&app.root.join("target/app-1.0.0.zip")),
+        [
+            "app-1.0.0/app-1.0.0.jar",
+            "app-1.0.0/bin/app",
+            "app-1.0.0/bin/app.bat"
+        ]
+    );
+}
+
+#[test]
+fn a_distribution_needs_a_main_class() {
+    let scratch = Scratch::new("package-dist-no-main");
+    scratch.write(
+        "lib/jrs.toml",
+        "[project]\nname = \"lib\"\nversion = \"1.0.0\"\n",
+    );
+    let (code, _, stderr) = jrs(&scratch.join("lib"), &["package", "--dist"]);
+    assert_eq!(code, 2, "{stderr}");
+    assert!(
+        stderr.contains("`jrs package --dist` needs a main class"),
+        "{stderr}"
+    );
+}
+
+#[test]
+fn a_native_image_needs_a_graalvm_jdk() {
+    let toolchain = require_jdk!();
+    let scratch = Scratch::new("package-native");
+    scratch.write(
+        "plain/src/main/java/com/example/App.java",
+        "package com.example;\n\npublic class App {\n    public static void main(String[] args) {\n        \
+         System.out.println(\"native args=\" + String.join(\"|\", args));\n    }\n}\n",
+    );
+    scratch.write(
+        "plain/jrs.toml",
+        "[project]\nname = \"plain\"\nversion = \"1.0.0\"\nmain-class = \"com.example.App\"\n\n\
+         [package]\nnative-image-args = [\"--no-fallback\"]\n",
+    );
+    let root = scratch.join("plain");
+
+    if let Err(e) = jrs::native_image::find(&toolchain) {
+        eprintln!(
+            "SKIPPED {}: building a native image needs GraalVM; checked the refusal only ({})",
+            concat!(module_path!(), "::", line!()),
+            e.to_string().lines().next().unwrap_or_default()
+        );
+        let (code, _, stderr) = jrs(&root, &["package", "--native-image"]);
+        assert_eq!(code, 1, "{stderr}");
+        assert!(stderr.contains("is not GraalVM"), "{stderr}");
+        assert!(
+            !stderr.contains("Compiling"),
+            "refused before anything is built: {stderr}"
+        );
+        return;
+    }
+
+    let (code, _, stderr) = jrs(&root, &["package", "--native-image"]);
+    assert_eq!(code, 0, "{stderr}");
+    let argfile = std::fs::read_to_string(root.join("target/.jrs/native-image.args")).unwrap();
+    assert!(
+        argfile.contains("--no-fallback\ncom.example.App\n"),
+        "{argfile}"
+    );
+    let executable = jrs::native_image::executable(&root.join("target/native"), "plain");
+    let out = run_ok(std::process::Command::new(&executable).args(["a", "b c"]));
+    assert_eq!(out, "native args=a|b c\n");
+}
+
+// ---- test reports, reruns, retries and --fail-fast -------------------------
+//
+// These run against the fake console launcher in tests/fixtures/fake-launcher,
+// published into the fixture repository at a 1.x and a 6.x version, with a
+// `@Test` of its own. It prints the tree and the summary block the real one
+// prints and writes its XML report, so the HTML page, `--rerun-failed`,
+// `test.retries` and both kinds of `--fail-fast` run end to end on every CI
+// leg without the network. `tests/network.rs` repeats them against the real
+// launcher, whose XML is what they are built from.
+
+/// A project tested with the fake launcher at `launcher`. `test_table` goes
+/// into `[test]`, after a `marker.dir` system property the tests keep state in
+/// between runs.
+fn junit_project(
+    scratch: &Scratch,
+    toolchain: &Toolchain,
+    launcher: &str,
+    test_table: &str,
+    files: &[(&str, &str)],
+) -> Polyglot {
+    let fixture = FixtureRepo::new(scratch);
+    fixture.publish_fake_launcher(scratch, toolchain);
+    let markers = scratch.join("markers");
+    std::fs::create_dir_all(&markers).unwrap();
+    scratch.write(
+        "app/jrs.toml",
+        &format!(
+            "[project]\nname = \"tested\"\nversion = \"1.0.0\"\n\n\
+             [test]\njvm-args = ['-Dmarker.dir={}']\n{test_table}\n\n\
+             [dev-dependencies]\n\
+             \"org.junit.platform:junit-platform-console-standalone\" = \"{launcher}\"\n\n{}",
+            markers.display(),
+            fixture.manifest_section()
+        ),
+    );
+    scratch.write(
+        "app/src/main/java/com/example/Calc.java",
+        "package com.example;\n\npublic final class Calc {\n    \
+         public static int add(int a, int b) {\n        return a + b;\n    }\n}\n",
+    );
+    for (path, contents) in files {
+        scratch.write(&format!("app/src/test/java/com/example/{path}"), contents);
+    }
+    Polyglot {
+        root: scratch.join("app"),
+        cache: scratch.join("jrs-cache"),
+        config: scratch.join("no-config.toml"),
+    }
+}
+
+/// Every launch of the fake launcher, as the argument line it starts with.
+fn launches(stdout: &str) -> Vec<&str> {
+    stdout
+        .lines()
+        .filter(|l| l.starts_with("fake-launcher "))
+        .collect()
+}
+
+/// The line of `text` that contains `needle`.
+fn line_with<'a>(text: &'a str, needle: &str) -> &'a str {
+    text.lines()
+        .find(|l| l.contains(needle))
+        .unwrap_or_else(|| panic!("no line with {needle:?} in:\n{text}"))
+}
+
+const CALC_TEST: &str = r#"package com.example;
+
+import java.nio.file.Files;
+import java.nio.file.Path;
+import org.junit.jupiter.api.Test;
+
+class CalcTest {
+    @Test
+    void adds() {
+        if (Calc.add(1, 1) != 2) throw new AssertionError("1 + 1");
+    }
+
+    @Test
+    void fixedLater() {
+        if (!Files.exists(Path.of(System.getProperty("marker.dir"), "fixed"))) {
+            throw new AssertionError("1 + 1 <is> 3 & more");
+        }
+    }
+}
+"#;
+
+const OTHER_TEST: &str = "package com.example;\n\nimport org.junit.jupiter.api.Test;\n\n\
+    class OtherTest {\n    @Test\n    void passes() {}\n}\n";
+
+/// Fails the first time it runs, passes after that.
+const FLAKY_TEST: &str = r#"package com.example;
+
+import java.nio.file.Files;
+import java.nio.file.Path;
+import org.junit.jupiter.api.Test;
+
+class FlakyTest {
+    @Test
+    void sometimes() throws Exception {
+        Path seen = Path.of(System.getProperty("marker.dir"), "flaky-seen");
+        if (!Files.exists(seen)) {
+            Files.createFile(seen);
+            throw new AssertionError("only the first time");
+        }
+    }
+}
+"#;
+
+const BROKEN_TEST: &str = "package com.example;\n\nimport org.junit.jupiter.api.Test;\n\n\
+    class BrokenTest {\n    @Test\n    void always() {\n        \
+    throw new IllegalStateException(\"never works\");\n    }\n}\n";
+
+/// A failure, then a test slow enough that jrs is long gone if it stops the
+/// launcher at the failure, and that leaves a mark if it runs.
+const STOP_TEST: &str = r#"package com.example;
+
+import java.nio.file.Files;
+import java.nio.file.Path;
+import org.junit.jupiter.api.Test;
+
+class StopTest {
+    @Test
+    void aFails() {
+        throw new AssertionError("the first failure");
+    }
+
+    @Test
+    void bSlow() throws Exception {
+        Thread.sleep(5000);
+        Files.createFile(Path.of(System.getProperty("marker.dir"), "slow-ran"));
+    }
+}
+"#;
+
+#[test]
+fn a_failing_run_leaves_a_page_and_reruns_only_what_failed() {
+    let toolchain = require_jdk!();
+    let scratch = Scratch::new("tests-rerun");
+    let p = junit_project(
+        &scratch,
+        &toolchain,
+        FAKE_LAUNCHER_1,
+        "",
+        &[("CalcTest.java", CALC_TEST), ("OtherTest.java", OTHER_TEST)],
+    );
+
+    // A rerun with no run before it is an error, not a success: the run
+    // that should have been there did not pass.
+    let (code, _, stderr) = p.jrs(&["test", "--rerun-failed"]);
+    assert_eq!(code, 2, "{stderr}");
+    assert!(stderr.contains("there is no test run to rerun"), "{stderr}");
+    assert!(stderr.contains("run `jrs test` first"), "{stderr}");
+
+    let (code, stdout, stderr) = p.jrs(&["test"]);
+    assert_eq!(code, 1, "{stderr}");
+    assert!(
+        launches(&stdout)[0].contains("--scan-class-path"),
+        "{stdout}"
+    );
+    assert!(
+        stderr.contains("Finished 3 tests, 2 passed, 1 failed"),
+        "{stderr}"
+    );
+    // The page is written for a failing run, and the output says where.
+    let reporting = line_with(&stderr, "Reporting test results into");
+    assert!(
+        reporting.ends_with(&format!(
+            "target{}test-reports{}index.html",
+            std::path::MAIN_SEPARATOR,
+            std::path::MAIN_SEPARATOR
+        )),
+        "{reporting}"
+    );
+    assert!(
+        line_of(&stderr, "Reporting") < line_of(&stderr, "Finished"),
+        "{stderr}"
+    );
+    let html = std::fs::read_to_string(p.root.join("target/test-reports/index.html")).unwrap();
+    assert!(html.contains("1 + 1 &lt;is&gt; 3 &amp; more"), "{html}");
+    assert!(
+        html.contains("<details class=\"class failed\" open>"),
+        "{html}"
+    );
+    assert!(
+        html.find("com.example.CalcTest").unwrap() < html.find("com.example.OtherTest").unwrap(),
+        "the failing class comes first"
+    );
+
+    // The rerun selects the one test that failed, by method, instead of
+    // scanning.
+    let (code, stdout, stderr) = p.jrs(&["test", "--rerun-failed"]);
+    assert_eq!(code, 1, "{stderr}");
+    assert!(
+        stderr.contains("Testing 1 test that failed in the last run"),
+        "{stderr}"
+    );
+    let args = launches(&stdout)[0];
+    assert!(
+        args.contains("--select-method com.example.CalcTest#fixedLater()"),
+        "{args}"
+    );
+    assert!(!args.contains("--scan-class-path"), "{args}");
+    assert!(
+        stderr.contains("Finished 1 tests, 0 passed, 1 failed"),
+        "{stderr}"
+    );
+
+    // Fixed, it passes; after that there is nothing left to rerun, which is
+    // a success.
+    std::fs::write(scratch.join("markers/fixed"), "").unwrap();
+    let (code, _, stderr) = p.jrs(&["test", "--rerun-failed"]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stderr.contains("Finished 1 tests, 1 passed"), "{stderr}");
+    let (code, stdout, stderr) = p.jrs(&["test", "--rerun-failed"]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stderr.contains("no failed tests to rerun"), "{stderr}");
+    assert!(launches(&stdout).is_empty(), "nothing ran: {stdout}");
+
+    let (code, _, stderr) = p.jrs(&["test", "--rerun-failed", "--method", "a.BTest#c"]);
+    assert_eq!(code, 2, "{stderr}");
+}
+
+#[test]
+fn a_test_that_passes_on_a_retry_is_flaky_not_passed() {
+    let toolchain = require_jdk!();
+    let scratch = Scratch::new("tests-retries");
+    let p = junit_project(
+        &scratch,
+        &toolchain,
+        FAKE_LAUNCHER_1,
+        "retries = 2",
+        &[
+            ("BrokenTest.java", BROKEN_TEST),
+            ("FlakyTest.java", FLAKY_TEST),
+            ("OtherTest.java", OTHER_TEST),
+        ],
+    );
+
+    let (code, stdout, stderr) = p.jrs(&["test"]);
+    assert_eq!(code, 1, "BrokenTest never passes: {stderr}");
+    assert!(
+        stderr.contains("Retrying 2 failed tests (attempt 2 of 3)"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("Retrying 1 failed test (attempt 3 of 3)"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("Flaky com.example.FlakyTest#sometimes() (passed on attempt 2)"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("Finished 3 tests, 1 passed, 1 flaky, 1 failed"),
+        "{stderr}"
+    );
+
+    // Each retry is a launcher of its own, selecting only what still fails
+    // and writing its XML beside the first run's.
+    let runs = launches(&stdout);
+    assert_eq!(runs.len(), 3, "{stdout}");
+    for (retry, methods) in [
+        (
+            1,
+            &[
+                "com.example.BrokenTest#always()",
+                "com.example.FlakyTest#sometimes()",
+            ][..],
+        ),
+        (2, &["com.example.BrokenTest#always()"][..]),
+    ] {
+        let args = runs[retry];
+        assert!(!args.contains("--scan-class-path"), "{args}");
+        assert_eq!(
+            args.matches("--select-method").count(),
+            methods.len(),
+            "{args}"
+        );
+        for method in methods {
+            assert!(
+                args.contains(&format!("--select-method {method}")),
+                "{args}"
+            );
+        }
+        let dir = format!("retry-{retry}");
+        assert!(args.contains(&dir), "{args}");
+    }
+    let reports = p.root.join("target/test-reports");
+    let first = std::fs::read_to_string(reports.join("TEST-junit-jupiter.xml")).unwrap();
+    assert!(
+        first.contains("sometimes()"),
+        "the first run's XML is left as it was"
+    );
+    let second = std::fs::read_to_string(reports.join("retry-2/TEST-junit-jupiter.xml")).unwrap();
+    assert!(second.contains("always()") && !second.contains("sometimes()"));
+    let html = std::fs::read_to_string(reports.join("index.html")).unwrap();
+    assert!(
+        html.contains("<span class=\"badge flaky\">FLAKY</span>"),
+        "{html}"
+    );
+    assert!(html.contains("failed all 3 attempts"), "{html}");
+
+    // `--rerun-failed` reruns what is still failing, not what was flaky.
+    let (_, stdout, stderr) = p.jrs(&["test", "--rerun-failed", "--retries", "0"]);
+    let args = launches(&stdout)[0];
+    assert!(args.contains("BrokenTest#always()"), "{args}\n{stderr}");
+    assert!(!args.contains("FlakyTest"), "{args}");
+
+    // Without the broken test, the flaky one does not fail the run — but it
+    // is still not counted as passed.
+    std::fs::remove_file(p.root.join("src/test/java/com/example/BrokenTest.java")).unwrap();
+    std::fs::remove_file(scratch.join("markers/flaky-seen")).unwrap();
+    let (code, _, stderr) = p.jrs(&["test"]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(
+        stderr.contains("Finished 2 tests, 1 passed, 1 flaky in"),
+        "{stderr}"
+    );
+
+    // `--retries 0` overrides the manifest.
+    std::fs::remove_file(scratch.join("markers/flaky-seen")).unwrap();
+    let (code, _, stderr) = p.jrs(&["test", "--retries", "0"]);
+    assert_eq!(code, 1, "{stderr}");
+    assert!(!stderr.contains("Retrying"), "{stderr}");
+    assert!(!reports.join("retry-1").exists(), "old retries are cleared");
+}
+
+#[test]
+fn fail_fast_stops_at_the_first_failure_on_either_launcher_line() {
+    let toolchain = require_jdk!();
+    for launcher in [FAKE_LAUNCHER_1, FAKE_LAUNCHER_6] {
+        let scratch = Scratch::new(&format!("tests-fail-fast-{launcher}"));
+        let p = junit_project(
+            &scratch,
+            &toolchain,
+            launcher,
+            "retries = 2",
+            &[("StopTest.java", STOP_TEST)],
+        );
+        let native = launcher == FAKE_LAUNCHER_6;
+
+        let (code, stdout, stderr) = p.jrs(&["test", "--fail-fast"]);
+        assert_eq!(code, 1, "{launcher}: {stderr}");
+        assert!(
+            !scratch.join("markers/slow-ran").exists(),
+            "{launcher}: the test after the failure ran"
+        );
+        assert!(
+            stderr.contains("stopped at the first failure"),
+            "{launcher}: {stderr}"
+        );
+        assert!(
+            !stderr.contains("Retrying"),
+            "{launcher}: a stopped run is not retried: {stderr}"
+        );
+        // JUnit 6 stops itself. A 1.x launcher would refuse the option, and
+        // prints its tree only at the end, so jrs follows its test feed and
+        // stops it once the failure and its trace are through — before the
+        // next test's start is shown — and says what that costs.
+        let args = launches(&stdout)[0];
+        assert_eq!(args.contains("--fail-fast"), native, "{args}");
+        let details = if native {
+            "--details=tree"
+        } else {
+            "--details=testfeed"
+        };
+        assert!(args.contains(details), "{args}");
+        assert!(stdout.contains("the first failure"), "{launcher}: {stdout}");
+        assert!(!stdout.contains("bSlow"), "{launcher}: {stdout}");
+        assert_eq!(
+            stderr.contains("has no --fail-fast"),
+            !native,
+            "{launcher}: {stderr}"
+        );
+        assert_eq!(
+            p.root.join("target/test-reports/index.html").is_file(),
+            native,
+            "{launcher}: a launcher stopped by jrs writes no XML, so there is no page"
+        );
+    }
 }

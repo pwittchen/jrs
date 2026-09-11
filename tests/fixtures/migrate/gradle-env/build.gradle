@@ -1,0 +1,50 @@
+// Gradle's `run` and `test` tasks with an environment and a working
+// directory, and Mockito's agent attached the way Mockito's documentation
+// sets it up.
+plugins {
+    id 'java'
+    id 'application'
+}
+
+version = '1.4.0'
+
+java {
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(21)
+    }
+}
+
+repositories {
+    mavenCentral()
+}
+
+configurations {
+    mockitoAgent
+}
+
+dependencies {
+    testImplementation 'org.junit.jupiter:junit-jupiter:5.10.2'
+    testImplementation 'org.mockito:mockito-core:5.14.2'
+    mockitoAgent('org.mockito:mockito-core:5.14.2') {
+        transitive = false
+    }
+}
+
+application {
+    mainClass = 'com.example.Server'
+    applicationDefaultJvmArgs = ['-Xmx512m']
+}
+
+run {
+    workingDir = file('work')
+    environment 'APP_MODE', 'dev'
+    environment 'GREETING', 'hello {world}'
+}
+
+test {
+    useJUnitPlatform()
+    jvmArgs "-javaagent:${configurations.mockitoAgent.asPath}"
+    systemProperty 'env', 'test'
+    environment 'TZ', 'UTC'
+    environment 'HOME_DIR', System.getProperty('user.home')
+}

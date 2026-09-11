@@ -859,6 +859,108 @@ fn translate(gradle: &str, header: Header, block: Option<&str>) -> Result<Declar
     })
 }
 
+// ---- the environment of Gradle's `run` and `test` --------------------------
+
+/// `environment` and `workingDir` in the blocks that configure Gradle's own
+/// `run` and `test` tasks, as `run.env`, `run.cwd` and `test.env`. Literals
+/// translate; anything else is reported, as in a task.
+pub(super) fn read_jvm_environment(script: &str, out: &mut Manifest, report: &mut Report) {
+    for stmt in statements(script) {
+        let Some(block) = stmt.block.as_deref() else {
+            continue;
+        };
+        if declaration(&stmt.head).is_some() {
+            continue;
+        }
+        let section = match configured(&stmt.head) {
+            Some((target, "")) if target == "run" => "run",
+            Some((target, "")) if target == "test" => "test",
+            _ => continue,
+        };
+        for inner in statements(block).into_iter().filter(|s| s.block.is_none()) {
+            let text = inner.head.as_str();
+            let end = text
+                .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '.'))
+                .unwrap_or(text.len());
+            let (key, rest) = text.split_at(end);
+            match (key.strip_suffix(".set").unwrap_or(key), section) {
+                ("environment", _) => read_environment(section, text, rest, out, report),
+                ("workingDir", "run") => read_working_dir(text, rest, out, report),
+                ("workingDir", _) => report.skipped(format!(
+                    "`{text}` in the `test` task — jrs starts the test JVM where jrs itself \
+                     runs, and has no `test.cwd`"
+                )),
+                _ => {}
+            }
+        }
+    }
+}
+
+/// `environment 'NAME', 'value'` into `<section>.env`; a name set twice keeps
+/// its last value, as in Gradle.
+fn read_environment(
+    section: &str,
+    text: &str,
+    rest: &str,
+    out: &mut Manifest,
+    report: &mut Report,
+) {
+    let pair = strings(rest).and_then(|values| match values.as_slice() {
+        [name, value] if name.is_empty() || name.contains(['=', '\0']) => {
+            Err(format!("`{name}` is not an environment variable name"))
+        }
+        [name, _] if name.to_ascii_uppercase().starts_with("JRS_") => Err(format!(
+            "`{name}` starts with `JRS_`, which jrs keeps for itself"
+        )),
+        [name, value] => Ok((name.clone(), value.clone())),
+        _ => Err("it is not one name and one value".to_string()),
+    });
+    match pair {
+        Ok((name, value)) => {
+            let env = if section == "run" {
+                &mut out.run.env
+            } else {
+                &mut out.test.env
+            };
+            env.retain(|(k, _)| *k != name);
+            env.push((name.clone(), Template::literal(&value)));
+            report.migrated(format!("{section}.env.{name} = {value:?}"));
+        }
+        Err(why) => report.skipped(format!("`{text}` in the `{section}` task — {why}")),
+    }
+}
+
+/// `workingDir` of Gradle's `run` into `run.cwd`. Gradle's default, the
+/// project directory, is `.`.
+fn read_working_dir(text: &str, rest: &str, out: &mut Manifest, report: &mut Report) {
+    let dir = match unwrap(argument(rest)) {
+        "projectDir"
+        | "rootDir"
+        | "project.projectDir"
+        | "project.rootDir"
+        | "layout.projectDirectory" => ".".to_string(),
+        _ => match string(rest) {
+            Ok(dir) => dir,
+            Err(why) => {
+                report.skipped(format!("`{text}` in the `run` task — {why}"));
+                return;
+            }
+        },
+    };
+    if dir == "build" || dir.starts_with("build/") {
+        report.review(format!(
+            "run.cwd — `{dir}` is under `build/`, Gradle's output directory; jrs writes to \
+             target/ (`{{target}}` in `run.cwd`)"
+        ));
+    } else if std::path::Path::new(&dir).is_absolute() {
+        report.review(format!(
+            "run.cwd — `{dir}` is an absolute path, which only means something on one machine"
+        ));
+    }
+    report.migrated(format!("run.cwd = {dir:?}"));
+    out.run.cwd = Some(Template::literal(&dir));
+}
+
 // ---- tying it together -----------------------------------------------------
 
 /// Gradle's own tasks a jrs task can depend on, as the built-ins doing the

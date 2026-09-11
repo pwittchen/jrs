@@ -450,3 +450,261 @@ fn a_classified_artifact_downloads_from_central() {
         junit::JACOCO_VERSION
     )));
 }
+
+// ---- test reports, reruns, retries, --fail-fast and coverage minimums ------
+//
+// tests/build.rs drives these through a fake launcher. Here they meet the
+// real one, whose XML the page and the rerun selectors are read from, on both
+// launcher lines, and real JaCoCo.
+
+const CALC: &str = "package com.example;\n\npublic final class Calc {\n    \
+    private Calc() {}\n\n    public static int add(int a, int b) {\n        return a + b;\n    }\n\n    \
+    public static int unused() {\n        return 42;\n    }\n}\n";
+
+/// A JUnit 5 suite with every shape of test a rerun has to select: a method
+/// with parameters, a nested class, one invocation of a parameterised test,
+/// one dynamic test, and a test that fails only the first time it runs.
+const SHAPES_TEST: &str = r#"package com.example;
+
+import static org.junit.jupiter.api.Assertions.*;
+
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.stream.Stream;
+import org.junit.jupiter.api.*;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
+
+class ShapesTest {
+    @Test
+    void passes() {
+        assertEquals(2, Calc.add(1, 1));
+    }
+
+    @Test
+    void withInfo(TestInfo info) {
+        fail("plain <method> & parameters");
+    }
+
+    @Test
+    void flaky() throws Exception {
+        Path seen = Path.of(System.getProperty("marker.dir"), "flaky-seen");
+        if (!Files.exists(seen)) {
+            Files.createFile(seen);
+            fail("only the first time");
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(ints = {1, 2, 3})
+    void param(int n) {
+        assertNotEquals(2, n);
+    }
+
+    @TestFactory
+    Stream<DynamicTest> dynamic() {
+        return Stream.of(
+            DynamicTest.dynamicTest("ok", () -> {}),
+            DynamicTest.dynamicTest("bad", () -> fail("dynamic")));
+    }
+
+    @Nested
+    class Inner {
+        @Test
+        void innerPasses() {}
+
+        @Test
+        void innerFails() {
+            fail("nested");
+        }
+    }
+}
+"#;
+
+/// A failure, then a test slow enough that jrs is long gone if the run
+/// stops at the failure, and that leaves a mark if it runs.
+const STOP_TEST: &str = r#"package com.example;
+
+import java.nio.file.Files;
+import java.nio.file.Path;
+import org.junit.jupiter.api.*;
+
+@TestMethodOrder(MethodOrderer.MethodName.class)
+class StopTest {
+    @Test
+    void aFails() {
+        Assertions.fail("the first failure");
+    }
+
+    @Test
+    void bSlow() throws Exception {
+        Thread.sleep(5000);
+        Files.createFile(Path.of(System.getProperty("marker.dir"), "slow-ran"));
+    }
+}
+"#;
+
+/// A project on `junit-jupiter` at `jupiter`, with a `marker.dir` for its
+/// tests and `test_table` in `[test]`.
+fn tested_project(scratch: &Scratch, jupiter: &str, test_table: &str, test: (&str, &str)) {
+    let markers = scratch.join("markers");
+    std::fs::create_dir_all(&markers).unwrap();
+    let manifest = format!(
+        "[project]\nname = \"tested\"\nversion = \"1.0.0\"\n\n\
+         [test]\njvm-args = ['-Dmarker.dir={}']\n{test_table}\n\n\
+         [dev-dependencies]\n\"org.junit.jupiter:junit-jupiter\" = \"{jupiter}\"\n",
+        markers.display()
+    );
+    let test_path = format!("src/test/java/com/example/{}", test.0);
+    write_project(
+        &scratch.join("app"),
+        &[
+            ("jrs.toml", &manifest),
+            ("src/main/java/com/example/Calc.java", CALC),
+            (&test_path, test.1),
+        ],
+    );
+}
+
+#[test]
+fn the_real_launchers_xml_reruns_each_shape_of_test_on_its_own() {
+    let _toolchain = require_jdk!();
+    let scratch = Scratch::new("net-test-reruns");
+    tested_project(
+        &scratch,
+        "5.13.4",
+        "retries = 1",
+        ("ShapesTest.java", SHAPES_TEST),
+    );
+    let root = scratch.join("app");
+
+    let (code, _, stderr) = jrs(&root, &["test"]);
+    assert_eq!(code, 1, "{stderr}");
+    assert!(
+        stderr.contains("Retrying 5 failed tests (attempt 2 of 2)"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("Flaky com.example.ShapesTest#flaky() (passed on attempt 2)"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("5 passed, 1 flaky, 4 failed"), "{stderr}");
+
+    // The retry ran each failure on its own: the one invocation, the one
+    // dynamic test, the one nested method — and nothing that had passed.
+    let reports = root.join("target/test-reports");
+    let retry = std::fs::read_to_string(reports.join("retry-1/TEST-junit-jupiter.xml")).unwrap();
+    let ran = |name: &str| retry.contains(&format!("name=\"{name}\""));
+    for name in [
+        "withInfo(TestInfo)",
+        "flaky()",
+        "param(int)[2]",
+        "dynamic()[2]",
+        "innerFails()",
+    ] {
+        assert!(ran(name), "{name} was not retried:\n{retry}");
+    }
+    for name in [
+        "passes()",
+        "param(int)[1]",
+        "param(int)[3]",
+        "dynamic()[1]",
+        "innerPasses()",
+    ] {
+        assert!(!ran(name), "{name} passed, yet was retried:\n{retry}");
+    }
+
+    let html = std::fs::read_to_string(reports.join("index.html")).unwrap();
+    assert!(
+        html.contains("plain &lt;method&gt; &amp; parameters"),
+        "{html}"
+    );
+    assert!(
+        html.contains("<span class=\"badge flaky\">FLAKY</span>"),
+        "{html}"
+    );
+
+    // `--rerun-failed` picks up the four still failing, and only those.
+    let (code, _, stderr) = jrs(&root, &["test", "--rerun-failed", "--retries", "0"]);
+    assert_eq!(code, 1, "{stderr}");
+    assert!(
+        stderr.contains("Testing 4 tests that failed in the last run"),
+        "{stderr}"
+    );
+    assert!(stderr.contains(" 0 passed, 4 failed"), "{stderr}");
+}
+
+#[test]
+fn the_real_launcher_fails_fast_on_either_line() {
+    let _toolchain = require_jdk!();
+    // JUnit 5 runs on a 1.x launcher, which jrs has to stop itself; JUnit 6's
+    // launcher stops on its own.
+    for (jupiter, native) in [("5.13.4", false), ("6.0.0", true)] {
+        let scratch = Scratch::new(&format!("net-fail-fast-{jupiter}"));
+        tested_project(
+            &scratch,
+            jupiter,
+            "retries = 1",
+            ("StopTest.java", STOP_TEST),
+        );
+        let (code, _, stderr) = jrs(&scratch.join("app"), &["test", "--fail-fast"]);
+        assert_eq!(code, 1, "{jupiter}: {stderr}");
+        assert!(
+            !scratch.join("markers/slow-ran").exists(),
+            "{jupiter}: the test after the failure ran"
+        );
+        assert!(
+            stderr.contains("stopped at the first failure"),
+            "{jupiter}: {stderr}"
+        );
+        assert!(!stderr.contains("Retrying"), "{jupiter}: {stderr}");
+        assert_eq!(
+            stderr.contains("has no --fail-fast"),
+            !native,
+            "{jupiter}: {stderr}"
+        );
+    }
+}
+
+#[test]
+fn coverage_minimums_fail_a_run_that_falls_short() {
+    let _toolchain = require_jdk!();
+    let scratch = Scratch::new("net-coverage-minimum");
+    let test = "package com.example;\n\nimport static org.junit.jupiter.api.Assertions.assertEquals;\n\
+                import org.junit.jupiter.api.Test;\n\nclass CalcTest {\n    @Test\n    void adds() {\n        \
+                assertEquals(2, Calc.add(1, 1));\n    }\n}\n";
+    // One of Calc's two counted lines runs: JaCoCo leaves the empty private
+    // constructor out.
+    tested_project(
+        &scratch,
+        "5.13.4",
+        "coverage-minimum = { line = 0.9, branch = 0.5 }",
+        ("CalcTest.java", test),
+    );
+    let root = scratch.join("app");
+
+    let (code, _, stderr) = jrs(&root, &["test", "--coverage"]);
+    assert_eq!(code, 1, "{stderr}");
+    assert!(
+        stderr.contains("coverage is below `test.coverage-minimum`"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("line coverage is 50% (1 of 2), below the minimum of 90%"),
+        "{stderr}"
+    );
+    assert!(
+        !stderr.contains("branch coverage"),
+        "no branches, so nothing to fall short of: {stderr}"
+    );
+
+    // Without --coverage there are no totals, and the minimum is not checked.
+    let (code, _, stderr) = jrs(&root, &["test"]);
+    assert_eq!(code, 0, "{stderr}");
+
+    let manifest = root.join("jrs.toml");
+    let text = std::fs::read_to_string(&manifest).unwrap();
+    std::fs::write(&manifest, text.replace("line = 0.9", "line = 0.3")).unwrap();
+    let (code, _, stderr) = jrs(&root, &["test", "--coverage"]);
+    assert_eq!(code, 0, "{stderr}");
+}

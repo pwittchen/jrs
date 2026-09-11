@@ -16,16 +16,21 @@ use super::{Migration, Report, Source};
 use crate::compile::lang::Language;
 use crate::error::{IoResultExt, Result};
 use crate::manifest::{self, Dependency, Exclusion, Manifest};
+use crate::resolve::coord::Ga;
 
 const PREAMBLE: &str = "Gradle migration is approximate. jrs reads the declarative \
                         parts of a build script by pattern, not by running Gradle, \
                         so review the manifest below before relying on it.";
 
 /// Configurations that land on the main classpath.
-const MAIN_CONFIGS: &[&str] = &["implementation", "api", "runtimeOnly", "compile", "runtime"];
+const MAIN_CONFIGS: &[&str] = &["implementation", "api", "compile"];
 
 /// Compiled against but not shipped: `compile-only`.
 const COMPILE_ONLY_CONFIGS: &[&str] = &["compileOnly", "compileOnlyApi", "providedCompile"];
+
+/// Shipped and run with, but not compiled against: `runtime-only`. The old
+/// `runtime` configuration, gone since Gradle 7, meant the same.
+const RUNTIME_ONLY_CONFIGS: &[&str] = &["runtimeOnly", "runtime"];
 
 /// Annotation processors. jrs has no processor path (SPEC §1.2), but `javac`
 /// runs a processor it finds on the compile classpath, so these become
@@ -98,7 +103,9 @@ pub fn migrate(build_file: &Path, root: &Path) -> Result<Migration> {
     // After them: `groovy` and `scala` take their library's version.
     read_library_languages(&plugins, &mut out, &mut report);
     read_jvm_args(&script, &mut out, &mut report);
-    read_repositories(&script, &mut out, &mut report);
+    super::gradle_tasks::read_jvm_environment(&script, &mut out, &mut report);
+    read_jar_manifest(&script, &mut out, &mut report);
+    super::gradle_repos::read(&script, &mut out, &mut report);
     super::gradle_tasks::read(&script, &mut out, &mut report);
     report_the_unreadable(&script, &settings, &plugins, &mut report);
 
@@ -315,6 +322,8 @@ fn read_dependencies(script: &str, catalog: &Catalog, out: &mut Manifest, report
             Target::Main
         } else if COMPILE_ONLY_CONFIGS.contains(&config.as_str()) {
             Target::CompileOnly
+        } else if RUNTIME_ONLY_CONFIGS.contains(&config.as_str()) {
+            Target::RuntimeOnly
         } else if PROCESSOR_CONFIGS.contains(&config.as_str()) {
             Target::Processor
         } else if TEST_CONFIGS.contains(&config.as_str()) {
@@ -333,6 +342,13 @@ fn read_dependencies(script: &str, catalog: &Catalog, out: &mut Manifest, report
             Some(at) => (&trimmed[..at], Some(&trimmed[at..])),
             None => (trimmed, None),
         };
+        // `files(...)` and `fileTree(...)`: jars in the project, not coordinates.
+        if let Some(jars) = super::gradle_files::read(trimmed, &out.root, report) {
+            for dep in jars {
+                push_local(out, target, dep, report, config.as_str());
+            }
+            continue;
+        }
         let Some(mut dep) =
             read_declaration(declaration, &config, kotlin.as_deref(), catalog, report)
         else {
@@ -430,6 +446,7 @@ fn read_declaration(
 enum Target {
     Main,
     CompileOnly,
+    RuntimeOnly,
     Processor,
     Test,
 }
@@ -445,7 +462,8 @@ fn table(out: &mut Manifest, target: Target) -> &mut Vec<Dependency> {
 ///
 /// `compileOnly` and `annotationProcessor` naming the same library is the usual
 /// Lombok setup, and becomes one compile-only entry; a plain `implementation`
-/// of it wins over both.
+/// of it wins over both. `compileOnly` and `runtimeOnly` of one library add up
+/// to a plain entry.
 fn push(
     out: &mut Manifest,
     target: Target,
@@ -454,10 +472,16 @@ fn push(
     config: &str,
 ) -> usize {
     dep.compile_only = matches!(target, Target::CompileOnly | Target::Processor);
+    dep.runtime_only = target == Target::RuntimeOnly;
     let entries = table(out, target);
     if let Some(index) = entries.iter().position(|d| d.key() == dep.key()) {
-        if target == Target::Main {
-            entries[index].compile_only = false;
+        let existing = &mut entries[index];
+        let widened = target == Target::Main
+            || (existing.compile_only && dep.runtime_only)
+            || (existing.runtime_only && dep.compile_only);
+        if widened {
+            existing.compile_only = false;
+            existing.runtime_only = false;
         }
         report.migrated(format!(
             "{} ({config}, merged with an earlier declaration)",
@@ -468,6 +492,27 @@ fn push(
     report.migrated(format!("{} ({config})", dep.key()));
     entries.push(dep);
     entries.len() - 1
+}
+
+/// Add a local jar. Two jars with one file name in different directories get
+/// distinct keys, `-2` and on after the first.
+fn push_local(
+    out: &mut Manifest,
+    target: Target,
+    mut dep: Dependency,
+    report: &mut Report,
+    config: &str,
+) {
+    let base = dep.artifact.clone();
+    let mut n = 2;
+    while table(out, target)
+        .iter()
+        .any(|d| d.key() == dep.key() && d.path != dep.path)
+    {
+        dep.artifact = format!("{base}-{n}");
+        n += 1;
+    }
+    push(out, target, dep, report, config);
 }
 
 /// `exclude group: 'x', module: 'y'`, `exclude(group = "x")`, or
@@ -508,7 +553,10 @@ fn read_jvm_args(script: &str, out: &mut Manifest, report: &mut Report) {
         .lines()
         .find(|l| l.trim().starts_with("applicationDefaultJvmArgs"))
     {
-        let args = quoted(line);
+        let mut args = quoted(line);
+        for agent in take_java_agents(&mut args) {
+            translate_java_agent("run", &agent, out, report);
+        }
         if !args.is_empty() {
             report.migrated(format!("run.jvm-args = {args:?}"));
             out.run.jvm_args = args;
@@ -516,10 +564,13 @@ fn read_jvm_args(script: &str, out: &mut Manifest, report: &mut Report) {
     }
 
     let mut test_args = Vec::new();
+    let mut test_agents = Vec::new();
     for line in blocks_where(script, is_test_block) {
         let trimmed = line.trim();
         if trimmed.starts_with("jvmArgs") {
-            test_args.extend(quoted(trimmed));
+            let mut args = quoted(trimmed);
+            test_agents.extend(take_java_agents(&mut args));
+            test_args.extend(args);
         } else if trimmed.starts_with("systemProperty") && !trimmed.starts_with("systemProperties")
         {
             if let [key, value] = quoted(trimmed).as_slice() {
@@ -537,6 +588,55 @@ fn read_jvm_args(script: &str, out: &mut Manifest, report: &mut Report) {
         report.migrated(format!("test.jvm-args = {test_args:?}"));
         out.test.jvm_args = test_args;
     }
+    for agent in test_agents {
+        translate_java_agent("test", &agent, out, report);
+    }
+}
+
+/// The `-javaagent:` arguments out of `args`, in order.
+fn take_java_agents(args: &mut Vec<String>) -> Vec<String> {
+    let (agents, rest) = std::mem::take(args)
+        .into_iter()
+        .partition(|a| a.starts_with("-javaagent:"));
+    *args = rest;
+    agents
+}
+
+/// A `-javaagent:` argument names its jar by path, and in a Gradle build that
+/// path is into Gradle's own cache, which a committed jrs.toml cannot name.
+/// Mockito's documented recipe is the one jrs can translate: its agent is the
+/// `mockito-core` jar the project already depends on, so `java-agents` names
+/// that. Any other agent is reported.
+fn translate_java_agent(section: &str, arg: &str, out: &mut Manifest, report: &mut Report) {
+    let is_mockito = |d: &Dependency| d.group == "org.mockito" && d.artifact == "mockito-core";
+    let declared = if section == "run" {
+        out.dependencies.iter().any(is_mockito)
+    } else {
+        out.dependencies
+            .iter()
+            .chain(&out.dev_dependencies)
+            .any(is_mockito)
+    };
+    if !(declared && arg.to_ascii_lowercase().contains("mockito")) {
+        report.skipped(format!(
+            "`{arg}` in the {section} JVM's arguments — a path jrs cannot carry over; name \
+             the agent by `group:artifact` in `{section}.java-agents`, and declare it as a \
+             dependency"
+        ));
+        return;
+    }
+    let mockito = Ga::new("org.mockito", "mockito-core");
+    let agents = if section == "run" {
+        &mut out.run.java_agents
+    } else {
+        &mut out.test.java_agents
+    };
+    if !agents.contains(&mockito) {
+        agents.push(mockito);
+    }
+    report.migrated(format!(
+        "{section}.java-agents = [\"org.mockito:mockito-core\"] (from `{arg}`)"
+    ));
 }
 
 /// `test { }`, and the `tasks.test` / `tasks.withType(Test)` spellings of it.
@@ -551,34 +651,278 @@ fn is_test_block(header: &str) -> bool {
         || compact.starts_with("tasks.named(\"test\"")
 }
 
-fn read_repositories(script: &str, out: &mut Manifest, report: &mut Report) {
-    let mut repos = Vec::new();
-    for line in block_lines(script, "repositories") {
-        let trimmed = line.trim();
-        if !trimmed.contains("url") {
-            continue;
+/// `jar { manifest { attributes(...) } }`, in either DSL, → `[package.manifest]`.
+///
+/// Literal values are carried over; `version` and `project.version` become
+/// `{project.version}`, and `project.name` and `rootProject.name` become
+/// `{project.name}`. Any other expression is reported, not guessed at. A
+/// `Main-Class` attribute sets `project.main-class` when nothing else did;
+/// the other attributes jrs writes itself are reported. `withSourcesJar()`
+/// and `withJavadocJar()` have no manifest key — they are `jrs package`
+/// flags — so they are reported with the flag to use.
+fn read_jar_manifest(script: &str, out: &mut Manifest, report: &mut Report) {
+    let mut text = blocks_where(script, is_jar_block).join("\n");
+    for line in script.lines() {
+        if line.trim().starts_with("jar.manifest") {
+            text.push('\n');
+            text.push_str(line);
         }
-        let Some(url) = quoted(trimmed).into_iter().next() else {
+    }
+    for (name, expression) in jar_attribute_pairs(&text) {
+        let Some(raw) = attribute_value(&expression) else {
             report.skipped(format!(
-                "`{trimmed}` — repository URL built from an expression"
+                "jar manifest attribute `{name}` — its value is computed (`{expression}`)"
             ));
             continue;
         };
-        let url = url.trim_end_matches('/').to_string();
-        if url == manifest::CENTRAL_URL {
+        if name.eq_ignore_ascii_case("Main-Class") {
+            match &out.main_class {
+                None if !raw.contains('{') => {
+                    report.migrated(format!(
+                        "project.main-class = {raw} (from the jar manifest)"
+                    ));
+                    out.main_class = Some(raw);
+                }
+                Some(main) if *main == raw => {}
+                _ => report.skipped(format!(
+                    "jar manifest attribute `Main-Class: {raw}` — the main class is \
+                     `project.main-class`"
+                )),
+            }
             continue;
         }
-        report.migrated(format!("repository {url}"));
-        repos.push(manifest::Repository {
-            name: repository_name(&url),
-            url,
-        });
+        if out
+            .package
+            .manifest
+            .iter()
+            .any(|(n, _)| n.eq_ignore_ascii_case(&name))
+        {
+            report.skipped(format!(
+                "jar manifest attribute `{name}` — set more than once; the first is kept"
+            ));
+            continue;
+        }
+        match manifest::jar_attribute(&name, &raw) {
+            Ok(template) => {
+                report.migrated(format!("package.manifest.{name} = {raw}"));
+                out.package.manifest.push((name, template));
+            }
+            Err(e) => report.skipped(format!("jar manifest attribute — {e}")),
+        }
     }
-    repos.push(manifest::Repository {
-        name: manifest::CENTRAL_NAME.into(),
-        url: manifest::CENTRAL_URL.into(),
-    });
-    out.repositories = repos;
+
+    for (call, flag) in [
+        ("withSourcesJar", "--sources"),
+        ("withJavadocJar", "--javadoc"),
+    ] {
+        if script.contains(call) {
+            report.skipped(format!(
+                "`{call}()` — a flag in jrs, not a manifest key: `jrs package {flag}`"
+            ));
+        }
+    }
+}
+
+/// `jar { }`, and the `tasks.jar` / `tasks.named('jar')` /
+/// `tasks.withType(Jar)` spellings of it.
+fn is_jar_block(header: &str) -> bool {
+    let compact: String = header.chars().filter(|c| !c.is_whitespace()).collect();
+    [
+        "jar{",
+        "tasks.jar{",
+        "tasks.named('jar')",
+        "tasks.named(\"jar\")",
+        "tasks.named<Jar>(\"jar\")",
+        "tasks.getByName<Jar>(\"jar\")",
+        "tasks.withType(Jar)",
+        "tasks.withType<Jar>",
+    ]
+    .iter()
+    .any(|start| compact.starts_with(start))
+}
+
+/// Every `name`/value-expression pair the `attributes` calls in `text` set:
+/// `attributes('K': v, ...)` and `attributes 'K': v` in Groovy,
+/// `attributes("K" to v, ...)`, `attributes(mapOf(...))` and
+/// `attributes["K"] = v` in Kotlin. Quoted text is never mistaken for the call.
+fn jar_attribute_pairs(text: &str) -> Vec<(String, String)> {
+    const CALL: &str = "attributes";
+    let chars: Vec<char> = text.chars().collect();
+    let is_ident = |c: char| c.is_alphanumeric() || c == '_';
+    let line_end = |from: usize| {
+        chars[from..]
+            .iter()
+            .position(|c| *c == '\n')
+            .map_or(chars.len(), |p| from + p)
+    };
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        if c == '\'' || c == '"' {
+            i = skip_quoted(&chars, i);
+            continue;
+        }
+        let at_call = chars[i..].starts_with(&CALL.chars().collect::<Vec<_>>())
+            && (i == 0 || !is_ident(chars[i - 1]))
+            && !chars.get(i + CALL.len()).copied().is_some_and(is_ident);
+        if !at_call {
+            i += 1;
+            continue;
+        }
+        let mut j = i + CALL.len();
+        while chars.get(j).is_some_and(|c| *c == ' ' || *c == '\t') {
+            j += 1;
+        }
+        match chars.get(j) {
+            Some('[') => {
+                // `attributes["K"] = v`
+                let end = line_end(j);
+                let segment: String = chars[j + 1..end].iter().collect();
+                if let Some((name, rest)) = first_literal(&segment)
+                    && let Some(value) = rest
+                        .trim_start()
+                        .strip_prefix(']')
+                        .and_then(|r| r.trim_start().strip_prefix('='))
+                {
+                    out.push((name, value.trim().to_string()));
+                }
+                i = end;
+            }
+            Some('(') => {
+                let end = closing_paren(&chars, j);
+                let inner: String = chars[j + 1..end].iter().collect();
+                attribute_items(&inner, &mut out);
+                i = end + 1;
+            }
+            _ => {
+                // Groovy's command syntax runs to the end of the line, and on
+                // over any line that ends in a comma.
+                let mut end = line_end(j);
+                while end < chars.len()
+                    && chars[j..end]
+                        .iter()
+                        .collect::<String>()
+                        .trim_end()
+                        .ends_with(',')
+                {
+                    end = line_end(end + 1);
+                }
+                let segment: String = chars[j..end].iter().collect();
+                attribute_items(&segment, &mut out);
+                i = end;
+            }
+        }
+    }
+    out
+}
+
+/// The index just past the string literal that opens at `start`.
+fn skip_quoted(chars: &[char], start: usize) -> usize {
+    let quote = chars[start];
+    let mut i = start + 1;
+    while i < chars.len() {
+        match chars[i] {
+            '\\' => i += 2,
+            c if c == quote => return i + 1,
+            _ => i += 1,
+        }
+    }
+    chars.len()
+}
+
+/// The index of the `)` that closes the `(` at `open`, or the end of `chars`.
+fn closing_paren(chars: &[char], open: usize) -> usize {
+    let mut depth = 0usize;
+    let mut i = open;
+    while i < chars.len() {
+        match chars[i] {
+            '\'' | '"' => {
+                i = skip_quoted(chars, i);
+                continue;
+            }
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    return i;
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    chars.len()
+}
+
+/// The `'K': v` / `"K" to v` items of one `attributes` argument list.
+fn attribute_items(list: &str, out: &mut Vec<(String, String)>) {
+    let list = list.trim();
+    let list = list
+        .strip_prefix("mapOf(")
+        .and_then(|l| l.strip_suffix(')'))
+        .unwrap_or(list);
+    let chars: Vec<char> = list.chars().collect();
+    let mut items = Vec::new();
+    let (mut start, mut depth, mut i) = (0, 0usize, 0);
+    while i < chars.len() {
+        match chars[i] {
+            '\'' | '"' => {
+                i = skip_quoted(&chars, i);
+                continue;
+            }
+            '(' | '[' => depth += 1,
+            ')' | ']' => depth = depth.saturating_sub(1),
+            ',' if depth == 0 => {
+                items.push(chars[start..i].iter().collect::<String>());
+                start = i + 1;
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    items.push(chars[start..].iter().collect::<String>());
+
+    for item in items {
+        let item = item.trim();
+        if !item.starts_with(['\'', '"']) {
+            continue;
+        }
+        let Some((name, rest)) = first_literal(item) else {
+            continue;
+        };
+        let rest = rest.trim_start();
+        let value = rest
+            .strip_prefix(':')
+            .or_else(|| rest.strip_prefix("to "))
+            .map(str::trim);
+        if let Some(value) = value.filter(|v| !v.is_empty()) {
+            out.push((name, value.to_string()));
+        }
+    }
+}
+
+/// An attribute's value expression as a `[package.manifest]` value, when it is
+/// a literal or names the project's version or name.
+fn attribute_value(expression: &str) -> Option<String> {
+    let expression = expression.trim().trim_end_matches(';').trim();
+    match expression {
+        "version"
+        | "project.version"
+        | "project.version.toString()"
+        | "\"$version\""
+        | "\"${version}\""
+        | "\"${project.version}\"" => return Some("{project.version}".to_string()),
+        "project.name" | "rootProject.name" | "\"${project.name}\"" | "\"${rootProject.name}\"" => {
+            return Some("{project.name}".to_string());
+        }
+        _ => {}
+    }
+    let (literal, rest) = first_literal(expression)?;
+    let whole = expression.starts_with(['\'', '"']) && rest.trim().is_empty();
+    // A `$` in a double-quoted string is interpolation, which jrs cannot run.
+    let interpolated = expression.starts_with('"') && literal.contains('$');
+    (whole && !interpolated).then(|| manifest::Template::literal(&literal).raw)
 }
 
 fn report_the_unreadable(
@@ -1029,7 +1373,7 @@ fn java_version(raw: &str) -> Option<u32> {
 }
 
 /// A readable name for a repository URL, since Gradle rarely gives one.
-fn repository_name(url: &str) -> String {
+pub(super) fn repository_name(url: &str) -> String {
     url.trim_start_matches("https://")
         .trim_start_matches("http://")
         .split(['/', '.'])
@@ -1185,6 +1529,28 @@ application {
     }
 
     #[test]
+    fn runtime_only_configurations_become_runtime_only() {
+        let dir = Dir::new("runtime-only");
+        let m = dir
+            .migrate(
+                "dependencies {\n    runtimeOnly 'org.postgresql:postgresql:42.7.3'\n    \
+                 runtime 'ch.qos.logback:logback-classic:1.5.6'\n    \
+                 compileOnly 'org.slf4j:slf4j-api:2.0.12'\n    \
+                 runtimeOnly 'org.slf4j:slf4j-api:2.0.12'\n    \
+                 testRuntimeOnly 'org.junit.platform:junit-platform-launcher:1.10.2'\n}\n",
+            )
+            .manifest;
+        let d = &m.dependencies;
+        assert_eq!(d.len(), 3);
+        assert!(d[0].runtime_only && d[1].runtime_only);
+        assert!(
+            !d[2].compile_only && !d[2].runtime_only,
+            "compileOnly plus runtimeOnly is a plain dependency"
+        );
+        assert!(!m.dev_dependencies[0].runtime_only);
+    }
+
+    #[test]
     fn classifiers_and_exclusions_are_read() {
         let dir = Dir::new("extras");
         let m = dir
@@ -1249,6 +1615,76 @@ application {
     }
 
     #[test]
+    fn the_environment_and_working_directory_of_run_and_test_are_read() {
+        let dir = Dir::new("jvm-env");
+        let migration = dir.migrate(
+            "dependencies {\n  testImplementation 'org.mockito:mockito-core:5.14.2'\n}\n\
+             run {\n  workingDir = file('work')\n  environment 'APP_MODE', 'dev'\n  \
+             environment 'APP_MODE', 'prod'\n  environment 'BRACES', '{x}'\n}\n\
+             test {\n  jvmArgs \"-javaagent:${configurations.mockitoAgent.asPath}\", '-Xmx256m'\n  \
+             environment 'TZ', 'UTC'\n  environment 'HOME_DIR', System.getProperty('user.home')\n  \
+             environment 'JRS_MODE', 'x'\n  workingDir 'build/tmp'\n}\n",
+        );
+        let m = &migration.manifest;
+        let env = |vars: &[(String, manifest::Template)]| -> Vec<(String, String)> {
+            vars.iter()
+                .map(|(k, v)| (k.clone(), v.raw.clone()))
+                .collect()
+        };
+        assert_eq!(
+            env(&m.run.env),
+            [
+                ("APP_MODE".to_string(), "prod".to_string()),
+                ("BRACES".to_string(), "{{x}}".to_string()),
+            ],
+            "the last value wins, and braces stay literal"
+        );
+        assert_eq!(m.run.cwd.as_ref().unwrap().raw, "work");
+        assert_eq!(env(&m.test.env), [("TZ".to_string(), "UTC".to_string())]);
+        assert_eq!(
+            m.test.java_agents,
+            vec![Ga::new("org.mockito", "mockito-core")]
+        );
+        assert_eq!(
+            m.test.jvm_args,
+            vec!["-Xmx256m"],
+            "no path into Gradle's cache"
+        );
+
+        let skipped = migration.report.not_migrated.join("\n");
+        assert!(skipped.contains("HOME_DIR"), "{skipped}");
+        assert!(skipped.contains("JRS_MODE"), "{skipped}");
+        assert!(skipped.contains("no `test.cwd`"), "{skipped}");
+
+        // The manifest this writes is one jrs reads back the same.
+        let again =
+            Manifest::parse(&m.render(None), Path::new("/p/jrs.toml"), Path::new("/p")).unwrap();
+        assert_eq!(again.run, m.run);
+        assert_eq!(again.test, m.test);
+    }
+
+    #[test]
+    fn the_kotlin_dsl_names_the_run_task_and_an_unknown_agent_is_reported() {
+        let dir = Dir::new("jvm-env-kts");
+        let migration = dir.migrate(
+            "application {\n  applicationDefaultJvmArgs = listOf(\"-javaagent:/opt/otel.jar\", \"-Xmx1g\")\n}\n\
+             tasks.named<JavaExec>(\"run\") {\n  workingDir = projectDir\n  environment(\"A\", \"b\")\n}\n\
+             tasks.withType<Test> {\n  environment(mapOf(\"C\" to \"d\"))\n  jvmArgs(\"-javaagent:/opt/x.jar\")\n}\n",
+        );
+        let m = &migration.manifest;
+        assert_eq!(m.run.cwd.as_ref().unwrap().raw, ".", "Gradle's default");
+        assert_eq!(m.run.env.len(), 1);
+        assert_eq!(m.run.jvm_args, vec!["-Xmx1g"]);
+        assert!(m.run.java_agents.is_empty() && m.test.java_agents.is_empty());
+        assert!(m.test.env.is_empty());
+        let skipped = migration.report.not_migrated.join("\n");
+        assert!(skipped.contains("-javaagent:/opt/otel.jar"), "{skipped}");
+        assert!(skipped.contains("run.java-agents"), "{skipped}");
+        assert!(skipped.contains("test.java-agents"), "{skipped}");
+        assert!(skipped.contains("mapOf"), "{skipped}");
+    }
+
+    #[test]
     fn repositories_are_read_with_central_left_implicit() {
         let dir = Dir::new("repos");
         let m = dir.migrate(GROOVY).manifest;
@@ -1259,6 +1695,52 @@ application {
         );
         assert_eq!(m.repositories[0].name, "nexus");
         assert_eq!(m.repositories[1].url, manifest::CENTRAL_URL);
+    }
+
+    #[test]
+    fn jar_attributes_are_read_in_the_kotlin_dsl() {
+        let dir = Dir::new("jar-kts");
+        let migration = dir.migrate(
+            "version = \"1.0\"\n\ntasks.jar {\n    manifest {\n        \
+             attributes(mapOf(\"Implementation-Title\" to \"kts\", \
+             \"Implementation-Version\" to project.version))\n        \
+             attributes[\"Automatic-Module-Name\"] = \"com.example.kts\"\n        \
+             attributes(\"X-Commit\" to \"${gitCommit}\", \"X-Brace\" to \"a{b}\")\n    \
+             }\n}\n",
+        );
+        let attributes: Vec<(&str, &str)> = migration
+            .manifest
+            .package
+            .manifest
+            .iter()
+            .map(|(n, t)| (n.as_str(), t.raw.as_str()))
+            .collect();
+        assert_eq!(
+            attributes,
+            [
+                ("Implementation-Title", "kts"),
+                ("Implementation-Version", "{project.version}"),
+                ("Automatic-Module-Name", "com.example.kts"),
+                ("X-Brace", "a{{b}}"),
+            ]
+        );
+        let skipped = migration.report.not_migrated.join("\n");
+        assert!(
+            skipped.contains("`X-Commit` — its value is computed"),
+            "{skipped}"
+        );
+    }
+
+    #[test]
+    fn the_word_attributes_inside_a_string_is_not_a_call() {
+        assert!(jar_attribute_pairs("description = 'no attributes(here)'\n").is_empty());
+        assert_eq!(
+            jar_attribute_pairs("attributes('A': 'x', 'B': version)"),
+            [
+                ("A".to_string(), "'x'".to_string()),
+                ("B".to_string(), "version".to_string())
+            ]
+        );
     }
 
     #[test]

@@ -10,6 +10,15 @@
 //! on the classpath, at either location, is merged into a single descriptor whose
 //! class lists are the union of them all (SPEC §9.2's rule for Groovy extension
 //! modules).
+//!
+//! Spring keeps its own registries in the same shape, and loses them the same
+//! silent way (SPEC §9.2): `META-INF/spring.factories` is merged key by key,
+//! each key's comma-separated values the union of every copy;
+//! `META-INF/spring/*.imports` files, one class a line, are the union of their
+//! lines; `spring.handlers`, `spring.schemas` and `spring.tooling` are
+//! concatenated like service files, which is Maven Shade's
+//! `AppendingTransformer`. In every merge the project's own copy comes first,
+//! then each jar's in classpath order.
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
@@ -23,7 +32,7 @@ use crate::project;
 
 /// The epoch every entry is stamped with, so repeated builds match byte for byte.
 /// 1980-01-01 is the earliest a zip timestamp can express.
-fn fixed_timestamp() -> zip::DateTime {
+pub(crate) fn fixed_timestamp() -> zip::DateTime {
     zip::DateTime::from_date_and_time(1980, 1, 1, 0, 0, 0).expect("a valid fixed timestamp")
 }
 
@@ -39,6 +48,9 @@ pub struct JarManifest {
     pub main_class: Option<String>,
     /// Relative jar paths for a thin jar's `Class-Path` header.
     pub class_path: Vec<String>,
+    /// `[package.manifest]`, expanded: written after jrs's own attributes,
+    /// in this order.
+    pub attributes: Vec<(String, String)>,
 }
 
 impl JarManifest {
@@ -53,6 +65,9 @@ impl JarManifest {
         }
         if !self.class_path.is_empty() {
             s.push_str(&wrap_header("Class-Path", &self.class_path.join(" ")));
+        }
+        for (name, value) in &self.attributes {
+            s.push_str(&wrap_header(name, value));
         }
         s.push('\n');
         s
@@ -240,6 +255,19 @@ pub fn write_fat_jar(
     }
     let mut module_entries = Vec::new();
 
+    // So are its service files and Spring registries: they head the merge,
+    // rather than being replaced by the first dependency that has one.
+    let owned: Vec<String> = plan
+        .keys()
+        .filter(|name| merge_kind(name).is_some())
+        .cloned()
+        .collect();
+    for name in owned {
+        if let (Some(kind), Some(Entry::File(path))) = (merge_kind(&name), plan.remove(&name)) {
+            plan.insert(name, Entry::Merged(kind, vec![Source::File(path)]));
+        }
+    }
+
     let mut archives = Vec::new();
     for (index, jar) in dependency_jars.iter().enumerate() {
         let file = std::fs::File::open(jar).path(jar)?;
@@ -263,11 +291,11 @@ pub fn write_fat_jar(
                 module_entries.push((index, i));
                 continue;
             }
-            if is_service_file(&name) {
+            if let Some(kind) = merge_kind(&name) {
                 match plan.get_mut(&name) {
-                    Some(Entry::Services(sources)) => sources.push((index, i)),
+                    Some(Entry::Merged(_, sources)) => sources.push(Source::Jar(index, i)),
                     _ => {
-                        plan.insert(name, Entry::Services(vec![(index, i)]));
+                        plan.insert(name, Entry::Merged(kind, vec![Source::Jar(index, i)]));
                     }
                 }
                 continue;
@@ -307,12 +335,61 @@ pub fn write_fat_jar(
     write_jar(output, manifest, &plan, archives, warnings)
 }
 
+/// A sources jar: each of `files` at its path relative to the root that holds
+/// it — the deepest of `roots` it lies under, so a nested root still gives
+/// package-relative names. Files under no root are left out; where two roots
+/// hold the same relative path, the one found first wins.
+///
+/// The manifest carries only `Manifest-Version` and `Created-By`: a sources
+/// jar has no main class, and `[package.manifest]` describes the program.
+///
+/// # Errors
+///
+/// `JrsError::Io` if a file cannot be read or the jar cannot be written;
+/// `JrsError::Build` if the zip writer rejects an entry.
+pub fn write_sources_jar(
+    roots: &[PathBuf],
+    files: &[PathBuf],
+    output: &Path,
+) -> Result<PackageOutcome> {
+    let mut plan: BTreeMap<String, Entry> = BTreeMap::new();
+    for file in files {
+        let Some(root) = roots
+            .iter()
+            .filter(|r| file.starts_with(r))
+            .max_by_key(|r| r.components().count())
+        else {
+            continue;
+        };
+        let name = project::slash_path(file.strip_prefix(root).unwrap_or(file));
+        plan.entry(name)
+            .or_insert_with(|| Entry::File(file.clone()));
+    }
+    write_jar(
+        output,
+        &JarManifest::default(),
+        &plan,
+        no_archives(),
+        Vec::new(),
+    )
+}
+
+/// A Javadoc jar: everything under `doc_dir`, as `jrs doc` left it.
+///
+/// # Errors
+///
+/// As for [`write_thin_jar`].
+pub fn write_javadoc_jar(doc_dir: &Path, output: &Path) -> Result<PackageOutcome> {
+    write_thin_jar(doc_dir, output, &JarManifest::default())
+}
+
 /// Where an entry's bytes come from.
 enum Entry {
     File(PathBuf),
     Jar(usize, usize),
-    /// A `META-INF/services` file, concatenated from every jar that has one.
-    Services(Vec<(usize, usize)>),
+    /// A resource several jars have, combined per [`Merge`]: the project's
+    /// copy first, then jar entries in classpath order.
+    Merged(Merge, Vec<Source>),
     /// Groovy extension-module descriptors, merged into one: the project's own
     /// files first, then jar entries in classpath order.
     ExtensionModules(Vec<PathBuf>, Vec<(usize, usize)>),
@@ -327,9 +404,11 @@ impl Entry {
         match self {
             Entry::File(_) => classes_dir.display().to_string(),
             Entry::Jar(index, _) => jar(index),
-            Entry::Services(sources) => sources
-                .first()
-                .map_or_else(|| "an earlier jar".to_string(), |(index, _)| jar(index)),
+            Entry::Merged(_, sources) => match sources.first() {
+                Some(Source::File(_)) => classes_dir.display().to_string(),
+                Some(Source::Jar(index, _)) => jar(index),
+                None => "an earlier jar".to_string(),
+            },
             Entry::ExtensionModules(files, _) if !files.is_empty() => {
                 classes_dir.display().to_string()
             }
@@ -395,6 +474,150 @@ fn is_service_file(name: &str) -> bool {
     name.starts_with("META-INF/services/") && name.len() > "META-INF/services/".len()
 }
 
+/// One input to a merged entry.
+enum Source {
+    /// The project's own copy, under the classes directory.
+    File(PathBuf),
+    /// Entry `.1` of dependency jar `.0`.
+    Jar(usize, usize),
+}
+
+/// How a fat jar combines a resource that more than one jar has.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Merge {
+    /// Concatenated, a newline between files: `META-INF/services/*`, and
+    /// Spring's `spring.handlers`, `spring.schemas` and `spring.tooling` —
+    /// Maven Shade's `AppendingTransformer`. A key two copies share is then
+    /// read the way the unpacked classpath reads it: the later one wins.
+    Append,
+    /// `META-INF/spring.factories`: each key once, first seen first, with the
+    /// union of every copy's comma-separated values.
+    SpringFactories,
+    /// `META-INF/spring/*.imports`: the union of the files' lines, first seen
+    /// first, comments and blank lines dropped.
+    Lines,
+}
+
+/// The merge rule for `name`, when it has one. Groovy's extension-module
+/// descriptors are not here: they are merged by [`ExtensionModule`], and are
+/// checked for first.
+#[allow(
+    clippy::case_sensitive_file_extension_comparisons,
+    reason = "jar entry names are case-sensitive, and Spring looks for `.imports` exactly"
+)]
+fn merge_kind(name: &str) -> Option<Merge> {
+    match name {
+        "META-INF/spring.factories" => Some(Merge::SpringFactories),
+        "META-INF/spring.handlers" | "META-INF/spring.schemas" | "META-INF/spring.tooling" => {
+            Some(Merge::Append)
+        }
+        _ if is_service_file(name) => Some(Merge::Append),
+        _ => name
+            .strip_prefix("META-INF/spring/")
+            .filter(|file| !file.contains('/') && file.len() > ".imports".len())
+            .filter(|file| file.ends_with(".imports"))
+            .map(|_| Merge::Lines),
+    }
+}
+
+/// Combine the copies of one resource, in order, per `kind`.
+fn merge(kind: Merge, copies: &[Vec<u8>]) -> Vec<u8> {
+    match kind {
+        Merge::Append => {
+            // A newline between files, so no line is glued onto the tail of
+            // the previous file's last one.
+            let mut merged = Vec::new();
+            for bytes in copies {
+                if !merged.is_empty() && !merged.ends_with(b"\n") {
+                    merged.push(b'\n');
+                }
+                merged.extend_from_slice(bytes);
+            }
+            merged
+        }
+        Merge::SpringFactories => {
+            let mut keys: Vec<(String, Vec<String>)> = Vec::new();
+            for bytes in copies {
+                for (key, value) in properties(&String::from_utf8_lossy(bytes)) {
+                    let slot = keys.iter().position(|(k, _)| *k == key).unwrap_or_else(|| {
+                        keys.push((key, Vec::new()));
+                        keys.len() - 1
+                    });
+                    let values = &mut keys[slot].1;
+                    for v in value.split(',').map(str::trim).filter(|v| !v.is_empty()) {
+                        if !values.iter().any(|seen| seen == v) {
+                            values.push(v.to_string());
+                        }
+                    }
+                }
+            }
+            let mut s = String::new();
+            for (key, values) in keys {
+                let _ = writeln!(s, "{key}={}", values.join(","));
+            }
+            s.into_bytes()
+        }
+        Merge::Lines => {
+            let mut lines: Vec<String> = Vec::new();
+            for bytes in copies {
+                for line in String::from_utf8_lossy(bytes).lines() {
+                    // Spring strips a `#` comment wherever it starts.
+                    let line = line.split('#').next().unwrap_or_default().trim();
+                    if !line.is_empty() && !lines.iter().any(|seen| seen == line) {
+                        lines.push(line.to_string());
+                    }
+                }
+            }
+            let mut s = String::new();
+            for line in lines {
+                s.push_str(&line);
+                s.push('\n');
+            }
+            s.into_bytes()
+        }
+    }
+}
+
+/// The `key`/`value` pairs of a `.properties` file, read leniently: `key=value`
+/// or `key: value`, `#` and `!` comments, trailing-`\` continuations. Keys and
+/// values come back trimmed; a line with no separator is skipped.
+fn properties(text: &str) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    let mut push = |logical: &str| {
+        if let Some(split) = logical.find(['=', ':']) {
+            out.push((
+                logical[..split].trim().to_string(),
+                logical[split + 1..].trim().to_string(),
+            ));
+        }
+    };
+    let mut pending: Option<String> = None;
+    for raw in text.lines() {
+        let line = raw.trim_start();
+        let mut logical = match pending.take() {
+            Some(logical) => logical,
+            None if line.is_empty() || line.starts_with('#') || line.starts_with('!') => {
+                continue;
+            }
+            None => String::new(),
+        };
+        // An odd run of trailing backslashes continues the line; an even run
+        // is escaped backslashes.
+        let backslashes = line.len() - line.trim_end_matches('\\').len();
+        if backslashes % 2 == 1 {
+            logical.push_str(&line[..line.len() - 1]);
+            pending = Some(logical);
+        } else {
+            logical.push_str(line);
+            push(&logical);
+        }
+    }
+    if let Some(logical) = pending {
+        push(&logical);
+    }
+    out
+}
+
 /// Where Groovy 2.5+ looks for an extension-module descriptor, and where the
 /// merged one is written.
 const EXTENSION_MODULE: &str = "META-INF/groovy/org.codehaus.groovy.runtime.ExtensionModule";
@@ -422,44 +645,16 @@ impl ExtensionModule {
     /// `#` and `!` comments, trailing-`\` continuations — and classes already
     /// seen are skipped, so the lists keep first-seen order without duplicates.
     fn add(&mut self, text: &str) {
-        let mut pending: Option<String> = None;
-        for raw in text.lines() {
-            let line = raw.trim_start();
-            let mut logical = match pending.take() {
-                Some(logical) => logical,
-                None if line.is_empty() || line.starts_with('#') || line.starts_with('!') => {
-                    continue;
-                }
-                None => String::new(),
+        for (key, value) in properties(text) {
+            let list = match key.as_str() {
+                "extensionClasses" => &mut self.extension_classes,
+                "staticExtensionClasses" => &mut self.static_extension_classes,
+                _ => continue,
             };
-            // An odd run of trailing backslashes continues the line; an even run
-            // is escaped backslashes.
-            let backslashes = line.len() - line.trim_end_matches('\\').len();
-            if backslashes % 2 == 1 {
-                logical.push_str(&line[..line.len() - 1]);
-                pending = Some(logical);
-            } else {
-                logical.push_str(line);
-                self.apply(&logical);
-            }
-        }
-        if let Some(logical) = pending {
-            self.apply(&logical);
-        }
-    }
-
-    fn apply(&mut self, property: &str) {
-        let Some(split) = property.find(['=', ':']) else {
-            return;
-        };
-        let list = match property[..split].trim() {
-            "extensionClasses" => &mut self.extension_classes,
-            "staticExtensionClasses" => &mut self.static_extension_classes,
-            _ => return,
-        };
-        for class in property[split + 1..].split(',').map(str::trim) {
-            if !class.is_empty() && !list.iter().any(|seen| seen == class) {
-                list.push(class.to_string());
+            for class in value.split(',').map(str::trim) {
+                if !class.is_empty() && !list.iter().any(|seen| seen == class) {
+                    list.push(class.to_string());
+                }
             }
         }
     }
@@ -523,22 +718,22 @@ fn write_jar<R: Read + Seek>(
                     .map_err(|e| JrsError::build(format!("{}: {e}", output.display())))?;
                 std::io::copy(&mut source, &mut writer).path(output)?;
             }
-            Entry::Services(sources) => {
-                // Concatenated, with a newline between files, so no provider is
-                // glued onto the tail of the previous one.
-                let mut merged = Vec::new();
-                for (archive, index) in sources {
-                    let mut source = archives[*archive]
-                        .by_index(*index)
-                        .map_err(|e| JrsError::build(format!("{}: {e}", output.display())))?;
-                    let mut bytes = Vec::new();
-                    source.read_to_end(&mut bytes).path(output)?;
-                    if !merged.is_empty() && !merged.ends_with(b"\n") {
-                        merged.push(b'\n');
-                    }
-                    merged.extend_from_slice(&bytes);
+            Entry::Merged(kind, sources) => {
+                let mut copies = Vec::with_capacity(sources.len());
+                for source in sources {
+                    copies.push(match source {
+                        Source::File(path) => std::fs::read(path).path(path)?,
+                        Source::Jar(archive, index) => {
+                            let mut source = archives[*archive].by_index(*index).map_err(|e| {
+                                JrsError::build(format!("{}: {e}", output.display()))
+                            })?;
+                            let mut bytes = Vec::new();
+                            source.read_to_end(&mut bytes).path(output)?;
+                            bytes
+                        }
+                    });
                 }
-                writer.write_all(&merged).path(output)?;
+                writer.write_all(&merge(*kind, &copies)).path(output)?;
             }
             Entry::ExtensionModules(files, sources) => {
                 let mut merged = ExtensionModule::default();
@@ -655,6 +850,7 @@ mod tests {
             &JarManifest {
                 main_class: Some("com.example.Main".into()),
                 class_path: vec!["lib/guava.jar".into()],
+                ..JarManifest::default()
             },
         )
         .unwrap();
@@ -726,6 +922,7 @@ mod tests {
             class_path: (0..10)
                 .map(|i| format!("lib/dependency-{i}-1.0.0.jar"))
                 .collect(),
+            ..JarManifest::default()
         };
         let text = manifest.render();
         for line in text.lines() {
@@ -765,6 +962,7 @@ mod tests {
             &JarManifest {
                 main_class: Some("com.example.Main".into()),
                 class_path: vec![],
+                ..JarManifest::default()
             },
         )
         .unwrap();
@@ -806,6 +1004,7 @@ mod tests {
             &JarManifest {
                 main_class: Some("Main".into()),
                 class_path: vec![],
+                ..JarManifest::default()
             },
         )
         .unwrap();
@@ -836,6 +1035,7 @@ mod tests {
             &JarManifest {
                 main_class: Some("Main".into()),
                 class_path: vec![],
+                ..JarManifest::default()
             },
         )
         .unwrap();
@@ -888,6 +1088,7 @@ mod tests {
             &JarManifest {
                 main_class: Some("Main".into()),
                 class_path: vec![],
+                ..JarManifest::default()
             },
         )
         .unwrap();
@@ -916,6 +1117,7 @@ mod tests {
             &JarManifest {
                 main_class: Some("Main".into()),
                 class_path: vec![],
+                ..JarManifest::default()
             },
         )
         .unwrap();
@@ -948,6 +1150,7 @@ mod tests {
             &JarManifest {
                 main_class: Some("Main".into()),
                 class_path: vec![],
+                ..JarManifest::default()
             },
         )
         .unwrap();
@@ -982,6 +1185,7 @@ mod tests {
                     class_path_entry(Path::new("/cache/a b/one.jar")),
                     class_path_entry(Path::new("/cache/two.jar")),
                 ],
+                ..JarManifest::default()
             },
         )
         .unwrap();
@@ -1048,6 +1252,7 @@ mod tests {
             &JarManifest {
                 main_class: Some("Main".into()),
                 class_path: vec![],
+                ..JarManifest::default()
             },
         )
         .unwrap();
@@ -1207,6 +1412,301 @@ mod tests {
             merged.render(),
             "moduleName=merged-by-jrs\nmoduleVersion=1.0\n\
              extensionClasses=com.a.One,com.a.Two,com.a.Three\n"
+        );
+    }
+
+    fn text(contents: &BTreeMap<String, Vec<u8>>, name: &str) -> String {
+        String::from_utf8(contents[name].clone()).unwrap()
+    }
+
+    #[test]
+    fn extra_attributes_follow_jrs_own_in_declaration_order() {
+        let long = "v".repeat(200);
+        let manifest = JarManifest {
+            main_class: Some("com.example.Main".into()),
+            class_path: vec!["lib/a.jar".into()],
+            attributes: vec![
+                ("Implementation-Version".into(), "1.0".into()),
+                ("Automatic-Module-Name".into(), "com.example".into()),
+                ("X-Long".into(), long.clone()),
+            ],
+        };
+        let rendered = manifest.render();
+        let names: Vec<&str> = rendered
+            .lines()
+            .filter(|l| !l.is_empty() && !l.starts_with(' '))
+            .map(|l| l.split(':').next().unwrap())
+            .collect();
+        assert_eq!(
+            names,
+            [
+                "Manifest-Version",
+                "Created-By",
+                "Main-Class",
+                "Class-Path",
+                "Implementation-Version",
+                "Automatic-Module-Name",
+                "X-Long"
+            ]
+        );
+        for line in rendered.lines() {
+            assert!(line.len() <= 72, "line too long ({}): {line}", line.len());
+        }
+        let folded: String = rendered
+            .lines()
+            .skip_while(|l| !l.starts_with("X-Long:"))
+            .take_while(|l| l.starts_with("X-Long:") || l.starts_with(' '))
+            .map(|l| l.strip_prefix(' ').unwrap_or(l))
+            .collect();
+        assert_eq!(folded, format!("X-Long: {long}"));
+        assert!(
+            rendered.ends_with("\n\n"),
+            "a manifest ends with a blank line"
+        );
+    }
+
+    #[test]
+    fn the_projects_own_service_file_is_merged_not_replaced() {
+        let tree = Tree::new("own-services");
+        tree.write("classes/META-INF/services/x.Y", b"com.app.Impl\n");
+        let dep = tree.jar(
+            "dep.jar",
+            &[("META-INF/services/x.Y", b"com.dep.Impl\n" as &[u8])],
+        );
+        let out = tree.root.join("fat.jar");
+        fat_jar(&tree, &[dep], &out);
+        assert_eq!(
+            text(&read_jar(&out), "META-INF/services/x.Y"),
+            "com.app.Impl\ncom.dep.Impl\n"
+        );
+    }
+
+    #[test]
+    fn a_service_file_only_the_project_has_is_kept_as_it_is() {
+        let tree = Tree::new("own-services-alone");
+        tree.write("classes/META-INF/services/x.Y", b"com.app.Impl");
+        let out = tree.root.join("fat.jar");
+        fat_jar(&tree, &[], &out);
+        assert_eq!(
+            text(&read_jar(&out), "META-INF/services/x.Y"),
+            "com.app.Impl"
+        );
+    }
+
+    #[test]
+    fn spring_factories_merge_key_by_key() {
+        let tree = Tree::new("spring-factories");
+        tree.write(
+            "classes/META-INF/spring.factories",
+            b"org.springframework.context.ApplicationListener=com.app.Listener\n",
+        );
+        let boot = tree.jar(
+            "boot.jar",
+            &[(
+                "META-INF/spring.factories",
+                b"# Auto Configure\n\
+                  org.springframework.boot.autoconfigure.EnableAutoConfiguration=\\\n  \
+                  com.boot.A,\\\n  com.boot.B\n\
+                  org.springframework.context.ApplicationListener=com.boot.Listener\n"
+                    as &[u8],
+            )],
+        );
+        let other = tree.jar(
+            "other.jar",
+            &[(
+                "META-INF/spring.factories",
+                b"org.springframework.boot.autoconfigure.EnableAutoConfiguration=\
+                  com.other.C, com.boot.A" as &[u8],
+            )],
+        );
+        let out = tree.root.join("fat.jar");
+        fat_jar(&tree, &[boot, other], &out);
+        assert_eq!(
+            text(&read_jar(&out), "META-INF/spring.factories"),
+            "org.springframework.context.ApplicationListener=com.app.Listener,com.boot.Listener\n\
+             org.springframework.boot.autoconfigure.EnableAutoConfiguration=\
+             com.boot.A,com.boot.B,com.other.C\n"
+        );
+    }
+
+    #[test]
+    fn spring_imports_files_are_the_union_of_their_lines() {
+        let name =
+            "META-INF/spring/org.springframework.boot.autoconfigure.AutoConfiguration.imports";
+        let tree = Tree::new("spring-imports");
+        std::fs::create_dir_all(tree.root.join("classes")).unwrap();
+        let boot = tree.jar(
+            "boot.jar",
+            &[(name, b"# Boot's own\ncom.boot.A\ncom.boot.B\n\n" as &[u8])],
+        );
+        let other = tree.jar(
+            "other.jar",
+            &[(name, b"com.other.C\r\ncom.boot.A # again" as &[u8])],
+        );
+        let out = tree.root.join("fat.jar");
+        fat_jar(&tree, &[boot, other], &out);
+        assert_eq!(
+            text(&read_jar(&out), name),
+            "com.boot.A\ncom.boot.B\ncom.other.C\n"
+        );
+    }
+
+    #[test]
+    fn spring_handlers_and_schemas_are_concatenated() {
+        let tree = Tree::new("spring-handlers");
+        std::fs::create_dir_all(tree.root.join("classes")).unwrap();
+        let beans = tree.jar(
+            "beans.jar",
+            &[
+                (
+                    "META-INF/spring.handlers",
+                    b"http\\://www.springframework.org/schema/c=org.C" as &[u8],
+                ),
+                (
+                    "META-INF/spring.schemas",
+                    b"http\\://www.springframework.org/schema/beans.xsd=beans.xsd\n",
+                ),
+            ],
+        );
+        let context = tree.jar(
+            "context.jar",
+            &[
+                (
+                    "META-INF/spring.handlers",
+                    b"http\\://www.springframework.org/schema/context=org.Ctx\n" as &[u8],
+                ),
+                (
+                    "META-INF/spring.schemas",
+                    b"http\\://www.springframework.org/schema/context.xsd=context.xsd\n",
+                ),
+            ],
+        );
+        let out = tree.root.join("fat.jar");
+        fat_jar(&tree, &[beans, context], &out);
+        let contents = read_jar(&out);
+        assert_eq!(
+            text(&contents, "META-INF/spring.handlers"),
+            "http\\://www.springframework.org/schema/c=org.C\n\
+             http\\://www.springframework.org/schema/context=org.Ctx\n"
+        );
+        assert_eq!(
+            text(&contents, "META-INF/spring.schemas"),
+            "http\\://www.springframework.org/schema/beans.xsd=beans.xsd\n\
+             http\\://www.springframework.org/schema/context.xsd=context.xsd\n"
+        );
+    }
+
+    #[test]
+    fn merge_rules_are_chosen_by_exact_name() {
+        for (name, kind) in [
+            ("META-INF/services/java.sql.Driver", Some(Merge::Append)),
+            ("META-INF/spring.factories", Some(Merge::SpringFactories)),
+            ("META-INF/spring.handlers", Some(Merge::Append)),
+            ("META-INF/spring.schemas", Some(Merge::Append)),
+            ("META-INF/spring.tooling", Some(Merge::Append)),
+            (
+                "META-INF/spring/a.b.AutoConfiguration.imports",
+                Some(Merge::Lines),
+            ),
+            ("META-INF/spring/nested/a.imports", None),
+            ("META-INF/spring/.imports", None),
+            ("META-INF/spring/a.IMPORTS", None),
+            ("META-INF/spring.factories.bak", None),
+            ("spring.factories", None),
+            ("META-INF/services/", None),
+        ] {
+            assert_eq!(merge_kind(name), kind, "{name}");
+        }
+    }
+
+    #[test]
+    fn a_spring_fat_jar_is_byte_identical_across_builds() {
+        let tree = Tree::new("spring-deterministic");
+        tree.write("classes/META-INF/spring.factories", b"k=com.app.A\n");
+        let dep = tree.jar(
+            "dep.jar",
+            &[
+                (
+                    "META-INF/spring.factories",
+                    b"k=com.dep.B\nj=com.dep.C\n" as &[u8],
+                ),
+                ("META-INF/spring/x.imports", b"com.dep.D\n"),
+            ],
+        );
+        let one = tree.root.join("one.jar");
+        let two = tree.root.join("two.jar");
+        for out in [&one, &two] {
+            fat_jar(&tree, std::slice::from_ref(&dep), out);
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert_eq!(std::fs::read(&one).unwrap(), std::fs::read(&two).unwrap());
+    }
+
+    #[test]
+    fn a_sources_jar_names_files_by_their_root() {
+        let tree = Tree::new("sources");
+        let java = tree.root.join("src/main/java");
+        let kotlin = tree.root.join("src/main/kotlin");
+        let generated = tree.root.join("target/generated/sources");
+        let files = vec![
+            tree.write("src/main/java/com/example/App.java", b"app"),
+            tree.write("src/main/kotlin/com/example/Util.kt", b"util"),
+            tree.write(
+                "target/generated/sources/com/example/BuildInfo.java",
+                b"info",
+            ),
+            // Under no root: not a source of this jar.
+            tree.write("elsewhere/Stray.java", b"stray"),
+        ];
+        let roots = vec![java, kotlin, generated];
+
+        let first = tree.root.join("first-sources.jar");
+        let second = tree.root.join("second-sources.jar");
+        let outcome = write_sources_jar(&roots, &files, &first).unwrap();
+        assert_eq!(outcome.entries, 4);
+        assert_eq!(
+            entry_order(&first),
+            [
+                "META-INF/MANIFEST.MF",
+                "com/example/App.java",
+                "com/example/BuildInfo.java",
+                "com/example/Util.kt"
+            ]
+        );
+        let contents = read_jar(&first);
+        assert_eq!(contents["com/example/Util.kt"], b"util");
+        let manifest = text(&contents, "META-INF/MANIFEST.MF");
+        assert!(!manifest.contains("Main-Class"), "{manifest}");
+
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        write_sources_jar(&roots, &files, &second).unwrap();
+        assert_eq!(
+            std::fs::read(&first).unwrap(),
+            std::fs::read(&second).unwrap()
+        );
+    }
+
+    #[test]
+    fn a_nested_root_gives_package_relative_names() {
+        let tree = Tree::new("sources-nested");
+        let outer = tree.root.join("src");
+        let inner = tree.root.join("src/main/kotlin");
+        let file = tree.write("src/main/kotlin/com/example/Util.kt", b"util");
+        let out = tree.root.join("sources.jar");
+        write_sources_jar(&[outer, inner], &[file], &out).unwrap();
+        assert!(read_jar(&out).contains_key("com/example/Util.kt"));
+    }
+
+    #[test]
+    fn a_javadoc_jar_holds_the_doc_tree() {
+        let tree = Tree::new("javadoc");
+        tree.write("doc/index.html", b"<html>");
+        tree.write("doc/com/example/App.html", b"<html>app");
+        let out = tree.root.join("javadoc.jar");
+        write_javadoc_jar(&tree.root.join("doc"), &out).unwrap();
+        assert_eq!(
+            entry_order(&out),
+            ["META-INF/MANIFEST.MF", "com/example/App.html", "index.html"]
         );
     }
 

@@ -15,7 +15,7 @@ use crate::error::{IoResultExt, JrsError, Result};
 use crate::manifest::{Dependency, Manifest};
 use crate::resolve::coord::{Coord, Ga};
 use crate::resolve::repo::sha256_hex;
-use crate::resolve::{Classpath, Resolution, ResolvedPackage};
+use crate::resolve::{Classpath, LocalJar, Resolution, ResolvedPackage};
 
 pub const LOCK_VERSION: u64 = 1;
 
@@ -36,6 +36,12 @@ pub struct Lockfile {
     /// Graphs jrs resolves for itself, each apart from the project's: the
     /// compilers of the project's other languages.
     pub tools: Vec<LockedTool>,
+    /// The manifest's local jars, as `[[local]]` blocks: the relative path and
+    /// the pinned checksum, never the absolute path. A lockfile without them
+    /// renders exactly as it did before they existed. They need no new
+    /// `version`: a jrs that predates them refuses the manifest's `path` key
+    /// outright, so it can never rewrite this file and drop the pins.
+    pub local: Vec<LocalJar>,
 }
 
 /// One tool's pinned graph, in the package format the project's uses.
@@ -57,6 +63,14 @@ impl Lockfile {
             test_roots: resolution.test_roots.clone(),
             packages: sorted(&resolution.packages),
             tools: Vec::new(),
+            local: resolution
+                .local
+                .iter()
+                .map(|l| LocalJar {
+                    jar: None,
+                    ..l.clone()
+                })
+                .collect(),
         }
     }
 
@@ -85,6 +99,7 @@ impl Lockfile {
                 test_roots: Vec::new(),
                 warnings: Vec::new(),
                 downloaded: 0,
+                local: Vec::new(),
             })
     }
 
@@ -97,7 +112,8 @@ impl Lockfile {
     }
 
     /// Turn the lockfile back into a resolution. Jar paths are left empty; the
-    /// caller fills them from the cache or by downloading.
+    /// caller fills them from the cache or by downloading, and the local jars'
+    /// from the project with [`crate::resolve::attach_local`].
     #[must_use]
     pub fn to_resolution(&self) -> Resolution {
         Resolution {
@@ -106,6 +122,7 @@ impl Lockfile {
             test_roots: self.test_roots.clone(),
             warnings: Vec::new(),
             downloaded: 0,
+            local: self.local.clone(),
         }
     }
 
@@ -205,6 +222,7 @@ impl Lockfile {
             test_roots: read_gas(&table, "test-roots"),
             packages: read_packages(&table, path)?,
             tools,
+            local: read_local(&table, path)?,
         })
     }
 
@@ -221,6 +239,9 @@ impl Lockfile {
 
         for p in &self.packages {
             render_package(&mut s, "package", p);
+        }
+        for l in &self.local {
+            render_local(&mut s, l);
         }
         for tool in &self.tools {
             s.push_str("\n[[tool]]\n");
@@ -262,6 +283,58 @@ fn render_package(s: &mut String, header: &str, p: &ResolvedPackage) {
     if !p.dependencies.is_empty() {
         let _ = writeln!(s, "dependencies = {}", render_gas(&p.dependencies));
     }
+}
+
+/// One `[[local]]` block. Its `path` is the manifest's, relative to the
+/// project root: an absolute path would tie the lockfile to one machine.
+fn render_local(s: &mut String, l: &LocalJar) {
+    s.push_str("\n[[local]]\n");
+    let _ = writeln!(s, "name = \"{}\"", l.name);
+    let _ = writeln!(s, "path = {}", toml::Value::String(l.path.clone()));
+    let _ = writeln!(s, "classpath = \"{}\"", l.classpath.as_str());
+    if let Some(c) = &l.checksum {
+        let _ = writeln!(s, "checksum = \"{c}\"");
+    }
+}
+
+fn read_local(table: &toml::Table, path: &Path) -> Result<Vec<LocalJar>> {
+    let mut out = Vec::new();
+    for value in table
+        .get("local")
+        .and_then(|v| v.as_array())
+        .into_iter()
+        .flatten()
+    {
+        let t = value.as_table().ok_or_else(|| {
+            JrsError::resolve(format!("{}: [[local]] must be a table", path.display()))
+        })?;
+        let field = |name: &str| -> Result<String> {
+            t.get(name)
+                .and_then(|v| v.as_str())
+                .map(str::to_string)
+                .ok_or_else(|| {
+                    JrsError::resolve(format!(
+                        "{}: [[local]] is missing `{name}`\n\nrun `jrs update` to regenerate it",
+                        path.display()
+                    ))
+                })
+        };
+        out.push(LocalJar {
+            name: field("name")?,
+            path: field("path")?,
+            classpath: Classpath::parse(
+                t.get("classpath")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("compile"),
+            ),
+            checksum: t
+                .get("checksum")
+                .and_then(|v| v.as_str())
+                .map(str::to_string),
+            jar: None,
+        });
+    }
+    Ok(out)
 }
 
 fn read_packages(table: &toml::Table, path: &Path) -> Result<Vec<ResolvedPackage>> {
@@ -358,12 +431,18 @@ pub fn manifest_checksum(manifest: &Manifest) -> String {
     // The long form's extras are appended only when present, so a lockfile
     // written before they existed still matches the manifest it was made from.
     let line = |d: &Dependency| {
-        let mut s = d.to_string();
+        let mut s = match &d.path {
+            Some(path) => format!("{} path={path}", d.artifact),
+            None => d.to_string(),
+        };
         for e in &d.exclusions {
             let _ = write!(s, " exclude={e}");
         }
         if d.compile_only {
             s.push_str(" compile-only");
+        }
+        if d.runtime_only {
+            s.push_str(" runtime-only");
         }
         s
     };
@@ -375,7 +454,13 @@ pub fn manifest_checksum(manifest: &Manifest) -> String {
         let _ = writeln!(canonical, "dev {}", line(d));
     }
     for r in &manifest.repositories {
-        let _ = writeln!(canonical, "repo {} {}", r.name, r.url);
+        // `groups` decide which repository an artifact may come from, and so
+        // whether it resolves at all.
+        let _ = write!(canonical, "repo {} {}", r.name, r.url);
+        if !r.groups.is_empty() {
+            let _ = write!(canonical, " groups={}", r.groups.join(","));
+        }
+        canonical.push('\n');
     }
     for c in &manifest.languages {
         let _ = writeln!(canonical, "lang {} {}", c.language.key(), c.version);
@@ -418,6 +503,7 @@ mod tests {
             test_roots: vec![Ga::new("g", "junit")],
             warnings: vec![],
             downloaded: 0,
+            local: vec![],
         }
     }
 
@@ -639,6 +725,70 @@ mod tests {
         let missing = std::env::temp_dir().join("jrs-no-such-lockfile.lock");
         let _ = std::fs::remove_file(&missing);
         assert!(Lockfile::load(&missing).unwrap().is_none());
+    }
+
+    #[test]
+    fn local_jars_are_pinned_by_relative_path_and_checksum() {
+        let m = manifest(
+            "[dependencies]\n'g:a'='1.0'\ndriver = { path = 'libs/driver.jar', runtime-only = true }",
+        );
+        let mut r = resolution();
+        r.local = vec![LocalJar {
+            name: "driver".into(),
+            path: "libs/driver.jar".into(),
+            classpath: Classpath::Runtime,
+            checksum: Some("sha256:abc".into()),
+            jar: Some(PathBuf::from("/home/me/project/libs/driver.jar")),
+        }];
+        let text = Lockfile::from_resolution(&m, &r).render();
+        assert!(text.contains("version = 1\n"), "{text}");
+        assert!(
+            text.contains(
+                "\n[[local]]\nname = \"driver\"\npath = \"libs/driver.jar\"\n\
+                 classpath = \"runtime\"\nchecksum = \"sha256:abc\"\n"
+            ),
+            "{text}"
+        );
+        assert!(!text.contains("/home/me"), "{text}");
+
+        let again = Lockfile::parse(&text, Path::new("jrs.lock")).unwrap();
+        assert!(again.matches(&m));
+        assert_eq!(again.local.len(), 1);
+        assert_eq!(again.local[0].classpath, Classpath::Runtime);
+        assert_eq!(again.local[0].jar, None);
+        assert_eq!(again.to_resolution().local, again.local);
+        assert_eq!(again.render(), text, "rendering is stable");
+
+        // A lockfile without them renders exactly as before they existed.
+        assert!(
+            !Lockfile::from_resolution(&m, &resolution())
+                .render()
+                .contains("[[local]]")
+        );
+        let err = Lockfile::parse(
+            "version = 1\n[[local]]\nname = \"d\"\n",
+            Path::new("jrs.lock"),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("[[local]] is missing `path`"), "{err}");
+    }
+
+    #[test]
+    fn the_checksum_follows_runtime_only_local_jars_and_groups() {
+        let base = manifest("[dependencies]\n'g:a'='1.0'");
+        let runtime = manifest("[dependencies]\n'g:a'={version='1.0', runtime-only=true}");
+        let local = manifest("[dependencies]\n'g:a'='1.0'\nd={path='libs/d.jar'}");
+        let moved = manifest("[dependencies]\n'g:a'='1.0'\nd={path='lib/d.jar'}");
+        let plain =
+            manifest("[dependencies]\n'g:a'='1.0'\n[repositories]\nx='https://example.com/m2'");
+        let grouped = manifest(
+            "[dependencies]\n'g:a'='1.0'\n[repositories]\nx={url='https://example.com/m2', groups=['g']}",
+        );
+        assert_ne!(manifest_checksum(&base), manifest_checksum(&runtime));
+        assert_ne!(manifest_checksum(&base), manifest_checksum(&local));
+        assert_ne!(manifest_checksum(&local), manifest_checksum(&moved));
+        assert_ne!(manifest_checksum(&plain), manifest_checksum(&grouped));
     }
 
     #[test]

@@ -848,6 +848,58 @@ fn stamp(path: &Path) -> Option<(u64, u128)> {
     Some((meta.len(), modified))
 }
 
+// ---- the run and test JVMs -------------------------------------------------
+
+/// A placeholder's value in `run.env`, `run.cwd` or `test.env`: what a task
+/// would see, with the dependencies resolved. `{jar}` and
+/// `{classpath-argfile}` were refused when the manifest was parsed.
+fn jvm_value(manifest: &Manifest, classpaths: &Classpaths, p: Placeholder) -> Result<String> {
+    match p {
+        Placeholder::Classpath => Ok(Toolchain::classpath(&classpaths.compile)),
+        Placeholder::RuntimeClasspath => Ok(Toolchain::classpath(&classpaths.runtime)),
+        Placeholder::TestClasspath => Ok(Toolchain::classpath(&classpaths.test)),
+        Placeholder::Jar | Placeholder::ClasspathArgfile => Err(JrsError::manifest(format!(
+            "`{{{}}}` only has a value in a task",
+            p.name()
+        ))),
+        _ => static_value(manifest, p),
+    }
+}
+
+/// `run.env` or `test.env`, expanded: what the JVM adds to the environment it
+/// inherits from jrs, in declaration order.
+///
+/// # Errors
+///
+/// [`JrsError::Manifest`] for a placeholder only a task has a value for,
+/// which parsing already refuses.
+pub fn jvm_env(
+    manifest: &Manifest,
+    env: &[(String, Template)],
+    classpaths: &Classpaths,
+) -> Result<Vec<(String, String)>> {
+    env.iter()
+        .map(|(key, t)| {
+            Ok((
+                key.clone(),
+                t.expand(|p| jvm_value(manifest, classpaths, p))?,
+            ))
+        })
+        .collect()
+}
+
+/// `run.cwd`, expanded and taken relative to the project root, as a task's
+/// `cwd` is.
+///
+/// # Errors
+///
+/// [`JrsError::Build`] for a classpath placeholder, which parsing already
+/// refuses in a path.
+pub fn jvm_cwd(manifest: &Manifest, cwd: &Template) -> Result<PathBuf> {
+    let expanded = cwd.expand(|p| static_value(manifest, p))?;
+    Ok(static_root(manifest).join(expanded))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1336,5 +1388,48 @@ mod tests {
         let watched = watched_inputs(&m);
         assert_eq!(watched.len(), 1);
         assert!(watched[0].ends_with("src/main/proto"));
+    }
+
+    #[test]
+    fn the_jvm_environment_expands_like_a_tasks() {
+        let m = parse(
+            "[run]\nenv = { OUT = '{target}/out', WHO = '{project.name}-{project.version}', \
+             CP = '{runtime-classpath}', LIT = '{{x}}' }\ncwd = '{target}/work'\n\
+             [test]\nenv = { CP = '{test-classpath}' }\n",
+        )
+        .unwrap();
+        let classpaths = Classpaths {
+            compile: vec![PathBuf::from("/c.jar")],
+            runtime: vec![PathBuf::from("/classes"), PathBuf::from("/r.jar")],
+            test: vec![PathBuf::from("/t.jar")],
+        };
+        let env = jvm_env(&m, &m.run.env, &classpaths).unwrap();
+        let root = static_root(&m);
+        assert_eq!(
+            env,
+            vec![
+                (
+                    "OUT".to_string(),
+                    format!("{}/out", root.join("target").display())
+                ),
+                ("WHO".to_string(), "app-1.0.0".to_string()),
+                ("CP".to_string(), Toolchain::classpath(&classpaths.runtime)),
+                ("LIT".to_string(), "{x}".to_string()),
+            ]
+        );
+        assert_eq!(
+            jvm_env(&m, &m.test.env, &classpaths).unwrap()[0].1,
+            "/t.jar"
+        );
+        assert_eq!(
+            jvm_cwd(&m, m.run.cwd.as_ref().unwrap()).unwrap(),
+            root.join("target").join("work")
+        );
+        // Relative to the root, as a task's `cwd` is.
+        let m = parse("[run]\ncwd = 'work'\n").unwrap();
+        assert_eq!(
+            jvm_cwd(&m, m.run.cwd.as_ref().unwrap()).unwrap(),
+            root.join("work")
+        );
     }
 }

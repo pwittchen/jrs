@@ -11,7 +11,7 @@ pub mod pom;
 pub mod repo;
 
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -27,17 +27,23 @@ use crate::ui::{Live, Transfer, Ui};
 
 /// Which classpath a resolved package belongs to.
 ///
-/// The order is the dominance order: a package reached several ways lands on the
-/// widest classpath that reaches it. A compile dependency that tests also see is
-/// a compile dependency; one that a `compile-only` library also drags in still
-/// has to be there at runtime.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+/// Each value is a set of places a jar goes: the main sources' compile
+/// classpath, the runtime one, and the test one (which the tests compile and
+/// run against alike). A package reached several ways lands on the union of
+/// what reaches it, [`Classpath::join`]: a compile dependency that tests also
+/// see is a compile dependency; one that a `compile-only` library also drags
+/// in still has to be there at runtime; and one that is `compile-only` on one
+/// path and `runtime-only` on another is needed on both, which is `Compile`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Classpath {
     /// Compile, test and runtime.
     Compile,
     /// Compile and test, but not runtime: `compile-only` and everything it
     /// brings in (Maven's `provided`).
     Provided,
+    /// Runtime and test, but not the main sources' compile classpath:
+    /// `runtime-only` and everything it brings in (Maven's `runtime`).
+    Runtime,
     /// Tests only.
     Test,
 }
@@ -48,6 +54,7 @@ impl Classpath {
         match self {
             Classpath::Compile => "compile",
             Classpath::Provided => "provided",
+            Classpath::Runtime => "runtime",
             Classpath::Test => "test",
         }
     }
@@ -57,9 +64,55 @@ impl Classpath {
         match s {
             "test" => Classpath::Test,
             "provided" => Classpath::Provided,
+            "runtime" => Classpath::Runtime,
             _ => Classpath::Compile,
         }
     }
+
+    /// The classpath of a package reached both as `self` and as `other`:
+    /// every place either puts it (SPEC §8.2 step 6).
+    #[must_use]
+    pub fn join(self, other: Classpath) -> Classpath {
+        match (self, other) {
+            (Classpath::Compile, _)
+            | (_, Classpath::Compile)
+            | (Classpath::Provided, Classpath::Runtime)
+            | (Classpath::Runtime, Classpath::Provided) => Classpath::Compile,
+            (Classpath::Test, other) | (other, Classpath::Test) => other,
+            (Classpath::Provided, Classpath::Provided) => Classpath::Provided,
+            (Classpath::Runtime, Classpath::Runtime) => Classpath::Runtime,
+        }
+    }
+
+    /// On the classpath the main sources compile against — `javac`'s, and
+    /// kotlinc's, scalac's and groovyc's.
+    #[must_use]
+    pub fn compiles(self) -> bool {
+        matches!(self, Classpath::Compile | Classpath::Provided)
+    }
+
+    /// On the classpath the program runs with, and so in what is packaged.
+    #[must_use]
+    pub fn runs(self) -> bool {
+        matches!(self, Classpath::Compile | Classpath::Runtime)
+    }
+}
+
+/// A jar the manifest names by `path` rather than by coordinate
+/// (`name = { path = "libs/driver.jar" }`). It is taken as it is: no POM, no
+/// transitive graph, nothing to mediate. `jrs.lock` records its relative path
+/// and pins its checksum.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LocalJar {
+    /// The manifest key.
+    pub name: String,
+    /// Relative to the project root, `/`-separated, as the manifest writes it.
+    pub path: String,
+    pub classpath: Classpath,
+    /// `sha256:<hex>`, once the file has been read or the lockfile pinned it.
+    pub checksum: Option<String>,
+    /// Filled in by [`attach_local`].
+    pub jar: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone)]
@@ -98,6 +151,9 @@ pub struct Resolution {
     pub test_roots: Vec<Ga>,
     pub warnings: Vec<String>,
     pub downloaded: u64,
+    /// The manifest's local jars, in declaration order: `[dependencies]`
+    /// first, then `[dev-dependencies]`.
+    pub local: Vec<LocalJar>,
 }
 
 impl Resolution {
@@ -107,28 +163,34 @@ impl Resolution {
     }
 
     /// Jars for `javac -cp`, in a stable order: direct dependencies first, then
-    /// transitives, each sorted by coordinate (SPEC §8.2 step 7).
+    /// transitives, each sorted by coordinate (SPEC §8.2 step 7). Local jars
+    /// are direct dependencies with no coordinate; they come after the
+    /// coordinates, sorted by name.
     ///
     /// `Compile` (or `Provided`) is what the main sources compile against, so
-    /// it includes `compile-only` jars; `Test` is everything. What a program
-    /// runs with is [`Resolution::runtime_classpath`].
+    /// it includes `compile-only` jars and leaves `runtime-only` ones out;
+    /// `Test` is everything; `Runtime` is [`Resolution::runtime_classpath`].
     #[must_use]
     pub fn classpath(&self, which: Classpath) -> Vec<PathBuf> {
-        self.ordered(|p| which == Classpath::Test || p.classpath != Classpath::Test)
+        match which {
+            Classpath::Test => self.ordered(|_| true),
+            Classpath::Runtime => self.runtime_classpath(),
+            Classpath::Compile | Classpath::Provided => self.ordered(Classpath::compiles),
+        }
     }
 
-    /// Jars for `java -cp` and for packaging: the compile classpath without
-    /// anything `compile-only`.
+    /// Jars for `java -cp` and for packaging: everything that runs, which is
+    /// the compile classpath without `compile-only` and with `runtime-only`.
     #[must_use]
     pub fn runtime_classpath(&self) -> Vec<PathBuf> {
-        self.ordered(|p| p.classpath == Classpath::Compile)
+        self.ordered(Classpath::runs)
     }
 
-    fn ordered(&self, include: impl Fn(&ResolvedPackage) -> bool) -> Vec<PathBuf> {
+    fn ordered(&self, include: impl Fn(Classpath) -> bool) -> Vec<PathBuf> {
         let mut direct: Vec<&ResolvedPackage> = Vec::new();
         let mut transitive: Vec<&ResolvedPackage> = Vec::new();
         for p in &self.packages {
-            if !include(p) || p.jar.is_none() {
+            if !include(p.classpath) || p.jar.is_none() {
                 continue;
             }
             if p.direct {
@@ -139,19 +201,32 @@ impl Resolution {
         }
         direct.sort_by(|a, b| a.coord.cmp(&b.coord));
         transitive.sort_by(|a, b| a.coord.cmp(&b.coord));
+        let mut local: Vec<&LocalJar> = self
+            .local
+            .iter()
+            .filter(|l| include(l.classpath) && l.jar.is_some())
+            .collect();
+        local.sort_by(|a, b| a.name.cmp(&b.name));
         direct
             .into_iter()
-            .chain(transitive)
             .filter_map(|p| p.jar.clone())
+            .chain(local.into_iter().filter_map(|l| l.jar.clone()))
+            .chain(transitive.into_iter().filter_map(|p| p.jar.clone()))
             .collect()
     }
 
     /// Packages whose jars belong inside a fat jar, or on the `Class-Path` of a
-    /// thin one: everything on the compile classpath.
+    /// thin one: everything on the runtime classpath that has a coordinate.
     pub fn runtime_packages(&self) -> impl Iterator<Item = &ResolvedPackage> {
         self.packages
             .iter()
-            .filter(|p| p.classpath == Classpath::Compile && p.jar.is_some())
+            .filter(|p| p.classpath.runs() && p.jar.is_some())
+    }
+
+    /// The local jar the manifest calls `name`.
+    #[must_use]
+    pub fn local_jar(&self, name: &str) -> Option<&LocalJar> {
+        self.local.iter().find(|l| l.name == name)
     }
 }
 
@@ -203,7 +278,7 @@ pub fn resolve(manifest: &Manifest, fetcher: &Fetcher, jobs: usize) -> Result<Re
     // direct dependencies, declared last.
     let dependencies = manifest.effective_dependencies();
     for dep in dependencies.iter().chain(&manifest.dev_dependencies) {
-        if is_range(&dep.version) {
+        if !dep.is_local() && is_range(&dep.version) {
             return Err(JrsError::resolve(format!(
                 "`{}` asks for the version range `{}`\n\n\
                  jrs resolves exact versions only; pick one, or run `jrs migrate` \
@@ -231,8 +306,17 @@ pub fn resolve(manifest: &Manifest, fetcher: &Fetcher, jobs: usize) -> Result<Re
 
     let root_ga =
         |d: &Dependency| Ga::new(&d.group, &d.artifact).with_classifier(d.classifier.clone());
-    let roots: Vec<Ga> = dependencies.iter().map(root_ga).collect();
-    let test_roots: Vec<Ga> = manifest.dev_dependencies.iter().map(root_ga).collect();
+    let roots: Vec<Ga> = dependencies
+        .iter()
+        .filter(|d| !d.is_local())
+        .map(root_ga)
+        .collect();
+    let test_roots: Vec<Ga> = manifest
+        .dev_dependencies
+        .iter()
+        .filter(|d| !d.is_local())
+        .map(root_ga)
+        .collect();
 
     let mut depth = 1;
     while !level.is_empty() {
@@ -258,7 +342,7 @@ pub fn resolve(manifest: &Manifest, fetcher: &Fetcher, jobs: usize) -> Result<Re
                 }
                 // A package reached from the compile graph must end up on the
                 // compile classpath even if a test path found it first.
-                existing.classpath = existing.classpath.min(item.classpath);
+                existing.classpath = existing.classpath.join(item.classpath);
                 existing.direct |= item.depth == 1;
             } else {
                 selected.insert(
@@ -343,11 +427,12 @@ pub fn resolve(manifest: &Manifest, fetcher: &Fetcher, jobs: usize) -> Result<Re
                 continue;
             };
             for child in children {
-                if let Some(c) = selected.get_mut(child)
-                    && widest < c.classpath
-                {
-                    c.classpath = widest;
-                    changed = true;
+                if let Some(c) = selected.get_mut(child) {
+                    let joined = c.classpath.join(widest);
+                    if joined != c.classpath {
+                        c.classpath = joined;
+                        changed = true;
+                    }
                 }
             }
         }
@@ -377,13 +462,44 @@ pub fn resolve(manifest: &Manifest, fetcher: &Fetcher, jobs: usize) -> Result<Re
         .collect();
     packages.sort_by(|a, b| a.coord.cmp(&b.coord));
 
-    Ok(Resolution {
+    let mut resolution = Resolution {
         packages,
         roots,
         test_roots,
         warnings: ctx.warnings.into_inner().unwrap(),
         downloaded: 0,
-    })
+        local: local_jars(manifest),
+    };
+    attach_local(&mut resolution, &manifest.root)?;
+    Ok(resolution)
+}
+
+/// The manifest's local jars, not yet read: `[dependencies]` in declaration
+/// order, then `[dev-dependencies]`.
+fn local_jars(manifest: &Manifest) -> Vec<LocalJar> {
+    let main = manifest.dependencies.iter().map(|d| (d, false));
+    let dev = manifest.dev_dependencies.iter().map(|d| (d, true));
+    main.chain(dev)
+        .filter_map(|(d, dev)| {
+            let path = d.path.clone()?;
+            let classpath = if dev {
+                Classpath::Test
+            } else if d.compile_only {
+                Classpath::Provided
+            } else if d.runtime_only {
+                Classpath::Runtime
+            } else {
+                Classpath::Compile
+            };
+            Some(LocalJar {
+                name: d.artifact.clone(),
+                path,
+                classpath,
+                checksum: None,
+                jar: None,
+            })
+        })
+        .collect()
 }
 
 /// Resolve a tool — a compiler — as a graph of its own, never merged into the
@@ -416,6 +532,8 @@ fn seed(dependencies: &[Dependency], dev_dependencies: &[Dependency]) -> Vec<Pen
                 .with_classifier(d.classifier.clone()),
             classpath: if d.compile_only {
                 Classpath::Provided
+            } else if d.runtime_only {
+                Classpath::Runtime
             } else {
                 classpath
             },
@@ -429,10 +547,11 @@ fn seed(dependencies: &[Dependency], dev_dependencies: &[Dependency]) -> Vec<Pen
             pom_only: false,
         });
     };
-    for d in dependencies {
+    // A local jar has no coordinate to walk; `local_jars` takes it instead.
+    for d in dependencies.iter().filter(|d| !d.is_local()) {
         push(d, Classpath::Compile);
     }
-    for d in dev_dependencies {
+    for d in dev_dependencies.iter().filter(|d| !d.is_local()) {
         push(d, Classpath::Test);
     }
     out
@@ -713,6 +832,127 @@ pub fn locate_cached(resolution: &mut Resolution, fetcher: &Fetcher) {
     }
 }
 
+/// The `-sources.jar` of every package with a jar in `resolution`, once each
+/// (a library and its natives share one), sorted by coordinate.
+#[must_use]
+pub fn sources_coords(resolution: &Resolution) -> Vec<Coord> {
+    let mut coords: Vec<Coord> = resolution
+        .packages
+        .iter()
+        .filter(|p| p.packaging != "pom")
+        .map(|p| p.coord.sources())
+        .collect();
+    coords.sort();
+    coords.dedup();
+    coords
+}
+
+/// Download each of `coords` — `-sources.jar`s, for `jrs fetch --sources` —
+/// in parallel, through the cache like any jar. Each comes back with its own
+/// result, in the order given: a library that publishes no sources is common,
+/// and the caller decides what a missing one means.
+///
+/// # Errors
+///
+/// [`JrsError::Resolve`] when the worker pool cannot start.
+pub fn fetch_sources(
+    coords: &[Coord],
+    fetcher: &Fetcher,
+    jobs: usize,
+) -> Result<Vec<(Coord, Result<PathBuf>)>> {
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(jobs.max(1))
+        .build()
+        .map_err(|e| JrsError::resolve(format!("could not start a worker pool: {e}")))?;
+    Ok(pool.install(|| {
+        coords
+            .par_iter()
+            .map(|c| (c.clone(), fetcher.jar(c).map(|(path, _)| path)))
+            .collect()
+    }))
+}
+
+/// Where `coord`'s `-sources.jar` is in the cache, if it is there.
+#[must_use]
+pub fn cached_sources(coord: &Coord, cache: &cache::Cache) -> Option<PathBuf> {
+    Some(cache.path_for(&coord.sources(), "jar")).filter(|p| p.is_file())
+}
+
+// ---- local jars ------------------------------------------------------------
+
+/// Find each local jar under `root`, the project directory, hash it, and fill
+/// in its `jar`; one already found is left alone. [`resolve`] does this
+/// itself; a resolution read back from `jrs.lock` needs it done.
+///
+/// The file is hashed on every build, unlike a cached jar: it is the only way
+/// to notice that a jar under the same name has changed, and a checked-in jar
+/// is small next to what a build reads anyway.
+///
+/// # Errors
+///
+/// [`JrsError::Manifest`] when a local jar does not exist or is a directory;
+/// [`JrsError::Resolve`] when it no longer matches the checksum `jrs.lock`
+/// pinned for it; [`JrsError::Io`] when it cannot be read.
+pub fn attach_local(resolution: &mut Resolution, root: &Path) -> Result<()> {
+    for local in resolution.local.iter_mut().filter(|l| l.jar.is_none()) {
+        let path = root.join(&local.path);
+        if !path.is_file() {
+            let what = if path.is_dir() {
+                "is a directory; name the jar itself, one entry per jar"
+            } else {
+                "does not exist"
+            };
+            return Err(JrsError::manifest(format!(
+                "the local jar `{}` = {} {what}\n\n`path` is relative to the project \
+                 root, {}",
+                local.name,
+                local.path,
+                root.display()
+            )));
+        }
+        let bytes = std::fs::read(&path).map_err(|e| JrsError::io(&path, e))?;
+        let actual = format!("sha256:{}", repo::sha256_hex(&bytes));
+        if let Some(pin) = &local.checksum
+            && let Some(found) = repo::digest_as(pin, &bytes)
+            && !found.eq_ignore_ascii_case(pin)
+        {
+            return Err(JrsError::resolve(format!(
+                "the local jar `{}` = {} has changed since jrs.lock pinned it\n\n  \
+                 locked {pin}\n  got    {found}\n\n\
+                 if it was replaced on purpose, run `jrs update` to pin the new one",
+                local.name, local.path
+            )));
+        }
+        local.checksum.get_or_insert(actual);
+        local.jar = Some(path);
+    }
+    Ok(())
+}
+
+/// What `jrs verify` finds for a local jar at `path`, against `pin`.
+/// [`Integrity::NotCached`] means the file is not there at all.
+///
+/// # Errors
+///
+/// [`JrsError::Io`] when the file exists but cannot be read.
+pub fn local_integrity(path: &Path, pin: Option<&str>) -> Result<Integrity> {
+    if !path.is_file() {
+        return Ok(Integrity::NotCached);
+    }
+    let Some(pin) = pin else {
+        return Ok(Integrity::Unpinned);
+    };
+    let bytes = std::fs::read(path).map_err(|e| JrsError::io(path, e))?;
+    Ok(match repo::digest_as(pin, &bytes) {
+        None => Integrity::Unpinned,
+        Some(actual) if actual.eq_ignore_ascii_case(pin) => Integrity::Verified,
+        Some(actual) => Integrity::Mismatch {
+            expected: pin.to_string(),
+            actual,
+        },
+    })
+}
+
 // ---- the download bars -----------------------------------------------------
 
 /// Publishes transfer progress into the UI's live region.
@@ -850,10 +1090,10 @@ mod tests {
 
         fn fetcher(&self) -> Fetcher {
             Fetcher::new(
-                vec![manifest::Repository {
-                    name: "fixture".into(),
-                    url: repo::file_url(&self.repo_dir()),
-                }],
+                vec![manifest::Repository::new(
+                    "fixture",
+                    repo::file_url(&self.repo_dir()),
+                )],
                 cache::Cache::with_root(self.dir.join("cache")),
                 false,
             )
@@ -1256,6 +1496,56 @@ mod tests {
         )
         .unwrap();
         assert_eq!(names(&project), vec!["g:shared:2.0"]);
+    }
+
+    #[test]
+    fn classpaths_join_to_every_place_a_package_is_needed() {
+        use Classpath::{Compile, Provided, Runtime, Test};
+        let all = [Compile, Provided, Runtime, Test];
+        for a in all {
+            assert_eq!(a.join(a), a);
+            assert_eq!(a.join(Test), a, "tests see everything anyway");
+            assert_eq!(a.join(Compile), Compile);
+            assert_eq!(Classpath::parse(a.as_str()), a);
+            for b in all {
+                assert_eq!(a.join(b), b.join(a));
+            }
+        }
+        assert_eq!(Provided.join(Runtime), Compile);
+        assert!(Compile.compiles() && Provided.compiles());
+        assert!(!Runtime.compiles() && !Test.compiles());
+        assert!(Compile.runs() && Runtime.runs());
+        assert!(!Provided.runs() && !Test.runs());
+    }
+
+    #[test]
+    fn a_runtime_only_dependency_is_walked_but_not_compiled_against() {
+        let repo = Repo::new("runtime-only");
+        repo.publish("g:driver:1.0", &dep(&d("g:driver-core:1.0", "")));
+        repo.publish("g:driver-core:1.0", "");
+        repo.publish("g:api:1.0", &dep(&d("g:driver-core:1.0", "")));
+
+        let m = repo.manifest("[dependencies]\n'g:driver'={version='1.0', runtime-only=true}");
+        let mut r = resolve(&m, &repo.fetcher(), 4).unwrap();
+        fetch_jars(&mut r, &repo.fetcher(), 4).unwrap();
+        let of = |r: &Resolution, a: &str| r.get(&Ga::new("g", a)).unwrap().classpath;
+        assert_eq!(of(&r, "driver"), Classpath::Runtime);
+        assert_eq!(of(&r, "driver-core"), Classpath::Runtime);
+        assert!(r.classpath(Classpath::Compile).is_empty());
+        assert_eq!(r.runtime_classpath().len(), 2);
+        assert_eq!(r.runtime_packages().count(), 2);
+        assert_eq!(r.classpath(Classpath::Test).len(), 2);
+
+        // Compiled against through another path, the shared jar is needed on
+        // both classpaths.
+        let m = repo.manifest(
+            "[dependencies]\n'g:driver'={version='1.0', runtime-only=true}\n\
+             'g:api'={version='1.0', compile-only=true}",
+        );
+        let r = resolve(&m, &repo.fetcher(), 4).unwrap();
+        assert_eq!(of(&r, "driver"), Classpath::Runtime);
+        assert_eq!(of(&r, "api"), Classpath::Provided);
+        assert_eq!(of(&r, "driver-core"), Classpath::Compile);
     }
 
     #[test]

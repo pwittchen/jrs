@@ -19,6 +19,7 @@ use crate::compile::lang;
 use crate::compile::{self, CompileUnit, DocUnit, ForeignCompiler, Language};
 use crate::completions;
 use crate::config::Config;
+use crate::dist;
 use crate::edit;
 use crate::error::{IoResultExt, JrsError, Result, exit};
 use crate::image;
@@ -28,6 +29,8 @@ use crate::manifest::{
     TaskRef,
 };
 use crate::migrate;
+use crate::model;
+use crate::native_image::{self, NativeImage};
 use crate::package::{self, JarManifest};
 use crate::project::{self, Project, Snapshot, Sources, Unit};
 use crate::resolve::cache::{Cache, Prune};
@@ -38,6 +41,8 @@ use crate::resolve::{self, Classpath, Resolution, UiReporter};
 use crate::runner;
 use crate::task;
 use crate::test as junit;
+use crate::test_report;
+use crate::timings::{self, Timings};
 use crate::toolchain::{self, Toolchain};
 use crate::ui::{self, CharsetChoice, Style, TreeNode, Ui, UiOptions, When};
 
@@ -188,6 +193,9 @@ pub enum Command {
         /// Build again whenever a source, a resource or jrs.toml changes.
         #[arg(long)]
         watch: bool,
+        /// Report the wall time of each phase after the summary.
+        #[arg(long)]
+        timings: bool,
     },
 
     /// Build, compile test sources, and run the test engine.
@@ -198,6 +206,20 @@ pub enum Command {
         /// Arguments passed to the program, after `--`.
         #[arg(last = true, value_name = "ARGS")]
         args: Vec<String>,
+        /// Report the wall time of each phase before the program starts.
+        #[arg(long)]
+        timings: bool,
+        /// Wait for a debugger before the program starts: JDWP on PORT, 5005
+        /// unless given, on localhost unless given as HOST:PORT (`*:5005`).
+        #[arg(
+            long,
+            value_name = "PORT",
+            num_args = 0..=1,
+            require_equals = true,
+            default_missing_value = "5005",
+            value_parser = runner::DebugAddress::parse
+        )]
+        debug: Option<runner::DebugAddress>,
     },
 
     /// Build, then produce target/<name>-<version>.jar.
@@ -231,7 +253,8 @@ pub enum Command {
         /// The test classpath instead: test classes, main classes, every jar.
         #[arg(long)]
         test: bool,
-        /// The runtime classpath: without compile-only dependencies.
+        /// The runtime classpath: without compile-only dependencies, and with
+        /// runtime-only ones.
         #[arg(long, conflicts_with = "test")]
         runtime: bool,
     },
@@ -258,6 +281,10 @@ pub enum Command {
         /// On the compile classpath only, not at runtime.
         #[arg(long, conflicts_with = "dev")]
         compile_only: bool,
+        /// At runtime and in tests, but not on the classpath the main sources
+        /// compile against.
+        #[arg(long, conflicts_with_all = ["dev", "compile_only"])]
+        runtime_only: bool,
     },
 
     /// Remove dependencies from jrs.toml.
@@ -313,6 +340,21 @@ pub enum Command {
         #[arg(value_name = "SHELL", value_parser = ["bash", "zsh", "fish"])]
         shell: String,
     },
+
+    /// Print the project model as JSON, for editors and tools.
+    Metadata {
+        /// Leave the dependencies out: nothing is resolved, and `classpaths`
+        /// is null.
+        #[arg(long)]
+        no_deps: bool,
+    },
+
+    /// Download the dependencies into the cache without building.
+    Fetch {
+        /// Also download each dependency's -sources.jar, for editors.
+        #[arg(long)]
+        sources: bool,
+    },
 }
 
 #[derive(Debug, Args)]
@@ -331,6 +373,10 @@ pub struct TaskArgs {
     pub args: Vec<String>,
 }
 
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "command-line switches, each independent of the others"
+)]
 #[derive(Debug, Default, Args)]
 pub struct TestArgs {
     /// Only run classes matching this regular expression.
@@ -351,9 +397,39 @@ pub struct TestArgs {
     /// Test again whenever a source, a resource or jrs.toml changes.
     #[arg(long)]
     pub watch: bool,
+    /// Report the wall time of each phase after the run.
+    #[arg(long)]
+    pub timings: bool,
+    /// Wait for a debugger before the tests start: JDWP on PORT, 5005 unless
+    /// given, on localhost unless given as HOST:PORT (`*:5005`).
+    #[arg(
+        long,
+        value_name = "PORT",
+        num_args = 0..=1,
+        require_equals = true,
+        default_missing_value = "5005",
+        value_parser = runner::DebugAddress::parse
+    )]
+    pub debug: Option<runner::DebugAddress>,
+    /// Run only the tests that failed last time, as its `JUnit` XML records them.
+    #[arg(
+        long,
+        conflicts_with_all = ["filter", "include_tag", "exclude_tag", "method", "watch"]
+    )]
+    pub rerun_failed: bool,
+    /// Stop at the first failing test.
+    #[arg(long)]
+    pub fail_fast: bool,
+    /// Run failing tests again up to N times; overrides `[test] retries`.
+    #[arg(long, value_name = "N")]
+    pub retries: Option<u32>,
 }
 
 #[derive(Debug, Default, Args)]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "each is an independent command-line flag, as clap parses them"
+)]
 pub struct PackageArgs {
     /// Unpack every runtime dependency into the jar.
     #[arg(long, conflicts_with = "portable")]
@@ -369,6 +445,25 @@ pub struct PackageArgs {
     /// jpackage's own: app-image, dmg, pkg, deb, rpm, exe or msi.
     #[arg(long, value_name = "TYPE", num_args = 0..=1)]
     pub jpackage: Option<Option<String>>,
+    /// Report the wall time of each phase after the summary.
+    #[arg(long)]
+    pub timings: bool,
+    /// Also write target/<name>-<version>-sources.jar from the main sources,
+    /// generated ones included.
+    #[arg(long)]
+    pub sources: bool,
+    /// Also run `jrs doc` and jar target/doc into
+    /// target/<name>-<version>-javadoc.jar.
+    #[arg(long)]
+    pub javadoc: bool,
+    /// Also write a distribution with launch scripts in target/dist, zipped
+    /// into target/<name>-<version>.zip.
+    #[arg(long)]
+    pub dist: bool,
+    /// Also build a native executable in target/native with `native-image`,
+    /// which needs a `GraalVM` JDK.
+    #[arg(long)]
+    pub native_image: bool,
 }
 
 #[derive(Debug, Subcommand)]
@@ -384,6 +479,20 @@ pub enum CacheCommand {
         #[arg(long)]
         dry_run: bool,
     },
+}
+
+impl Command {
+    /// Whether the command was given `--timings`, which `build`, `test`,
+    /// `run` and `package` take.
+    #[must_use]
+    pub fn timings(&self) -> bool {
+        match self {
+            Command::Build { timings, .. } | Command::Run { timings, .. } => *timings,
+            Command::Test(args) => args.timings,
+            Command::Package(args) => args.timings,
+            _ => false,
+        }
+    }
 }
 
 /// Parse arguments, run the command, and turn the result into an exit code.
@@ -467,13 +576,16 @@ fn dispatch(cli: &Cli, ui: &Ui) -> Result<i32> {
             coordinates,
             dev,
             compile_only,
-        } => return add_command(cli, ui, coordinates, *dev, *compile_only),
+            runtime_only,
+        } => {
+            return add_command(cli, ui, coordinates, *dev, (*compile_only, *runtime_only));
+        }
         Command::Remove { keys, dev } => return remove_command(cli, ui, keys, *dev),
         #[allow(
             clippy::redundant_closure_for_method_calls,
             reason = "`Session::build_command` does not satisfy watch's higher-ranked bound"
         )]
-        Command::Build { watch: true } => return watch(cli, ui, |s| s.build_command()),
+        Command::Build { watch: true, .. } => return watch(cli, ui, |s| s.build_command()),
         Command::Test(args) if args.watch => return watch(cli, ui, |s| s.test_command(args)),
         Command::Task(args) if args.watch => return watch(cli, ui, |s| s.task_command(args)),
         _ => {}
@@ -483,7 +595,7 @@ fn dispatch(cli: &Cli, ui: &Ui) -> Result<i32> {
     match &cli.command {
         Command::Build { .. } => session.build_command(),
         Command::Test(args) => session.test_command(args),
-        Command::Run { args } => session.run_command(args),
+        Command::Run { args, debug, .. } => session.run_command(args, debug.as_ref()),
         Command::Package(args) => session.package_command(args),
         Command::Doc => session.doc_command(),
         Command::Task(args) => session.task_command(args),
@@ -495,12 +607,23 @@ fn dispatch(cli: &Cli, ui: &Ui) -> Result<i32> {
         Command::Update => session.update_command(),
         Command::Verify => session.verify_command(),
         Command::Outdated => session.outdated_command(),
+        Command::Metadata { no_deps } => session.metadata_command(*no_deps),
+        Command::Fetch { sources } => session.fetch_command(*sources),
         Command::Init { .. }
         | Command::Migrate { .. }
         | Command::Completions { .. }
         | Command::Cache { .. }
         | Command::Add { .. }
         | Command::Remove { .. } => unreachable!("handled above"),
+    }
+}
+
+/// `1 test`, `2 tests`.
+fn counted(n: usize, noun: &str) -> String {
+    if n == 1 {
+        format!("1 {noun}")
+    } else {
+        format!("{n} {noun}s")
     }
 }
 
@@ -536,6 +659,10 @@ struct Session<'a> {
     done: RefCell<HashSet<Builtin>>,
     /// The jar, once `package` has written it.
     jar: RefCell<Option<PathBuf>>,
+    /// The wall time of each phase, for `--timings`.
+    timings: Timings,
+    /// Whether the command asked for `--timings`.
+    timings_wanted: bool,
 }
 
 impl<'a> Session<'a> {
@@ -562,6 +689,8 @@ impl<'a> Session<'a> {
             ran: RefCell::new(HashSet::new()),
             done: RefCell::new(HashSet::new()),
             jar: RefCell::new(None),
+            timings: Timings::new(),
+            timings_wanted: cli.command.timings(),
         })
     }
 
@@ -571,6 +700,33 @@ impl<'a> Session<'a> {
 
     fn elapsed(&self) -> String {
         ui::format_duration(self.started.elapsed())
+    }
+
+    /// `--timings`: the table on the terminal, and its copy in
+    /// `target/.jrs/timings.txt`. Under `-q` the table is not printed but the
+    /// file is still written, so a quiet CI run can keep the numbers.
+    /// `command` names the command in the file.
+    fn report_timings(&self, command: &str) -> Result<()> {
+        if !self.timings_wanted {
+            return Ok(());
+        }
+        let rows = self.timings.rows();
+        let total = self.started.elapsed();
+        self.ui.timings(&rows, total);
+        let work_dir = self.project().work_dir();
+        std::fs::create_dir_all(&work_dir).path(&work_dir)?;
+        let path = work_dir.join(timings::FILE);
+        std::fs::write(&path, timings::render_file(command, &rows, total)).path(&path)?;
+        self.ui.verbose(format!("wrote {}", path.display()));
+        Ok(())
+    }
+
+    /// A compile unit's steps, as `compile main: kotlinc` rows.
+    fn record_steps(&self, unit: &str, steps: &[(&str, Duration)]) {
+        for (compiler, took) in steps {
+            self.timings
+                .record(format!("compile {unit}: {compiler}"), *took);
+        }
     }
 
     /// The JDK this project builds with: the one it pins, or the default.
@@ -632,10 +788,11 @@ impl<'a> Session<'a> {
             ("deps", deps_row(&built.resolution)),
             ("time", self.elapsed()),
         ]);
+        self.report_timings("build")?;
         Ok(exit::SUCCESS)
     }
 
-    fn run_command(&self, args: &[String]) -> Result<i32> {
+    fn run_command(&self, args: &[String], debug: Option<&runner::DebugAddress>) -> Result<i32> {
         let main_class = self.manifest.require_main_class("run")?.to_string();
         let built = self.build()?;
         self.check_main_class(&main_class)?;
@@ -644,14 +801,40 @@ impl<'a> Session<'a> {
 
         let mut classpath = vec![self.project().classes_dir()];
         classpath.extend(built.resolution.runtime_classpath());
+        let mut agents = runner::java_agents(
+            "run",
+            &self.manifest.run.java_agents,
+            &built.resolution,
+            true,
+        )?;
+        let environment = self.jvm_environment(
+            "run",
+            &self.manifest.run.env,
+            self.manifest.run.cwd.as_ref(),
+        )?;
+        if environment.cwd.is_some() {
+            // Relative paths would be read from the other directory.
+            let absolute = |p: PathBuf| std::path::absolute(&p).unwrap_or(p);
+            classpath = classpath.into_iter().map(absolute).collect();
+            agents = agents.into_iter().map(absolute).collect();
+        }
+        let mut jvm_args = runner::jvm_prefix(debug, &agents);
+        jvm_args.extend(self.manifest.run.jvm_args.iter().cloned());
 
+        // The program's own run is not a build phase: the report covers what
+        // led up to it, and comes before the program gets the terminal.
+        self.report_timings("run")?;
         self.ui.phase("Running", &main_class);
+        if let Some(debug) = debug {
+            self.announce_debugger(debug);
+        }
         let code = runner::run_main(
             &toolchain,
-            &self.manifest.run.jvm_args,
+            &jvm_args,
             &classpath,
             &main_class,
             args,
+            &environment,
             self.ui,
         )?;
         if code != 0 {
@@ -682,17 +865,103 @@ impl<'a> Session<'a> {
         )))
     }
 
+    /// `<section>.env` and `<section>.cwd`, expanded for the JVM `jrs run` or
+    /// `jrs test` starts.
+    fn jvm_environment(
+        &self,
+        section: &str,
+        env: &[(String, manifest::Template)],
+        cwd: Option<&manifest::Template>,
+    ) -> Result<toolchain::Environment> {
+        let vars = if env.is_empty() {
+            Vec::new()
+        } else {
+            task::jvm_env(&self.manifest, env, &self.classpaths()?)?
+        };
+        let cwd = match cwd {
+            None => None,
+            Some(template) => {
+                let dir = task::jvm_cwd(&self.manifest, template)?;
+                if !dir.is_dir() {
+                    return Err(JrsError::manifest(format!(
+                        "`{section}.cwd` is {}, which is not a directory",
+                        dir.display()
+                    )));
+                }
+                Some(dir)
+            }
+        };
+        Ok(toolchain::Environment { cwd, vars })
+    }
+
+    /// Say where to attach before a JVM starts waiting for a debugger, since
+    /// nothing else happens until one does.
+    fn announce_debugger(&self, debug: &runner::DebugAddress) {
+        self.ui.phase(
+            "Debugging",
+            format!(
+                "attach a debugger to {}; the JVM waits until one does",
+                debug.attach_to()
+            ),
+        );
+    }
+
+    /// `run.java-agents` as the image's launchers name them: `lib/<file>`,
+    /// relative to the application directory, where the portable layout put
+    /// each jar.
+    fn image_agents(&self, lib_dir: Option<&Path>) -> Result<Vec<String>> {
+        let wanted = &self.manifest.run.java_agents;
+        if wanted.is_empty() {
+            return Ok(Vec::new());
+        }
+        let Some(lib_dir) = lib_dir else {
+            return Err(JrsError::manifest(
+                "`run.java-agents` cannot go into an image or a distribution of a fat \
+                 jar: an agent loads from a jar of its own, and the fat jar has \
+                 unpacked it\n\n\
+                 leave out --fat, and the portable layout is used, with each agent in \
+                 its lib/",
+            ));
+        };
+        let resolution = self.resolved()?;
+        let jars = runner::java_agents("run", wanted, &resolution, true)?;
+        Ok(wanted
+            .iter()
+            .zip(jars)
+            .map(|(ga, jar)| {
+                let name = jar
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                // `copy_libraries` prefixes a file name two groups share.
+                let prefixed = format!("{}.{name}", ga.group);
+                let file = if lib_dir.join(&prefixed).is_file() {
+                    prefixed
+                } else {
+                    name
+                };
+                format!("lib/{file}")
+            })
+            .collect())
+    }
+
     fn package_command(&self, args: &PackageArgs) -> Result<i32> {
         let mut rows = self.package(args)?;
         self.ui
             .phase("Finished", format!("build in {}", self.elapsed()));
         rows.push(("time", self.elapsed()));
         self.ui.summary(&rows);
+        self.report_timings("package")?;
         Ok(exit::SUCCESS)
     }
 
     /// Build, write the jar (and any image), then the `post-package` hook.
     /// Returns the summary rows.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the checks every flag needs before the build, then one arm per jar kind; \
+                  images and the other artifacts are already helpers"
+    )]
     fn package(&self, args: &PackageArgs) -> Result<Vec<(&'static str, String)>> {
         let images = args.jlink || args.jpackage.is_some();
         if images {
@@ -704,15 +973,25 @@ impl<'a> Session<'a> {
             };
             self.manifest.require_main_class(command)?;
         }
+        if args.dist {
+            self.manifest.require_main_class("package --dist")?;
+        }
+        if args.native_image {
+            self.manifest.require_main_class("package --native-image")?;
+            // Before anything is built: without GraalVM nothing can use it.
+            native_image::find(&self.toolchain()?)?;
+        }
+        let attributes = self.manifest.jar_attributes()?;
         let built = self.build()?;
         let project = self.project();
         let output = project.jar_path();
         let runtime = built.resolution.runtime_classpath();
-        // An image needs a jar that runs anywhere: the fat one when asked for,
-        // the portable layout otherwise.
-        let portable = args.portable || (images && !args.fat);
+        // An image or a distribution needs a jar that runs anywhere: the fat
+        // one when asked for, the portable layout otherwise.
+        let portable = args.portable || ((images || args.dist) && !args.fat);
         let lib_dir = project.target_dir().join("lib");
 
+        let packaging = Instant::now();
         let outcome = if args.fat {
             self.ui.phase(
                 "Packaging",
@@ -725,6 +1004,7 @@ impl<'a> Session<'a> {
                 &JarManifest {
                     main_class: self.manifest.main_class.clone(),
                     class_path: Vec::new(),
+                    attributes,
                 },
             )?
         } else if portable {
@@ -757,6 +1037,7 @@ impl<'a> Session<'a> {
                 &JarManifest {
                     main_class: self.manifest.main_class.clone(),
                     class_path,
+                    attributes,
                 },
             )?
         } else {
@@ -773,9 +1054,11 @@ impl<'a> Session<'a> {
                 &JarManifest {
                     main_class: self.manifest.main_class.clone(),
                     class_path,
+                    attributes,
                 },
             )?
         };
+        self.timings.since("packaging", packaging);
         for warning in &outcome.warnings {
             self.ui.warn(warning);
         }
@@ -795,6 +1078,12 @@ impl<'a> Session<'a> {
         if images {
             rows.extend(self.images(args, &output, portable.then_some(lib_dir.as_path()))?);
         }
+        rows.extend(self.package_extras(
+            args,
+            &output,
+            portable.then_some(lib_dir.as_path()),
+            &built,
+        )?);
 
         *self.jar.borrow_mut() = Some(output);
         self.hook(Hook::PostPackage)?;
@@ -810,6 +1099,7 @@ impl<'a> Session<'a> {
     ) -> Result<Vec<(&'static str, String)>> {
         let toolchain = self.toolchain()?;
         let project = self.project();
+        let agents = self.image_agents(lib_dir)?;
         let app = image::App {
             name: &self.manifest.name,
             version: &self.manifest.version,
@@ -817,9 +1107,11 @@ impl<'a> Session<'a> {
             jar,
             lib_dir,
             jvm_args: &self.manifest.run.jvm_args,
+            java_agents: &agents,
         };
 
         self.ui.phase("Analysing", "module dependencies with jdeps");
+        let started = Instant::now();
         let scope = self.ui.spinner("Analysing", "module dependencies");
         let modules = app.jars().and_then(|jars| {
             image::modules(
@@ -831,6 +1123,7 @@ impl<'a> Session<'a> {
             )
         });
         scope.finish();
+        self.timings.since("jdeps", started);
         let modules = modules?;
         self.ui.verbose(format!("modules: {}", modules.join(",")));
 
@@ -841,9 +1134,11 @@ impl<'a> Session<'a> {
                 "Linking",
                 format!("{} ({} modules)", output.display(), modules.len()),
             );
+            let started = Instant::now();
             let scope = self.ui.spinner("Linking", "a runtime image");
             let linked = image::jlink(&toolchain, &app, &modules, &output, self.ui);
             scope.finish();
+            self.timings.since("jlink", started);
             let linked = linked?;
             rows.push((
                 "image",
@@ -864,6 +1159,7 @@ impl<'a> Session<'a> {
                     kind.as_deref().unwrap_or("the platform's default package")
                 ),
             );
+            let started = Instant::now();
             let scope = self.ui.spinner("Bundling", "with jpackage");
             let bundled = image::jpackage(
                 &toolchain,
@@ -875,6 +1171,7 @@ impl<'a> Session<'a> {
                 self.ui,
             );
             scope.finish();
+            self.timings.since("jpackage", started);
             let bundled = bundled?;
             self.ui.phase("Bundled", bundled.display());
             rows.push(("package", bundled.display().to_string()));
@@ -882,14 +1179,131 @@ impl<'a> Session<'a> {
         Ok(rows)
     }
 
+    /// `--sources`, `--javadoc`, `--dist` and `--native-image`: what
+    /// `package` writes beside the jar, from the jar (and `lib/`) just
+    /// written. Returns their summary rows.
+    fn package_extras(
+        &self,
+        args: &PackageArgs,
+        jar: &Path,
+        lib_dir: Option<&Path>,
+        built: &Built,
+    ) -> Result<Vec<(&'static str, String)>> {
+        let project = self.project();
+        let target = project.target_dir();
+        let base = format!("{}-{}", self.manifest.name, self.manifest.version);
+        let row = |path: &Path, bytes: u64| {
+            let name = path.file_name().map_or_else(
+                || path.display().to_string(),
+                |n| n.to_string_lossy().into_owned(),
+            );
+            format!("{name}   {}", ui::format_bytes(bytes))
+        };
+        let mut rows = Vec::new();
+
+        if args.sources {
+            // What the build compiled: every main root, and what the
+            // `pre-compile` tasks generated.
+            let generated = task::generated(&self.manifest, Hook::PreCompile)?;
+            let sources = project.sources(Unit::Main, &generated.sources)?;
+            let mut roots = project.roots(Unit::Main);
+            roots.extend(generated.sources);
+            let output = target.join(format!("{base}-sources.jar"));
+            self.ui.phase(
+                "Packaging",
+                format!(
+                    "{} ({})",
+                    output.display(),
+                    sources.describe("source files")
+                ),
+            );
+            let outcome = package::write_sources_jar(&roots, &sources.files, &output)?;
+            rows.push(("sources", row(&output, outcome.bytes)));
+        }
+
+        if args.javadoc {
+            // Once per invocation, however a task's `depends-on` reached it.
+            self.builtin(Builtin::Doc)?;
+            let output = target.join(format!("{base}-javadoc.jar"));
+            self.ui.phase("Packaging", output.display());
+            let outcome = package::write_javadoc_jar(&target.join("doc"), &output)?;
+            rows.push(("javadoc", row(&output, outcome.bytes)));
+        }
+
+        if args.dist {
+            let agents = self.image_agents(lib_dir)?;
+            let app = image::App {
+                name: &self.manifest.name,
+                version: &self.manifest.version,
+                main_class: self.manifest.main_class.as_deref(),
+                jar,
+                lib_dir,
+                jvm_args: &self.manifest.run.jvm_args,
+                java_agents: &agents,
+            };
+            let zip = target.join(format!("{base}.zip"));
+            self.ui.phase(
+                "Archiving",
+                format!(
+                    "{} (launchers in {})",
+                    zip.display(),
+                    target.join("dist").join(&base).join("bin").display()
+                ),
+            );
+            let outcome = dist::write_dist(&app, &target.join("dist"), &zip)?;
+            rows.push(("dist", row(&outcome.zip, outcome.bytes)));
+        }
+
+        if args.native_image {
+            let toolchain = self.toolchain()?;
+            let tool = native_image::find(&toolchain)?;
+            let main_class = self.manifest.require_main_class("package --native-image")?;
+            let mut classpath = vec![project.classes_dir()];
+            classpath.extend(built.resolution.runtime_classpath());
+            let image = NativeImage {
+                name: &self.manifest.name,
+                main_class,
+                classpath: &classpath,
+                extra_args: &self.manifest.package.native_image_args,
+            };
+            let output_dir = target.join("native");
+            self.ui.phase(
+                "Building",
+                format!("a native image of {main_class} in {}", output_dir.display()),
+            );
+            let scope = self.ui.spinner("Building", "a native image");
+            let result =
+                native_image::build(&tool, &image, &output_dir, &project.work_dir(), self.ui);
+            scope.finish();
+            let executable = result?;
+            let bytes = std::fs::metadata(&executable).path(&executable)?.len();
+            rows.push(("native", row(&executable, bytes)));
+        }
+        Ok(rows)
+    }
+
     fn test_command(&self, args: &TestArgs) -> Result<i32> {
         let Some(outcome) = self.test(args)? else {
+            self.report_timings("test")?;
             return Ok(exit::SUCCESS);
         };
         self.ui.phase(
             "Finished",
             format!("{} in {}", outcome.describe(), self.elapsed()),
         );
+        // A failing run is timed too: how long the tests took is part of it.
+        self.report_timings("test")?;
+        if outcome.ok() && !outcome.coverage_shortfalls.is_empty() {
+            let lines: Vec<String> = outcome
+                .coverage_shortfalls
+                .iter()
+                .map(|s| format!("    {s}"))
+                .collect();
+            return Err(JrsError::test(format!(
+                "coverage is below `test.coverage-minimum` in jrs.toml\n\n{}",
+                lines.join("\n")
+            )));
+        }
         if outcome.ok() {
             Ok(exit::SUCCESS)
         } else {
@@ -901,7 +1315,22 @@ impl<'a> Session<'a> {
 
     /// Build, compile the tests, run them, then — only if they passed — the
     /// `post-test` hook. `None` when there are no tests to run.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the test phases in the order they run, each already a helper or a \
+                  library call; the extra lines are their --timings rows"
+    )]
     fn test(&self, args: &TestArgs) -> Result<Option<junit::TestOutcome>> {
+        // `--rerun-failed` reads the last run's reports before anything else:
+        // this run is about to replace them.
+        let rerun = if args.rerun_failed {
+            match self.last_failures()? {
+                Some(rerun) => Some(rerun),
+                None => return Ok(None),
+            }
+        } else {
+            None
+        };
         let built = self.build()?;
         self.hook(Hook::PreTest)?;
         let project = self.project();
@@ -931,20 +1360,27 @@ impl<'a> Session<'a> {
             classpath.clone(),
             vec![project.classes_dir()],
         )?;
+        let checking = Instant::now();
         if compile::is_stale(&unit)? {
             let what = sources.describe("test sources");
             self.ui.phase("Compiling", &what);
             let scope = self.ui.spinner("Compiling", &what);
-            let result = compile::compile(&toolchain, &unit, self.ui);
+            let mut steps = Vec::new();
+            let result = compile::compile_timed(&toolchain, &unit, self.ui, &mut steps);
             scope.finish();
+            self.record_steps("test", &steps);
             result?;
+        } else {
+            self.timings.since("compile test (fresh)", checking);
         }
+        let syncing = Instant::now();
         project::sync_resources(
             &self.manifest.test_resource_path(),
             &project.test_classes_dir(),
             &project.work_dir().join("resources-test.list"),
         )?;
         self.sync_generated(&generated.resources, &project.test_classes_dir(), "test")?;
+        self.timings.since("resources test", syncing);
 
         // The launcher, and JaCoCo when coverage is on, are internal
         // dependencies: resolved by jrs, never on the user's own classpath.
@@ -975,8 +1411,10 @@ impl<'a> Session<'a> {
             let _ = std::fs::remove_file(&exec);
             jvm_args.insert(0, junit::agent_argument(&fetched[1], &exec));
         }
+        // The debugger and `test.java-agents` go ahead of JaCoCo's agent.
+        jvm_args.splice(0..0, self.test_jvm_prefix(&built.resolution, args)?);
 
-        let run = junit::TestRun {
+        let mut run = junit::TestRun {
             jvm_args,
             classpath: test_classpath,
             scan_dir: project.test_classes_dir(),
@@ -989,24 +1427,251 @@ impl<'a> Session<'a> {
             ascii: self.ui.glyphs().charset == ui::Charset::Ascii,
             launcher_version: launcher.version.clone(),
             work_dir: project.work_dir(),
+            environment: self.jvm_environment("test", &self.manifest.test.env, None)?,
+            unique_ids: Vec::new(),
+            classes: Vec::new(),
+            fail_fast: args.fail_fast,
         };
-
-        self.ui.phase("Testing", sources.describe("test sources"));
-        let scope = self.ui.tests();
-        let outcome = junit::run(&toolchain, &run, self.ui);
-        scope.finish();
-        let outcome = outcome?;
+        self.announce_tests(&mut run, rerun.as_ref(), &sources);
+        let started = Instant::now();
+        let outcome = self
+            .launch_tests(&toolchain, &run, args.debug.as_ref())
+            .and_then(|mut outcome| {
+                self.conclude_tests(&toolchain, &run, args, &mut outcome)?;
+                Ok(outcome)
+            });
+        self.timings.since("test JVM", started);
+        let mut outcome = outcome?;
 
         // Coverage is reported for a failing run too: which code the failing
         // tests reached is part of working out why.
         if args.coverage && exec.is_file() {
+            let started = Instant::now();
             self.coverage_report(&project, &toolchain, exec, &fetched[2])?;
+            self.timings.since("coverage report", started);
+            outcome.coverage_shortfalls = self.coverage_shortfalls(&project)?;
         }
 
-        if outcome.ok() {
+        if outcome.ok() && outcome.coverage_shortfalls.is_empty() {
             self.hook(Hook::PostTest)?;
         }
         Ok(Some(outcome))
+    }
+
+    /// What goes ahead of the test JVM's other arguments: the debugger's
+    /// agent under `--debug`, then `test.java-agents` from the test classpath.
+    fn test_jvm_prefix(&self, resolution: &Resolution, args: &TestArgs) -> Result<Vec<String>> {
+        let agents =
+            runner::java_agents("test", &self.manifest.test.java_agents, resolution, false)?;
+        Ok(runner::jvm_prefix(args.debug.as_ref(), &agents))
+    }
+
+    /// Run the launcher under the live test counter, or, when the JVM waits
+    /// for a debugger, without one: it has nothing to count yet, and a
+    /// counter animating over it would say otherwise.
+    fn launch_tests(
+        &self,
+        toolchain: &Toolchain,
+        run: &junit::TestRun,
+        debug: Option<&runner::DebugAddress>,
+    ) -> Result<junit::TestOutcome> {
+        if let Some(debug) = debug {
+            self.announce_debugger(debug);
+        }
+        let scope = debug.is_none().then(|| self.ui.tests());
+        let outcome = junit::run(toolchain, run, self.ui);
+        if let Some(scope) = scope {
+            scope.finish();
+        }
+        outcome
+    }
+
+    /// Point `run` at what `--rerun-failed` selected, and say what is about to
+    /// run, and when `--fail-fast` cannot be honoured.
+    fn announce_tests(
+        &self,
+        run: &mut junit::TestRun,
+        rerun: Option<&(usize, test_report::Selection)>,
+        sources: &Sources,
+    ) {
+        if let Some((_, selection)) = rerun {
+            // The selectors name exactly what failed; no class-name pattern
+            // may narrow them.
+            run.filter = None;
+            run.methods.clone_from(&selection.methods);
+            run.unique_ids.clone_from(&selection.unique_ids);
+            run.classes.clone_from(&selection.classes);
+        }
+        if run.fail_fast_mode() == junit::FailFast::Unsupported {
+            self.ui.warn(format!(
+                "the JUnit Platform {} console launcher cannot stop at the first failure: it has \
+                 no --fail-fast (JUnit 6) and no test feed to follow (1.10), so every test runs",
+                run.launcher_version
+            ));
+        }
+        match rerun {
+            Some((failed, _)) => self.ui.phase(
+                "Testing",
+                format!("{} that failed in the last run", counted(*failed, "test")),
+            ),
+            None => self.ui.phase("Testing", sources.describe("test sources")),
+        }
+    }
+
+    /// After the launcher: say what stopping it cost, retry what failed, and
+    /// write the page.
+    fn conclude_tests(
+        &self,
+        toolchain: &Toolchain,
+        run: &junit::TestRun,
+        args: &TestArgs,
+        outcome: &mut junit::TestOutcome,
+    ) -> Result<()> {
+        if outcome.stopped_early && run.fail_fast_mode() == junit::FailFast::Stop {
+            self.ui.warn(format!(
+                "the JUnit Platform {} console launcher has no --fail-fast (JUnit 6 added it), \
+                 so jrs stopped it after the first failure: this run has no XML report",
+                run.launcher_version
+            ));
+        }
+        // A retry is a launcher of its own, and under `--debug` it would stop
+        // and wait for a debugger again, unannounced: no retries there.
+        let retries = if args.debug.is_some() {
+            0
+        } else {
+            args.retries.unwrap_or(self.manifest.test.retries)
+        };
+        if !outcome.ok() && !outcome.stopped_early && retries > 0 {
+            self.retry_failures(toolchain, run, retries, outcome)?;
+        }
+        self.report_tests(run, outcome)
+    }
+
+    /// What `--rerun-failed` runs: the tests still failing at the end of the
+    /// last run, retries included, as its reports record them, and how many
+    /// there are. `None`, having said so, when there are none.
+    ///
+    /// No reports at all is an error, not nothing to do: a run that ended
+    /// before the launcher wrote any did not pass.
+    fn last_failures(&self) -> Result<Option<(usize, test_report::Selection)>> {
+        let reports = self.project().target_dir().join("test-reports");
+        let Some(results) = test_report::load(&reports)? else {
+            return Err(JrsError::usage(format!(
+                "there is no test run to rerun: {} holds no JUnit XML\n\nrun `jrs test` first",
+                reports.display()
+            )));
+        };
+        let failed = results.failed();
+        if failed.is_empty() {
+            self.ui.phase(
+                "Testing",
+                "no failed tests to rerun: nothing failed in the last run",
+            );
+            return Ok(None);
+        }
+        Ok(Some((failed.len(), test_report::select(failed))))
+    }
+
+    /// `test.retries`: run what is still failing again, each attempt in a
+    /// launcher of its own writing its reports into `retry-<n>/`, until it
+    /// passes or the attempts run out. What passes on a retry is flaky, which
+    /// `report_tests` counts; everything passing in the end makes the run a
+    /// success, as it does with Gradle's test-retry plugin.
+    fn retry_failures(
+        &self,
+        toolchain: &Toolchain,
+        first: &junit::TestRun,
+        retries: u32,
+        outcome: &mut junit::TestOutcome,
+    ) -> Result<()> {
+        let Some(reports) = first.reports_dir.as_deref() else {
+            return Ok(());
+        };
+        for attempt in 1..=retries {
+            let Some(results) = test_report::load(reports)? else {
+                break;
+            };
+            let failed = results.failed();
+            let selection = test_report::select(failed.iter().copied());
+            if selection.is_empty() {
+                break;
+            }
+            self.ui.phase(
+                "Retrying",
+                format!(
+                    "{} (attempt {} of {})",
+                    counted(failed.len(), "failed test"),
+                    attempt + 1,
+                    retries + 1
+                ),
+            );
+            let retry = junit::TestRun {
+                jvm_args: junit::retry_jvm_args(&first.jvm_args),
+                filter: None,
+                include_tags: Vec::new(),
+                exclude_tags: Vec::new(),
+                methods: selection.methods,
+                unique_ids: selection.unique_ids,
+                classes: selection.classes,
+                reports_dir: Some(test_report::retry_dir(reports, attempt)),
+                fail_fast: false,
+                ..first.clone()
+            };
+            let scope = self.ui.tests();
+            let result = junit::run(toolchain, &retry, self.ui);
+            scope.finish();
+            if result?.ok() {
+                outcome.exit_code = exit::SUCCESS;
+                break;
+            }
+        }
+        Ok(())
+    }
+
+    /// Read the run's reports back, retries folded in: name and count the
+    /// flaky tests, and write `index.html` beside the XML. A run that left no
+    /// XML — stopped before the launcher wrote it — gets no page.
+    fn report_tests(&self, run: &junit::TestRun, outcome: &mut junit::TestOutcome) -> Result<()> {
+        let Some(reports) = run.reports_dir.as_deref() else {
+            return Ok(());
+        };
+        let Some(results) = test_report::load(reports)? else {
+            return Ok(());
+        };
+        if results.retries > 0 {
+            let flaky = results.flaky();
+            for case in &flaky {
+                self.ui.status(
+                    "Flaky",
+                    format!("{} (passed on attempt {})", case.label(), case.attempts),
+                );
+            }
+            outcome.flaky = u64::try_from(flaky.len()).unwrap_or(u64::MAX);
+            outcome.failed = if outcome.ok() {
+                0
+            } else {
+                outcome.failed.saturating_sub(outcome.flaky)
+            };
+        }
+        let index = reports.join(test_report::INDEX);
+        self.ui.phase(
+            "Reporting",
+            format!("test results into {}", index.display()),
+        );
+        test_report::write_html(reports, &self.manifest.name, &results)?;
+        Ok(())
+    }
+
+    /// The totals of the coverage report just written that fall short of
+    /// `test.coverage-minimum`.
+    fn coverage_shortfalls(&self, project: &Project<'_>) -> Result<Vec<junit::CoverageShortfall>> {
+        let minimums = &self.manifest.test.coverage_minimum;
+        if minimums.is_empty() {
+            return Ok(Vec::new());
+        }
+        let xml = project.target_dir().join("coverage").join("jacoco.xml");
+        let text = std::fs::read_to_string(&xml).path(&xml)?;
+        Ok(junit::coverage_shortfalls(&text, minimums))
     }
 
     /// Fetch jrs's own test-time tools, announcing the ones not cached yet.
@@ -1021,12 +1686,14 @@ impl<'a> Session<'a> {
             self.ui
                 .phase("Downloading", format!("{} ({what})", coord.artifact));
         }
+        let started = Instant::now();
         let scope = self.ui.downloads(missing.len());
         let jars: Result<Vec<PathBuf>> = internal
             .iter()
             .map(|(coord, _)| fetcher.jar(coord).map(|(path, _)| path))
             .collect();
         scope.finish();
+        self.timings.since("downloads (test tools)", started);
         jars
     }
 
@@ -1191,7 +1858,8 @@ impl<'a> Session<'a> {
     }
 
     /// What `jrs outdated` checks, as (row name, group, artifact, current
-    /// version): the declared dependencies, then each language's compiler.
+    /// version): the declared dependencies, then each language's compiler. A
+    /// local jar has no repository to ask, so it is left out.
     fn outdated_checks(&self) -> Vec<(String, String, String, String)> {
         let mut checks: Vec<(String, String, String, String)> = self
             .manifest
@@ -1204,6 +1872,7 @@ impl<'a> Session<'a> {
                     .iter()
                     .map(|d| (format!("{} (dev)", d.key()), d)),
             )
+            .filter(|(_, d)| !d.is_local())
             .map(|(name, d)| (name, d.group.clone(), d.artifact.clone(), d.version.clone()))
             .collect();
         for config in &self.manifest.languages {
@@ -1331,7 +2000,8 @@ impl<'a> Session<'a> {
             .packages
             .iter()
             .filter(|p| p.packaging != "pom")
-            .count();
+            .count()
+            + lock.local.len();
         self.ui
             .phase("Verifying", format!("{count} locked artifacts"));
         let scope = self
@@ -1365,6 +2035,28 @@ impl<'a> Session<'a> {
                 )),
             }
         }
+        // Local jars are checked where the project keeps them.
+        for local in &lock.local {
+            let path = self.manifest.root.join(&local.path);
+            match resolve::local_integrity(&path, local.checksum.as_deref())? {
+                resolve::Integrity::Verified => verified += 1,
+                resolve::Integrity::Mismatch { expected, actual } => mismatches.push(format!(
+                    "  {} (local jar `{}`)\n    locked {expected}\n    found  {actual}",
+                    local.path, local.name
+                )),
+                resolve::Integrity::NotCached => mismatches.push(format!(
+                    "  {} (local jar `{}`)\n    missing",
+                    local.path, local.name
+                )),
+                resolve::Integrity::Unpinned | resolve::Integrity::Snapshot => {
+                    self.ui.warn(format!(
+                        "the local jar `{}` has no checksum in {}; it was not verified",
+                        local.name,
+                        lock_path.display()
+                    ));
+                }
+            }
+        }
 
         if !mismatches.is_empty() {
             return Err(JrsError::build(format!(
@@ -1387,6 +2079,137 @@ impl<'a> Session<'a> {
         Ok(exit::SUCCESS)
     }
 
+    /// `jrs metadata`: the project model as versioned JSON on stdout
+    /// (`model.rs`). It resolves, unless `--no-deps`, and never compiles.
+    fn metadata_command(&self, no_deps: bool) -> Result<i32> {
+        let resolution = if no_deps {
+            None
+        } else {
+            Some(self.dependencies(false)?)
+        };
+        // Without a JDK the layout and the classpaths are still worth having,
+        // so a missing one leaves `jdk` null rather than failing the command.
+        let toolchain = match self.toolchain() {
+            Ok(toolchain) => Some(toolchain),
+            Err(e) => {
+                self.ui.warn(format!(
+                    "{}; the model has no `jdk`",
+                    e.to_string().lines().next().unwrap_or_default()
+                ));
+                None
+            }
+        };
+        let cache = Cache::discover().ok();
+        let document = model::metadata(&model::Inputs {
+            manifest: &self.manifest,
+            toolchain: toolchain.as_ref(),
+            resolution: resolution.as_ref(),
+            cache: cache.as_ref(),
+        })?;
+        // The model is real output, for `jrs metadata | jq`.
+        self.ui.suspend();
+        for line in document.render().lines() {
+            self.ui.println_out(line);
+        }
+        Ok(exit::SUCCESS)
+    }
+
+    /// `jrs fetch`: resolve and download what a build and a test run need —
+    /// the dependencies, the compilers, the test launcher — without building;
+    /// with `--sources`, every dependency's `-sources.jar` as well.
+    fn fetch_command(&self, sources: bool) -> Result<i32> {
+        let resolution = self.dependencies(false)?;
+        // The launcher `jrs test` would run, when there is a JUnit to derive
+        // it from, so that `jrs test --offline` works after a fetch.
+        if let Ok(launcher) = junit::launcher_coordinate(&self.manifest, &resolution) {
+            self.fetch_internal(&[(launcher, "test launcher")])?;
+        }
+        let jars = resolution
+            .packages
+            .iter()
+            .filter(|p| p.jar.is_some())
+            .count();
+        let mut fetched = format!("{jars} dependencies");
+        if sources {
+            let (found, wanted) = self.fetch_sources(&resolution)?;
+            let _ = write!(fetched, " and {found} of {wanted} sources jars");
+        }
+        self.ui.phase(
+            "Finished",
+            format!("fetched {fetched} in {}", self.elapsed()),
+        );
+        Ok(exit::SUCCESS)
+    }
+
+    /// Every dependency's `-sources.jar`, into the cache, under the usual
+    /// `Downloading` line and bars. One that is not published is a warning,
+    /// not an error: many libraries publish none, and no build needs one.
+    /// Returns how many are cached now, out of how many were wanted.
+    fn fetch_sources(&self, resolution: &Resolution) -> Result<(usize, usize)> {
+        let fetcher = self.fetcher()?;
+        let wanted = resolve::sources_coords(resolution);
+        let missing = wanted
+            .iter()
+            .filter(|c| !fetcher.cache().contains(c, "jar"))
+            .count();
+        let results = if missing > 0 && !self.offline {
+            self.ui
+                .phase("Downloading", format!("{missing} sources jars"));
+            let scope = self.ui.downloads(missing);
+            let results = resolve::fetch_sources(&wanted, &fetcher, self.jobs);
+            scope.finish();
+            results?
+        } else {
+            resolve::fetch_sources(&wanted, &fetcher, self.jobs)?
+        };
+
+        let mut found = 0;
+        let mut unpublished = Vec::new();
+        let mut not_cached = Vec::new();
+        for (coord, result) in results {
+            let Err(e) = result else {
+                found += 1;
+                continue;
+            };
+            let artifact = coord.pom_coord().to_string();
+            let reason = e.to_string();
+            let reason = reason.lines().next().unwrap_or_default();
+            if self.offline {
+                not_cached.push(artifact);
+            } else if reason.starts_with("could not find") {
+                // What the fetcher says when no repository has the file.
+                unpublished.push(artifact);
+            } else {
+                self.ui.warn(format!(
+                    "could not download the sources jar of `{artifact}`: {reason}"
+                ));
+            }
+        }
+        for warning in fetcher.take_warnings() {
+            self.ui.warn(warning);
+        }
+        if !unpublished.is_empty() {
+            let (noun, verb) = if unpublished.len() == 1 {
+                ("dependency", "publishes")
+            } else {
+                ("dependencies", "publish")
+            };
+            self.ui.warn(format!(
+                "{} {noun} {verb} no sources jar: {}",
+                unpublished.len(),
+                unpublished.join(", ")
+            ));
+        }
+        if !not_cached.is_empty() {
+            self.ui.warn(format!(
+                "{} sources jars are not in the cache, and --offline was given: {}",
+                not_cached.len(),
+                not_cached.join(", ")
+            ));
+        }
+        Ok((found, wanted.len()))
+    }
+
     // ---- the build pipeline -----------------------------------------------
 
     fn fetcher(&self) -> Result<Fetcher> {
@@ -1398,8 +2221,8 @@ impl<'a> Session<'a> {
             .repositories
             .iter()
             .map(|r| Repository {
-                name: r.name.clone(),
                 url: self.config.mirror_for(&r.name, &r.url).to_string(),
+                ..r.clone()
             })
             .collect();
         let credentials = self
@@ -1458,6 +2281,7 @@ impl<'a> Session<'a> {
             Vec::new(),
         )?;
 
+        let checking = Instant::now();
         let outcome = if compile::is_stale(&unit)? {
             self.ui.phase(
                 "Compiling",
@@ -1471,17 +2295,21 @@ impl<'a> Session<'a> {
             let scope = self
                 .ui
                 .spinner("Compiling", sources.describe("source files"));
-            let result = compile::compile(&toolchain, &unit, self.ui);
+            let mut steps = Vec::new();
+            let result = compile::compile_timed(&toolchain, &unit, self.ui, &mut steps);
             scope.finish();
+            self.record_steps("main", &steps);
             result?
         } else {
             self.ui.phase(
                 "Fresh",
                 format!("{} v{}", self.manifest.name, self.manifest.version),
             );
+            self.timings.since("compile main (fresh)", checking);
             compile::Outcome::UpToDate
         };
 
+        let syncing = Instant::now();
         let synced = project::sync_resources(
             &self.manifest.resource_path(),
             &project.classes_dir(),
@@ -1496,6 +2324,7 @@ impl<'a> Session<'a> {
                 .verbose(format!("removed {} deleted resources", synced.removed));
         }
         self.sync_generated(&generated.resources, &project.classes_dir(), "main")?;
+        self.timings.since("resources main", syncing);
         self.hook(Hook::PostCompile)?;
 
         let classes = match outcome {
@@ -1752,9 +2581,12 @@ impl<'a> Session<'a> {
             offline: self.offline,
             path: path.as_deref(),
         };
+        let started = Instant::now();
         let prepared = task::prepare(def, &ctx, named.unwrap_or_default())?;
         if prepared.is_fresh() {
             self.ui.phase("Fresh", format!("{} (task)", def.name));
+            self.timings
+                .since(task_timing_label(&def.name, hook, true), started);
             return Ok(exit::SUCCESS);
         }
 
@@ -1782,6 +2614,8 @@ impl<'a> Session<'a> {
             scope.finish();
             code?
         };
+        self.timings
+            .since(task_timing_label(&def.name, hook, false), started);
         if code == exit::SUCCESS {
             prepared.record()?;
         } else {
@@ -1824,6 +2658,7 @@ impl<'a> Session<'a> {
         }
 
         // `jrs update` asks every cached snapshot for its newest build too.
+        let resolving = Instant::now();
         let fetcher = self.fetcher()?.refreshing_snapshots(force_update);
         let lock_path = manifest.lock_path();
         let existing = Lockfile::load(&lock_path)?;
@@ -1863,7 +2698,18 @@ impl<'a> Session<'a> {
             }
         };
 
+        self.timings.since(
+            if fresh {
+                "resolution"
+            } else {
+                "resolution (jrs.lock)"
+            },
+            resolving,
+        );
+
+        let downloading = Instant::now();
         resolve::locate_cached(&mut resolution, &fetcher);
+        resolve::attach_local(&mut resolution, &manifest.root)?;
         let missing = resolution
             .packages
             .iter()
@@ -1878,6 +2724,7 @@ impl<'a> Session<'a> {
         } else {
             resolve::fetch_jars(&mut resolution, &fetcher, self.jobs)?;
         }
+        self.timings.since("downloads", downloading);
 
         self.fetch_tools(&mut tools, &fetcher)?;
 
@@ -1909,6 +2756,7 @@ impl<'a> Session<'a> {
     /// naming each compiler, then the shared download bars.
     fn fetch_tools(&self, tools: &mut [Tool], fetcher: &Fetcher) -> Result<()> {
         for tool in tools {
+            let started = Instant::now();
             resolve::locate_cached(&mut tool.resolution, fetcher);
             let missing = tool
                 .resolution
@@ -1933,6 +2781,8 @@ impl<'a> Session<'a> {
             } else {
                 resolve::fetch_jars(&mut tool.resolution, fetcher, self.jobs)?;
             }
+            self.timings
+                .since(format!("downloads ({} compiler)", tool.language), started);
             // How a compiler's own graph mediated is the compiler's business.
             for warning in &tool.resolution.warnings {
                 self.ui
@@ -2014,6 +2864,11 @@ impl<'a> Session<'a> {
             }
             root.children.push(node);
         }
+        // A local jar has no graph: one line, declared, with nothing below it.
+        for local in &resolution.local {
+            root.children
+                .push(TreeNode::styled(local_label(local), Style::None));
+        }
         root
     }
 
@@ -2065,7 +2920,8 @@ impl<'a> Session<'a> {
             })
             .map(resolve::ResolvedPackage::ga)
             .collect();
-        if matches.is_empty() {
+        let local = resolution.local_jar(target).map(|l| self.local_why(l));
+        if matches.is_empty() && local.is_none() {
             return Err(JrsError::usage(format!(
                 "`{target}` is not in the resolved graph\n\n\
                  run `jrs tree` to see what is"
@@ -2085,7 +2941,27 @@ impl<'a> Session<'a> {
         Ok(matches
             .iter()
             .map(|ga| self.why_node(resolution, &dependents, ga, &mut vec![ga.clone()]))
+            .chain(local)
             .collect())
+    }
+
+    /// `jrs tree --why <name>` for a local jar: nothing pulls it in but the
+    /// manifest.
+    fn local_why(&self, local: &resolve::LocalJar) -> TreeNode {
+        let table = if local.classpath == Classpath::Test {
+            "dev-dependencies"
+        } else {
+            "dependencies"
+        };
+        let mut node = TreeNode::styled(local_label(local), Style::None);
+        node.children.push(TreeNode::styled(
+            format!(
+                "{} v{} [{table}]",
+                self.manifest.name, self.manifest.version
+            ),
+            Style::Bold,
+        ));
+        node
     }
 
     fn why_node(
@@ -2155,11 +3031,22 @@ fn display_roots(roots: &[PathBuf]) -> String {
         .join(", ")
 }
 
+/// A task's row in the `--timings` report: `task gen (pre-compile)`, with
+/// `fresh` when its up-to-date check let it be skipped.
+fn task_timing_label(name: &str, hook: Option<Hook>, fresh: bool) -> String {
+    match (hook, fresh) {
+        (Some(hook), false) => format!("task {name} ({hook})"),
+        (Some(hook), true) => format!("task {name} ({hook}, fresh)"),
+        (None, false) => format!("task {name}"),
+        (None, true) => format!("task {name} (fresh)"),
+    }
+}
+
 /// `14      3 downloaded`, for the summary.
 fn deps_row(resolution: &Resolution) -> String {
     format!(
         "{:<7} {} downloaded",
-        resolution.packages.len(),
+        resolution.packages.len() + resolution.local.len(),
         resolution.downloaded
     )
 }
@@ -2168,17 +3055,33 @@ fn deps_row(resolution: &Resolution) -> String {
 /// nearest-wins decision is visible at a glance (SPEC §5.3.6).
 fn package_label(package: &resolve::ResolvedPackage) -> (String, Style) {
     let mut label = package.coord.to_string();
-    match package.classpath {
-        Classpath::Test => label.push_str(" (test)"),
-        Classpath::Provided => label.push_str(" (compile-only)"),
-        Classpath::Compile => {}
-    }
+    label.push_str(classpath_suffix(package.classpath));
     let style = if package.mediated {
         Style::Yellow
     } else {
         Style::None
     };
     (label, style)
+}
+
+/// What `jrs tree` adds after a package that is not on every classpath.
+fn classpath_suffix(classpath: Classpath) -> &'static str {
+    match classpath {
+        Classpath::Test => " (test)",
+        Classpath::Provided => " (compile-only)",
+        Classpath::Runtime => " (runtime-only)",
+        Classpath::Compile => "",
+    }
+}
+
+/// A local jar as `jrs tree` draws it: its name, then the path it is at.
+fn local_label(local: &resolve::LocalJar) -> String {
+    format!(
+        "{} = {}{}",
+        local.name,
+        local.path,
+        classpath_suffix(local.classpath)
+    )
 }
 
 // ---- watch -----------------------------------------------------------------
@@ -2236,13 +3139,16 @@ fn wait_for_change(ui: &Ui, paths: &[PathBuf]) {
 
 // ---- add / remove ----------------------------------------------------------
 
+/// `only` is `(--compile-only, --runtime-only)`, which clap keeps from both
+/// being set.
 fn add_command(
     cli: &Cli,
     ui: &Ui,
     coordinates: &[String],
     dev: bool,
-    compile_only: bool,
+    only: (bool, bool),
 ) -> Result<i32> {
+    let (compile_only, runtime_only) = only;
     let session = Session::open(cli, ui)?;
     let section = if dev {
         "dev-dependencies"
@@ -2297,6 +3203,7 @@ fn add_command(
         let mut dep = Dependency::new(group, artifact, version);
         dep.classifier = classifier;
         dep.compile_only = compile_only;
+        dep.runtime_only = runtime_only;
         additions.push(dep);
     }
 
@@ -2324,8 +3231,15 @@ fn remove_command(cli: &Cli, ui: &Ui, keys: &[String], dev: bool) -> Result<i32>
     } else {
         &["dependencies", "dev-dependencies"]
     };
+    let local = |key: &str| {
+        let m = &session.manifest;
+        m.dependencies
+            .iter()
+            .chain(&m.dev_dependencies)
+            .any(|d| d.is_local() && d.key() == key)
+    };
     for key in keys {
-        if Ga::parse(key).is_none() || key.split(':').count() > 3 {
+        if !local(key) && (Ga::parse(key).is_none() || key.split(':').count() > 3) {
             return Err(JrsError::usage(format!(
                 "`{key}` is not a `group:artifact` key, as jrs.toml names dependencies"
             )));
@@ -2948,6 +3862,10 @@ mod tests {
             vec!["jrs", "package", "--portable"],
             vec!["jrs", "package", "--jlink", "--jpackage"],
             vec!["jrs", "package", "--jpackage", "app-image"],
+            vec!["jrs", "package", "--sources", "--javadoc"],
+            vec!["jrs", "package", "--dist"],
+            vec!["jrs", "package", "--fat", "--dist", "--native-image"],
+            vec!["jrs", "package", "--dist", "--jlink", "--sources"],
             vec!["jrs", "doc"],
             vec!["jrs", "clean"],
             vec!["jrs", "tree"],
@@ -3017,6 +3935,8 @@ mod tests {
             vec!["jrs", "package", "--fat", "--portable"],
             vec!["jrs", "classpath", "--test", "--runtime"],
             vec!["jrs", "add", "--dev", "--compile-only", "g:a"],
+            vec!["jrs", "add", "--dev", "--runtime-only", "g:a"],
+            vec!["jrs", "add", "--compile-only", "--runtime-only", "g:a"],
             vec!["jrs", "add"],
             vec!["jrs", "completions", "powershell"],
             vec!["jrs", "task"],
@@ -3105,6 +4025,28 @@ mod tests {
     }
 
     #[test]
+    fn the_packaging_extras_are_independent_flags() {
+        let Command::Package(p) = parse(&[
+            "jrs",
+            "package",
+            "--portable",
+            "--sources",
+            "--javadoc",
+            "--dist",
+            "--native-image",
+        ])
+        .command
+        else {
+            panic!("expected package");
+        };
+        assert!(p.portable && p.sources && p.javadoc && p.dist && p.native_image);
+        let Command::Package(p) = parse(&["jrs", "package"]).command else {
+            panic!("expected package");
+        };
+        assert!(!p.sources && !p.javadoc && !p.dist && !p.native_image);
+    }
+
+    #[test]
     fn global_flags_work_after_the_subcommand() {
         let cli = parse(&["jrs", "build", "--verbose", "--offline", "--jobs", "2"]);
         assert!(cli.global.verbose);
@@ -3139,8 +4081,42 @@ mod tests {
     fn program_arguments_come_after_a_double_dash() {
         let cli = parse(&["jrs", "run", "--", "--verbose", "input.txt"]);
         match cli.command {
-            Command::Run { args } => assert_eq!(args, vec!["--verbose", "input.txt"]),
+            Command::Run { args, .. } => assert_eq!(args, vec!["--verbose", "input.txt"]),
             other => panic!("expected run, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn debug_takes_an_optional_port_after_an_equals_sign() {
+        let debug = |argv: &[&str]| match parse(argv).command {
+            Command::Run { debug, .. } => debug,
+            Command::Test(args) => args.debug,
+            other => panic!("expected run or test, got {other:?}"),
+        };
+        assert_eq!(debug(&["jrs", "run"]), None);
+        assert_eq!(
+            debug(&["jrs", "run", "--debug"]),
+            Some(runner::DebugAddress::default())
+        );
+        assert_eq!(debug(&["jrs", "test", "--debug=8000"]).unwrap().port, 8000);
+        let any = debug(&["jrs", "test", "--debug=*:5006"]).unwrap();
+        assert_eq!(any.host.as_deref(), Some("*"));
+        // The program's arguments still come after `--`, untouched.
+        match parse(&["jrs", "run", "--debug", "--", "--debug=1"]).command {
+            Command::Run { args, debug, .. } => {
+                assert_eq!(args, vec!["--debug=1"]);
+                assert_eq!(debug.unwrap().port, runner::DEFAULT_DEBUG_PORT);
+            }
+            other => panic!("expected run, got {other:?}"),
+        }
+        // A port is validated before anything builds: a usage error.
+        for bad in [
+            &["jrs", "run", "--debug=0"][..],
+            &["jrs", "test", "--debug=70000"],
+            &["jrs", "test", "--debug=five"],
+            &["jrs", "test", "--debug", "5005"],
+        ] {
+            assert!(Cli::try_parse_from(bad).is_err(), "{bad:?}");
         }
     }
 
@@ -3202,6 +4178,41 @@ mod tests {
     }
 
     #[test]
+    fn test_takes_rerun_fail_fast_and_retries() {
+        let cli = parse(&[
+            "jrs",
+            "test",
+            "--rerun-failed",
+            "--fail-fast",
+            "--retries",
+            "3",
+        ]);
+        match cli.command {
+            Command::Test(args) => {
+                assert!(args.rerun_failed);
+                assert!(args.fail_fast);
+                assert_eq!(args.retries, Some(3));
+            }
+            other => panic!("expected test, got {other:?}"),
+        }
+        // A rerun selects exactly what failed: nothing may narrow or widen
+        // it, and a watch would rerun the same list forever.
+        for other in [
+            ["--method", "a.BTest#c"],
+            ["--filter", ".*"],
+            ["--include-tag", "fast"],
+            ["--exclude-tag", "slow"],
+        ] {
+            let mut argv = vec!["jrs", "test", "--rerun-failed"];
+            argv.extend(other);
+            assert!(Cli::try_parse_from(argv).is_err(), "{other:?}");
+        }
+        assert!(Cli::try_parse_from(["jrs", "test", "--rerun-failed", "--watch"]).is_err());
+        assert!(Cli::try_parse_from(["jrs", "test", "--retries", "-1"]).is_err());
+        assert!(Cli::try_parse_from(["jrs", "test", "--fail-fast", "--retries", "2"]).is_ok());
+    }
+
+    #[test]
     fn migrate_takes_the_flags_the_spec_lists() {
         let cli = parse(&[
             "jrs",
@@ -3227,5 +4238,64 @@ mod tests {
             }
             other => panic!("expected migrate, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn timings_is_a_flag_of_the_commands_that_build() {
+        for args in [
+            vec!["jrs", "build", "--timings"],
+            vec!["jrs", "build", "--watch", "--timings"],
+            vec!["jrs", "test", "--timings", "--coverage"],
+            vec!["jrs", "run", "--timings", "--", "--timings"],
+            vec!["jrs", "package", "--fat", "--timings"],
+        ] {
+            assert!(parse(&args).command.timings(), "{args:?}");
+        }
+        assert!(!parse(&["jrs", "build"]).command.timings());
+        match parse(&["jrs", "run", "--timings", "--", "--timings"]).command {
+            Command::Run { args, timings, .. } => {
+                assert!(timings);
+                assert_eq!(args, ["--timings"], "after `--` it is the program's");
+            }
+            other => panic!("expected run, got {other:?}"),
+        }
+        for args in [
+            vec!["jrs", "tree", "--timings"],
+            vec!["jrs", "classpath", "--timings"],
+            vec!["jrs", "fetch", "--timings"],
+        ] {
+            assert!(Cli::try_parse_from(&args).is_err(), "{args:?} parsed");
+        }
+    }
+
+    #[test]
+    fn metadata_and_fetch_take_their_flags() {
+        match parse(&["jrs", "metadata", "--no-deps"]).command {
+            Command::Metadata { no_deps } => assert!(no_deps),
+            other => panic!("expected metadata, got {other:?}"),
+        }
+        match parse(&["jrs", "metadata"]).command {
+            Command::Metadata { no_deps } => assert!(!no_deps),
+            other => panic!("expected metadata, got {other:?}"),
+        }
+        match parse(&["jrs", "fetch", "--sources", "--offline"]).command {
+            Command::Fetch { sources } => assert!(sources),
+            other => panic!("expected fetch, got {other:?}"),
+        }
+        assert!(Cli::try_parse_from(["jrs", "fetch", "guava"]).is_err());
+    }
+
+    #[test]
+    fn a_task_row_names_its_hook_and_freshness() {
+        assert_eq!(
+            task_timing_label("gen", Some(Hook::PreCompile), false),
+            "task gen (pre-compile)"
+        );
+        assert_eq!(
+            task_timing_label("gen", Some(Hook::PreCompile), true),
+            "task gen (pre-compile, fresh)"
+        );
+        assert_eq!(task_timing_label("fmt", None, false), "task fmt");
+        assert_eq!(task_timing_label("fmt", None, true), "task fmt (fresh)");
     }
 }

@@ -93,16 +93,24 @@ src/
 │   ├── repo.rs        Fetcher: cache → repositories, checksums, retries
 │   └── cache.rs       the local store: layout, atomic writes, pruning
 ├── test.rs            the JUnit Platform console launcher; JaCoCo
-├── package.rs         thin / portable / fat jars; deterministic zip writing
+├── test_report.rs     JUnit XML read back: the HTML page, reruns, retries
+├── package.rs         thin / portable / fat / sources jars; merge rules; zip writing
 ├── image.rs           jdeps, jlink, jpackage
+├── dist.rs            --dist: launch scripts, the staged directory, the zip
+├── native_image.rs    --native-image: GraalVM's native-image, by argfile
 ├── runner.rs          `jrs run`: the user's program gets the terminal
 ├── task.rs            [tasks] and [hooks]: plan, cycles, placeholders, freshness
 ├── migrate/
 │   ├── mod.rs         detection, report, manifest emission
 │   ├── maven.rs       pom.xml → Manifest (reuses resolve::pom)
 │   ├── gradle.rs      build.gradle[.kts] → Manifest (pattern extraction)
+│   ├── gradle_files.rs  files() / fileTree() → local jars, literal ones only
+│   ├── gradle_repos.rs  repositories { }, content filters → groups
 │   └── gradle_tasks.rs  Gradle tasks → [tasks] and [hooks], literal ones only
 ├── completions.rs     bash/zsh/fish scripts generated from the clap definition
+├── timings.rs         --timings: the per-phase recorder, and timings.txt
+├── model.rs           the project model `jrs metadata` prints
+├── json.rs            a small JSON writer (no serde_json), for the model
 └── ui/
     ├── mod.rs         Ui handle: mode detection, phase lines, live scopes
     ├── progress.rs    Live state and the pure functions that turn it into lines
@@ -162,7 +170,7 @@ What the layering buys:
   enum from `compile::lang`, coordinate parsing from `resolve::coord`, and
   `task::check` for the whole-manifest task validation.
 - **Modules that run processes take a `&Ui`** (`toolchain`, `compile`, `test`,
-  `runner`, `image`) only so they can tear the live region down before a
+  `runner`, `image`, `native_image`) only so they can tear the live region down before a
   subprocess writes to the terminal, and pass that output through verbatim.
 - **`cli` is the only module that decides what a user sees**, and the only one
   that renders an error.
@@ -194,7 +202,7 @@ What the layering buys:
            ▼
          session.<command>()           build · test · run · package · doc · task
            │                           clean · tree · classpath · update
-           │                           verify · outdated
+           │                           verify · outdated · metadata · fetch
            ▼
          Result<i32>
            ├── Ok(code) ─────────────────────────────────────────────────► code
@@ -217,7 +225,8 @@ it, it runs **at most once per invocation**.
  ├── built      : OnceCell<Built>           the result of build()
  ├── ran        : RefCell<HashSet<String>>  tasks already run or found fresh
  ├── done       : RefCell<HashSet<Builtin>> built-ins a depends-on already ran
- └── jar        : RefCell<Option<PathBuf>>  set once package has written it
+ ├── jar        : RefCell<Option<PathBuf>>  set once package has written it
+ └── timings    : Timings                   one row per leaf phase, for --timings
 ```
 
 The commands nest. `build()` is the shared spine; the others call it first and
@@ -235,14 +244,17 @@ add to it:
  └  hook(post-compile)
 
  test()                                                     jrs test
+ │  --rerun-failed: the last run's XML ─► what to select, before it is replaced
  │  build()
  │  hook(pre-test)
  │  compile_unit("test")  classpath = target/classes + test classpath
  │  sync test resources
  │  fetch_internal: JUnit console launcher (+ JaCoCo agent/cli with --coverage)
- │  test::run  ─► java … ConsoleLauncher --scan-class-path …
- │  coverage report (even when tests failed)
- └  hook(post-test)      only if the tests passed
+ │  test::run  ─► java … ConsoleLauncher --scan-class-path …   (+ test.env)
+ │  retries (test.retries): what still fails, one launcher each
+ │  test_report: XML read back ─► flaky count, test-reports/index.html
+ │  coverage report (even when tests failed), then test.coverage-minimum
+ └  hook(post-test)      only if the tests passed and met the minimums
 
  package()                                                  jrs package
  │  build()
@@ -253,7 +265,8 @@ add to it:
  run_command()                                              jrs run
  │  build()
  │  hook(pre-run)
- └  runner::run_main ─► java … <main-class> args   (stdio inherited)
+ └  runner::run_main ─► java … <main-class> args   (stdio inherited;
+                                                      run.env, in run.cwd)
 ```
 
 Every phase line (`Resolving`, `Downloading`, `Compiling`, `Fresh`, `Testing`,
@@ -261,6 +274,22 @@ Every phase line (`Resolving`, `Downloading`, `Compiling`, `Fresh`, `Testing`,
 unconditionally.
 The spinner or download bars around a phase are a separate `LiveScope` that
 only adds motion. See [§11](#11-the-output-layer).
+
+The same methods time their phases. As each leaf phase ends — resolution,
+downloads, each compile step (`compile::compile_timed` hands them back),
+resources, each task, the test JVM, packaging, the image tools — `Session`
+records a row in its `Timings` (`timings.rs`). Rows are recorded whatever the
+flags; only `--timings` reports them, from `build_command`, `test_command` and
+`package_command` after the summary, and from `run_command` before the
+program starts. The report is the table through `Ui::timings` and a copy in
+`target/.jrs/timings.txt`. A nested phase never gets a row of its own, so the
+rows do not overlap.
+
+Two commands use the spine without building. `jrs fetch` is `dependencies()`,
+the test launcher and optionally every `-sources.jar`
+(`resolve::fetch_sources`). `jrs metadata` is `dependencies()` (unless
+`--no-deps`) and `toolchain()` handed to `model::metadata`, which turns them
+and the manifest into a `json::Json` document printed on stdout.
 
 ## 6. Dependency resolution
 
@@ -302,6 +331,13 @@ from the network:
 are recomputed on load. It is `version = 1` byte for byte until a `[[tool]]`
 block makes it `version = 2`.
 
+Local jars (`name = { path = "libs/x.jar" }`, SPEC §8.8) have no coordinate, so
+they never enter the walk. `Resolution::local` holds them, `jrs.lock` writes
+them as `[[local]]` blocks (the manifest's relative path and a `sha256` pin, no
+new version), and `resolve::attach_local` finds each under the project root and
+re-hashes it on every build — `resolve` itself, or `dependencies()` for a
+lockfile. A jar that no longer matches its pin fails until `jrs update`.
+
 ### 6.2 The graph walk
 
 `resolve::resolve` is breadth-first **by level**, so that each level's POM
@@ -340,6 +376,14 @@ Version ranges are rejected with an error, never guessed at. The classpath jrs
 hands to `javac` is ordered direct dependencies first, then transitive ones,
 each sorted by coordinate, so it is deterministic.
 
+A package's `Classpath` is a set of places its jar goes, and widening is their
+union (`Classpath::join`): `compile` (main compile, runtime, tests),
+`provided` (compile-only: main compile and tests), `runtime` (runtime-only:
+runtime and tests) and `test`. Reached as both `provided` and `runtime`, a
+package is `compile`. The main sources' compilers get `compile` and `provided`;
+`jrs run`, packaging and `jdeps` get `compile` and `runtime`; the test
+classpath gets everything.
+
 A compiler's graph goes through the same function via `resolve_tool`, but as
 a separate resolution: the Kotlin compiler's own `kotlinx-coroutines` must
 never mediate against the project's.
@@ -355,7 +399,9 @@ never mediate against the project's.
    │ no
    ├─► --offline? ─── yes ─► error naming the expected cache path
    │
-   └─► for repo in [repositories…] (mirrors applied), then Maven Central:
+   └─► for repo in [repositories…] (mirrors applied), then Maven Central —
+       only those whose `groups` claim the group, or, when none does, those
+       without `groups` (repo::repositories_for):
          GET  (retry twice on dropped connection / 429 / 5xx;
                believe 404 and 401 at once)
          verify the repository's .sha1, and the jrs.lock pin if there is one
@@ -422,19 +468,62 @@ internal dependency:
                    (minus launcher parts the project's graph would shadow)
                  + junit-platform-console-standalone     ◄── last, so the
                                                               user's jars win
- java [jvm-args] [-javaagent:jacoco…] -cp … ConsoleLauncher [execute]
-      --scan-class-path target/test-classes   (or --select-method …, which
-                                               replaces the scan)
+ java [-agentlib:jdwp=…]              --debug
+      [-javaagent:<jar>…]             test.java-agents, from the resolved graph
+      [-javaagent:jacoco…]            --coverage
+      [jvm-args] -cp … ConsoleLauncher [execute]
+      --scan-class-path target/test-classes   (or --select-method,
+                                               --select-unique-id and
+                                               --select-class, which
+                                               replace the scan)
       --include-classname … --include-tag … --exclude-tag …
-      --reports-dir target/test-reports
-        │
+      --reports-dir target/test-reports       (retry-<n>/ for a retry)
+      [--fail-fast]                           (6.x launchers only)
+        │  environment: jrs's own + test.env
         ├── stdout/stderr passed through verbatim
-        ├── each line read to advance the live counter (TestState)
+        ├── each line read to advance the live counter (TestState),
+        │   except under --debug, when the JVM waits for a debugger
         └── the launcher's summary block parsed for the authoritative totals
 ```
 
 The launcher version is derived from the Jupiter (or other engine) version the
 project declares. JUnit 4 runs on the Vintage engine the launcher bundles.
+
+`jrs run` builds its command line the same way: `runner::jvm_prefix` puts the
+JDWP agent and then the java agents (`runner::java_agents` looks each
+`group:artifact` up in the resolution: the test classpath for `test`, the
+runtime classpath for `run`) ahead of `jvm-args`. `run.env`, `test.env` and
+`run.cwd` are the tasks' `env` and `cwd`, parsed by the same code in
+`manifest.rs` and expanded by `task::jvm_env` / `task::jvm_cwd`, and
+`toolchain::Environment` applies them to the process.
+
+When the launcher exits, `test_report.rs` reads its XML back: the per-engine
+`TEST-*.xml` files, with each test's unique ID taken from its `<system-out>`,
+and any retries folded in over them.
+
+```
+ test-reports/TEST-*.xml ────────┐
+ test-reports/retry-<n>/TEST-*.xml ┴─► test_report::load ─► Results
+                                          (a failure that passed on a
+                                           retry becomes Flaky)
+        ┌──────────────────────────────────────┼───────────────────────────┐
+        ▼                                      ▼                           ▼
+ select(still failing):               Flaky lines, and the        index.html: a row
+   --select-method Class#m(params)    Finished line's count       per class, failures
+   else --select-unique-id            (cli.rs)                    first with their
+   else --select-class                                            traces, the rest
+ for --rerun-failed and test.retries                              folded
+```
+
+`--fail-fast` is the launcher's own from JUnit 6 on (`TestRun::fail_fast_mode`).
+A 1.x launcher has none, and prints its tree only once the run is over, so
+from 1.10 on jrs asks it for `--details=testfeed`, reads that through
+`toolchain::run_streaming_until`, and kills the launcher when the test after
+the first failure starts. That run has no summary block and no XML. Before
+1.10 there is no feed either, and `--fail-fast` is ignored with a warning.
+A retry is the first run's `TestRun`, cloned with
+its selectors swapped, its reports sent to `retry-<n>/` and the JaCoCo agent
+set to `append=true`.
 
 ## 9. Packaging
 
@@ -446,26 +535,46 @@ project declares. JUnit 4 runs on the Vintage engine the launcher bundles.
      thin (default)            --portable                    --fat
   Class-Path: absolute     deps copied to target/lib/   deps unpacked into
   paths into the cache     Class-Path: lib/<file>.jar   one jar; project
-                                    │                   classes win conflicts
-                                    │                          │
+                                    │                   classes win conflicts;
+  each gets [package.manifest]      │                   services and Spring
+  after jrs's own attributes        │                   registries merged
                                     ├──────────────────────────┤
                                     ▼                          ▼
-                         --jlink / --jpackage use the portable layout,
+                  --jlink / --jpackage / --dist use the portable layout,
                          or the fat jar when --fat is given too
                                     │
-                        jdeps ─► module list (+ [package] add-modules)
-                                    │
-                    ┌───────────────┴────────────────┐
-                    ▼                                ▼
-            jlink ─► target/image           jpackage ─► target/jpackage
+             ┌──────────────────────┴───────────────────────┐
+             ▼                                              ▼
+   jdeps ─► module list (+ add-modules)      --dist: jar (+ lib/) + bin/<name>,
+             │                               bin/<name>.bat (java from JAVA_HOME
+     ┌───────┴──────────┐                    or PATH) ─► target/dist/<n>-<v>/
+     ▼                  ▼                               ─► target/<n>-<v>.zip
+ jlink ─► target/image  jpackage ─► target/jpackage
+
+ beside any of them:
+   --sources       main roots + generated sources ─► <n>-<v>-sources.jar
+   --javadoc       jrs doc ─► target/doc ─► <n>-<v>-javadoc.jar
+   --native-image  classes + runtime classpath ─► native-image (the GraalVM
+                   JDK's bin/, by argfile) ─► target/native/<name>
 ```
 
 All jars are **deterministic**: entries sorted, a fixed 1980 timestamp, fixed
 permissions, so two builds of the same inputs are byte-identical. The fat jar
 is written straight from the dependency jars without a staging directory, and
 its merge rules are load-bearing: `META-INF/services/*` files are concatenated
-(overwriting them breaks `ServiceLoader` silently), and Groovy extension-module
-descriptors are merged into one.
+(overwriting them breaks `ServiceLoader` silently), Groovy extension-module
+descriptors are merged into one, and Spring's registries are merged —
+`spring.factories` key by key, `META-INF/spring/*.imports` as a union of lines,
+`spring.handlers`, `spring.schemas` and `spring.tooling` concatenated. The
+project's own copy of each comes first. The distribution zip is written the
+same way — sorted, fixed timestamp, fixed modes, `0755` only for the POSIX
+launcher — and `javadoc` runs with `-notimestamp`, so the sources, Javadoc and
+distribution archives are byte-identical across builds as well.
+
+`--dist` and `--native-image` live in `dist.rs` and `native_image.rs`. The
+launchers reuse `image.rs`'s quoting; `native-image` is found beside `javac`,
+and its absence means the JDK is not GraalVM, which is reported before the
+build starts.
 
 ## 10. Tasks and hooks
 
@@ -560,6 +669,13 @@ Before a subprocess writes to the terminal — `javac` diagnostics, a test run,
 `jrs run` handing stdio to the user's program — the live region is torn down
 (`Ui::suspend`), and the output is passed through untouched.
 
+The `--timings` table is one more composite output, like the summary.
+`Ui::timings` takes rows of labels and `Duration`s that `Session` collected,
+and `render_timings` turns them into lines. That function is pure: its
+columns depend on the labels alone. The lines go to stderr in every mode
+except quiet, so `tests/output.rs` snapshots the table with fixed durations,
+the same way it snapshots the summary.
+
 ## 12. Errors and exit codes
 
 Errors are values. Every fallible function returns `jrs::Result<T>`, and there
@@ -593,10 +709,15 @@ poisoning, which is documented under each function's `# Panics`.
      ├── classes/                 main classes + resources
      ├── test-classes/
      ├── <name>-<version>.jar
+     ├── <name>-<version>-sources.jar  <name>-<version>-javadoc.jar
+     │                            --sources / --javadoc
+     ├── <name>-<version>.zip     --dist, zipped from dist/<name>-<version>/
      ├── lib/                     --portable
+     ├── dist/                    --dist: the staged distribution, bin/ launchers
      ├── image/  jpackage/        --jlink / --jpackage
+     ├── native/                  --native-image
      ├── doc/                     jrs doc
-     ├── test-reports/            JUnit XML
+     ├── test-reports/            JUnit XML, index.html; retry-<n>/ per retry
      ├── coverage/  jacoco.exec   jrs test --coverage
      ├── generated/…              by convention, task output
      └── .jrs/                    jrs's own scratch space
@@ -604,12 +725,15 @@ poisoning, which is documented under each function's `# Panics`.
          ├── main.fingerprint  test.fingerprint
          ├── resources-main.list  resources-test.list  resources-*-generated-*.list
          ├── tasks/                 <task>.fingerprint  <task>.cp.args
-         └── javadoc.args  junit-palette.properties  jpackage-input/
+         ├── javadoc.args  junit-palette.properties  jpackage-input/
+         │   native-image.args
+         └── timings.txt            --timings: phase<TAB>ms, the last run's
 
  shared cache  (JRS_CACHE_DIR, or ~/Library/Caches/jrs, $XDG_CACHE_HOME/jrs,
                 ~/.cache/jrs, %LOCALAPPDATA%\jrs\cache)
  ├── com/google/guava/guava/33.0.0-jre/guava-33.0.0-jre.jar   Maven layout
  │     (a snapshot keeps a *.jrs-snapshot record of its build beside it)
+ │     (and guava-33.0.0-jre-sources.jar, once `jrs fetch --sources` ran)
  └── .jrs/projects                the lockfiles of every project built with it,
                                   which `jrs cache prune` keeps alive
 
@@ -669,11 +793,12 @@ design regression, not a style nit.
 | Sources and classpaths go through argfiles | `compile/`, `test.rs` |
 | Nearest-wins, breadth-first by level, ties on declaration order; no ranges | `resolve/mod.rs`, `manifest.rs` |
 | Atomic, checksum-verified cache writes | `resolve/cache.rs`, `resolve/repo.rs` |
-| `META-INF/services/*` concatenated in fat jars | `package.rs` |
+| Fat-jar merge rules: `META-INF/services/*`, Groovy extension modules and Spring's registries merged, never overwritten; the project's copy first | `package.rs` |
 | Toolchain output passed through verbatim | `compile/`, `test.rs`, `image.rs` |
 | `jrs.lock` holds no absolute paths; `manifest-checksum` triggers re-resolution | `lockfile.rs` |
 | Resolution reads `effective_dependencies()`, never `dependencies` alone | `manifest.rs`, `resolve/mod.rs` |
 | A compiler's graph never meets the project's | `resolve::resolve_tool` |
+| A group a repository's `groups` claim is looked up nowhere else | `resolve::repo::repositories_for` |
 | Tasks are subprocesses at fixed points; built-in phases cannot be reordered | `task.rs`, `cli.rs` |
 
 The dependency list is kept deliberately short (SPEC §13): `clap`,

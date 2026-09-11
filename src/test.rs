@@ -14,13 +14,14 @@
 //! launcher prints at the end.
 
 use std::fmt::Write as _;
+use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
 
-use crate::error::{IoResultExt, JrsError, Result};
-use crate::manifest::Manifest;
+use crate::error::{IoResultExt, JrsError, Result, exit};
+use crate::manifest::{CoverageCounter, CoverageMinimum, Manifest};
 use crate::resolve::Resolution;
 use crate::resolve::coord::{Coord, Ga, compare_versions};
-use crate::toolchain::{Toolchain, run_captured, run_streaming};
+use crate::toolchain::{Environment, Toolchain, run_captured, run_streaming_until};
 use crate::ui::{Live, Outcome, Stream, Ui};
 
 pub const LAUNCHER_GROUP: &str = "org.junit.platform";
@@ -185,6 +186,33 @@ const EXECUTE_SUBCOMMAND_SINCE: &str = "1.10";
 /// The platform release that introduced `--color-palette`.
 const COLOR_PALETTE_SINCE: &str = "1.9";
 
+/// The platform release that introduced `--fail-fast`: `JUnit` 6. No 1.x
+/// launcher has it, up to and including 1.14.
+pub const FAIL_FAST_SINCE: &str = "6.0";
+
+/// What a launcher with `--fail-fast` prints when it stopped a run early.
+const FAIL_FAST_CANCELLED: &str = "cancelled due to --fail-fast";
+
+/// The platform release that introduced `--details=testfeed`, which reports
+/// each test as it finishes. The default tree is printed only once the whole
+/// run is over, which is too late to stop at the first failure.
+const TESTFEED_SINCE: &str = "1.10";
+
+/// How `jrs test --fail-fast` is carried out with a given launcher.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FailFast {
+    /// Not asked for.
+    Off,
+    /// The launcher's own `--fail-fast`, from `JUnit` 6 on.
+    Native,
+    /// A 1.10 to 1.14 launcher: jrs asks for its test feed instead of the
+    /// tree, and stops the launcher when the test after the first failure
+    /// starts.
+    Stop,
+    /// A launcher before 1.10 has neither, so every test runs.
+    Unsupported,
+}
+
 /// Overrides for the launcher's ANSI palette, keyed by its `Style` names.
 ///
 /// The defaults paint test names blue (34), which is close to unreadable on a
@@ -199,7 +227,7 @@ TEST=39
 REPORTED=39
 ";
 
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct TestRun {
     /// `[test] jvm-args`, and the coverage agent when there is one.
     pub jvm_args: Vec<String>,
@@ -222,6 +250,17 @@ pub struct TestRun {
     pub launcher_version: String,
     /// jrs's scratch space, where the colour palette is written.
     pub work_dir: PathBuf,
+    /// `test.env`, added to what the test JVM inherits.
+    pub environment: Environment,
+    /// Tests selected by unique ID (`--select-unique-id`): one invocation of a
+    /// parameterised test, one dynamic test. Like `methods`, replaces the scan.
+    pub unique_ids: Vec<String>,
+    /// Whole classes (`--select-class`), for a failed test the reports give no
+    /// narrower selector for. Like `methods`, replaces the scan.
+    pub classes: Vec<String>,
+    /// `jrs test --fail-fast`: stop at the first failure, as [`FailFast`]
+    /// says this launcher can.
+    pub fail_fast: bool,
 }
 
 impl TestRun {
@@ -240,7 +279,7 @@ impl TestRun {
         }
         // Scanning and explicit selectors cannot be combined: the launcher
         // refuses. A method selection replaces the scan.
-        if self.methods.is_empty() {
+        if self.methods.is_empty() && self.unique_ids.is_empty() && self.classes.is_empty() {
             args.push("--scan-class-path".to_string());
             args.push(self.scan_dir.display().to_string());
         } else {
@@ -248,9 +287,24 @@ impl TestRun {
                 args.push("--select-method".to_string());
                 args.push(method.clone());
             }
+            for id in &self.unique_ids {
+                args.push("--select-unique-id".to_string());
+                args.push(id.clone());
+            }
+            for class in &self.classes {
+                args.push("--select-class".to_string());
+                args.push(class.clone());
+            }
         }
         args.extend([
-            "--details=tree".to_string(),
+            format!(
+                "--details={}",
+                if self.fail_fast_mode() == FailFast::Stop {
+                    "testfeed"
+                } else {
+                    "tree"
+                }
+            ),
             format!(
                 "--details-theme={}",
                 if self.ascii { "ascii" } else { "unicode" }
@@ -277,7 +331,29 @@ impl TestRun {
             args.push("--exclude-tag".to_string());
             args.push(tag.clone());
         }
+        if self.fail_fast_mode() == FailFast::Native {
+            args.push("--fail-fast".to_string());
+        }
         args
+    }
+
+    /// How `--fail-fast` is carried out with this launcher. A 1.x one refuses
+    /// `--fail-fast` as an unknown option, so jrs stops it instead where it
+    /// can follow the run as it happens.
+    #[must_use]
+    pub fn fail_fast_mode(&self) -> FailFast {
+        let since = |version: &str| {
+            compare_versions(&self.launcher_version, version) != std::cmp::Ordering::Less
+        };
+        if !self.fail_fast {
+            FailFast::Off
+        } else if since(FAIL_FAST_SINCE) {
+            FailFast::Native
+        } else if since(TESTFEED_SINCE) {
+            FailFast::Stop
+        } else {
+            FailFast::Unsupported
+        }
     }
 
     /// Where the colour palette goes, when this run is coloured and the launcher
@@ -297,6 +373,13 @@ pub struct TestOutcome {
     pub passed: u64,
     pub failed: u64,
     pub skipped: u64,
+    /// Tests that failed and then passed on a retry: counted here, not as
+    /// passed, so a retry cannot hide them.
+    pub flaky: u64,
+    /// `--fail-fast` ended the run before every test had run.
+    pub stopped_early: bool,
+    /// The totals below `test.coverage-minimum`, on a `--coverage` run.
+    pub coverage_shortfalls: Vec<CoverageShortfall>,
 }
 
 impl TestOutcome {
@@ -305,15 +388,21 @@ impl TestOutcome {
         self.exit_code == 0
     }
 
-    /// `31 tests, 30 passed, 1 failed`
+    /// `31 tests, 29 passed, 1 flaky, 1 failed`
     #[must_use]
     pub fn describe(&self) -> String {
         let mut s = format!("{} tests, {} passed", self.found, self.passed);
+        if self.flaky > 0 {
+            let _ = write!(s, ", {} flaky", self.flaky);
+        }
         if self.failed > 0 {
             let _ = write!(s, ", {} failed", self.failed);
         }
         if self.skipped > 0 {
             let _ = write!(s, ", {} skipped", self.skipped);
+        }
+        if self.stopped_early {
+            s.push_str("; stopped at the first failure");
         }
         s
     }
@@ -345,23 +434,42 @@ pub fn run(toolchain: &Toolchain, run: &TestRun, ui: &Ui) -> Result<TestOutcome>
     let args = run.args();
     let mut outcome = TestOutcome::default();
     let mut summary = Vec::new();
-    let exit_code = run_streaming(ui, &toolchain.java, &args, |line| {
-        if let Some(mark) = test_mark(line) {
-            ui.update_live(|live| {
-                if let Live::Tests(state) = live {
-                    state.marks.push(mark);
-                    match mark {
-                        Outcome::Pass => state.passed += 1,
-                        Outcome::Fail => state.failed += 1,
-                        Outcome::Skip => state.skipped += 1,
+    // Counted here as well, for a run jrs stops before its summary.
+    let mut seen = TestOutcome::default();
+    let mut cancelled = false;
+    let stop_it = run.fail_fast_mode() == FailFast::Stop;
+    let mut failing = false;
+    let (exit_code, stopped) =
+        run_streaming_until(ui, &toolchain.java, &args, &run.environment, |line| {
+            // The test after the first failure has started: stop it before it
+            // gets anywhere, with the failure and its trace already through.
+            if stop_it && failing && feed_started(line) {
+                return ControlFlow::Break(());
+            }
+            if let Some(mark) = test_mark(line).or_else(|| feed_mark(line)) {
+                failing |= mark == Outcome::Fail;
+                ui.update_live(|live| {
+                    if let Live::Tests(state) = live {
+                        state.marks.push(mark);
+                        match mark {
+                            Outcome::Pass => state.passed += 1,
+                            Outcome::Fail => state.failed += 1,
+                            Outcome::Skip => state.skipped += 1,
+                        }
                     }
+                });
+                match mark {
+                    Outcome::Pass => seen.passed += 1,
+                    Outcome::Fail => seen.failed += 1,
+                    Outcome::Skip => seen.skipped += 1,
                 }
-            });
-        }
-        if let Some(entry) = summary_entry(line) {
-            summary.push(entry);
-        }
-    })?;
+            }
+            if let Some(entry) = summary_entry(line) {
+                summary.push(entry);
+            }
+            cancelled |= line.contains(FAIL_FAST_CANCELLED);
+            ControlFlow::Continue(())
+        })?;
 
     outcome.exit_code = exit_code;
     for (count, what) in summary {
@@ -373,6 +481,20 @@ pub fn run(toolchain: &Toolchain, run: &TestRun, ui: &Ui) -> Result<TestOutcome>
             _ => {}
         }
     }
+    if stopped {
+        // Stopped before its summary: what jrs counted is all there is, and
+        // it stopped because something failed.
+        let failed = seen.failed.max(1);
+        outcome = TestOutcome {
+            exit_code: exit::FAILURE,
+            found: seen.passed + failed + seen.skipped,
+            passed: seen.passed,
+            failed,
+            skipped: seen.skipped,
+            ..TestOutcome::default()
+        };
+    }
+    outcome.stopped_early = stopped || cancelled;
     Ok(outcome)
 }
 
@@ -402,6 +524,39 @@ pub fn test_mark(line: &str) -> Option<Outcome> {
         }
     }
     None
+}
+
+/// Recognise a finished test in the launcher's test feed
+/// (`--details=testfeed`), which `--fail-fast` asks a 1.x launcher for:
+/// `JUnit Jupiter > CalcTest > adds() :: SUCCESSFUL`. Unlike the tree, it
+/// names each test's status, so a `JUnit` 4 test without `()` counts too.
+#[must_use]
+pub fn feed_mark(line: &str) -> Option<Outcome> {
+    let status = feed_status(line)?;
+    if status.starts_with("SUCCESSFUL") {
+        Some(Outcome::Pass)
+    } else if status.starts_with("FAILED") {
+        Some(Outcome::Fail)
+    } else if status.starts_with("ABORTED") || status.starts_with("SKIPPED") {
+        Some(Outcome::Skip)
+    } else {
+        None
+    }
+}
+
+/// Whether a line of the test feed says a test has started.
+#[must_use]
+pub fn feed_started(line: &str) -> bool {
+    feed_status(line).is_some_and(|status| status.starts_with("STARTED"))
+}
+
+/// The status a test-feed event ends in. The feed indents the stack traces
+/// under its events, and never the events themselves.
+fn feed_status(line: &str) -> Option<&str> {
+    if line.starts_with(char::is_whitespace) {
+        return None;
+    }
+    line.rsplit_once(" :: ").map(|(_, status)| status)
 }
 
 /// Parse one line of the launcher's closing summary, e.g.
@@ -548,25 +703,115 @@ pub fn report_coverage(
 /// DTD `JaCoCo`'s doctype points at.
 #[must_use]
 pub fn coverage_summary(xml: &str) -> Option<Coverage> {
+    let tail = report_tail(xml)?;
+    Some(Coverage {
+        lines: report_counter(tail, "LINE")?,
+        branches: report_counter(tail, "BRANCH").unwrap_or((0, 0)),
+    })
+}
+
+/// The part of a `JaCoCo` XML report after its last package or group, where
+/// the report-level counters are.
+fn report_tail(xml: &str) -> Option<&str> {
     let start = ["</package>", "</group>", "<report"]
         .iter()
         .filter_map(|marker| xml.rfind(marker).map(|at| at + marker.len()))
         .max()?;
-    let tail = &xml[start..];
-    let counter = |kind: &str| -> Option<(u64, u64)> {
-        let at = tail.find(&format!("type=\"{kind}\""))?;
-        let element = &tail[at..at + tail[at..].find("/>")?];
-        let attribute = |name: &str| -> Option<u64> {
-            let value = element.split(&format!("{name}=\"")).nth(1)?;
-            value.split('"').next()?.parse().ok()
-        };
-        let (missed, covered) = (attribute("missed")?, attribute("covered")?);
-        Some((covered, covered + missed))
+    Some(&xml[start..])
+}
+
+/// One `<counter type="…">` of a report's tail, as covered and total.
+fn report_counter(tail: &str, kind: &str) -> Option<(u64, u64)> {
+    let at = tail.find(&format!("type=\"{kind}\""))?;
+    let element = &tail[at..at + tail[at..].find("/>")?];
+    let attribute = |name: &str| -> Option<u64> {
+        let value = element.split(&format!("{name}=\"")).nth(1)?;
+        value.split('"').next()?.parse().ok()
     };
-    Some(Coverage {
-        lines: counter("LINE")?,
-        branches: counter("BRANCH").unwrap_or((0, 0)),
-    })
+    let (missed, covered) = (attribute("missed")?, attribute("covered")?);
+    Some((covered, covered + missed))
+}
+
+/// A project-wide total below its `test.coverage-minimum`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CoverageShortfall {
+    pub counter: CoverageCounter,
+    pub covered: u64,
+    pub total: u64,
+    /// The minimum, in hundredths of a percent.
+    pub minimum: u32,
+}
+
+impl std::fmt::Display for CoverageShortfall {
+    /// `line coverage is 72.4% (131 of 181), below the minimum of 80%`
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let actual = u128::from(self.covered) * 10_000 / u128::from(self.total.max(1));
+        write!(
+            f,
+            "{} coverage is {} ({} of {}), below the minimum of {}",
+            self.counter.key(),
+            percent(u64::try_from(actual).unwrap_or(u64::MAX)),
+            self.covered,
+            self.total,
+            percent(u64::from(self.minimum))
+        )
+    }
+}
+
+/// Hundredths of a percent as a percentage: `8000` is `80%`, `7243` is
+/// `72.43%`. The actual figure is rounded down, so a total just short of its
+/// minimum never reads as equal to it.
+#[must_use]
+pub fn percent(basis_points: u64) -> String {
+    let (whole, fraction) = (basis_points / 100, basis_points % 100);
+    if fraction == 0 {
+        format!("{whole}%")
+    } else if fraction % 10 == 0 {
+        format!("{whole}.{}%", fraction / 10)
+    } else {
+        format!("{whole}.{fraction:02}%")
+    }
+}
+
+/// The minimums a `JaCoCo` XML report's totals fall short of, in the order
+/// they were declared. The comparison is exact, in integers. A counter with
+/// nothing to count — a project without a single branch — meets any minimum,
+/// as it does in `JaCoCo`'s own check.
+#[must_use]
+pub fn coverage_shortfalls(xml: &str, minimums: &[CoverageMinimum]) -> Vec<CoverageShortfall> {
+    let tail = report_tail(xml).unwrap_or("");
+    minimums
+        .iter()
+        .filter_map(|minimum| {
+            let (covered, total) =
+                report_counter(tail, minimum.counter.jacoco_type()).unwrap_or((0, 0));
+            let met = total == 0
+                || u128::from(covered) * 10_000
+                    >= u128::from(minimum.basis_points) * u128::from(total);
+            (!met).then_some(CoverageShortfall {
+                counter: minimum.counter,
+                covered,
+                total,
+                minimum: minimum.basis_points,
+            })
+        })
+        .collect()
+}
+
+/// The test JVM's arguments for a retry: the coverage agent, when there is
+/// one, appends to the execution data the first attempt recorded instead of
+/// starting it over.
+#[must_use]
+pub fn retry_jvm_args(jvm_args: &[String]) -> Vec<String> {
+    jvm_args
+        .iter()
+        .map(|arg| match arg.strip_suffix(",append=false") {
+            Some(agent) if arg.starts_with("-javaagent:") && arg.contains("=destfile=") => {
+                format!("{agent},append=true")
+            }
+            _ => arg.clone(),
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -976,6 +1221,7 @@ mod tests {
             passed: 30,
             failed: 1,
             skipped: 0,
+            ..TestOutcome::default()
         };
         assert!(!outcome.ok());
         assert_eq!(outcome.describe(), "31 tests, 30 passed, 1 failed");
@@ -986,6 +1232,7 @@ mod tests {
             passed: 5,
             failed: 0,
             skipped: 0,
+            ..TestOutcome::default()
         };
         assert!(clean.ok());
         assert_eq!(clean.describe(), "5 tests, 5 passed");
@@ -1021,5 +1268,195 @@ mod tests {
         };
         assert_eq!(no_branches.describe(), "n/a of lines, n/a of branches");
         assert_eq!(coverage_summary("not xml"), None);
+    }
+
+    #[test]
+    fn unique_ids_and_classes_replace_the_scan_too() {
+        let run = TestRun {
+            unique_ids: vec!["[engine:junit-jupiter]/[class:A]/[test-factory:f()]".into()],
+            classes: vec!["com.example.Mystery".into()],
+            ..run("1.10.2")
+        };
+        let args = run.args();
+        assert!(!args.contains(&"--scan-class-path".to_string()), "{args:?}");
+        let pairs: Vec<(&str, &str)> = args
+            .windows(2)
+            .map(|w| (w[0].as_str(), w[1].as_str()))
+            .collect();
+        assert!(pairs.contains(&(
+            "--select-unique-id",
+            "[engine:junit-jupiter]/[class:A]/[test-factory:f()]"
+        )));
+        assert!(pairs.contains(&("--select-class", "com.example.Mystery")));
+    }
+
+    #[test]
+    fn fail_fast_is_the_launchers_own_from_junit_6_and_read_off_the_feed_before() {
+        for (version, mode) in [
+            ("1.9.3", FailFast::Unsupported),
+            ("1.10.2", FailFast::Stop),
+            ("1.14.4", FailFast::Stop),
+            ("6.0.0", FailFast::Native),
+            ("6.1.3", FailFast::Native),
+        ] {
+            let run = TestRun {
+                fail_fast: true,
+                ..run(version)
+            };
+            assert_eq!(run.fail_fast_mode(), mode, "{version}");
+            let args = run.args();
+            assert_eq!(
+                args.contains(&"--fail-fast".to_string()),
+                mode == FailFast::Native,
+                "a 1.x launcher refuses the option: {version}"
+            );
+            // The tree is printed when the run is over; the feed as it goes.
+            let details = if mode == FailFast::Stop {
+                "--details=testfeed"
+            } else {
+                "--details=tree"
+            };
+            assert!(args.contains(&details.to_string()), "{version}: {args:?}");
+        }
+        assert_eq!(run("6.0.0").fail_fast_mode(), FailFast::Off);
+        assert!(!run("6.0.0").args().contains(&"--fail-fast".to_string()));
+    }
+
+    #[test]
+    fn the_test_feed_is_read_as_it_arrives() {
+        assert_eq!(
+            feed_mark("JUnit Jupiter > CalcTest > adds() :: SUCCESSFUL"),
+            Some(Outcome::Pass)
+        );
+        assert_eq!(
+            feed_mark("JUnit Jupiter > CalcTest > param(int) > [2] 2 :: FAILED"),
+            Some(Outcome::Fail)
+        );
+        assert_eq!(
+            feed_mark("JUnit Vintage > OldTest > oldFails :: FAILED"),
+            Some(Outcome::Fail),
+            "a JUnit 4 test has no ()"
+        );
+        assert_eq!(
+            feed_mark("JUnit Jupiter > CalcTest > assumes() :: ABORTED"),
+            Some(Outcome::Skip)
+        );
+        assert_eq!(
+            feed_mark("JUnit Jupiter > CalcTest > skipped() :: SKIPPED"),
+            Some(Outcome::Skip)
+        );
+        assert_eq!(
+            feed_mark("JUnit Jupiter > CalcTest > adds() :: STARTED"),
+            None
+        );
+        assert!(feed_started("JUnit Jupiter > CalcTest > adds() :: STARTED"));
+        assert!(
+            !feed_started("\t\tat a.B.c(B.java:1) :: STARTED"),
+            "a trace line"
+        );
+        assert_eq!(
+            feed_mark("\torg.opentest4j.AssertionFailedError: a :: FAILED"),
+            None
+        );
+        assert_eq!(feed_mark("| +-- adds() [OK]"), None, "a tree line");
+    }
+
+    #[test]
+    fn outcomes_count_flaky_tests_apart_and_say_when_they_stopped() {
+        let retried = TestOutcome {
+            found: 31,
+            passed: 29,
+            flaky: 1,
+            failed: 1,
+            ..TestOutcome::default()
+        };
+        assert_eq!(retried.describe(), "31 tests, 29 passed, 1 flaky, 1 failed");
+        let stopped = TestOutcome {
+            exit_code: 1,
+            found: 3,
+            passed: 2,
+            failed: 1,
+            stopped_early: true,
+            ..TestOutcome::default()
+        };
+        assert_eq!(
+            stopped.describe(),
+            "3 tests, 2 passed, 1 failed; stopped at the first failure"
+        );
+    }
+
+    const JACOCO_TAIL: &str = r#"<report name="app"><package name="p"><counter type="LINE" missed="99" covered="1"/></package><counter type="INSTRUCTION" missed="10" covered="90"/><counter type="BRANCH" missed="1" covered="3"/><counter type="LINE" missed="5" covered="15"/><counter type="METHOD" missed="0" covered="4"/></report>"#;
+
+    fn minimum(counter: CoverageCounter, basis_points: u32) -> CoverageMinimum {
+        CoverageMinimum {
+            counter,
+            basis_points,
+        }
+    }
+
+    #[test]
+    fn coverage_minimums_are_compared_exactly() {
+        let shortfalls = coverage_shortfalls(
+            JACOCO_TAIL,
+            &[
+                minimum(CoverageCounter::Line, 8000),
+                // 3 of 4 is exactly 75%: met.
+                minimum(CoverageCounter::Branch, 7500),
+                minimum(CoverageCounter::Instruction, 9001),
+                minimum(CoverageCounter::Method, 10_000),
+                // No complexity or class counter in the report: nothing to
+                // count, so nothing short.
+                minimum(CoverageCounter::Complexity, 10_000),
+                minimum(CoverageCounter::Class, 10_000),
+            ],
+        );
+        assert_eq!(
+            shortfalls
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>(),
+            [
+                "line coverage is 75% (15 of 20), below the minimum of 80%",
+                "instruction coverage is 90% (90 of 100), below the minimum of 90.01%",
+            ]
+        );
+        assert!(
+            coverage_shortfalls("not xml", &[minimum(CoverageCounter::Line, 10_000)]).is_empty()
+        );
+    }
+
+    #[test]
+    fn percentages_round_down_and_drop_needless_digits() {
+        assert_eq!(percent(8000), "80%");
+        assert_eq!(percent(8050), "80.5%");
+        assert_eq!(percent(7243), "72.43%");
+        assert_eq!(percent(5), "0.05%");
+        let just_short = CoverageShortfall {
+            counter: CoverageCounter::Line,
+            covered: 7999,
+            total: 10_000,
+            minimum: 8000,
+        };
+        assert!(
+            just_short.to_string().contains("is 79.99% "),
+            "{just_short}"
+        );
+    }
+
+    #[test]
+    fn a_retry_adds_to_the_coverage_the_first_attempt_recorded() {
+        let first = vec![
+            "-javaagent:/c/agent.jar=destfile=/t/jacoco.exec,append=false".to_string(),
+            "-Xmx256m".to_string(),
+        ];
+        assert_eq!(
+            retry_jvm_args(&first),
+            [
+                "-javaagent:/c/agent.jar=destfile=/t/jacoco.exec,append=true",
+                "-Xmx256m"
+            ]
+        );
+        let other = vec!["-javaagent:/c/mockito.jar".to_string()];
+        assert_eq!(retry_jvm_args(&other), other, "other agents are left alone");
     }
 }

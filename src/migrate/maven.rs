@@ -48,6 +48,7 @@ pub fn migrate(pom_path: &Path, root: &Path) -> Result<Migration> {
 
     read_java_settings(&effective, pom, &mut out, &mut report);
     read_main_class(pom, &mut out, &mut report);
+    read_jar_manifest(pom, &mut out, &mut report);
     read_dependencies(&effective, &mut out, &mut report);
     // The layout depends on which languages are on, and Scala's and Groovy's
     // versions on the dependencies.
@@ -280,6 +281,45 @@ fn read_main_class(pom: &Pom, out: &mut Manifest, report: &mut Report) {
     }
 }
 
+/// `maven-jar-plugin`'s `<archive><manifestEntries>` → `[package.manifest]`, in
+/// order. `${project.version}` and `${project.artifactId}` become
+/// `{project.version}` and `{project.name}`; a value with any other `${...}`
+/// is reported, as is an attribute jrs writes itself. `Main-Class` is
+/// `<manifest><mainClass>`'s business, read above.
+fn read_jar_manifest(pom: &Pom, out: &mut Manifest, report: &mut Report) {
+    let Some(entries) = plugin(pom, "maven-jar-plugin")
+        .and_then(|p| p.configuration.as_ref())
+        .and_then(|c| c.path(&["archive", "manifestEntries"]))
+    else {
+        return;
+    };
+    for entry in &entries.children {
+        let (name, text) = (entry.name.as_str(), entry.text.trim());
+        // Braces in the text are literal, so they are escaped before the
+        // two properties jrs knows become placeholders.
+        let raw = manifest::Template::literal(text)
+            .raw
+            .replace("${{project.version}}", "{project.version}")
+            .replace("${{project.artifactId}}", "{project.name}");
+        if raw.contains("${{") {
+            report.skipped(format!(
+                "jar manifest entry `{name}` — `{text}` names a property jrs cannot evaluate"
+            ));
+            continue;
+        }
+        if name.eq_ignore_ascii_case("Main-Class") && out.main_class.as_deref() == Some(text) {
+            continue;
+        }
+        match manifest::jar_attribute(name, &raw) {
+            Ok(template) => {
+                report.migrated(format!("package.manifest.{name} = {raw}"));
+                out.package.manifest.push((name.to_string(), template));
+            }
+            Err(e) => report.skipped(format!("jar manifest entry — {e}")),
+        }
+    }
+}
+
 fn read_dependencies(effective: &Effective, out: &mut Manifest, report: &mut Report) {
     for raw in &effective.dependencies {
         let managed = effective.manage(raw);
@@ -344,6 +384,9 @@ fn read_dependencies(effective: &Effective, out: &mut Manifest, report: &mut Rep
         let mut dep = Dependency::new(&managed.group, &managed.artifact, version);
         dep.classifier = classifier;
         dep.compile_only = compile_only;
+        // `runtime` is what `runtime-only` is for: run and tested with, never
+        // compiled against.
+        dep.runtime_only = scope == Scope::Runtime;
         dep.exclusions = managed
             .exclusions
             .iter()
@@ -363,6 +406,9 @@ fn read_dependencies(effective: &Effective, out: &mut Manifest, report: &mut Rep
         let mut notes = vec![scope.as_str().to_string()];
         if compile_only {
             notes.push("as compile-only".to_string());
+        }
+        if dep.runtime_only {
+            notes.push("as runtime-only".to_string());
         }
         if !dep.exclusions.is_empty() {
             notes.push(format!("{} exclusions", dep.exclusions.len()));
@@ -507,15 +553,12 @@ fn read_repositories(effective: &Effective, out: &mut Manifest, report: &mut Rep
             continue;
         }
         report.migrated(format!("repository {id} = {url}"));
-        repos.push(Repository {
-            name: id.clone(),
-            url,
-        });
+        repos.push(Repository::new(id.clone(), url));
     }
-    repos.push(Repository {
-        name: manifest::CENTRAL_NAME.into(),
-        url: manifest::CENTRAL_URL.into(),
-    });
+    repos.push(Repository::new(
+        manifest::CENTRAL_NAME,
+        manifest::CENTRAL_URL,
+    ));
     out.repositories = repos;
 }
 
@@ -838,6 +881,51 @@ mod tests {
     }
 
     #[test]
+    fn jar_manifest_entries_become_package_manifest() {
+        let dir = Dir::new("manifest-entries");
+        let migration = dir.migrate(
+            r"<project>
+  <groupId>com.example</groupId><artifactId>my-app</artifactId><version>1.0.0</version>
+  <build><plugins><plugin>
+    <artifactId>maven-jar-plugin</artifactId>
+    <configuration><archive>
+      <manifest><mainClass>com.example.Main</mainClass></manifest>
+      <manifestEntries>
+        <Implementation-Title>${project.artifactId}</Implementation-Title>
+        <Automatic-Module-Name>com.example.app</Automatic-Module-Name>
+        <Built-By>${user.name}</Built-By>
+        <Class-Path>extra.jar</Class-Path>
+        <X-Braces>a{b}</X-Braces>
+      </manifestEntries>
+    </archive></configuration>
+  </plugin></plugins></build>
+</project>",
+        );
+        let attributes: Vec<(&str, &str)> = migration
+            .manifest
+            .package
+            .manifest
+            .iter()
+            .map(|(n, t)| (n.as_str(), t.raw.as_str()))
+            .collect();
+        assert_eq!(
+            attributes,
+            [
+                ("Implementation-Title", "{project.name}"),
+                ("Automatic-Module-Name", "com.example.app"),
+                ("X-Braces", "a{{b}}"),
+            ]
+        );
+        let skipped = migration.report.not_migrated.join("\n");
+        assert!(skipped.contains("`Built-By`"), "{skipped}");
+        assert!(skipped.contains("`Class-Path` belongs to jrs"), "{skipped}");
+        assert_eq!(
+            migration.manifest.main_class.as_deref(),
+            Some("com.example.Main")
+        );
+    }
+
+    #[test]
     fn scopes_route_dependencies_to_the_right_table() {
         let dir = Dir::new("scopes");
         let migration = dir.migrate(FULL);
@@ -861,6 +949,21 @@ mod tests {
         let skipped = migration.report.not_migrated.join("\n");
         assert!(skipped.contains("lombok"), "{skipped}");
         assert!(!skipped.contains("jakarta.servlet-api"), "{skipped}");
+    }
+
+    #[test]
+    fn runtime_scope_becomes_runtime_only() {
+        let dir = Dir::new("runtime-scope");
+        let migration = dir.migrate(
+            "<project><groupId>g</groupId><artifactId>app</artifactId><version>1</version>\
+             <dependencies><dependency><groupId>org.postgresql</groupId>\
+             <artifactId>postgresql</artifactId><version>42.7.3</version>\
+             <scope>runtime</scope></dependency></dependencies></project>",
+        );
+        let dep = &migration.manifest.dependencies[0];
+        assert!(dep.runtime_only && !dep.compile_only);
+        let migrated = migration.report.migrated.join("\n");
+        assert!(migrated.contains("as runtime-only"), "{migrated}");
     }
 
     #[test]

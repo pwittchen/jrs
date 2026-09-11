@@ -21,6 +21,7 @@ pub mod lang;
 
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 pub use javac::{DocUnit, javadoc};
 pub use lang::Language;
@@ -202,6 +203,22 @@ pub fn is_stale(unit: &CompileUnit) -> Result<bool> {
 /// joint `javac`; `JrsError::Io` if the output or work directory, an argfile,
 /// the fingerprint or the compiled classes cannot be written or read.
 pub fn compile(toolchain: &Toolchain, unit: &CompileUnit, ui: &Ui) -> Result<Outcome> {
+    compile_timed(toolchain, unit, ui, &mut Vec::new())
+}
+
+/// [`compile`], also pushing the wall time of each step it runs onto
+/// `steps`, named by its compiler (`kotlinc`, `javac`), in the order they
+/// ran — for `--timings`. A step that fails is pushed too.
+///
+/// # Errors
+///
+/// As for [`compile`].
+pub fn compile_timed(
+    toolchain: &Toolchain,
+    unit: &CompileUnit,
+    ui: &Ui,
+    steps: &mut Vec<(&'static str, Duration)>,
+) -> Result<Outcome> {
     if unit.sources.is_empty() {
         return Ok(Outcome::UpToDate);
     }
@@ -218,7 +235,7 @@ pub fn compile(toolchain: &Toolchain, unit: &CompileUnit, ui: &Ui) -> Result<Out
     std::fs::create_dir_all(&unit.output_dir).path(&unit.output_dir)?;
     std::fs::create_dir_all(&unit.work_dir).path(&unit.work_dir)?;
 
-    let result = run_steps(toolchain, unit, ui);
+    let result = run_steps(toolchain, unit, ui, steps);
     if result.is_err() {
         // A failed build must never be recorded as up to date.
         let _ = std::fs::remove_file(unit.fingerprint_path());
@@ -232,11 +249,19 @@ pub fn compile(toolchain: &Toolchain, unit: &CompileUnit, ui: &Ui) -> Result<Out
     Ok(Outcome::Compiled { classes })
 }
 
-fn run_steps(toolchain: &Toolchain, unit: &CompileUnit, ui: &Ui) -> Result<()> {
+fn run_steps(
+    toolchain: &Toolchain,
+    unit: &CompileUnit,
+    ui: &Ui,
+    steps: &mut Vec<(&'static str, Duration)>,
+) -> Result<()> {
     let java = unit.sources_in(Language::Java);
     let mut after_foreign = false;
     if let Some(foreign) = unit.foreign_step() {
-        run_foreign(toolchain, unit, foreign, !java.is_empty(), ui)?;
+        let started = Instant::now();
+        let result = run_foreign(toolchain, unit, foreign, !java.is_empty(), ui);
+        steps.push((foreign.language.compiler_name(), started.elapsed()));
+        result?;
         if foreign.language == Language::Groovy {
             // Joint compilation: groovyc has run javac over the Java sources.
             return Ok(());
@@ -251,7 +276,10 @@ fn run_steps(toolchain: &Toolchain, unit: &CompileUnit, ui: &Ui) -> Result<()> {
     } else {
         count(java.len(), None)
     };
-    javac::run(toolchain, unit, &java, after_foreign, &what, ui)
+    let started = Instant::now();
+    let result = javac::run(toolchain, unit, &java, after_foreign, &what, ui);
+    steps.push(("javac", started.elapsed()));
+    result
 }
 
 /// `3 Kotlin source files`, or `3 source files` for a unit with one language.

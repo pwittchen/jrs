@@ -32,7 +32,8 @@ your own requirements before adopting it for production builds.
 
 - Dependency resolution against Maven Central and additional repositories, with
   transitive dependencies and nearest-wins version mediation, classifiers,
-  exclusions, compile-only dependencies and SNAPSHOT versions
+  exclusions, compile-only and runtime-only dependencies, local jar files,
+  repositories confined to the groups they serve, and SNAPSHOT versions
 - Checksum-verified downloads into a shared local cache, plus an `--offline`
   mode and cache pruning
 - A committed `jrs.lock` for reproducible resolution
@@ -42,10 +43,14 @@ your own requirements before adopting it for production builds.
   from Maven Central, pinned in `jrs.lock` and run on the project's JDK, with
   its runtime library implied
 - JUnit 5 and 6 tests, and JUnit 4 through the Vintage engine, with class, tag
-  and method selection, JUnit XML reports and JaCoCo coverage; Spock, Kotest,
-  ScalaTest and MUnit through their JUnit Platform engines
+  and method selection, reruns of what failed, fail-fast, retries that report
+  flaky tests, JUnit XML and HTML reports, and JaCoCo coverage with minimums;
+  Spock, Kotest, ScalaTest and MUnit through their JUnit Platform engines
 - Packaging to a plain jar, a portable jar with its `lib/`, a self-contained fat
-  jar, a `jlink` runtime image or a `jpackage` installer
+  jar (Spring's registries merged), a zipped distribution with launch scripts,
+  a `jlink` runtime image, a `jpackage` installer or a GraalVM native
+  executable, plus sources and Javadoc jars and jar manifest attributes of
+  your own
 - Running the project's main class directly, and rebuilding on every change
 - User-defined tasks and lifecycle hooks, for code generators, post-packaging
   steps and chores, run with the project's JDK and classpath
@@ -57,6 +62,9 @@ your own requirements before adopting it for production builds.
 - One-shot migration from Maven (`pom.xml`) and Gradle (`build.gradle`,
   `build.gradle.kts`)
 - Shell completions for bash, zsh and fish
+- Per-phase build timings, a JSON project model for editors (`jrs metadata`),
+  sources jars for go-to-definition (`jrs fetch --sources`), and a minimum jrs
+  version per project
 
 See [specs/INITIAL_SPEC.md](specs/INITIAL_SPEC.md) for the design behind them,
 and [ARCH.md](ARCH.md) for how the code is put together.
@@ -201,6 +209,11 @@ javac-args = ["-Xlint:all", "-Werror"]
 | `resource-dir` | `src/main/resources` | Copied into the jar. |
 | `test-resource-dir` | beside `test-dir` (`src/test/resources`) | On the test classpath only. |
 | `target-dir` | `target` | Build output. |
+| `jrs-version` | — | The oldest jrs that may build the project, as `"0.9"` or `"0.9.1"`. |
+
+`jrs-version` works like Cargo's `rust-version`. An older jrs stops with exit
+code `2`, says which version the project needs and where to download it, and
+does not try to build a manifest it may not understand.
 
 ### `[java]`
 
@@ -237,18 +250,67 @@ A table turns the language on. See [Kotlin, Scala and Groovy](#kotlin-scala-and-
 ```toml
 [run]
 jvm-args = ["-Xmx512m", "--enable-preview"]   # for `jrs run`, before -cp
+java-agents = ["com.example:my-agent"]       # -javaagent:, from the resolved graph
+env = { APP_MODE = "dev", DATA = "{target}/data" }
+cwd = "work"                                 # relative to the project root
 
 [test]
 jvm-args = ["-Dmode=test"]                   # for the test JVM
 jacoco-version = "0.8.15"                    # for `jrs test --coverage`; optional
+java-agents = ["org.mockito:mockito-core"]
+env = { TZ = "UTC" }
+retries = 2                                  # run failed tests again; optional
+coverage-minimum = { line = 0.80, branch = 0.70 }   # for `jrs test --coverage`; optional
 
 [package]
 add-modules = ["jdk.crypto.ec"]              # for --jlink / --jpackage images
+native-image-args = ["--no-fallback"]        # for --native-image
+
+[package.manifest]                           # extra MANIFEST.MF attributes
+Implementation-Title = "{project.name}"
+Implementation-Version = "{project.version}"
+Automatic-Module-Name = "com.example.app"
 ```
 
 `add-modules` names JDK modules an image needs beyond the ones `jdeps` finds
 itself. `jdeps` cannot see modules that are only reached by reflection or
 `ServiceLoader`, such as the TLS providers in `jdk.crypto.ec`.
+
+`java-agents` names agents by `group:artifact`, never by path: `jrs.toml` is
+committed, and the jar lives in the machine's cache. Each one is looked up in
+the resolved graph, so it is the version `jrs.lock` pins, and it has to be a
+dependency. `test.java-agents` looks on the test classpath, dev-dependencies
+included, and `run.java-agents` on the runtime one. An agent the graph does
+not hold there is a manifest error that says where to declare it. Agents go
+to the JVM as `-javaagent:` ahead of every other argument, and ahead of
+JaCoCo's agent under `--coverage`. Mockito 5 on JDK 21 and later needs exactly
+`test.java-agents = ["org.mockito:mockito-core"]`; without it, Mockito
+attaches itself at run time and the JVM warns. `run.java-agents` also goes
+into the launchers of a `--jlink` or `--jpackage` image and of a `--dist`
+archive, which load it from their `lib/`. An image or a distribution of a
+`--fat` jar cannot carry one, and says so.
+
+`env` adds environment variables, and `run.cwd` sets the program's working
+directory, relative to the project root; without it the program runs where
+jrs was started. Both take the placeholders a task does (`{target}`,
+`{project.version}`, `{runtime-classpath}`, … — see
+[Tasks and hooks](#tasks-and-hooks)), except `{jar}` and
+`{classpath-argfile}`, which only a task has. There is no `test.cwd`: the test
+JVM runs where jrs does. `env` and `cwd` belong to `jrs run` and `jrs test`,
+so an image's launchers do not take them.
+
+`[package.manifest]` adds attributes to the jar's `META-INF/MANIFEST.MF` — the
+thin, portable and fat jar alike — after the ones jrs writes, in the order they
+are declared, so the jar stays byte-identical from build to build. Values may
+use `{project.name}` and `{project.version}`. `Main-Class`, `Class-Path`,
+`Created-By`, `Manifest-Version` and `Name` belong to jrs and are refused, and
+a name must be one the jar specification allows. `Implementation-Version` is
+only there if you set it, as above; `Package.getImplementationVersion()` then
+reads it.
+
+`native-image-args` is passed through verbatim to `native-image` by
+`jrs package --native-image`: `--no-fallback`, `--initialize-at-build-time`,
+resource and reflection configuration.
 
 ### `[dependencies]` and `[dev-dependencies]`
 
@@ -262,6 +324,7 @@ The long form is a table with a `version` and any of the following:
 [dependencies]
 "com.google.guava:guava" = { version = "33.0.0-jre", exclusions = ["com.google.code.findbugs:jsr305"] }
 "jakarta.servlet:jakarta.servlet-api" = { version = "6.0.0", compile-only = true }
+"org.postgresql:postgresql" = { version = "42.7.3", runtime-only = true }
 "io.netty:netty-transport-native-epoll" = { version = "4.1.100.Final", classifier = "linux-x86_64" }
 "org.lwjgl:lwjgl" = "3.3.3"
 "org.lwjgl:lwjgl:natives-linux" = "3.3.3"   # a classifier in the key
@@ -273,6 +336,14 @@ The long form is a table with a `version` and any of the following:
   is on the compile and test classpaths but not the runtime one. It stays out
   of `jrs run`, the thin jar's `Class-Path`, `lib/` and the fat jar. This is
   Maven's `provided` and Gradle's `compileOnly`.
+- **`runtime-only = true`** is the reverse: the dependency, and everything it
+  brings in, is on the runtime and test classpaths but not on the one the main
+  sources compile against. JDBC drivers, SLF4J bindings and Logback belong
+  here. It is in `jrs run`, the thin jar's `Class-Path`, `lib/`, the fat jar
+  and runtime images. This is Maven's `runtime` and Gradle's `runtimeOnly`.
+  The tests compile against it too, as they do in Maven. A package one path
+  brings in as compile-only and another as runtime-only is needed on both
+  classpaths, so it ends up as a plain dependency.
 - **`classifier`** selects a file published beside the main jar, such as
   natives or a platform build. Writing the classifier in the key lets one table
   hold the same artifact with and without it.
@@ -282,6 +353,25 @@ A version ending in `-SNAPSHOT` resolves through the repository's
 snapshot is re-checked once a day. When it came from a `file://` repository,
 such as `~/.m2/repository`, it is re-checked on every build. `jrs update`
 re-checks every snapshot at once.
+
+A jar that is in no repository — a vendor's JDBC driver, a licensed SDK checked
+into `libs/` — can be named by its path instead:
+
+```toml
+[dependencies]
+ojdbc = { path = "libs/ojdbc11.jar" }
+vendor-api = { path = "libs/vendor-api.jar", compile-only = true }
+```
+
+The jar has no coordinate, so its key is a name of your choosing (letters,
+digits, `.`, `-` and `_`), and the path is relative to the project root. The
+jar is taken as it is, with no transitive graph. `compile-only` and
+`runtime-only` apply as usual, and in `[dev-dependencies]` the jar is
+test-only. `jrs.lock` records the relative path and pins the jar's SHA-256.
+The jar is re-hashed on every build, and one that changed under the same name
+fails the build until `jrs update` pins it again. A missing jar is an error
+that names its path. `jrs tree` shows it as `ojdbc = libs/ojdbc11.jar`,
+`jrs remove ojdbc` removes it, and `jrs outdated` skips it.
 
 ### `[repositories]`
 
@@ -293,6 +383,22 @@ and always tried last.
 internal = "https://repo.example.com/maven2"
 ```
 
+The long form confines a repository to the groups it serves:
+
+```toml
+[repositories]
+internal = { url = "https://nexus.example.com/maven", groups = ["com.acme", "com.acme.*"] }
+jitpack = { url = "https://jitpack.io", groups = ["com.github.someone"] }
+```
+
+`com.acme` is that group, and `com.acme.*` is every group below it. A
+repository with `groups` is asked only for those groups. A group that some
+repository's `groups` name is looked up only there, never in another repository
+or in Maven Central. That keeps an extra public repository from answering for
+your internal groups (dependency confusion), and saves a request per artifact
+to repositories that cannot have it. Mirrors and credentials work as they do
+for any repository.
+
 `jrs.toml` is committed, so credentials for a private repository never go in it
 — see [User configuration](#user-configuration).
 
@@ -302,12 +408,15 @@ internal = "https://repo.example.com/maven2"
 | --- | --- |
 | `jrs build [--watch]` | Resolve → compile main sources → copy resources. `--watch` rebuilds on every change. |
 | `jrs test` | `build` + compile test sources + run the tests. See [Tests](#tests) for its flags. |
-| `jrs run [-- args...]` | `build` + run `main-class` with `args`. |
+| `jrs run [--debug[=<port>]] [-- args...]` | `build` + run `main-class` with `args`. `--debug` waits for a debugger first; see below. |
 | `jrs package` | `build` + produce `target/<name>-<version>.jar`. |
 | `jrs package --portable` | Same, with the runtime dependencies copied into `target/lib/`. |
 | `jrs package --fat` | Same, with every runtime dependency unpacked into the jar. |
 | `jrs package --jlink` | Also build a trimmed runtime image in `target/image`, with a launcher in `bin/`. |
 | `jrs package --jpackage [type]` | Also build a native package in `target/jpackage`, using jpackage's own types (`app-image`, `dmg`, `pkg`, `deb`, `rpm`, `exe`, `msi`). |
+| `jrs package --sources` / `--javadoc` | Also write `target/<name>-<version>-sources.jar` / `-javadoc.jar`; `--javadoc` runs `jrs doc` first. |
+| `jrs package --dist` | Also write a distribution with launch scripts in `bin/`, zipped into `target/<name>-<version>.zip`. |
+| `jrs package --native-image` | Also build a native executable in `target/native` with GraalVM's `native-image`. |
 | `jrs doc` | Generate Javadoc into `target/doc`. |
 | `jrs clean` | Remove `target/`. |
 | `jrs tree [--depth <n>] [--why <artifact>] [--tool <name>]` | Print the resolved dependency graph, every path that leads to one artifact, or a compiler's own graph (`kotlin-compiler`, `scala-compiler`, `groovy-compiler`). |
@@ -315,14 +424,16 @@ internal = "https://repo.example.com/maven2"
 | `jrs update` | Re-resolve and rewrite `jrs.lock`. |
 | `jrs verify` | Re-hash the cached dependency jars against the checksums in `jrs.lock`. |
 | `jrs outdated` | List declared dependencies that have newer releases. |
-| `jrs add <group:artifact[:version[:classifier]]>... [--dev] [--compile-only]` | Add dependencies to `jrs.toml`, at their newest release unless given a version. |
-| `jrs remove <group:artifact>... [--dev]` | Remove dependencies from `jrs.toml`. |
+| `jrs add <group:artifact[:version[:classifier]]>... [--dev] [--compile-only \| --runtime-only]` | Add dependencies to `jrs.toml`, at their newest release unless given a version. |
+| `jrs remove <group:artifact \| name>... [--dev]` | Remove dependencies from `jrs.toml`; a local jar goes by its name. |
 | `jrs cache path` / `jrs cache prune` | Print where the cache is, or remove what no project uses. See [Dependency cache](#dependency-cache). |
 | `jrs init [--lib] [--lang <java\|kotlin\|scala\|groovy>] [--name <name>] [path]` | Scaffold `jrs.toml`, a starter class and its test. |
 | `jrs migrate` | Generate `jrs.toml` from an existing `pom.xml` or Gradle build. |
 | `jrs completions <bash\|zsh\|fish>` | Print a shell completion script. See [Shell completions](#shell-completions). |
 | `jrs task <name> [--watch] [-- args...]` | Run a task from `jrs.toml`, and whatever it depends on. See [Tasks and hooks](#tasks-and-hooks). |
 | `jrs task --list` | List the tasks, their descriptions and the hooks that run them. |
+| `jrs metadata [--no-deps]` | Print the project model as JSON, for editors and tools. |
+| `jrs fetch [--sources]` | Download the dependencies into the cache without building, and with `--sources` their `-sources.jar`s. |
 
 Global flags: `-v/--verbose`, `-q/--quiet`, `--offline`, `-j/--jobs <n>`,
 `--manifest-path <p>`, `--progress <auto|always|never>`,
@@ -346,11 +457,55 @@ then `jlink` builds a runtime with only those. `--jlink` leaves it in
 installer. Both use the portable layout unless `--fat` is given too. Both
 require `project.main-class`.
 
+`jrs run --debug` and `jrs test --debug` start the JVM with the JDWP agent,
+suspended until a debugger attaches, and first print where to attach:
+`localhost:5005`, or another port with `--debug=8000`. A bare port listens on
+localhost only, as the JDK does since 9; `--debug=*:5005` listens on every
+interface, for a JVM in a container. While the test JVM waits, the live test
+counter stays off.
+
+`--dist` ships the application without a runtime: the portable layout (or the
+fat jar, with `--fat`) plus the launch scripts `bin/<name>` and
+`bin/<name>.bat`, which run it on `$JAVA_HOME/bin/java`, or the `java` on
+`PATH`, with `run.jvm-args`. It is staged in `target/dist/<name>-<version>/`,
+where it runs in place, and zipped into `target/<name>-<version>.zip`,
+deterministically and with the POSIX launcher kept executable.
+`--native-image` builds a native executable with GraalVM's `native-image`; the
+JDK jrs builds with has to be a GraalVM one, and jrs says so before building
+anything when it is not. `--sources` and `--javadoc` write the jars an IDE or a
+repository wants beside the main one. All of them combine with each other and
+with `--fat` or `--portable`; `--dist` and `--native-image` require
+`project.main-class`.
+
+A fat jar merges what several jars register instead of letting one copy
+overwrite the rest: `META-INF/services/*` files, Groovy extension modules, and
+Spring's `spring.factories` (key by key), `META-INF/spring/*.imports`,
+`spring.handlers`, `spring.schemas` and `spring.tooling`. The project's own copy
+comes first.
+
 `jrs add` and `jrs remove` edit `jrs.toml` in place, keeping its comments and
 order. An edit that jrs cannot make safely is refused, with a message saying to
 edit the file by hand. After each change the graph is resolved again, and if
 that fails — a coordinate that does not exist, say — the manifest is put back
 the way it was.
+
+`--timings` on `build`, `test`, `run` and `package` prints the wall time of
+each phase after the summary. The phases are resolution, downloads, each
+compiler step, resources, each task, the test JVM and packaging. The same
+numbers go to `target/.jrs/timings.txt` as tab-separated columns, even under
+`-q`. `jrs run` prints the table before the program starts.
+
+`jrs metadata` prints the project model as JSON on stdout, the way
+`cargo metadata` does. It includes the source and resource roots for each
+language, the output directories, the compile, runtime and test classpaths
+(each jar with its coordinate), the JDK and `--release`, the main class and
+the tasks. It resolves the dependencies but never compiles. `--no-deps` skips
+resolution. [SPEC §5.4](specs/INITIAL_SPEC.md#54-the-project-model-jrs-metadata-and-jrs-fetch)
+has the full schema. `jrs fetch` downloads everything a build needs without
+building, which warms a CI cache for `--offline` runs. `jrs fetch --sources`
+also downloads each dependency's `-sources.jar`, and `jrs metadata` then lists
+it next to the jar, so an editor can go to a library's definitions. A library
+that publishes no sources jar is only a warning.
 
 ## Dependency cache
 
@@ -481,9 +636,60 @@ the JDK it picked.
 | `--method <class#method>` | Only this method, e.g. `com.example.FooTest#adds`; repeatable. |
 | `--coverage` | Record coverage with JaCoCo and write a report to `target/coverage` (HTML, plus `jacoco.xml`). |
 | `--watch` | Test again on every change. |
+| `--debug[=<port>]` | Wait for a debugger on port 5005, or `<port>`, or `<host>:<port>`, before the tests start. |
+| `--rerun-failed` | Only the tests that failed in the last run, read from its JUnit XML. |
+| `--fail-fast` | Stop at the first failing test. |
+| `--retries <n>` | Run failing tests again up to `n` times; overrides `[test] retries`. |
 
 JUnit XML reports land in `target/test-reports`, where CI systems look for
-them. `[test] jvm-args` sets the test JVM's arguments.
+them. `[test] jvm-args` sets the test JVM's arguments, and `[test] env` and
+`java-agents` its environment and agents (see
+[`[run]`, `[test]` and `[package]`](#run-test-and-package)).
+
+Jupiter runs tests in parallel inside the one test JVM when asked to, and
+asking goes through `jvm-args`:
+
+```toml
+[test]
+jvm-args = [
+    "-Djunit.jupiter.execution.parallel.enabled=true",
+    "-Djunit.jupiter.execution.parallel.mode.default=concurrent",
+]
+```
+
+A `junit-platform.properties` in `src/test/resources` with the same keys does
+the same.
+
+Every run that leaves XML also gets `target/test-reports/index.html`, a static
+page with one row per class. Classes with failures come first and unfolded,
+with each failure's stack trace; the rest are folded. The page is written for
+a failing run too, and `jrs test` prints its path.
+
+`--rerun-failed` runs what failed last time. A plain test method is selected
+by name; one invocation of a parameterised test, or one dynamic test, by its
+JUnit unique ID; and a test the XML gives nothing narrower for, by its class.
+When nothing failed it says so and exits `0`; with no earlier run at all it
+exits `2`.
+
+`[test] retries = n` runs failing tests again, up to `n` times, each attempt
+in a launcher of its own that writes its XML into
+`target/test-reports/retry-<n>/`. A test that passes on a retry does not fail
+the run, but it is not counted as passed either: it is reported as flaky, by
+name and in the `Finished` line, and marked on the page. `--debug` turns
+retries off, since each would wait for a debugger again.
+
+`--fail-fast` passes the launcher's own `--fail-fast` on JUnit 6. The 1.x
+launchers that JUnit 5 and 4 run on do not have one, so there jrs shows the
+launcher's test feed instead of its tree and stops the launcher itself after
+the first failure; that run has no XML report. Launchers older than 1.10
+(JUnit 5.9 and before) cannot be followed that way, and run every test. A run
+stopped early is not retried.
+
+`[test] coverage-minimum` makes `jrs test --coverage` exit `1` when a
+project-wide total falls short, naming the total and the minimum. It takes
+ratios from 0 to 1 for any of JaCoCo's counters: `line`, `branch`,
+`instruction`, `method`, `class` and `complexity`. Without `--coverage` it is
+ignored.
 
 ## Kotlin, Scala and Groovy
 
@@ -664,6 +870,23 @@ over jrs's classpath, and a task with only `dependsOn` an aggregate.
 become `[hooks]`. A task with a `doLast { }` closure, another type such as
 `Copy`, or a value built from a variable is listed with the reason, to rewrite
 by hand as a `run`, `shell` or `script` task.
+
+`environment` and `workingDir` on Gradle's `run` and `test` tasks become
+`run.env`, `run.cwd` and `test.env` when they are literals. A `-javaagent:` in
+`jvmArgs` is a path into Gradle's cache, so it is reported, except for
+Mockito's own recipe, which becomes
+`test.java-agents = ["org.mockito:mockito-core"]`.
+
+A `jar { manifest { attributes(...) } }` block, and Maven's
+`<manifestEntries>`, become `[package.manifest]` when the values are literals
+or the project's version. `withSourcesJar()` and `withJavadocJar()` are
+reported: in jrs they are the `jrs package --sources` and `--javadoc` flags.
+
+Scopes keep their meaning. Maven's `provided` and Gradle's `compileOnly` become
+`compile-only`, and `runtime` and `runtimeOnly` become `runtime-only`. Gradle's
+`files(...)` and `fileTree(...)` become local jars, with a `fileTree` expanded
+to the jars it holds when you migrate. A repository's `content { includeGroup }`
+or `exclusiveContent` filter becomes its `groups`.
 
 Kotlin, Scala and Groovy builds migrate too. The Kotlin Gradle plugin,
 `id 'groovy'` and `id 'scala'`, and Maven's `kotlin-maven-plugin`,

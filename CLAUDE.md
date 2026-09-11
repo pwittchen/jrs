@@ -151,6 +151,10 @@ regression, not a style nit.
   jar for the next build to link against.
 - **Fat-jar merge rules** (`package.rs`): `META-INF/services/*` entries are
   concatenated, not overwritten — getting this wrong breaks `ServiceLoader` silently.
+  Spring's registries get the same care — `spring.factories` merged key by key,
+  `META-INF/spring/*.imports` as a union of lines, `spring.handlers`/`schemas`/
+  `tooling` concatenated — since an overwrite there loses auto-configuration
+  without an error. The project's own copy always comes first.
 - **Toolchain output is passed through verbatim.** `javac` and the JUnit launcher have
   good diagnostics; jrs never reformats them, it only tears the live region down first.
 - **`jrs.lock` records no absolute paths.** Cache paths are recomputed on load; the

@@ -6,6 +6,8 @@
 //! tool while the migration is evaluated.
 
 pub mod gradle;
+mod gradle_files;
+mod gradle_repos;
 mod gradle_tasks;
 pub mod maven;
 
@@ -351,7 +353,11 @@ fn drop_implied_libraries(out: &mut Manifest, report: &mut Report) {
         let is_library =
             |d: &Dependency| d.group == group && d.artifact == artifact && d.classifier.is_none();
         if let Some(index) = out.dependencies.iter().position(|d| {
-            is_library(d) && d.version == version && !d.compile_only && d.exclusions.is_empty()
+            is_library(d)
+                && d.version == version
+                && !d.compile_only
+                && !d.runtime_only
+                && d.exclusions.is_empty()
         }) {
             out.dependencies.remove(index);
             // The dependency pass reported it as migrated; this line replaces

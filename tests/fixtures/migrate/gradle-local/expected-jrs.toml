@@ -1,0 +1,21 @@
+[project]
+name = "local-app"
+version = "1.0.0"
+
+[dependencies]
+"com.acme:billing" = "2.3.0"
+"com.github.someone:tool" = "1.4"
+"ojdbc11" = { path = "libs/ojdbc11.jar" }
+"vendor-api" = { path = "libs/vendor-api.jar", compile-only = true }
+"org.postgresql:postgresql" = { version = "42.7.3", runtime-only = true }
+"h2-extra" = { path = "drivers/h2-extra.jar", runtime-only = true }
+"mysql-connector" = { path = "drivers/mysql-connector.jar", runtime-only = true }
+"org.slf4j:slf4j-api" = "2.0.12"
+
+[dev-dependencies]
+"fixtures" = { path = "test-libs/fixtures.jar" }
+"org.junit.jupiter:junit-jupiter" = "5.10.2"
+
+[repositories]
+"acme" = { url = "https://acme.jfrog.io/artifactory/libs", groups = ["com.acme", "com.acme.*"] }
+"jitpack" = { url = "https://jitpack.io", groups = ["com.github.someone"] }

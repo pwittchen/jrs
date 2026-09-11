@@ -184,6 +184,92 @@ fn the_gradle_tasks_fixture_translates_exactly() {
     assert!(review.contains("`jrs task checksum` alone"), "{review}");
 }
 
+/// `environment` and `workingDir` on Gradle's `run` and `test`, and Mockito's
+/// agent recipe, become `run.env`, `run.cwd`, `test.env` and
+/// `test.java-agents`; what is not a literal is reported.
+#[test]
+fn the_gradle_environment_fixture_translates_exactly() {
+    let (migration, dir) = migrate_fixture("gradle-env");
+    assert_eq!(migration.manifest.render(None), expected(&dir));
+
+    let skipped = migration.report.not_migrated.join("\n");
+    assert!(skipped.contains("HOME_DIR"), "{skipped}");
+    let migrated = migration.report.migrated.join("\n");
+    assert!(migrated.contains("test.java-agents"), "{migrated}");
+    assert!(migrated.contains("run.cwd"), "{migrated}");
+}
+
+/// `jar { manifest { attributes(...) } }`: literal values and the project's
+/// version carried over in order, `Main-Class` as the main class, and what
+/// cannot be — a computed value, an attribute jrs writes, `withSourcesJar()` —
+/// reported.
+#[test]
+fn the_gradle_jar_fixture_translates_exactly() {
+    let (migration, dir) = migrate_fixture("gradle-jar");
+    assert_eq!(migration.manifest.render(None), expected(&dir));
+
+    let skipped = migration.report.not_migrated.join("\n");
+    assert!(
+        skipped.contains("`Built-By` — its value is computed"),
+        "{skipped}"
+    );
+    assert!(skipped.contains("`Class-Path` belongs to jrs"), "{skipped}");
+    assert!(skipped.contains("`jrs package --sources`"), "{skipped}");
+    assert!(skipped.contains("`jrs package --javadoc`"), "{skipped}");
+    let migrated = migration.report.migrated.join("\n");
+    assert!(
+        migrated.contains("project.main-class = com.example.JarDemo (from the jar manifest)"),
+        "{migrated}"
+    );
+}
+
+/// `files()` and `fileTree()` as local jars, `runtimeOnly`, and `content` /
+/// `exclusiveContent` as `groups`. The jars are made here, as empty files,
+/// since migration only lists them and nothing binary is committed.
+#[test]
+fn the_gradle_local_fixture_translates_exactly() {
+    let scratch = Scratch::new("migrate-gradle-local");
+    let dir = scratch.join("project");
+    copy_dir(&fixtures().join("migrate/gradle-local"), &dir);
+    for file in [
+        "libs/ojdbc11.jar",
+        "libs/vendor-api.jar",
+        "drivers/h2-extra.jar",
+        "drivers/mysql-connector.jar",
+        "drivers/README.txt",
+        "test-libs/fixtures.jar",
+    ] {
+        scratch.write(&format!("project/{file}"), "");
+    }
+
+    let migration = migrate::plan(&dir, None).unwrap();
+    assert_eq!(migration.manifest.render(None), expected(&dir));
+    let parsed =
+        Manifest::parse(&migration.render_manifest(), &dir.join("jrs.toml"), &dir).unwrap();
+    assert!(parsed.warnings.is_empty(), "{:?}", parsed.warnings);
+
+    let review = migration.report.needs_review.join("\n");
+    assert!(
+        review.contains("expanded to the 2 jars in drivers/"),
+        "{review}"
+    );
+    assert!(review.contains("repository `acme`"), "{review}");
+    assert!(
+        !review.contains("jitpack"),
+        "exclusiveContent is exact: {review}"
+    );
+    let migrated = migration.report.migrated.join("\n");
+    assert!(
+        migrated.contains("org.slf4j:slf4j-api (runtimeOnly, merged"),
+        "{migrated}"
+    );
+    assert!(
+        migration.report.not_migrated.is_empty(),
+        "{:?}",
+        migration.report.not_migrated
+    );
+}
+
 #[test]
 fn every_expected_manifest_is_a_manifest_jrs_can_read() {
     for name in [
@@ -196,6 +282,8 @@ fn every_expected_manifest_is_a_manifest_jrs_can_read() {
         "gradle-kotlin",
         "gradle-groovy",
         "gradle-tasks",
+        "gradle-env",
+        "gradle-jar",
     ] {
         let (migration, dir) = migrate_fixture(name);
         let text = migration.render_manifest();

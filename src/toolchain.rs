@@ -516,9 +516,48 @@ pub fn run_captured(ui: &Ui, program: &Path, args: &[impl AsRef<OsStr>]) -> Resu
 /// [`JrsError::Build`] if `program` cannot be started. A non-zero exit is not an
 /// error: the code is returned.
 pub fn run_inherited(ui: &Ui, program: &Path, args: &[impl AsRef<OsStr>]) -> Result<i32> {
+    run_inherited_in(ui, program, args, &Environment::default())
+}
+
+/// Where a JVM started for the user runs, and what it adds to the environment
+/// it inherits from jrs: `run.cwd`, `run.env` and `test.env`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Environment {
+    /// `None` keeps jrs's own working directory.
+    pub cwd: Option<PathBuf>,
+    /// Set on top of the inherited environment, in order.
+    pub vars: Vec<(String, String)>,
+}
+
+impl Environment {
+    fn apply(&self, ui: &Ui, command: &mut Command) {
+        if let Some(cwd) = &self.cwd {
+            ui.verbose(format!("in {}", cwd.display()));
+            command.current_dir(cwd);
+        }
+        for (key, value) in &self.vars {
+            ui.verbose(format!("with {key}={value}"));
+            command.env(key, value);
+        }
+    }
+}
+
+/// [`run_inherited`], in `environment`.
+///
+/// # Errors
+///
+/// As for [`run_inherited`].
+pub fn run_inherited_in(
+    ui: &Ui,
+    program: &Path,
+    args: &[impl AsRef<OsStr>],
+    environment: &Environment,
+) -> Result<i32> {
     ui.verbose(describe(program, args));
     ui.suspend();
-    let status = Command::new(program)
+    let mut command = Command::new(program);
+    environment.apply(ui, &mut command);
+    let status = command
         .args(args.iter().map(AsRef::as_ref))
         .status()
         .map_err(|e| JrsError::build(format!("could not run {}: {e}", program.display())))?;
@@ -540,12 +579,29 @@ pub fn run_streaming(
     ui: &Ui,
     program: &Path,
     args: &[impl AsRef<OsStr>],
+    on_line: impl FnMut(&str),
+) -> Result<i32> {
+    run_streaming_in(ui, program, args, &Environment::default(), on_line)
+}
+
+/// [`run_streaming`], in `environment`.
+///
+/// # Errors
+///
+/// As for [`run_streaming`].
+pub fn run_streaming_in(
+    ui: &Ui,
+    program: &Path,
+    args: &[impl AsRef<OsStr>],
+    environment: &Environment,
     mut on_line: impl FnMut(&str),
 ) -> Result<i32> {
     use std::io::BufRead;
 
     ui.verbose(describe(program, args));
-    let mut child = Command::new(program)
+    let mut command = Command::new(program);
+    environment.apply(ui, &mut command);
+    let mut child = command
         .args(args.iter().map(AsRef::as_ref))
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -582,6 +638,75 @@ pub fn run_streaming(
     let code = status.code().unwrap_or(-1);
     ui.verbose(format!("{} exited with {code}", program.display()));
     Ok(code)
+}
+
+/// [`run_streaming_in`], except that `on_line` may stop the process: a
+/// `Break` kills it, and the line that asked for that is not passed through.
+/// The second value says whether that happened; the exit code of a killed
+/// process is whatever the platform reports for one.
+///
+/// # Errors
+///
+/// [`JrsError::Build`] if the program cannot be started or waited for.
+pub fn run_streaming_until(
+    ui: &Ui,
+    program: &Path,
+    args: &[impl AsRef<OsStr>],
+    environment: &Environment,
+    mut on_line: impl FnMut(&str) -> std::ops::ControlFlow<()>,
+) -> Result<(i32, bool)> {
+    use std::io::BufRead;
+
+    ui.verbose(describe(program, args));
+    let mut command = Command::new(program);
+    environment.apply(ui, &mut command);
+    let mut child = command
+        .args(args.iter().map(AsRef::as_ref))
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| JrsError::build(format!("could not run {}: {e}", program.display())))?;
+
+    // As in `run_streaming`: stderr drains on its own thread.
+    let stderr = child.stderr.take();
+    let drain = std::thread::spawn(move || {
+        let mut buf = String::new();
+        if let Some(mut e) = stderr {
+            let _ = std::io::Read::read_to_string(&mut e, &mut buf);
+        }
+        buf
+    });
+
+    let mut stopped = false;
+    if let Some(stdout) = child.stdout.take() {
+        for line in std::io::BufReader::new(stdout).lines() {
+            let line = line.unwrap_or_default();
+            if on_line(&line).is_break() {
+                stopped = true;
+                // It may have exited on its own in the meantime; either way
+                // it is gone once `wait` returns.
+                let _ = child.kill();
+                break;
+            }
+            ui.println_out(&line);
+        }
+    }
+
+    let status = child
+        .wait()
+        .map_err(|e| JrsError::build(format!("{} did not finish: {e}", program.display())))?;
+    let errors = drain.join().unwrap_or_default();
+    if !errors.trim().is_empty() {
+        ui.passthrough(Stream::Err, errors.trim_end());
+    }
+    let code = status.code().unwrap_or(-1);
+    if stopped {
+        ui.verbose(format!("{} stopped by jrs", program.display()));
+    } else {
+        ui.verbose(format!("{} exited with {code}", program.display()));
+    }
+    Ok((code, stopped))
 }
 
 // ---- running tasks ---------------------------------------------------------

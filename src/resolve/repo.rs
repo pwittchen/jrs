@@ -312,7 +312,8 @@ impl Fetcher {
     ) -> Result<(PathBuf, Origin)> {
         let cached = self.cache.path_for(coord, ext);
         let mut misses = Vec::new();
-        for repo in &self.repos {
+        let repos = repositories_for(&self.repos, &coord.group);
+        for repo in repos.iter().copied() {
             // A snapshot in a remote repository is stored under a timestamped
             // name that only its `maven-metadata.xml` knows.
             let timestamped = if coord.is_snapshot() {
@@ -370,8 +371,8 @@ impl Fetcher {
         }
 
         Err(JrsError::resolve(format!(
-            "could not find `{coord}` ({ext})\n\nlooked in: {}",
-            misses.join(", ")
+            "could not find `{coord}` ({ext})\n\n{}",
+            where_looked(&self.repos, &coord.group, &misses)
         )))
     }
 
@@ -432,7 +433,7 @@ impl Fetcher {
         let dir = format!("{}/{artifact}", group.replace('.', "/"));
         let mut merged: Option<Metadata> = None;
         let mut looked = Vec::new();
-        for repo in &self.repos {
+        for repo in repositories_for(&self.repos, group) {
             looked.push(repo.name.clone());
             // `mvn install` writes the local variant of the file.
             let mut names = vec!["maven-metadata.xml"];
@@ -462,8 +463,8 @@ impl Fetcher {
         }
         merged.ok_or_else(|| {
             JrsError::resolve(format!(
-                "no repository lists versions of `{group}:{artifact}`\n\nlooked in: {}",
-                looked.join(", ")
+                "no repository lists versions of `{group}:{artifact}`\n\n{}",
+                where_looked(&self.repos, group, &looked)
             ))
         })
     }
@@ -648,6 +649,50 @@ impl Fetcher {
         ));
         Ok(())
     }
+}
+
+/// The repositories that may be asked for an artifact of `group`, in
+/// declaration order.
+///
+/// A repository with `groups` is asked only for the groups they match, and a
+/// group one of them matches is asked only of the repositories that claim it:
+/// exclusivity is always on, so no other repository, Maven Central included,
+/// can answer for a group an internal repository serves (the dependency-
+/// confusion hole). A group nothing claims goes to the repositories without
+/// `groups`, Central last among them.
+#[must_use]
+pub fn repositories_for<'a>(repos: &'a [Repository], group: &str) -> Vec<&'a Repository> {
+    let claimed = repos.iter().any(|r| r.claims(group));
+    repos
+        .iter()
+        .filter(|r| {
+            if claimed {
+                r.claims(group)
+            } else {
+                r.groups.is_empty()
+            }
+        })
+        .collect()
+}
+
+/// The end of a "could not find" message: where jrs looked, and why only
+/// there when `groups` decided it.
+fn where_looked(repos: &[Repository], group: &str, looked: &[String]) -> String {
+    if looked.is_empty() {
+        return format!(
+            "no repository may be asked for the group `{group}`: every repository in \
+             jrs.toml has `groups`, and none of them lists it"
+        );
+    }
+    let why = if repos.iter().any(|r| r.claims(group)) {
+        format!(
+            "\n\nonly these serve `{group}`, by their `groups` in jrs.toml; no other \
+             repository is asked for it"
+        )
+    } else {
+        String::new()
+    };
+    format!("looked in: {}{why}", looked.join(", "))
 }
 
 /// Why one HTTP attempt failed.
@@ -854,10 +899,7 @@ mod tests {
 
         fn fetcher(&self, offline: bool) -> Fetcher {
             Fetcher::new(
-                vec![Repository {
-                    name: "fixture".into(),
-                    url: file_url(&self.repo()),
-                }],
+                vec![Repository::new("fixture", file_url(&self.repo()))],
                 self.cache(),
                 offline,
             )
@@ -951,14 +993,8 @@ mod tests {
         std::fs::create_dir_all(&empty).unwrap();
         let fetcher = Fetcher::new(
             vec![
-                Repository {
-                    name: "first".into(),
-                    url: file_url(&empty),
-                },
-                Repository {
-                    name: "second".into(),
-                    url: file_url(&fx.repo()),
-                },
+                Repository::new("first", file_url(&empty)),
+                Repository::new("second", file_url(&fx.repo())),
             ],
             fx.cache(),
             false,
@@ -1032,16 +1068,9 @@ mod tests {
     }
 
     fn http_fetcher(fx: &Fixture, url: &str, network: Network) -> Fetcher {
-        Fetcher::new(
-            vec![Repository {
-                name: "remote".into(),
-                url: url.to_string(),
-            }],
-            fx.cache(),
-            false,
-        )
-        .with_network(network)
-        .unwrap()
+        Fetcher::new(vec![Repository::new("remote", url)], fx.cache(), false)
+            .with_network(network)
+            .unwrap()
     }
 
     fn quick(attempts: u32) -> Network {
@@ -1347,6 +1376,73 @@ mod tests {
             .metadata("org.example", "thing")
             .unwrap_err();
         assert!(err.to_string().contains("--offline"), "{err}");
+    }
+
+    fn confined(name: &str, url: &str, groups: &[&str]) -> Repository {
+        Repository {
+            groups: groups.iter().map(ToString::to_string).collect(),
+            ..Repository::new(name, url)
+        }
+    }
+
+    #[test]
+    fn groups_decide_which_repositories_are_asked() {
+        let repos = [
+            confined("internal", "https://i", &["com.acme", "com.acme.*"]),
+            confined("vendor", "https://v", &["com.vendor"]),
+            Repository::new("public", "https://p"),
+            Repository::new("central", "https://c"),
+        ];
+        let names = |group: &str| -> Vec<String> {
+            repositories_for(&repos, group)
+                .iter()
+                .map(|r| r.name.clone())
+                .collect()
+        };
+        assert_eq!(names("com.acme"), ["internal"]);
+        assert_eq!(names("com.acme.billing"), ["internal"]);
+        assert_eq!(names("com.vendor"), ["vendor"]);
+        assert_eq!(names("org.other"), ["public", "central"]);
+        assert_eq!(names("com.acmex"), ["public", "central"]);
+    }
+
+    #[test]
+    fn a_claimed_group_is_never_taken_from_another_repository() {
+        let fx = Fixture::new("groups");
+        let coord = Coord::new("com.acme", "billing", "1.0");
+        fx.publish(&coord, "jar", b"from the public repository", true);
+        let internal = fx.dir.join("internal");
+        std::fs::create_dir_all(&internal).unwrap();
+        let fetcher = Fetcher::new(
+            vec![
+                confined("internal", &file_url(&internal), &["com.acme"]),
+                Repository::new("public", file_url(&fx.repo())),
+            ],
+            fx.cache(),
+            false,
+        );
+        let err = fetcher.jar(&coord).unwrap_err().to_string();
+        assert!(err.contains("looked in: internal"), "{err}");
+        assert!(err.contains("only these serve `com.acme`"), "{err}");
+        assert!(!err.contains("public"), "{err}");
+        assert!(!fetcher.cache().contains(&coord, "jar"));
+
+        // Any other group still comes from the repository without `groups`.
+        let other = Coord::new("org.example", "thing", "1.0");
+        fx.publish(&other, "jar", b"ok", true);
+        fetcher.jar(&other).unwrap();
+
+        // With nothing left to ask, the message says why.
+        let only = Fetcher::new(
+            vec![confined("internal", &file_url(&internal), &["com.acme"])],
+            fx.cache(),
+            false,
+        );
+        let err = only
+            .jar(&Coord::new("org.example", "absent", "1.0"))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("no repository may be asked"), "{err}");
     }
 
     #[test]

@@ -495,6 +495,98 @@ fn a_kotlin_build_names_its_compiler_and_counts_sources_by_language() {
     }
 }
 
+/// `--timings` rows as `cli.rs` records them for a Kotlin project with a
+/// pre-compile task, whose tests then run.
+fn timing_rows() -> Vec<(String, std::time::Duration)> {
+    use std::time::Duration;
+    [
+        ("resolution (jrs.lock)", 4),
+        ("downloads", 1_120),
+        ("downloads (Kotlin compiler)", 2),
+        ("task build-info (pre-compile)", 310),
+        ("compile main: kotlinc", 3_020),
+        ("compile main: javac", 640),
+        ("resources main", 3),
+        ("compile test (fresh)", 12),
+        ("resources test", 1),
+        ("test JVM", 1_890),
+    ]
+    .into_iter()
+    .map(|(label, ms)| (label.to_string(), Duration::from_millis(ms)))
+    .collect()
+}
+
+#[test]
+fn the_timings_table_follows_the_summary_in_every_mode() {
+    use std::time::Duration;
+    let total = Duration::from_millis(7_210);
+    let table = concat!(
+        "  phase                           time   share\n",
+        "  resolution (jrs.lock)            4ms    0.1%\n",
+        "  downloads                      1.12s   15.5%\n",
+        "  downloads (Kotlin compiler)      2ms    0.0%\n",
+        "  task build-info (pre-compile)  310ms    4.3%\n",
+        "  compile main: kotlinc          3.02s   41.9%\n",
+        "  compile main: javac            640ms    8.9%\n",
+        "  resources main                   3ms    0.0%\n",
+        "  compile test (fresh)            12ms    0.2%\n",
+        "  resources test                   1ms    0.0%\n",
+        "  test JVM                       1.89s   26.2%\n",
+        "  total                          7.21s\n",
+    );
+
+    let (plain, plain_capture) =
+        Ui::captured(options(When::Never, CharsetChoice::Ascii), geometry(WIDTH));
+    play_a_build(&plain, 1);
+    plain.timings(&timing_rows(), total);
+    let transcript = plain_capture.stderr();
+    assert!(
+        transcript.ends_with(&format!("        time 2.31s\n{table}")),
+        "the table must follow the summary:\n{transcript}"
+    );
+    assert_eq!(plain_capture.stdout(), "", "the report is not real output");
+
+    // Animated: the same table after the framed summary, ASCII only; with
+    // colour, the header dimmed and the total in bold around the same text.
+    let (animated, animated_capture) = Ui::captured(
+        UiOptions {
+            color: When::Always,
+            ..options(When::Always, CharsetChoice::Ascii)
+        },
+        geometry(WIDTH),
+    );
+    play_a_build(&animated, 1);
+    animated.timings(&timing_rows(), total);
+    let raw = animated_capture.stderr();
+    assert!(raw.is_ascii(), "{raw:?}");
+    assert!(raw.contains("\x1b[2m  phase "), "no dim header: {raw:?}");
+    assert!(raw.contains("\x1b[1m  total "), "no bold total: {raw:?}");
+    let text = plain_text(&raw);
+    let summary_end = text.rfind("+\n").expect("no summary frame");
+    assert!(
+        text[summary_end..].ends_with(table),
+        "the animated run lost the table:\n{text}"
+    );
+
+    // Quiet prints none of it.
+    let mut quiet_options = options(When::Never, CharsetChoice::Ascii);
+    quiet_options.quiet = true;
+    let (quiet, quiet_capture) = Ui::captured(quiet_options, geometry(WIDTH));
+    quiet.timings(&timing_rows(), total);
+    assert_eq!(quiet_capture.stderr(), "");
+}
+
+#[test]
+fn a_timings_table_of_nothing_is_just_the_total() {
+    let (ui, capture) = Ui::captured(options(When::Never, CharsetChoice::Ascii), geometry(WIDTH));
+    ui.timings(&[], std::time::Duration::ZERO);
+    assert_eq!(
+        capture.stderr(),
+        "  phase  time   share\n  total   0ms\n",
+        "an empty table still lines up, and a zero total divides nothing"
+    );
+}
+
 #[test]
 fn toolchain_output_is_passed_through_after_the_live_region_comes_down() {
     let (ui, capture) = Ui::captured(options(When::Always, CharsetChoice::Ascii), geometry(WIDTH));
@@ -520,5 +612,67 @@ fn toolchain_output_is_passed_through_after_the_live_region_comes_down() {
         "  ^",
     ] {
         assert!(raw.contains(line), "lost {line:?}");
+    }
+}
+
+/// A test run with one flaky test, retried, as `cli.rs` plays it.
+fn play_a_retried_test_run(ui: &Ui) {
+    ui.phase("Testing", "3 test sources");
+    let scope = ui.tests();
+    ui.update_live(|live| {
+        if let Live::Tests(state) = live {
+            state.marks = vec![Outcome::Pass, Outcome::Fail, Outcome::Pass];
+            state.passed = 2;
+            state.failed = 1;
+        }
+    });
+    ui.render_frame();
+    scope.finish();
+
+    ui.phase("Retrying", "1 failed test (attempt 2 of 3)");
+    let scope = ui.tests();
+    ui.render_frame();
+    scope.finish();
+
+    ui.status(
+        "Flaky",
+        "com.example.FlakyTest#sometimes() (passed on attempt 2)",
+    );
+    ui.phase(
+        "Reporting",
+        "test results into target/test-reports/index.html",
+    );
+    let outcome = jrs::test::TestOutcome {
+        found: 3,
+        passed: 2,
+        flaky: 1,
+        ..Default::default()
+    };
+    ui.phase("Finished", format!("{} in 1.20s", outcome.describe()));
+}
+
+#[test]
+fn a_retried_run_counts_its_flaky_test_apart() {
+    let (plain, plain_capture) =
+        Ui::captured(options(When::Never, CharsetChoice::Ascii), geometry(100));
+    play_a_retried_test_run(&plain);
+    let transcript = concat!(
+        "     Testing 3 test sources\n",
+        "    Retrying 1 failed test (attempt 2 of 3)\n",
+        "       Flaky com.example.FlakyTest#sometimes() (passed on attempt 2)\n",
+        "   Reporting test results into target/test-reports/index.html\n",
+        "    Finished 3 tests, 2 passed, 1 flaky in 1.20s\n",
+    );
+    assert_eq!(plain_capture.stderr(), transcript);
+
+    // Animated and in ASCII: the same scrollback, no byte outside ASCII.
+    let (animated, animated_capture) =
+        Ui::captured(options(When::Always, CharsetChoice::Ascii), geometry(100));
+    play_a_retried_test_run(&animated);
+    let raw = animated_capture.stderr();
+    assert!(raw.is_ascii(), "{raw:?}");
+    let text = plain_text(&raw);
+    for line in transcript.lines() {
+        assert!(text.contains(line), "the animated run lost {line:?}");
     }
 }

@@ -1,0 +1,11 @@
+[project]
+name = "jar-demo"
+version = "2.0.0"
+main-class = "com.example.JarDemo"
+
+[package.manifest]
+Implementation-Title = "Jar Demo"
+Implementation-Version = "{project.version}"
+Automatic-Module-Name = "com.example.jardemo"
+Premain-Class = "com.example.Agent"
+Can-Redefine-Classes = "true"

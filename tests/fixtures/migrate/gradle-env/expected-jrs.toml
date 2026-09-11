@@ -1,0 +1,21 @@
+[project]
+name = "gradle-env-app"
+version = "1.4.0"
+main-class = "com.example.Server"
+
+[java]
+source = 21
+
+[run]
+jvm-args = ["-Xmx512m"]
+env = { "APP_MODE" = "dev", "GREETING" = "hello {{world}}" }
+cwd = "work"
+
+[test]
+jvm-args = ["-Denv=test"]
+java-agents = ["org.mockito:mockito-core"]
+env = { "TZ" = "UTC" }
+
+[dev-dependencies]
+"org.junit.jupiter:junit-jupiter" = "5.10.2"
+"org.mockito:mockito-core" = "5.14.2"

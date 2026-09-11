@@ -105,6 +105,12 @@ impl FixtureRepo {
         std::fs::write(path.with_extension("jar.sha1"), repo::sha1_hex(bytes)).unwrap();
     }
 
+    /// Publish `bytes` as the `-sources.jar` beside `coord`, where
+    /// `jrs fetch --sources` looks for it.
+    pub fn publish_sources(&self, coord: &Coord, bytes: &[u8]) {
+        self.publish_jar(&coord.sources(), bytes);
+    }
+
     pub fn publish_pom(&self, coord: &Coord, xml: &str) {
         let path = self.root.join(coord.repo_path("pom"));
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -117,10 +123,7 @@ impl FixtureRepo {
     }
 
     pub fn repositories(&self) -> Vec<Repository> {
-        vec![Repository {
-            name: "fixture".into(),
-            url: repo::file_url(&self.root),
-        }]
+        vec![Repository::new("fixture", repo::file_url(&self.root))]
     }
 
     pub fn fetcher(&self) -> Fetcher {
@@ -222,6 +225,34 @@ impl FixtureRepo {
             javac(toolchain, &[source], &dir.join("classes"), &[]);
             self.publish_pom(&coord, &pom(&coord, &[]));
             self.publish_jar(&coord, &jar(&dir.join("classes"), &dir.join("lib.jar")));
+        }
+    }
+}
+
+/// The versions the fake console launcher is published at: a 1.x one, which
+/// has no `--fail-fast`, so jrs stops it itself, and a 6.x one, which stops on
+/// its own. Neither is a real release.
+pub const FAKE_LAUNCHER_1: &str = "1.99.0";
+pub const FAKE_LAUNCHER_6: &str = "6.99.0";
+
+impl FixtureRepo {
+    /// Compile `tests/fixtures/fake-launcher` — a stand-in for the JUnit
+    /// console launcher and Jupiter's `@Test` — and publish it as
+    /// `junit-platform-console-standalone` at [`FAKE_LAUNCHER_1`] and
+    /// [`FAKE_LAUNCHER_6`]. Needs a JDK; nothing binary is committed.
+    pub fn publish_fake_launcher(&self, scratch: &Scratch, toolchain: &Toolchain) {
+        let src = fixtures().join("fake-launcher");
+        let classes = scratch.join("fake-launcher/classes");
+        javac(toolchain, &find_java(&src), &classes, &[]);
+        let bytes = jar(&classes, &scratch.join("fake-launcher/launcher.jar"));
+        for version in [FAKE_LAUNCHER_1, FAKE_LAUNCHER_6] {
+            let coord = Coord::new(
+                "org.junit.platform",
+                "junit-platform-console-standalone",
+                version,
+            );
+            self.publish_pom(&coord, &pom(&coord, &[]));
+            self.publish_jar(&coord, &bytes);
         }
     }
 }

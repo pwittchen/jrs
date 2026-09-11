@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 
 use crate::compile::lang::{self, Language};
 use crate::error::{IoResultExt, JrsError, Result};
-use crate::resolve::coord::is_range;
+use crate::resolve::coord::{Ga, is_range};
 
 pub const MANIFEST_FILE: &str = "jrs.toml";
 pub const LOCK_FILE: &str = "jrs.lock";
@@ -32,6 +32,15 @@ pub struct Dependency {
     /// `provided`, Gradle's `compileOnly`): an API the runtime supplies, or an
     /// annotation-only library.
     pub compile_only: bool,
+    /// On the runtime and test classpaths, but not the one the main sources
+    /// compile against (Maven's `runtime`, Gradle's `runtimeOnly`): a JDBC
+    /// driver, an SLF4J binding.
+    pub runtime_only: bool,
+    /// A jar in the project rather than in a repository: the `path` of the
+    /// long form, relative to the project root and `/`-separated, as written.
+    /// A local jar has no coordinate. Its manifest key is its name, held in
+    /// `artifact`, and `group` and `version` are empty.
+    pub path: Option<String>,
 }
 
 /// An exclusion from a dependency's transitive graph.
@@ -60,12 +69,31 @@ impl Dependency {
             classifier: None,
             exclusions: Vec::new(),
             compile_only: false,
+            runtime_only: false,
+            path: None,
         }
     }
 
+    /// A local jar called `name`, at `path` relative to the project root.
+    pub fn local(name: impl Into<String>, path: impl Into<String>) -> Dependency {
+        let mut dep = Dependency::new("", name, "");
+        dep.path = Some(path.into());
+        dep
+    }
+
+    /// Whether this is a jar in the project rather than a Maven coordinate.
+    #[must_use]
+    pub fn is_local(&self) -> bool {
+        self.path.is_some()
+    }
+
     /// `group:artifact`, or `group:artifact:classifier` — unique within a table.
+    /// A local jar's key is its name.
     #[must_use]
     pub fn key(&self) -> String {
+        if self.is_local() {
+            return self.artifact.clone();
+        }
         match &self.classifier {
             Some(c) => format!("{}:{}:{c}", self.group, self.artifact),
             None => format!("{}:{}", self.group, self.artifact),
@@ -75,12 +103,15 @@ impl Dependency {
     /// True when the short `"g:a" = "version"` form says everything.
     #[must_use]
     pub fn is_plain(&self) -> bool {
-        self.exclusions.is_empty() && !self.compile_only
+        self.exclusions.is_empty() && !self.compile_only && !self.runtime_only && !self.is_local()
     }
 }
 
 impl std::fmt::Display for Dependency {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if let Some(path) = &self.path {
+            return write!(f, "{} ({path})", self.artifact);
+        }
         write!(f, "{}:{}:{}", self.group, self.artifact, self.version)?;
         if let Some(c) = &self.classifier {
             write!(f, ":{c}")?;
@@ -93,6 +124,57 @@ impl std::fmt::Display for Dependency {
 pub struct Repository {
     pub name: String,
     pub url: String,
+    /// The groups this repository serves, from the long form's `groups`:
+    /// `com.acme` for that group, `com.acme.*` for the groups under it. Empty
+    /// for a repository asked for everything. A group one of these matches is
+    /// looked up only in the repositories that claim it (`resolve::repo`).
+    pub groups: Vec<String>,
+}
+
+impl Repository {
+    /// A repository asked for every group.
+    pub fn new(name: impl Into<String>, url: impl Into<String>) -> Repository {
+        Repository {
+            name: name.into(),
+            url: url.into(),
+            groups: Vec::new(),
+        }
+    }
+
+    /// Whether this repository's `groups` name `group`. A repository without
+    /// `groups` claims nothing: it is asked for what no other claims.
+    #[must_use]
+    pub fn claims(&self, group: &str) -> bool {
+        self.groups
+            .iter()
+            .any(|pattern| group_matches(pattern, group))
+    }
+}
+
+/// Whether `pattern` is something `groups` can hold: a group (`com.acme`), or
+/// a group followed by `.*` for the groups under it. No other wildcard.
+#[must_use]
+pub fn valid_group_pattern(pattern: &str) -> bool {
+    let base = pattern.strip_suffix(".*").unwrap_or(pattern);
+    !base.is_empty()
+        && !base.starts_with('.')
+        && !base.ends_with('.')
+        && !base.contains("..")
+        && base
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'))
+}
+
+/// `com.acme` matches that group alone; `com.acme.*` matches the groups below
+/// it (`com.acme.billing`), but not `com.acme` itself.
+#[must_use]
+pub fn group_matches(pattern: &str, group: &str) -> bool {
+    match pattern.strip_suffix(".*") {
+        Some(prefix) => group
+            .strip_prefix(prefix)
+            .is_some_and(|rest| rest.starts_with('.') && rest.len() > 1),
+        None => pattern == group,
+    }
 }
 
 pub const CENTRAL_NAME: &str = "central";
@@ -132,6 +214,14 @@ impl Default for JavaConfig {
 pub struct RunConfig {
     /// Placed before `-cp`: `-Xmx512m`, `-Dkey=value`, `--enable-preview`.
     pub jvm_args: Vec<String>,
+    /// Agents passed as `-javaagent:`, named by `group:artifact` and taken
+    /// from the resolved runtime classpath, so each is the pinned version.
+    pub java_agents: Vec<Ga>,
+    /// Added to the environment the program inherits, in declaration order.
+    pub env: Vec<(String, Template)>,
+    /// The program's working directory, relative to the project root. `None`
+    /// keeps the directory jrs was started in.
+    pub cwd: Option<Template>,
 }
 
 /// `[test]`: how `jrs test` starts the test JVM.
@@ -141,16 +231,124 @@ pub struct TestConfig {
     /// The `JaCoCo` release `jrs test --coverage` uses, for a JDK newer than
     /// jrs's default knows about.
     pub jacoco_version: Option<String>,
+    /// Agents passed as `-javaagent:`, ahead of `JaCoCo`'s, taken from the
+    /// resolved test classpath (dev-dependencies included).
+    pub java_agents: Vec<Ga>,
+    /// Added to the environment the test JVM inherits, in declaration order.
+    pub env: Vec<(String, Template)>,
+    /// `test.retries`: how many times a failed test is run again before it
+    /// counts as failed. One that passes on a retry is reported as flaky.
+    pub retries: u32,
+    /// `test.coverage-minimum`: project-wide totals `jrs test --coverage`
+    /// must reach, in declaration order. Ignored without `--coverage`.
+    pub coverage_minimum: Vec<CoverageMinimum>,
 }
 
-/// `[package]`: runtime images.
+/// A `JaCoCo` counter `test.coverage-minimum` can set a minimum for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CoverageCounter {
+    Instruction,
+    Branch,
+    Line,
+    Complexity,
+    Method,
+    Class,
+}
+
+impl CoverageCounter {
+    pub const ALL: [CoverageCounter; 6] = [
+        CoverageCounter::Instruction,
+        CoverageCounter::Branch,
+        CoverageCounter::Line,
+        CoverageCounter::Complexity,
+        CoverageCounter::Method,
+        CoverageCounter::Class,
+    ];
+
+    /// Its key in `test.coverage-minimum`: `line`.
+    #[must_use]
+    pub fn key(self) -> &'static str {
+        match self {
+            CoverageCounter::Instruction => "instruction",
+            CoverageCounter::Branch => "branch",
+            CoverageCounter::Line => "line",
+            CoverageCounter::Complexity => "complexity",
+            CoverageCounter::Method => "method",
+            CoverageCounter::Class => "class",
+        }
+    }
+
+    /// The `type` of its `<counter>` in `jacoco.xml`: `LINE`.
+    #[must_use]
+    pub fn jacoco_type(self) -> &'static str {
+        match self {
+            CoverageCounter::Instruction => "INSTRUCTION",
+            CoverageCounter::Branch => "BRANCH",
+            CoverageCounter::Line => "LINE",
+            CoverageCounter::Complexity => "COMPLEXITY",
+            CoverageCounter::Method => "METHOD",
+            CoverageCounter::Class => "CLASS",
+        }
+    }
+
+    #[must_use]
+    pub fn from_key(key: &str) -> Option<CoverageCounter> {
+        CoverageCounter::ALL.into_iter().find(|c| c.key() == key)
+    }
+}
+
+/// One entry of `test.coverage-minimum`: the covered ratio a counter's total
+/// must reach, kept in hundredths of a percent (`0.8` is `8000`) so that the
+/// comparison with `JaCoCo`'s counts is exact.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CoverageMinimum {
+    pub counter: CoverageCounter,
+    pub basis_points: u32,
+}
+
+impl CoverageMinimum {
+    /// The ratio as the manifest writes it: `0.8`, `0.755`, `1.0`.
+    #[must_use]
+    pub fn ratio(&self) -> String {
+        let digits = format!(
+            "{}.{:04}",
+            self.basis_points / 10_000,
+            self.basis_points % 10_000
+        );
+        let trimmed = digits.trim_end_matches('0');
+        if trimmed.ends_with('.') {
+            format!("{trimmed}0")
+        } else {
+            trimmed.to_string()
+        }
+    }
+}
+
+/// `[package]`: jar attributes, runtime images, native images.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PackageConfig {
     /// Modules added to a `--jlink` / `--jpackage` runtime beyond those `jdeps`
     /// finds — ones reached only by reflection or `ServiceLoader`, such as
     /// `jdk.crypto.ec` for TLS.
     pub add_modules: Vec<String>,
+    /// `[package.manifest]`: extra `META-INF/MANIFEST.MF` attributes, in
+    /// declaration order, so the jar is byte-identical from build to build.
+    /// Values may use `{project.name}` and `{project.version}`.
+    pub manifest: Vec<(String, Template)>,
+    /// Passed through verbatim to `native-image` by `--native-image`.
+    pub native_image_args: Vec<String>,
 }
+
+/// The `MANIFEST.MF` main attributes jrs writes itself, which
+/// `[package.manifest]` may not set. `Name` is here too: it starts a
+/// per-entry section, and jrs writes the main section only.
+pub const JAR_ATTRIBUTES_OWNED: &[&str] = &[
+    "Manifest-Version",
+    "Created-By",
+    "Main-Class",
+    "Class-Path",
+    "Name",
+];
 
 /// `[kotlin]`, `[scala]` or `[groovy]`: the table's presence turns the
 /// language on, and its `version` pins the compiler (`JVM_LANGUAGES.md` §4.1).
@@ -597,6 +795,9 @@ pub struct Manifest {
 
     /// Non-fatal complaints, surfaced by the CLI after the manifest loads.
     pub warnings: Vec<String>,
+    /// `project.jrs-version`: the oldest jrs that may build the project, as
+    /// written. Checked when the manifest is parsed.
+    pub jrs_version: Option<String>,
 }
 
 const PROJECT_KEYS: &[&str] = &[
@@ -608,6 +809,7 @@ const PROJECT_KEYS: &[&str] = &[
     "resource-dir",
     "test-resource-dir",
     "target-dir",
+    "jrs-version",
 ];
 const JAVA_KEYS: &[&str] = &[
     "source",
@@ -617,10 +819,28 @@ const JAVA_KEYS: &[&str] = &[
     "javadoc-args",
     "jdk",
 ];
-const RUN_KEYS: &[&str] = &["jvm-args"];
-const TEST_KEYS: &[&str] = &["jvm-args", "jacoco-version"];
-const PACKAGE_KEYS: &[&str] = &["add-modules"];
-const DEPENDENCY_KEYS: &[&str] = &["version", "classifier", "exclusions", "compile-only"];
+const RUN_KEYS: &[&str] = &["jvm-args", "java-agents", "env", "cwd"];
+const TEST_KEYS: &[&str] = &[
+    "jvm-args",
+    "jacoco-version",
+    "java-agents",
+    "env",
+    "retries",
+    "coverage-minimum",
+];
+const PACKAGE_KEYS: &[&str] = &["add-modules", "manifest", "native-image-args"];
+const DEPENDENCY_KEYS: &[&str] = &[
+    "version",
+    "classifier",
+    "exclusions",
+    "compile-only",
+    "runtime-only",
+    "path",
+];
+/// What a local jar's table may hold: no version, classifier or exclusions,
+/// since it has no coordinate and no graph.
+const LOCAL_DEPENDENCY_KEYS: &[&str] = &["path", "compile-only", "runtime-only"];
+const REPOSITORY_KEYS: &[&str] = &["url", "groups"];
 const TASK_KEYS: &[&str] = &[
     "description",
     "run",
@@ -674,6 +894,8 @@ pub const RESERVED_TASK_NAMES: &[&str] = &[
     "completions",
     "task",
     "help",
+    "metadata",
+    "fetch",
 ];
 
 impl Manifest {
@@ -790,6 +1012,10 @@ impl Manifest {
             .ok_or_else(|| JrsError::manifest("missing required table `[project]`"))?
             .as_table()
             .ok_or_else(|| JrsError::manifest("`project` must be a table"))?;
+        // Before anything else is read: a manifest written for a newer jrs
+        // may use keys and forms this one would misread or warn about, and
+        // the one thing worth saying then is which jrs it needs.
+        let jrs_version = parse_jrs_version(project, path)?;
         warn_unknown(project, PROJECT_KEYS, "project.", &mut warnings);
 
         let name = required_string(project, "name", "project")?;
@@ -822,6 +1048,9 @@ impl Manifest {
             None => RunConfig::default(),
             Some(t) => RunConfig {
                 jvm_args: string_array(t, "jvm-args", "run")?,
+                java_agents: parse_java_agents(t, "run")?,
+                env: parse_jvm_env(t, "run")?,
+                cwd: parse_jvm_cwd(t, "run")?,
             },
         };
         let test = match section(&table, "test", TEST_KEYS, &mut warnings)? {
@@ -829,12 +1058,18 @@ impl Manifest {
             Some(t) => TestConfig {
                 jvm_args: string_array(t, "jvm-args", "test")?,
                 jacoco_version: optional_string(t, "jacoco-version", "test")?,
+                java_agents: parse_java_agents(t, "test")?,
+                env: parse_jvm_env(t, "test")?,
+                retries: optional_count(t, "retries", "test")?,
+                coverage_minimum: coverage_minimum(t, &mut warnings)?,
             },
         };
         let package = match section(&table, "package", PACKAGE_KEYS, &mut warnings)? {
             None => PackageConfig::default(),
             Some(t) => PackageConfig {
                 add_modules: string_array(t, "add-modules", "package")?,
+                manifest: parse_jar_attributes(t)?,
+                native_image_args: string_array(t, "native-image-args", "package")?,
             },
         };
 
@@ -845,6 +1080,14 @@ impl Manifest {
             return Err(JrsError::manifest(format!(
                 "`dev-dependencies.\"{}\"`: `compile-only` only means something in \
                  [dependencies]; a dev-dependency is never on the runtime classpath anyway",
+                d.key()
+            )));
+        }
+        if let Some(d) = dev_dependencies.iter().find(|d| d.runtime_only) {
+            return Err(JrsError::manifest(format!(
+                "`dev-dependencies.\"{}\"`: `runtime-only` only means something in \
+                 [dependencies]; the test classpath is one classpath, that the tests \
+                 compile and run against alike",
                 d.key()
             )));
         }
@@ -883,6 +1126,7 @@ impl Manifest {
             tasks,
             hooks,
             warnings,
+            jrs_version,
         };
         let language_warnings = check_languages(&manifest)?;
         manifest.warnings.extend(language_warnings);
@@ -989,6 +1233,31 @@ impl Manifest {
         })
     }
 
+    /// `[package.manifest]` with its placeholders expanded: the attributes a
+    /// jar's `MANIFEST.MF` gets after jrs's own, in declaration order.
+    ///
+    /// # Errors
+    ///
+    /// None in practice: the parser admits only `{project.name}` and
+    /// `{project.version}`, which are always known.
+    pub fn jar_attributes(&self) -> Result<Vec<(String, String)>> {
+        self.package
+            .manifest
+            .iter()
+            .map(|(name, value)| {
+                let expanded = value.expand(|p| match p {
+                    Placeholder::ProjectName => Ok(self.name.clone()),
+                    Placeholder::ProjectVersion => Ok(self.version.clone()),
+                    other => Err(JrsError::manifest(format!(
+                        "`package.manifest.{name}`: `{{{}}}` is not available here",
+                        other.name()
+                    ))),
+                })?;
+                Ok((name.clone(), expanded))
+            })
+            .collect()
+    }
+
     /// Render this manifest back to TOML, optionally with a comment header.
     ///
     /// Used by `jrs init` and `jrs migrate`; the output is deliberately
@@ -1026,6 +1295,9 @@ impl Manifest {
         let test_resources = to_slash(&self.test_resource_dir);
         if test_resources != to_slash(&default_test_resource_dir(&self.test_dir)) {
             let _ = writeln!(s, "test-resource-dir = {}", quote(&test_resources));
+        }
+        if let Some(v) = &self.jrs_version {
+            let _ = writeln!(s, "jrs-version = {}", quote(v));
         }
 
         let java = &self.java;
@@ -1087,9 +1359,15 @@ impl Manifest {
                 );
             }
         }
-        if !self.run.jvm_args.is_empty() {
+        if self.run != RunConfig::default() {
             let _ = writeln!(s, "\n[run]");
-            let _ = writeln!(s, "jvm-args = {}", quote_list(&self.run.jvm_args));
+            if !self.run.jvm_args.is_empty() {
+                let _ = writeln!(s, "jvm-args = {}", quote_list(&self.run.jvm_args));
+            }
+            render_jvm_extras(&mut s, &self.run.java_agents, &self.run.env);
+            if let Some(cwd) = &self.run.cwd {
+                let _ = writeln!(s, "cwd = {}", quote(&cwd.raw));
+            }
         }
         if self.test != TestConfig::default() {
             let _ = writeln!(s, "\n[test]");
@@ -1099,10 +1377,40 @@ impl Manifest {
             if let Some(v) = &self.test.jacoco_version {
                 let _ = writeln!(s, "jacoco-version = {}", quote(v));
             }
+            render_jvm_extras(&mut s, &self.test.java_agents, &self.test.env);
+            if self.test.retries > 0 {
+                let _ = writeln!(s, "retries = {}", self.test.retries);
+            }
+            if !self.test.coverage_minimum.is_empty() {
+                let entries: Vec<String> = self
+                    .test
+                    .coverage_minimum
+                    .iter()
+                    .map(|m| format!("{} = {}", m.counter.key(), m.ratio()))
+                    .collect();
+                let _ = writeln!(s, "coverage-minimum = {{ {} }}", entries.join(", "));
+            }
         }
-        if !self.package.add_modules.is_empty() {
+        if !self.package.add_modules.is_empty() || !self.package.native_image_args.is_empty() {
             let _ = writeln!(s, "\n[package]");
-            let _ = writeln!(s, "add-modules = {}", quote_list(&self.package.add_modules));
+            if !self.package.add_modules.is_empty() {
+                let _ = writeln!(s, "add-modules = {}", quote_list(&self.package.add_modules));
+            }
+            if !self.package.native_image_args.is_empty() {
+                let _ = writeln!(
+                    s,
+                    "native-image-args = {}",
+                    quote_list(&self.package.native_image_args)
+                );
+            }
+        }
+        if !self.package.manifest.is_empty() {
+            // Attribute names are validated to bare-key characters on the way
+            // in, so they need no quoting.
+            let _ = writeln!(s, "\n[package.manifest]");
+            for (name, value) in &self.package.manifest {
+                let _ = writeln!(s, "{name} = {}", quote(&value.raw));
+            }
         }
 
         if !self.dependencies.is_empty() {
@@ -1120,12 +1428,22 @@ impl Manifest {
         let extra: Vec<&Repository> = self
             .repositories
             .iter()
-            .filter(|r| r.url.trim_end_matches('/') != CENTRAL_URL)
+            .filter(|r| r.url.trim_end_matches('/') != CENTRAL_URL || !r.groups.is_empty())
             .collect();
         if !extra.is_empty() {
             let _ = writeln!(s, "\n[repositories]");
             for r in extra {
-                let _ = writeln!(s, "{} = {}", quote(&r.name), quote(&r.url));
+                if r.groups.is_empty() {
+                    let _ = writeln!(s, "{} = {}", quote(&r.name), quote(&r.url));
+                } else {
+                    let _ = writeln!(
+                        s,
+                        "{} = {{ url = {}, groups = {} }}",
+                        quote(&r.name),
+                        quote(&r.url),
+                        quote_list(&r.groups)
+                    );
+                }
             }
         }
         for task in &self.tasks {
@@ -1167,12 +1485,7 @@ fn render_task(s: &mut String, task: &TaskDef) {
         let _ = writeln!(s, "depends-on = {}", quote_list(&names));
     }
     if !task.env.is_empty() {
-        let vars: Vec<String> = task
-            .env
-            .iter()
-            .map(|(k, v)| format!("{} = {}", quote(k), quote(&v.raw)))
-            .collect();
-        let _ = writeln!(s, "env = {{ {} }}", vars.join(", "));
+        let _ = writeln!(s, "env = {}", inline_env(&task.env));
     }
     if let Some(cwd) = &task.cwd {
         let _ = writeln!(s, "cwd = {}", quote(&cwd.raw));
@@ -1186,6 +1499,26 @@ fn render_task(s: &mut String, task: &TaskDef) {
         if !list.is_empty() {
             let _ = writeln!(s, "{key} = {}", quote_templates(list));
         }
+    }
+}
+
+/// An `env` table as one inline TOML table, in declaration order.
+fn inline_env(env: &[(String, Template)]) -> String {
+    let vars: Vec<String> = env
+        .iter()
+        .map(|(k, v)| format!("{} = {}", quote(k), quote(&v.raw)))
+        .collect();
+    format!("{{ {} }}", vars.join(", "))
+}
+
+/// The `java-agents` and `env` lines `[run]` and `[test]` share.
+fn render_jvm_extras(s: &mut String, agents: &[Ga], env: &[(String, Template)]) {
+    if !agents.is_empty() {
+        let names: Vec<String> = agents.iter().map(ToString::to_string).collect();
+        let _ = writeln!(s, "java-agents = {}", quote_list(&names));
+    }
+    if !env.is_empty() {
+        let _ = writeln!(s, "env = {}", inline_env(env));
     }
 }
 
@@ -1215,13 +1548,11 @@ pub fn blank(name: &str, version: &str, root: &Path) -> Manifest {
         languages: Vec::new(),
         dependencies: Vec::new(),
         dev_dependencies: Vec::new(),
-        repositories: vec![Repository {
-            name: CENTRAL_NAME.into(),
-            url: CENTRAL_URL.into(),
-        }],
+        repositories: vec![Repository::new(CENTRAL_NAME, CENTRAL_URL)],
         tasks: Vec::new(),
         hooks: Hooks::default(),
         warnings: Vec::new(),
+        jrs_version: None,
     }
 }
 
@@ -1461,6 +1792,85 @@ fn parse_depends_on(t: &toml::Table, section: &str) -> Result<Vec<TaskRef>> {
 
 /// A task's `env` table, in declaration order. `JRS_*` names are jrs's.
 fn parse_task_env(t: &toml::Table, section: &str) -> Result<Vec<(String, Template)>> {
+    parse_env(t, section, ", and are set for every task")
+}
+
+/// `run.env` or `test.env`: the tasks' `env` table, without the placeholders
+/// only a task has a value for.
+fn parse_jvm_env(t: &toml::Table, section: &str) -> Result<Vec<(String, Template)>> {
+    let env = parse_env(t, section, "")?;
+    for (key, template) in &env {
+        refuse_task_placeholders(template, &format!("{section}.env.{key}"))?;
+    }
+    Ok(env)
+}
+
+/// `run.cwd`: a directory, as a task's `cwd` is, relative to the root.
+fn parse_jvm_cwd(t: &toml::Table, section: &str) -> Result<Option<Template>> {
+    let Some(raw) = optional_string(t, "cwd", section)? else {
+        return Ok(None);
+    };
+    let template =
+        Template::parse(&raw).map_err(|e| JrsError::manifest(format!("`{section}.cwd`: {e}")))?;
+    refuse_task_placeholders(&template, &format!("{section}.cwd"))?;
+    if let Some(p) = template.placeholders().find(|p| p.is_classpath()) {
+        return Err(JrsError::manifest(format!(
+            "`{section}.cwd`: `{{{}}}` is a classpath, not a path; it cannot name a directory",
+            p.name()
+        )));
+    }
+    Ok(Some(template))
+}
+
+/// `{jar}` and `{classpath-argfile}` have a value in a task only: `jrs run`
+/// and `jrs test` package nothing, and the argfile is a task's own.
+fn refuse_task_placeholders(template: &Template, key: &str) -> Result<()> {
+    for p in template.placeholders() {
+        let why = match p {
+            Placeholder::Jar => "`jrs run` and `jrs test` do not package, so there is no jar",
+            Placeholder::ClasspathArgfile => {
+                "the argfile is a task's own; use `{classpath}`, `{runtime-classpath}` or \
+                 `{test-classpath}`"
+            }
+            _ => continue,
+        };
+        return Err(JrsError::manifest(format!(
+            "`{key}`: `{{{}}}` has no value here: {why}",
+            p.name()
+        )));
+    }
+    Ok(())
+}
+
+/// `run.java-agents` or `test.java-agents`: `group:artifact` coordinates,
+/// without a version, since the version is the one the graph resolved.
+fn parse_java_agents(t: &toml::Table, section: &str) -> Result<Vec<Ga>> {
+    let key = format!("{section}.java-agents");
+    let mut agents: Vec<Ga> = Vec::new();
+    for raw in string_array(t, "java-agents", section)? {
+        let well_formed = |s: &str| !s.is_empty() && !s.contains(char::is_whitespace);
+        let ga = match raw.split(':').collect::<Vec<_>>().as_slice() {
+            [g, a] if well_formed(g) && well_formed(a) => Ga::new(*g, *a),
+            _ => {
+                return Err(JrsError::manifest(format!(
+                    "`{key}`: `{raw}` is not a `group:artifact` coordinate\n\n\
+                     name the agent's dependency without a version, as in \
+                     `java-agents = [\"org.mockito:mockito-core\"]`; the version is the \
+                     one jrs.lock pins"
+                )));
+            }
+        };
+        if agents.contains(&ga) {
+            return Err(JrsError::manifest(format!("`{key}` names `{raw}` twice")));
+        }
+        agents.push(ga);
+    }
+    Ok(agents)
+}
+
+/// An `env` table, in declaration order: names to templates. `JRS_*` names
+/// are jrs's; `reserved` finishes the sentence that says so.
+fn parse_env(t: &toml::Table, section: &str, reserved: &str) -> Result<Vec<(String, Template)>> {
     let Some(value) = t.get("env") else {
         return Ok(Vec::new());
     };
@@ -1479,8 +1889,7 @@ fn parse_task_env(t: &toml::Table, section: &str) -> Result<Vec<(String, Templat
         }
         if key.to_ascii_uppercase().starts_with("JRS_") {
             return Err(JrsError::manifest(format!(
-                "`{section}.env.{key}`: names starting with `JRS_` are jrs's own, \
-                 and are set for every task"
+                "`{section}.env.{key}`: names starting with `JRS_` are jrs's own{reserved}"
             )));
         }
         let template = Template::parse(raw)
@@ -1555,6 +1964,19 @@ fn parse_dependencies(table: &toml::Table, section: &str) -> Result<Vec<Dependen
 
     let mut out: Vec<Dependency> = Vec::with_capacity(deps.len());
     for (key, value) in deps {
+        if let toml::Value::Table(t) = value
+            && t.contains_key("path")
+        {
+            let dep = parse_local_jar(key, t, section)?;
+            if out.iter().any(|d| d.key() == dep.key()) {
+                return Err(JrsError::manifest(format!(
+                    "`{section}` declares `{}` twice",
+                    dep.key()
+                )));
+            }
+            out.push(dep);
+            continue;
+        }
         let (group, artifact, key_classifier) = split_coordinate(key, section)?;
         let mut dep = Dependency::new(group, artifact, "");
         dep.classifier = key_classifier;
@@ -1566,7 +1988,8 @@ fn parse_dependencies(table: &toml::Table, section: &str) -> Result<Vec<Dependen
                     if !DEPENDENCY_KEYS.contains(&k.as_str()) {
                         return Err(JrsError::manifest(format!(
                             "`{section}.\"{key}\"`: unknown key `{k}` (expected `version`, \
-                             `classifier`, `exclusions` or `compile-only`)"
+                             `classifier`, `exclusions`, `compile-only`, `runtime-only` \
+                             or `path`)"
                         )));
                     }
                 }
@@ -1605,16 +2028,9 @@ fn parse_dependencies(table: &toml::Table, section: &str) -> Result<Vec<Dependen
                         artifact: a.to_string(),
                     });
                 }
-                dep.compile_only = match t.get("compile-only") {
-                    None => false,
-                    Some(toml::Value::Boolean(b)) => *b,
-                    Some(_) => {
-                        return Err(JrsError::manifest(format!(
-                            "{} must be `true` or `false`",
-                            name("compile-only")
-                        )));
-                    }
-                };
+                dep.compile_only = bool_key(t, "compile-only", &name("compile-only"))?;
+                dep.runtime_only = bool_key(t, "runtime-only", &name("runtime-only"))?;
+                check_one_classpath(&dep, section)?;
             }
             _ => {
                 return Err(JrsError::manifest(format!(
@@ -1637,6 +2053,81 @@ fn parse_dependencies(table: &toml::Table, section: &str) -> Result<Vec<Dependen
         out.push(dep);
     }
     Ok(out)
+}
+
+/// A `true`/`false` key of a long form; `name` is how a message names it.
+fn bool_key(t: &toml::Table, key: &str, name: &str) -> Result<bool> {
+    match t.get(key) {
+        None => Ok(false),
+        Some(toml::Value::Boolean(b)) => Ok(*b),
+        Some(_) => Err(JrsError::manifest(format!(
+            "{name} must be `true` or `false`"
+        ))),
+    }
+}
+
+/// `compile-only` and `runtime-only` together would put the jar on both
+/// classpaths, which is what a plain dependency already is.
+fn check_one_classpath(dep: &Dependency, section: &str) -> Result<()> {
+    if dep.compile_only && dep.runtime_only {
+        return Err(JrsError::manifest(format!(
+            "`{section}.\"{}\"` is both `compile-only` and `runtime-only`, which is \
+             what a plain dependency is; drop both",
+            dep.key()
+        )));
+    }
+    Ok(())
+}
+
+/// `name = { path = "libs/driver.jar" }`: a jar taken as it is, from inside
+/// the project. It has no coordinate, so the key is a name of its own, and no
+/// graph, so there is nothing to version, classify or exclude.
+fn parse_local_jar(key: &str, t: &toml::Table, section: &str) -> Result<Dependency> {
+    let name = |k: &str| format!("`{section}.\"{key}\".{k}`");
+    let well_formed = !key.is_empty()
+        && key
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'));
+    if !well_formed {
+        return Err(JrsError::manifest(format!(
+            "`{section}.\"{key}\"` has a `path`, so it is a local jar, and its key is a \
+             name of its own: letters, digits, `.`, `-` and `_`, such as `oracle-driver`"
+        )));
+    }
+    for k in t.keys() {
+        if !LOCAL_DEPENDENCY_KEYS.contains(&k.as_str()) {
+            let why = match k.as_str() {
+                "version" | "classifier" | "exclusions" => {
+                    " — a local jar is taken as it is: it has no coordinate and no \
+                     transitive graph"
+                }
+                _ => "",
+            };
+            return Err(JrsError::manifest(format!(
+                "`{section}.\"{key}\"`: `{k}` does not go with `path`{why} (expected \
+                 `path`, `compile-only` or `runtime-only`)"
+            )));
+        }
+    }
+    let raw = optional_string(t, "path", &format!("{section}.\"{key}\""))?.unwrap_or_default();
+    let path = raw.replace('\\', "/");
+    let as_path = Path::new(&path);
+    let escapes = as_path.is_absolute()
+        || as_path.has_root()
+        || path.starts_with('/')
+        || path.split('/').any(|c| c == "..");
+    if path.trim().is_empty() || escapes || path.ends_with('/') {
+        return Err(JrsError::manifest(format!(
+            "{} must name a jar file inside the project, relative to its root \
+             (got `{raw}`)",
+            name("path")
+        )));
+    }
+    let mut dep = Dependency::local(key, path);
+    dep.compile_only = bool_key(t, "compile-only", &name("compile-only"))?;
+    dep.runtime_only = bool_key(t, "runtime-only", &name("runtime-only"))?;
+    check_one_classpath(&dep, section)?;
+    Ok(dep)
 }
 
 /// `group:artifact`, or `group:artifact:classifier`.
@@ -1717,6 +2208,104 @@ fn string_array(t: &toml::Table, key: &str, section: &str) -> Result<Vec<String>
     }
 }
 
+/// `[package.manifest]`: attribute names to string values, in declaration
+/// order. Each name is checked against the jar specification and against the
+/// attributes jrs writes itself, and each value may use `{project.name}` and
+/// `{project.version}` — nothing else is known when a jar is written.
+fn parse_jar_attributes(t: &toml::Table) -> Result<Vec<(String, Template)>> {
+    let Some(value) = t.get("manifest") else {
+        return Ok(Vec::new());
+    };
+    let table = value.as_table().ok_or_else(|| {
+        JrsError::manifest(
+            "`package.manifest` must be a table of attribute names to strings, e.g.\n\n    \
+             [package.manifest]\n    Implementation-Title = \"My App\"",
+        )
+    })?;
+    let mut out: Vec<(String, Template)> = Vec::new();
+    for (name, value) in table {
+        let key = format!("package.manifest.{name}");
+        if let Some((earlier, _)) = out.iter().find(|(n, _)| n.eq_ignore_ascii_case(name)) {
+            return Err(JrsError::manifest(format!(
+                "`{key}`: `{earlier}` is already set; attribute names are case-insensitive"
+            )));
+        }
+        let raw = value
+            .as_str()
+            .ok_or_else(|| JrsError::manifest(format!("`{key}` must be a string")))?;
+        out.push((name.clone(), jar_attribute(name, raw)?));
+    }
+    Ok(out)
+}
+
+/// One `[package.manifest]` attribute, checked as the parser checks it — a
+/// name the jar specification allows, not one jrs writes itself, and a
+/// one-line value whose only placeholders are `{project.name}` and
+/// `{project.version}` — and its value parsed. `jrs migrate` uses it to decide
+/// what a build's jar attributes can become.
+///
+/// # Errors
+///
+/// [`JrsError::Manifest`], naming `package.manifest.<name>`, for any of those.
+pub fn jar_attribute(name: &str, raw: &str) -> Result<Template> {
+    let key = format!("package.manifest.{name}");
+    validate_attribute_name(name).map_err(|why| JrsError::manifest(format!("`{key}`: {why}")))?;
+    if let Some(owned) = JAR_ATTRIBUTES_OWNED
+        .iter()
+        .find(|a| a.eq_ignore_ascii_case(name))
+    {
+        let hint = match *owned {
+            "Main-Class" => "set `project.main-class` instead",
+            "Class-Path" => {
+                "it is written from the runtime classpath (see `jrs package --portable`)"
+            }
+            "Name" => "it starts a per-entry section, and jrs writes the main section only",
+            _ => "jrs writes it itself",
+        };
+        return Err(JrsError::manifest(format!(
+            "`{key}`: `{owned}` belongs to jrs; {hint}"
+        )));
+    }
+    if raw.contains(['\n', '\r', '\0']) {
+        return Err(JrsError::manifest(format!(
+            "`{key}`: an attribute value must be one line, with no NUL"
+        )));
+    }
+    let template = Template::parse(raw).map_err(|e| JrsError::manifest(format!("`{key}`: {e}")))?;
+    if let Some(p) = template
+        .placeholders()
+        .find(|p| !matches!(p, Placeholder::ProjectName | Placeholder::ProjectVersion))
+    {
+        return Err(JrsError::manifest(format!(
+            "`{key}`: `{{{}}}` is not known when a jar is written; an attribute can use \
+             `{{project.name}}` and `{{project.version}}`",
+            p.name()
+        )));
+    }
+    Ok(template)
+}
+
+/// A main-section attribute name, per the jar specification: an ASCII letter
+/// or digit, then letters, digits, `-` and `_`, 70 bytes at most.
+fn validate_attribute_name(name: &str) -> std::result::Result<(), String> {
+    let mut chars = name.chars();
+    let first_ok = chars.next().is_some_and(|c| c.is_ascii_alphanumeric());
+    if !first_ok || !chars.all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
+        return Err(
+            "an attribute name is an ASCII letter or digit followed by letters, digits, \
+             `-` and `_`"
+                .to_string(),
+        );
+    }
+    if name.len() > 70 {
+        return Err(format!(
+            "an attribute name is at most 70 bytes (this one is {})",
+            name.len()
+        ));
+    }
+    Ok(())
+}
+
 /// One `[dependencies]` line: the short form when it says everything, the
 /// inline table otherwise.
 fn render_dependency(d: &Dependency) -> String {
@@ -1728,6 +2317,16 @@ fn render_dependency(d: &Dependency) -> String {
 /// `jrs add` writes exactly this, so an added line reads like a generated one.
 #[must_use]
 pub fn dependency_entry(d: &Dependency) -> (String, String) {
+    if let Some(path) = &d.path {
+        let mut fields = vec![format!("path = {}", quote(path))];
+        if d.compile_only {
+            fields.push("compile-only = true".to_string());
+        }
+        if d.runtime_only {
+            fields.push("runtime-only = true".to_string());
+        }
+        return (d.artifact.clone(), format!("{{ {} }}", fields.join(", ")));
+    }
     // The classifier goes in the key when it can, so two classifiers of one
     // artifact stay two distinct keys.
     let key_classifier = d
@@ -1753,6 +2352,9 @@ pub fn dependency_entry(d: &Dependency) -> (String, String) {
     if d.compile_only {
         fields.push("compile-only = true".to_string());
     }
+    if d.runtime_only {
+        fields.push("runtime-only = true".to_string());
+    }
     (key, format!("{{ {} }}", fields.join(", ")))
 }
 
@@ -1767,24 +2369,70 @@ fn parse_repositories(table: &toml::Table) -> Result<Vec<Repository>> {
         let t = value
             .as_table()
             .ok_or_else(|| JrsError::manifest("`repositories` must be a table"))?;
-        for (name, url) in t {
-            let url = url.as_str().ok_or_else(|| {
-                JrsError::manifest(format!("`repositories.{name}` must be a URL string"))
-            })?;
+        for (name, value) in t {
+            let (url, groups) = match value {
+                toml::Value::Table(long) => repository_long_form(name, long)?,
+                other => (
+                    other.as_str().ok_or_else(|| {
+                        JrsError::manifest(format!(
+                            "`repositories.{name}` must be a URL string, or a table with \
+                             `url` and `groups`"
+                        ))
+                    })?,
+                    Vec::new(),
+                ),
+            };
             repos.push(Repository {
                 name: name.clone(),
                 url: url.trim_end_matches('/').to_string(),
+                groups,
             });
         }
     }
     // Maven Central is implicit and always last.
     if !repos.iter().any(|r| r.url == CENTRAL_URL) {
-        repos.push(Repository {
-            name: CENTRAL_NAME.into(),
-            url: CENTRAL_URL.into(),
-        });
+        repos.push(Repository::new(CENTRAL_NAME, CENTRAL_URL));
     }
     Ok(repos)
+}
+
+/// `internal = { url = "...", groups = ["com.acme", "com.acme.*"] }`: a
+/// repository confined to the groups it serves. The keys are checked, not
+/// warned about: a misspelt `groups` would silently open the repository to
+/// every group, which is the hole the key exists to close.
+fn repository_long_form<'a>(name: &str, t: &'a toml::Table) -> Result<(&'a str, Vec<String>)> {
+    let section = format!("repositories.{name}");
+    for k in t.keys() {
+        if !REPOSITORY_KEYS.contains(&k.as_str()) {
+            return Err(JrsError::manifest(format!(
+                "`{section}`: unknown key `{k}` (expected `url` or `groups`)"
+            )));
+        }
+    }
+    let url = match t.get("url") {
+        Some(toml::Value::String(u)) if !u.trim().is_empty() => u.as_str(),
+        _ => {
+            return Err(JrsError::manifest(format!(
+                "`{section}` needs a `url` string"
+            )));
+        }
+    };
+    let groups = string_array(t, "groups", &section)?;
+    if t.contains_key("groups") && groups.is_empty() {
+        return Err(JrsError::manifest(format!(
+            "`{section}.groups` is empty, so the repository would serve nothing; leave \
+             `groups` out to ask it for every group"
+        )));
+    }
+    for pattern in &groups {
+        if !valid_group_pattern(pattern) {
+            return Err(JrsError::manifest(format!(
+                "`{section}.groups`: `{pattern}` is not a group; write `com.acme` for \
+                 that group, or `com.acme.*` for the groups under it"
+            )));
+        }
+    }
+    Ok((url, groups))
 }
 
 fn required_string(t: &toml::Table, key: &str, section: &str) -> Result<String> {
@@ -1845,6 +2493,82 @@ fn optional_release(t: &toml::Table, key: &str) -> Result<Option<u32>> {
     }
 }
 
+/// A whole number of times, `0` when absent: `test.retries`.
+fn optional_count(t: &toml::Table, key: &str, section: &str) -> Result<u32> {
+    match t.get(key) {
+        None => Ok(0),
+        Some(toml::Value::Integer(n)) => u32::try_from(*n).map_err(|_| {
+            JrsError::manifest(format!(
+                "`{section}.{key}` must be a whole number, 0 or more (got {n})"
+            ))
+        }),
+        Some(_) => Err(JrsError::manifest(format!(
+            "`{section}.{key}` must be a whole number, e.g. `2`"
+        ))),
+    }
+}
+
+/// `test.coverage-minimum = { line = 0.80, branch = 0.70 }`: a ratio from 0 to
+/// 1 per `JaCoCo` counter. An unknown counter is a warning, like any unknown
+/// key; a value that is not a ratio is an error naming its key.
+fn coverage_minimum(t: &toml::Table, warnings: &mut Vec<String>) -> Result<Vec<CoverageMinimum>> {
+    const COUNTERS: &[&str] = &[
+        "instruction",
+        "branch",
+        "line",
+        "complexity",
+        "method",
+        "class",
+    ];
+    let Some(value) = t.get("coverage-minimum") else {
+        return Ok(Vec::new());
+    };
+    let table = value.as_table().ok_or_else(|| {
+        JrsError::manifest(
+            "`test.coverage-minimum` must be a table of ratios, e.g. \
+             `{ line = 0.80, branch = 0.70 }`",
+        )
+    })?;
+    warn_unknown(table, COUNTERS, "test.coverage-minimum.", warnings);
+    let mut minimums = Vec::new();
+    for (key, value) in table {
+        let Some(counter) = CoverageCounter::from_key(key) else {
+            continue;
+        };
+        let out_of_range = |shown: &str| {
+            JrsError::manifest(format!(
+                "`test.coverage-minimum.{key}` is {shown}, but a minimum is a ratio from 0 to 1 \
+                 (write 0.8 for 80%)"
+            ))
+        };
+        let basis_points = match value {
+            toml::Value::Integer(0) => 0,
+            toml::Value::Integer(1) => 10_000,
+            toml::Value::Integer(n) => return Err(out_of_range(&n.to_string())),
+            toml::Value::Float(ratio) if (0.0..=1.0).contains(ratio) => {
+                #[allow(
+                    clippy::cast_possible_truncation,
+                    clippy::cast_sign_loss,
+                    reason = "the ratio is checked to be within 0..=1, so this is 0..=10000"
+                )]
+                let basis_points = (ratio * 10_000.0).round() as u32;
+                basis_points
+            }
+            toml::Value::Float(ratio) => return Err(out_of_range(&ratio.to_string())),
+            _ => {
+                return Err(JrsError::manifest(format!(
+                    "`test.coverage-minimum.{key}` must be a number from 0 to 1, e.g. `0.8`"
+                )));
+            }
+        };
+        minimums.push(CoverageMinimum {
+            counter,
+            basis_points,
+        });
+    }
+    Ok(minimums)
+}
+
 fn warn_unknown(t: &toml::Table, known: &[&str], prefix: &str, warnings: &mut Vec<String>) {
     for key in t.keys() {
         if !known.contains(&key.as_str()) {
@@ -1880,6 +2604,72 @@ fn validate_class_name(class: &str) -> Result<()> {
         )));
     }
     Ok(())
+}
+
+/// Where jrs releases are published, for a project that needs a newer one.
+pub const RELEASES_URL: &str = "https://github.com/pwittchen/jrs/releases";
+
+/// `project.jrs-version`: the oldest jrs the project builds with, like Cargo's
+/// `rust-version`. A jrs older than that stops here, before it reads a key it
+/// might not know.
+fn parse_jrs_version(project: &toml::Table, path: &Path) -> Result<Option<String>> {
+    let Some(value) = project.get("jrs-version") else {
+        return Ok(None);
+    };
+    let bad = |got: String| {
+        JrsError::manifest(format!(
+            "`project.jrs-version` must be a jrs version as `MAJOR.MINOR` or \
+             `MAJOR.MINOR.PATCH`, like \"0.9\" or \"0.9.1\" (got {got})"
+        ))
+    };
+    let Some(required) = value.as_str() else {
+        return Err(bad(format!("`{value}`")));
+    };
+    if release_parts(required).is_none() {
+        return Err(bad(quote(required)));
+    }
+    check_jrs_version(required, env!("CARGO_PKG_VERSION"), path)?;
+    Ok(Some(required.to_string()))
+}
+
+/// Fail unless `running` is at least `required`, naming both and where newer
+/// releases are. `required` has been validated; a `running` version this
+/// cannot read (it is jrs's own) passes.
+///
+/// # Errors
+///
+/// [`JrsError::Manifest`] when `running` is older than `required`.
+pub fn check_jrs_version(required: &str, running: &str, path: &Path) -> Result<()> {
+    // A pre-release or build suffix on the running version does not count:
+    // `0.9.0-dev` is taken as 0.9.0.
+    let numeric = running.split(['-', '+']).next().unwrap_or(running);
+    let (Some(needed), Some(have)) = (release_parts(required), release_parts(numeric)) else {
+        return Ok(());
+    };
+    if have >= needed {
+        return Ok(());
+    }
+    Err(JrsError::manifest(format!(
+        "{} needs jrs {required} or newer (`project.jrs-version`), but this is jrs \
+         {running}\n\ninstall a newer release from {RELEASES_URL}",
+        path.display()
+    )))
+}
+
+/// `0.9` or `0.9.1` as `[0, 9, 0]` / `[0, 9, 1]`; anything else is `None`.
+fn release_parts(version: &str) -> Option<[u64; 3]> {
+    let parts: Vec<&str> = version.split('.').collect();
+    if !(2..=3).contains(&parts.len()) {
+        return None;
+    }
+    let mut out = [0; 3];
+    for (slot, part) in out.iter_mut().zip(&parts) {
+        if part.is_empty() || !part.bytes().all(|b| b.is_ascii_digit()) {
+            return None;
+        }
+        *slot = part.parse().ok()?;
+    }
+    Some(out)
 }
 
 /// Byte offset to 1-based line and column.
@@ -2060,6 +2850,279 @@ version = "1"
         assert!(err.to_string().contains("run.jvm-args"), "{err}");
     }
 
+    const DEMO: &str = "[project]\nname = \"demo\"\nversion = \"2.1.0\"\n\n";
+
+    fn attributes(m: &Manifest) -> Vec<(String, String)> {
+        m.jar_attributes().unwrap()
+    }
+
+    fn pairs(items: &[(&str, &str)]) -> Vec<(String, String)> {
+        items
+            .iter()
+            .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn jar_attributes_keep_declaration_order_and_expand_placeholders() {
+        let m = parse(&format!(
+            "{DEMO}[package]\nnative-image-args = [\"--no-fallback\"]\n\n\
+             [package.manifest]\nZ-Last-Alphabetically = \"first\"\n\
+             Implementation-Title = \"{{project.name}}\"\n\
+             Implementation-Version = \"{{project.version}}\"\n\
+             Add-Opens = \"java.base/java.lang {{{{braces}}}}\"\n"
+        ))
+        .unwrap();
+        assert!(m.warnings.is_empty(), "{:?}", m.warnings);
+        assert_eq!(
+            attributes(&m),
+            pairs(&[
+                ("Z-Last-Alphabetically", "first"),
+                ("Implementation-Title", "demo"),
+                ("Implementation-Version", "2.1.0"),
+                ("Add-Opens", "java.base/java.lang {braces}"),
+            ])
+        );
+        assert_eq!(m.package.native_image_args, vec!["--no-fallback"]);
+
+        // Rendered back, it reads the same, placeholders and order included.
+        let text = m.render(None);
+        assert!(text.contains("\n[package.manifest]\nZ-Last-Alphabetically = \"first\"\n"));
+        let again = parse(&text).unwrap();
+        assert_eq!(again.package, m.package);
+    }
+
+    #[test]
+    fn the_inline_table_form_reads_the_same() {
+        let m = parse(&format!(
+            "{DEMO}[package]\nmanifest = {{ B-Second = \"2\", A-First = \"1\" }}\n"
+        ))
+        .unwrap();
+        assert_eq!(
+            attributes(&m),
+            pairs(&[("B-Second", "2"), ("A-First", "1")])
+        );
+    }
+
+    #[test]
+    fn attributes_jrs_writes_itself_are_refused() {
+        for (name, hint) in [
+            ("Main-Class", "project.main-class"),
+            ("class-path", "--portable"),
+            ("Created-By", "writes it itself"),
+            ("MANIFEST-VERSION", "writes it itself"),
+            ("Name", "per-entry section"),
+        ] {
+            let err = parse(&format!("{DEMO}[package.manifest]\n{name} = \"x\"\n")).unwrap_err();
+            assert_eq!(err.exit_code(), 2);
+            let text = err.to_string();
+            assert!(
+                text.contains(&format!("`package.manifest.{name}`")),
+                "{text}"
+            );
+            assert!(text.contains("belongs to jrs"), "{text}");
+            assert!(text.contains(hint), "{text}");
+        }
+    }
+
+    #[test]
+    fn attribute_names_follow_the_jar_specification() {
+        let longest = "A".repeat(70);
+        for ok in ["X", "X_1-a", "Premain-Class", "9-Lives", longest.as_str()] {
+            let m = parse(&format!("{DEMO}[package.manifest]\n\"{ok}\" = \"v\"\n")).unwrap();
+            assert_eq!(attributes(&m)[0].0, ok);
+        }
+        let too_long = "A".repeat(71);
+        for bad in [
+            "-Leading",
+            "_Leading",
+            "Has.Dot",
+            "Has Space",
+            "Ümlaut",
+            too_long.as_str(),
+        ] {
+            let err = parse(&format!("{DEMO}[package.manifest]\n\"{bad}\" = \"v\"\n")).unwrap_err();
+            assert!(err.to_string().contains("attribute name"), "{bad}: {err}");
+        }
+    }
+
+    #[test]
+    fn attribute_values_are_one_line_strings() {
+        for (value, complaint) in [
+            ("\"a\\nb\"", "one line"),
+            ("1", "must be a string"),
+            ("\"{classpath}\"", "not known when a jar is written"),
+            ("\"{nope}\"", "unknown placeholder"),
+            ("\"{unclosed\"", "unclosed"),
+        ] {
+            let err = parse(&format!("{DEMO}[package.manifest]\nX-Value = {value}\n")).unwrap_err();
+            assert!(err.to_string().contains(complaint), "{value}: {err}");
+        }
+        let err = parse(&format!("{DEMO}[package]\nmanifest = [\"x\"]\n")).unwrap_err();
+        assert!(err.to_string().contains("must be a table"), "{err}");
+    }
+
+    #[test]
+    fn attribute_names_are_case_insensitive() {
+        let err = parse(&format!(
+            "{DEMO}[package.manifest]\nX-Flavour = \"a\"\nx-flavour = \"b\"\n"
+        ))
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("`X-Flavour` is already set"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn runtime_only_and_local_jars_parse_and_render_back() {
+        let m = parse(
+            r#"
+[project]
+name = "a"
+version = "1"
+[dependencies]
+"org.postgresql:postgresql" = { version = "42.7.3", runtime-only = true }
+ojdbc = { path = "libs/ojdbc11.jar" }
+"vendor-api" = { path = 'libs\vendor api.jar', compile-only = true }
+[dev-dependencies]
+fixtures = { path = "test-libs/fixtures.jar" }
+"#,
+        )
+        .unwrap();
+        assert!(m.warnings.is_empty(), "{:?}", m.warnings);
+        assert!(m.dependencies[0].runtime_only);
+        assert!(!m.dependencies[0].is_plain());
+        let ojdbc = &m.dependencies[1];
+        assert!(ojdbc.is_local());
+        assert_eq!(ojdbc.key(), "ojdbc");
+        assert_eq!(ojdbc.path.as_deref(), Some("libs/ojdbc11.jar"));
+        assert_eq!(
+            m.dependencies[2].path.as_deref(),
+            Some("libs/vendor api.jar"),
+            "a backslash becomes a slash"
+        );
+        assert!(m.dependencies[2].compile_only);
+        assert!(m.dev_dependencies[0].is_local());
+        assert!(m.effective_dependencies().iter().any(Dependency::is_local));
+
+        let text = m.render(None);
+        assert!(
+            text.contains("\"ojdbc\" = { path = \"libs/ojdbc11.jar\" }"),
+            "{text}"
+        );
+        assert!(
+            text.contains("{ version = \"42.7.3\", runtime-only = true }"),
+            "{text}"
+        );
+        let again = parse(&text).unwrap();
+        assert_eq!(again.dependencies, m.dependencies);
+        assert_eq!(again.dev_dependencies, m.dev_dependencies);
+    }
+
+    #[test]
+    fn malformed_runtime_only_and_local_jars_name_the_problem() {
+        let base = "[project]\nname='a'\nversion='1'\n";
+        let err = |body: &str| parse(&format!("{base}{body}")).unwrap_err().to_string();
+        for (body, needle) in [
+            (
+                "[dependencies]\n'g:a' = { version = '1', compile-only = true, runtime-only = true }",
+                "drop both",
+            ),
+            (
+                "[dependencies]\n'g:a' = { version = '1', runtime-only = 'yes' }",
+                "runtime-only",
+            ),
+            (
+                "[dev-dependencies]\n'g:a' = { version = '1', runtime-only = true }",
+                "[dependencies]",
+            ),
+            (
+                "[dependencies]\n'g:a' = { path = 'libs/a.jar' }",
+                "name of its own",
+            ),
+            (
+                "[dependencies]\ndriver = { path = 'libs/a.jar', version = '1' }",
+                "no coordinate",
+            ),
+            (
+                "[dependencies]\ndriver = { path = '../a.jar' }",
+                "inside the project",
+            ),
+            (
+                "[dependencies]\ndriver = { path = '/opt/a.jar' }",
+                "inside the project",
+            ),
+            (
+                "[dependencies]\ndriver = { path = '' }",
+                "inside the project",
+            ),
+            ("[dependencies]\ndriver = 'libs/a.jar'", "group:artifact"),
+            (
+                "[dev-dependencies]\ndriver = { path = 'a.jar', compile-only = true }",
+                "[dependencies]",
+            ),
+        ] {
+            let message = err(body);
+            assert!(message.contains(needle), "{body}: {message}");
+        }
+    }
+
+    #[test]
+    fn a_repository_can_be_confined_to_groups() {
+        let m = parse(
+            "[project]\nname='a'\nversion='1'\n[repositories]\n\
+             internal = { url = 'https://nexus.example.com/m2/', groups = ['com.acme', 'com.acme.*'] }\n\
+             plain = 'https://x.example.com'",
+        )
+        .unwrap();
+        let internal = &m.repositories[0];
+        assert_eq!(internal.url, "https://nexus.example.com/m2");
+        assert_eq!(internal.groups, ["com.acme", "com.acme.*"]);
+        assert!(internal.claims("com.acme") && internal.claims("com.acme.billing"));
+        assert!(!internal.claims("com.acmex"));
+        assert!(m.repositories[1].groups.is_empty());
+        assert!(!m.repositories[1].claims("com.acme"), "claims nothing");
+        assert_eq!(m.repositories[2].url, CENTRAL_URL);
+        let again = parse(&m.render(None)).unwrap();
+        assert_eq!(again.repositories, m.repositories);
+
+        let base = "[project]\nname='a'\nversion='1'\n[repositories]\n";
+        for (body, needle) in [
+            (
+                "internal = { url = 'https://x', group = ['com.acme'] }",
+                "unknown key `group`",
+            ),
+            ("internal = { groups = ['com.acme'] }", "needs a `url`"),
+            ("internal = { url = 'https://x', groups = [] }", "empty"),
+            (
+                "internal = { url = 'https://x', groups = ['com.*.x'] }",
+                "not a group",
+            ),
+            (
+                "internal = { url = 'https://x', groups = ['*'] }",
+                "not a group",
+            ),
+            ("internal = 3", "URL string"),
+        ] {
+            let message = parse(&format!("{base}{body}")).unwrap_err().to_string();
+            assert!(message.contains(needle), "{body}: {message}");
+        }
+    }
+
+    #[test]
+    fn group_patterns_match_a_group_or_the_groups_below_it() {
+        assert!(group_matches("com.acme", "com.acme"));
+        assert!(!group_matches("com.acme", "com.acme.billing"));
+        assert!(group_matches("com.acme.*", "com.acme.billing"));
+        assert!(group_matches("com.acme.*", "com.acme.billing.api"));
+        assert!(!group_matches("com.acme.*", "com.acme"));
+        assert!(!group_matches("com.acme.*", "com.acmex.billing"));
+        assert!(valid_group_pattern("io.github.some-one_2.*"));
+        assert!(!valid_group_pattern("com..acme"));
+        assert!(!valid_group_pattern(".*"));
+    }
+
     #[test]
     fn declaration_order_survives_parsing() {
         // Conflict mediation breaks ties on declaration order, so this is load
@@ -2094,10 +3157,7 @@ version = "1"
         let bare = parse("[project]\nname='a'\nversion='1'").unwrap();
         assert_eq!(
             bare.repositories,
-            vec![Repository {
-                name: CENTRAL_NAME.into(),
-                url: CENTRAL_URL.into()
-            }]
+            vec![Repository::new(CENTRAL_NAME, CENTRAL_URL)]
         );
     }
 
@@ -2205,6 +3265,90 @@ version = "1"
         .unwrap();
         assert!(
             m.warnings.iter().any(|w| w.contains("both")),
+            "{:?}",
+            m.warnings
+        );
+    }
+
+    #[test]
+    fn retries_and_coverage_minimums_parse_and_render_back() {
+        let m = parse(
+            "[project]\nname='a'\nversion='1'\n\
+             [test]\nretries = 2\ncoverage-minimum = { line = 0.80, branch = 0.755, class = 1 }",
+        )
+        .unwrap();
+        assert!(m.warnings.is_empty(), "{:?}", m.warnings);
+        assert_eq!(m.test.retries, 2);
+        assert_eq!(
+            m.test.coverage_minimum,
+            [
+                CoverageMinimum {
+                    counter: CoverageCounter::Line,
+                    basis_points: 8000
+                },
+                CoverageMinimum {
+                    counter: CoverageCounter::Branch,
+                    basis_points: 7550
+                },
+                CoverageMinimum {
+                    counter: CoverageCounter::Class,
+                    basis_points: 10_000
+                },
+            ],
+            "in declaration order"
+        );
+        let rendered = m.render(None);
+        assert!(rendered.contains("retries = 2\n"), "{rendered}");
+        assert!(
+            rendered.contains("coverage-minimum = { line = 0.8, branch = 0.755, class = 1.0 }\n"),
+            "{rendered}"
+        );
+        assert_eq!(parse(&rendered).unwrap().test, m.test);
+
+        let plain = parse("[project]\nname='a'\nversion='1'\n[test]\n").unwrap();
+        assert_eq!(plain.test.retries, 0);
+        assert!(plain.test.coverage_minimum.is_empty());
+    }
+
+    #[test]
+    fn coverage_minimums_are_ratios_checked_per_key() {
+        let error = |body: &str| {
+            parse(&format!("[project]\nname='a'\nversion='1'\n[test]\n{body}"))
+                .unwrap_err()
+                .to_string()
+        };
+        let err = error("coverage-minimum = { line = 80 }");
+        assert!(err.contains("`test.coverage-minimum.line` is 80"), "{err}");
+        assert!(err.contains("0.8 for 80%"), "{err}");
+        let err = error("coverage-minimum = { branch = 1.5 }");
+        assert!(
+            err.contains("`test.coverage-minimum.branch` is 1.5"),
+            "{err}"
+        );
+        let err = error("coverage-minimum = { branch = -0.1 }");
+        assert!(err.contains("`test.coverage-minimum.branch`"), "{err}");
+        let err = error("coverage-minimum = { line = '80%' }");
+        assert!(err.contains("must be a number from 0 to 1"), "{err}");
+        let err = error("coverage-minimum = 0.8");
+        assert!(err.contains("must be a table of ratios"), "{err}");
+        let err = error("retries = -1");
+        assert!(
+            err.contains("`test.retries` must be a whole number"),
+            "{err}"
+        );
+        let err = error("retries = 'twice'");
+        assert!(err.contains("`test.retries`"), "{err}");
+
+        // A counter jrs does not know is a warning, as any unknown key is.
+        let m = parse(
+            "[project]\nname='a'\nversion='1'\n[test]\ncoverage-minimum = { lines = 0.8, line = 0.5 }",
+        )
+        .unwrap();
+        assert_eq!(m.test.coverage_minimum.len(), 1);
+        assert!(
+            m.warnings
+                .iter()
+                .any(|w| w.contains("`test.coverage-minimum.lines`")),
             "{:?}",
             m.warnings
         );
@@ -2599,5 +3743,212 @@ post-package = ["sh"]
         assert!(err.to_string().contains("`oops`"), "{err}");
         // Without [groovy], javac-args are javac's own business.
         with("[java]\njavac-args = ['-Xlint:all', 'oops']\n").unwrap();
+    }
+
+    // ---- project.jrs-version ----------------------------------------------
+
+    #[test]
+    fn a_jrs_version_this_jrs_satisfies_is_kept_and_rendered() {
+        let m = parse("[project]\nname='a'\nversion='1'\njrs-version='0.1'").unwrap();
+        assert_eq!(m.jrs_version.as_deref(), Some("0.1"));
+        assert!(m.warnings.is_empty(), "{:?}", m.warnings);
+        let text = m.render(None);
+        assert!(text.contains("jrs-version = \"0.1\"\n"), "{text}");
+        let again = Manifest::parse(&text, Path::new("/p/jrs.toml"), Path::new("/p")).unwrap();
+        assert_eq!(again.jrs_version.as_deref(), Some("0.1"));
+        // `init` and `migrate` start from a blank manifest, which pins nothing.
+        assert!(
+            !blank("a", "1", Path::new("/p"))
+                .render(None)
+                .contains("jrs-version")
+        );
+    }
+
+    #[test]
+    fn a_newer_jrs_version_stops_before_any_other_key_is_read() {
+        // A manifest for a future jrs: an unknown key, and a dependency form
+        // this jrs cannot read. The version is the only thing it says.
+        let err = parse(
+            "[project]\nname='a'\nversion='1'\njrs-version='999.0'\nfuture-key=1\n\
+             [dependencies]\n'g:a' = { path = 'libs/a.jar' }\n",
+        )
+        .unwrap_err();
+        assert_eq!(err.exit_code(), 2);
+        let msg = err.to_string();
+        assert!(msg.contains("needs jrs 999.0 or newer"), "{msg}");
+        assert!(
+            msg.contains(&format!("this is jrs {}", env!("CARGO_PKG_VERSION"))),
+            "{msg}"
+        );
+        assert!(msg.contains(RELEASES_URL), "{msg}");
+        assert!(msg.contains("/p/jrs.toml"), "{msg}");
+    }
+
+    #[test]
+    fn jrs_versions_compare_numerically() {
+        let path = Path::new("jrs.toml");
+        for (required, running) in [
+            ("0.9", "0.9.0"),
+            ("0.9.0", "0.9.0"),
+            ("0.9", "0.10.0"),
+            ("0.9.1", "0.9.2"),
+            ("1.0", "1.0.0-dev"),
+            ("0.4", "1.0.0"),
+        ] {
+            check_jrs_version(required, running, path)
+                .unwrap_or_else(|e| panic!("{required} vs {running}: {e}"));
+        }
+        for (required, running) in [("0.10", "0.9.9"), ("0.9.1", "0.9.0"), ("1.0", "0.99.99")] {
+            assert!(
+                check_jrs_version(required, running, path).is_err(),
+                "{required} vs {running}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_malformed_jrs_version_names_the_key() {
+        for value in [
+            "'1'",
+            "'0.9.1.2'",
+            "'0.x'",
+            "'v0.9'",
+            "'0.9-rc1'",
+            "''",
+            "0.9",
+            "[1]",
+        ] {
+            let err = parse(&format!(
+                "[project]\nname='a'\nversion='1'\njrs-version={value}"
+            ))
+            .unwrap_err();
+            assert_eq!(err.exit_code(), 2, "{value}");
+            assert!(
+                err.to_string().contains("`project.jrs-version`"),
+                "{value}: {err}"
+            );
+        }
+    }
+
+    const JVM_HEAD: &str = "[project]\nname='a'\nversion='1'\n";
+
+    #[test]
+    fn agents_environment_and_working_directory_are_read_and_rendered_back() {
+        let m = parse(&format!(
+            "{JVM_HEAD}[run]\njava-agents = ['io.opentelemetry:otel-agent']\n\
+             env = {{ APP_MODE = 'dev', OUT = '{{target}}/out' }}\ncwd = '{{target}}/work'\n\
+             [test]\njava-agents = ['org.mockito:mockito-core', 'net.bytebuddy:byte-buddy-agent']\n\
+             env = {{ CP = '{{test-classpath}}' }}\n"
+        ))
+        .unwrap();
+        assert!(m.warnings.is_empty(), "{:?}", m.warnings);
+        assert_eq!(
+            m.run.java_agents,
+            vec![Ga::new("io.opentelemetry", "otel-agent")]
+        );
+        let names: Vec<&str> = m.run.env.iter().map(|(k, _)| k.as_str()).collect();
+        assert_eq!(names, ["APP_MODE", "OUT"], "declaration order is kept");
+        assert_eq!(m.run.cwd.as_ref().unwrap().raw, "{target}/work");
+        assert_eq!(m.test.java_agents.len(), 2);
+        assert_eq!(
+            m.test.java_agents[1].to_string(),
+            "net.bytebuddy:byte-buddy-agent"
+        );
+        assert!(
+            m.test.env[0]
+                .1
+                .placeholders()
+                .any(|p| p == Placeholder::TestClasspath),
+            "a classpath is a value an environment variable can hold"
+        );
+
+        let text = m.render(None);
+        assert!(
+            text.contains("java-agents = [\"io.opentelemetry:otel-agent\"]"),
+            "{text}"
+        );
+        assert!(
+            text.contains("env = { \"APP_MODE\" = \"dev\", \"OUT\" = \"{target}/out\" }"),
+            "{text}"
+        );
+        let again = parse(&text).unwrap();
+        assert_eq!(again.run, m.run);
+        assert_eq!(again.test, m.test);
+
+        // A [run] with only a working directory still renders.
+        let cwd_only = parse(&format!("{JVM_HEAD}[run]\ncwd = 'work'\n")).unwrap();
+        assert!(cwd_only.render(None).contains("[run]\ncwd = \"work\"\n"));
+    }
+
+    #[test]
+    fn agents_are_named_by_group_and_artifact_once() {
+        for bad in [
+            "mockito-core",
+            "org.mockito:mockito-core:5.14.2",
+            "org.mockito:",
+            " a:b",
+        ] {
+            let err = parse(&format!("{JVM_HEAD}[test]\njava-agents = ['{bad}']\n")).unwrap_err();
+            assert_eq!(err.exit_code(), 2);
+            let msg = err.to_string();
+            assert!(msg.contains("`test.java-agents`"), "{bad}: {msg}");
+            assert!(
+                msg.contains("not a `group:artifact` coordinate"),
+                "{bad}: {msg}"
+            );
+        }
+        let err = parse(&format!("{JVM_HEAD}[run]\njava-agents = ['a:b', 'a:b']\n")).unwrap_err();
+        assert!(err.to_string().contains("names `a:b` twice"), "{err}");
+        let err = parse(&format!("{JVM_HEAD}[run]\njava-agents = 'a:b'\n")).unwrap_err();
+        assert!(err.to_string().contains("run.java-agents"), "{err}");
+    }
+
+    #[test]
+    fn the_jvm_environment_is_checked_like_a_tasks() {
+        let cases = [
+            (
+                "[run]\nenv = { JRS_X = '1' }",
+                "`run.env.JRS_X`",
+                "jrs's own",
+            ),
+            (
+                "[test]\nenv = { A = 1 }",
+                "`test.env.A`",
+                "must be a string",
+            ),
+            (
+                "[test]\nenv = { A = '{nope}' }",
+                "`test.env.A`",
+                "unknown placeholder",
+            ),
+            ("[run]\nenv = { J = '{jar}' }", "`run.env.J`", "no jar"),
+            (
+                "[test]\nenv = { CP = '@{classpath-argfile}' }",
+                "`test.env.CP`",
+                "a task's own",
+            ),
+            ("[run]\ncwd = '{classpath}'", "`run.cwd`", "not a path"),
+            ("[run]\ncwd = '{jar}'", "`run.cwd`", "no jar"),
+            ("[run]\ncwd = 3", "`run.cwd`", "must be a string"),
+        ];
+        for (table, key, why) in cases {
+            let err = parse(&format!("{JVM_HEAD}{table}\n")).unwrap_err();
+            assert_eq!(err.exit_code(), 2, "{table}");
+            let msg = err.to_string();
+            assert!(msg.contains(key) && msg.contains(why), "{table}: {msg}");
+        }
+        // `JRS_` stays reserved in a task, with the task's own explanation.
+        let err = parse(&format!(
+            "{JVM_HEAD}[tasks.t]\nshell = 'x'\nenv = {{ JRS_A = '1' }}\n"
+        ))
+        .unwrap_err();
+        assert!(err.to_string().contains("set for every task"), "{err}");
+        // `test.cwd` is not a key: it warns, as every unknown key does.
+        let m = parse(&format!("{JVM_HEAD}[test]\ncwd = 'x'\n")).unwrap();
+        assert!(
+            m.warnings.iter().any(|w| w.contains("test.cwd")),
+            "{:?}",
+            m.warnings
+        );
     }
 }

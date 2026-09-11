@@ -211,6 +211,20 @@ impl PartialOrd for Coord {
     }
 }
 
+/// The classifier Maven publishes source code under.
+pub const SOURCES_CLASSIFIER: &str = "sources";
+
+impl Coord {
+    /// The `-sources.jar` published beside this artifact: the main artifact's,
+    /// whatever classifier this one has, since the natives or platform build
+    /// of a library is compiled from the same sources.
+    #[must_use]
+    pub fn sources(&self) -> Coord {
+        self.pom_coord()
+            .with_classifier(Some(SOURCES_CLASSIFIER.to_string()))
+    }
+}
+
 /// Maven dependency scopes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Scope {

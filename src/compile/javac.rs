@@ -120,6 +120,9 @@ impl DocUnit {
             self.title.clone(),
             // Progress chatter off; warnings and errors still come through.
             "-quiet".to_string(),
+            // No date in the pages, so a Javadoc jar is byte-identical from
+            // build to build (SPEC §9.1).
+            "-notimestamp".to_string(),
         ];
         if !self.classpath.is_empty() {
             args.push("-cp".to_string());

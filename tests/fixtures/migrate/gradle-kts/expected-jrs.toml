@@ -17,7 +17,7 @@ jvm-args = ["-Xmx256m", "-Denv=test"]
 "org.lwjgl:lwjgl:natives-linux" = "3.3.3"
 "com.fasterxml.jackson.core:jackson-databind" = { version = "2.17.0", exclusions = ["*:*"] }
 "org.projectlombok:lombok" = { version = "1.18.34", compile-only = true }
-"org.postgresql:postgresql" = "42.7.3"
+"org.postgresql:postgresql" = { version = "42.7.3", runtime-only = true }
 
 [dev-dependencies]
 "junit:junit" = "4.13.2"

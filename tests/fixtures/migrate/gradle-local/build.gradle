@@ -1,0 +1,45 @@
+// Jars kept in the project (`files`, `fileTree`), runtime-only dependencies,
+// and repositories confined to the groups they serve. The jars under libs/,
+// drivers/ and test-libs/ are created by the test, as empty files: migration
+// only lists them.
+plugins {
+    id 'java'
+}
+
+group = 'com.example'
+version = '1.0.0'
+
+repositories {
+    mavenCentral()
+    maven {
+        url 'https://acme.jfrog.io/artifactory/libs'
+        content {
+            includeGroup 'com.acme'
+            includeGroupByRegex 'com\\.acme\\..*'
+        }
+    }
+    exclusiveContent {
+        forRepository {
+            maven { url 'https://jitpack.io' }
+        }
+        filter {
+            includeGroup 'com.github.someone'
+        }
+    }
+}
+
+dependencies {
+    implementation 'com.acme:billing:2.3.0'
+    implementation 'com.github.someone:tool:1.4'
+    implementation files('libs/ojdbc11.jar')
+    compileOnly files('libs/vendor-api.jar')
+    runtimeOnly 'org.postgresql:postgresql:42.7.3'
+    runtimeOnly fileTree(dir: 'drivers', include: ['*.jar'])
+
+    // compiled against and run with: a plain dependency
+    compileOnly 'org.slf4j:slf4j-api:2.0.12'
+    runtimeOnly 'org.slf4j:slf4j-api:2.0.12'
+
+    testImplementation files('test-libs/fixtures.jar')
+    testImplementation 'org.junit.jupiter:junit-jupiter:5.10.2'
+}
