@@ -1407,7 +1407,12 @@ mod tests {
         ];
         ctx.tool_classpath = Some(&jars);
         let prepared = prepare(task, &ctx, &["x".to_string()]).unwrap();
-        let argfile = tree.0.join("target/.jrs/tasks/fmt.tool.args");
+        let argfile = tree
+            .0
+            .join("target")
+            .join(".jrs")
+            .join("tasks")
+            .join("fmt.tool.args");
         let Launch::Exec { program, args } = &prepared.launch else {
             panic!("{:?}", prepared.launch);
         };
