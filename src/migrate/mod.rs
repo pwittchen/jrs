@@ -10,6 +10,7 @@ mod gradle_files;
 mod gradle_repos;
 mod gradle_tasks;
 pub mod maven;
+mod maven_profiles;
 
 use std::path::{Path, PathBuf};
 
@@ -69,6 +70,13 @@ impl Report {
     }
     pub fn skipped(&mut self, what: impl Into<String>) {
         self.not_migrated.push(what.into());
+    }
+
+    /// Add `other`'s lines after this report's own, block by block.
+    pub fn append(&mut self, other: Report) {
+        self.migrated.extend(other.migrated);
+        self.needs_review.extend(other.needs_review);
+        self.not_migrated.extend(other.not_migrated);
     }
 }
 

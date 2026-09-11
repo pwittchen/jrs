@@ -106,6 +106,7 @@ src/
 ├── migrate/
 │   ├── mod.rs         detection, report, manifest emission
 │   ├── maven.rs       pom.xml → Manifest (reuses resolve::pom); exec-maven-plugin → [tasks]
+│   ├── maven_profiles.rs  the <profiles> a plain `mvn` build activates, merged in
 │   ├── gradle.rs      build.gradle[.kts] → Manifest (pattern extraction)
 │   ├── gradle_files.rs  files() / fileTree() → local jars, literal ones only
 │   ├── gradle_repos.rs  repositories { }, content filters → groups

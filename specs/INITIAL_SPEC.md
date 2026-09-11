@@ -1657,6 +1657,7 @@ parent chains and `<dependencyManagement>` already work.
 | `maven-jar-plugin` → `<mainClass>`, `maven-shade-plugin`'s transformer, `spring-boot-maven-plugin`'s `<mainClass>` or `start-class`; for Spring Boot, else the `@SpringBootApplication` class | `project.main-class` |
 | `maven-jar-plugin` → `<archive><manifestEntries>` | `[package.manifest]`; `${project.version}` and `${project.artifactId}` become placeholders, any other property is reported |
 | `exec-maven-plugin` executions | `[tasks]` and `[hooks]`: `exec` → a `run` task, `java` → `java @{classpath-argfile} <main>`, or a `main` task over the plugin's `<dependencies>` with `includePluginDependencies`; the `<phase>` → the hook at the same point ([TASKS.md §12](TASKS.md#12-open-questions) item 5). With no execution, its `<mainClass>` → `project.main-class` |
+| `<profiles>` a plain `mvn` build activates: each whose `<activation>` holds with no `-P` and no `-D` — its conditions all negated properties (`!skipDocs`) — else the `<activeByDefault>` ones | merged into their POM before anything is read, as Maven injects them, the profile dominant: properties by name, dependencies and repositories by key, plugins by key with `<configuration>` merged element by element, executions by `<id>`. A default profile gets a review line when another profile could activate on some machine and turn it off |
 | `maven-surefire-plugin` `<argLine>`, `<systemPropertyVariables>` | `test.jvm-args` |
 | `maven-surefire-plugin` `<forkCount>`, a number | `test.forks` |
 
@@ -1674,7 +1675,9 @@ Reported, not translated:
   the report as unmigrated. An `exec-maven-plugin` execution jrs cannot
   translate whole (another phase, `<async>`, a property it cannot evaluate)
   is named on its own.
-- Profiles: only the default-active ones are read; the rest are listed.
+- Profiles a plain build does not activate — named only by `-P`, or waiting
+  on a JDK, an OS, a file or a property that must be set — each with its
+  condition: `jrs.toml` is one fixed configuration.
 - A per-core `<forkCount>` (`1C`), which depends on the machine, and
   `<reuseForks>false</reuseForks>`, a fresh JVM per test class.
 

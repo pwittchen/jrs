@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 
 use super::{
     Migration, Report, Source, drop_implied_libraries, enable_from_library, enable_language,
-    report_compiler_plugin,
+    maven_profiles, report_compiler_plugin,
 };
 use crate::compile::lang::Language;
 use crate::error::{IoResultExt, JrsError, Result};
@@ -45,7 +45,9 @@ const UNDERSTOOD_PLUGINS: &[&str] = &[
 /// [`JrsError::Resolve`] if the project's groupId or version cannot be worked out.
 pub fn migrate(pom_path: &Path, root: &Path) -> Result<Migration> {
     let mut report = Report::default();
-    let (chain, boot_parent) = read_chain(pom_path, &mut report)?;
+    // Reported last, after what the profiles merged in has been read.
+    let mut profiles = Report::default();
+    let (chain, boot_parent) = read_chain(pom_path, &mut report, &mut profiles)?;
     let effective = pom::effective(&chain)?;
     let pom = &chain[0];
 
@@ -72,6 +74,7 @@ pub fn migrate(pom_path: &Path, root: &Path) -> Result<Migration> {
     read_exec(pom, &effective, &mut out, &mut report);
     read_spring_boot(pom, boot_parent.as_deref(), &mut out, &mut report);
     read_the_rest(pom, &mut report);
+    report.append(profiles);
 
     Ok(Migration {
         source: Source::Maven,
@@ -85,7 +88,14 @@ pub fn migrate(pom_path: &Path, root: &Path) -> Result<Migration> {
 /// exist on disk. Returns the chain, and the version of Spring Boot's
 /// `spring-boot-starter-parent` when that is the parent that is not on disk:
 /// its managed versions are Boot's BOM, which `[managed]` can import.
-fn read_chain(pom_path: &Path, report: &mut Report) -> Result<(Vec<Pom>, Option<String>)> {
+///
+/// Each POM comes back with the profiles a plain `mvn` build activates merged
+/// in, and what became of every profile goes into `profiles`.
+fn read_chain(
+    pom_path: &Path,
+    report: &mut Report,
+    profiles: &mut Report,
+) -> Result<(Vec<Pom>, Option<String>)> {
     let is_boot = |parent: &pom::ParentRef| {
         parent.group == super::SPRING_BOOT_GROUP && parent.artifact == "spring-boot-starter-parent"
     };
@@ -99,7 +109,9 @@ fn read_chain(pom_path: &Path, report: &mut Report) -> Result<(Vec<Pom>, Option<
         let dir = current
             .parent()
             .map_or_else(|| PathBuf::from("."), Path::to_path_buf);
-        chain.push(parsed);
+        let owner = (!chain.is_empty())
+            .then(|| format!("{}:{}", parsed.group_id().unwrap_or("?"), parsed.artifact));
+        chain.push(maven_profiles::apply(parsed, owner.as_deref(), profiles));
 
         let Some(parent) = parent else { break };
         let relative = parent.relative_path.as_deref().unwrap_or("../pom.xml");
@@ -1222,19 +1234,6 @@ fn read_the_rest(pom: &Pom, report: &mut Report) {
             ));
         }
     }
-    for profile in &pom.profiles {
-        if profile.active_by_default {
-            report.review(format!(
-                "<profile> {} is active by default; its contents were not merged",
-                profile.id
-            ));
-        } else {
-            report.skipped(format!(
-                "<profile> {} — only default-active profiles are read",
-                profile.id
-            ));
-        }
-    }
 }
 
 /// The compiler plugins for Kotlin, Scala and Groovy turn their language on
@@ -1931,28 +1930,31 @@ mod tests {
     }
 
     #[test]
-    fn profiles_are_listed() {
+    fn default_profiles_are_merged_and_the_rest_listed() {
         let dir = Dir::new("profiles");
         let migration = dir.migrate(
             "<project><groupId>g</groupId><artifactId>a</artifactId><version>1</version>\
              <profiles><profile><id>ci</id></profile>\
              <profile><id>dev</id><activation><activeByDefault>true</activeByDefault>\
-             </activation></profile></profiles></project>",
+             </activation><dependencies><dependency><groupId>g</groupId>\
+             <artifactId>dev-tools</artifactId><version>1.0</version></dependency>\
+             </dependencies></profile></profiles></project>",
         );
         assert!(
             migration
                 .report
                 .not_migrated
                 .iter()
-                .any(|s| s.contains("ci"))
+                .any(|s| s.contains("<profile> ci"))
         );
         assert!(
             migration
                 .report
-                .needs_review
+                .migrated
                 .iter()
-                .any(|s| s.contains("dev"))
+                .any(|s| s.contains("<profile> dev — active by default"))
         );
+        assert_eq!(migration.manifest.dependencies[0].artifact, "dev-tools");
     }
 
     #[test]

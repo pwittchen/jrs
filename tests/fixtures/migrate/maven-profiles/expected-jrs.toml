@@ -1,0 +1,17 @@
+[project]
+name = "profiled-service"
+version = "1.4.0"
+
+[java]
+source = 21
+
+[test]
+jvm-args = ["-Ddb=postgres", "-Dapp.env=test"]
+forks = 3
+
+[dependencies]
+"com.zaxxer:HikariCP" = "6.3.0"
+"org.postgresql:postgresql" = { version = "42.7.7", runtime-only = true }
+
+[dev-dependencies]
+"org.junit.jupiter:junit-jupiter" = "5.13.4"

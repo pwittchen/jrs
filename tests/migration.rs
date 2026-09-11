@@ -382,6 +382,39 @@ fn the_gradle_forks_fixture_translates_exactly() {
     );
 }
 
+/// Profiles as a plain `mvn` build picks them: the default one merged in —
+/// its property, its dependency and its surefire settings, merged over the
+/// project's own — and the ones waiting on `-P`, a property or the JDK
+/// listed. surefire's `<forkCount>` becomes `test.forks`.
+#[test]
+fn the_maven_profiles_fixture_translates_exactly() {
+    let (migration, dir) = migrate_fixture("maven-profiles");
+    assert_eq!(migration.manifest.render(None), expected(&dir));
+
+    let migrated = migration.report.migrated.join("\n");
+    assert!(
+        migrated.contains("<profile> postgres — active by default in a plain `mvn` build"),
+        "{migrated}"
+    );
+    assert!(
+        migrated.contains("test.forks = 3 (from surefire <forkCount>)"),
+        "{migrated}"
+    );
+    let review = migration.report.needs_review.join("\n");
+    assert!(
+        review.contains("Maven drops it whenever `release`"),
+        "{review}"
+    );
+    let skipped = migration.report.not_migrated.join("\n");
+    for id in ["h2", "release", "jdk25"] {
+        assert!(skipped.contains(&format!("<profile> {id} —")), "{skipped}");
+    }
+    assert!(
+        !skipped.contains("maven-gpg-plugin"),
+        "a profile left out does not put its plugins in the build: {skipped}"
+    );
+}
+
 #[test]
 fn every_expected_manifest_is_a_manifest_jrs_can_read() {
     for name in [
@@ -400,6 +433,7 @@ fn every_expected_manifest_is_a_manifest_jrs_can_read() {
         "spring-boot-kts",
         "spring-boot-maven",
         "maven-exec",
+        "maven-profiles",
         "gradle-forks",
     ] {
         let (migration, dir) = migrate_fixture(name);

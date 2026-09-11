@@ -970,9 +970,13 @@ Maven's `exec-maven-plugin` executions become tasks, and their `<phase>` a
 hook: `exec` a `run` command, and `java` a `java` command over jrs's
 classpath, or a `main` task over the plugin's own `<dependencies>`.
 
-Gradle's `maxParallelForks` and surefire's `<forkCount>` become
-`test.forks` when they are numbers; one worked out from the machine's cores
-is reported.
+`jrs.toml` is one fixed configuration, so a Maven build migrates as a plain
+`mvn` build runs it: the profiles that build activates — `<activeByDefault>`
+ones, or one waiting only on a property being unset, such as `!skipDocs` —
+are merged in first, the way Maven merges them, and the others are listed
+with what activates them. Gradle's `maxParallelForks` and surefire's
+`<forkCount>` become `test.forks` when they are numbers; one worked out from
+the machine's cores is reported.
 
 Kotlin, Scala and Groovy builds migrate too. The Kotlin Gradle plugin,
 `id 'groovy'` and `id 'scala'`, and Maven's `kotlin-maven-plugin`,
