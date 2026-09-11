@@ -547,6 +547,7 @@ mod tests {
             extra_args: vec!["-Xlint:all".into()],
             work_dir: PathBuf::from("/p/target/.jrs"),
             foreign: None,
+            main_api: None,
         }
     }
 

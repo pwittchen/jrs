@@ -142,6 +142,12 @@ regression, not a style nit.
 - **Argfiles, not command lines.** Sources and classpaths go to `target/.jrs/*.args`
   and are passed as `@argfile` — a few dozen dependencies blow past the OS argument
   limit otherwise.
+- **Compile avoidance errs towards recompiling.** The test unit's fingerprint holds
+  `compile::api_digest` of `target/classes` (`compile/abi.rs`): what another unit's
+  `javac` can see, never method bodies. Kotlin and Scala classes count by their
+  bytes, and so does every class once the main classes carry an annotation
+  processor or a Groovy AST transformation. When in doubt, a class counts by its
+  bytes: a spurious recompile costs seconds, a stale test class costs a wrong result.
 - **Nearest-wins mediation, breadth-first by level** (`resolve/mod.rs`), ties broken on
   manifest declaration order — which is why `manifest.rs` parses a `toml::Table` by
   hand instead of using a `serde` derive (order preservation, per-key diagnostics,

@@ -724,6 +724,18 @@ own.
   anyway when types are interdependent.)
 - A recompile empties `target/classes/` first, so a class whose source was
   deleted or renamed cannot survive onto the classpath or into the jar.
+- The test unit compiles against `target/classes`, and counts it by its API,
+  not its bytes (compile avoidance): its fingerprint holds a digest of what
+  `javac` can see of those classes from another unit. That is each class's
+  flags, supertypes and nesting, and every non-private member's name,
+  descriptor, generic signature, annotations, exceptions and constant value,
+  since `javac` inlines constants. Method bodies, private members, and local
+  and anonymous classes are left out. A main change that alters that API
+  recompiles the tests; one that does not leaves them fresh. Kotlin and Scala
+  classes count by their bytes, since inline functions and macros carry
+  bodies across the boundary, and so does every class once the main classes
+  register an annotation processor or a Groovy AST transformation, which run
+  while the tests compile.
 - Invoke:
   ```
   javac --release <n> -encoding <enc> -d target/classes \

@@ -16,6 +16,7 @@
 //! own `@file` readers disagree on backslashes (scalac keeps them) and on what
 //! a file may hold (groovyc's lists only sources), so jrs never uses them.
 
+pub mod abi;
 pub mod javac;
 pub mod lang;
 
@@ -23,6 +24,7 @@ use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
+pub use abi::api_digest;
 pub use javac::{DocUnit, javadoc};
 pub use lang::Language;
 
@@ -50,6 +52,10 @@ pub struct CompileUnit {
     pub work_dir: PathBuf,
     /// The compiler of the unit's language besides Java, when it has one.
     pub foreign: Option<ForeignCompiler>,
+    /// For the test unit: [`api_digest`] of the main classes it compiles
+    /// against. It is in the fingerprint, so a main change that alters that
+    /// API recompiles the tests and one that does not leaves them fresh.
+    pub main_api: Option<String>,
 }
 
 /// A Kotlin, Scala or Groovy compiler, and what its run needs beyond the
@@ -111,12 +117,15 @@ impl CompileUnit {
     }
 
     /// Everything that, if changed, means the previous output cannot be reused:
-    /// every step's flags, every jar either compiler reads, and the sources.
+    /// every step's flags, every jar either compiler reads, the main classes'
+    /// API for the tests, and the sources.
     ///
     /// A jar's path names its version, so a new version is already a new
     /// classpath. A snapshot is the exception — a new build lands at the same
     /// path — which is why each jar's size and modification time are in here
     /// too. Both come from one `stat`, which costs nothing next to a compiler.
+    /// A class directory on the classpath is not a jar: the tests see
+    /// `target/classes` through `main_api` instead.
     fn fingerprint(&self) -> String {
         let mut s = String::new();
         s.push_str(&self.javac_flags(false).join("\u{1}"));
@@ -149,6 +158,9 @@ impl CompileUnit {
                     .unwrap_or_default();
                 let _ = writeln!(s, "jar {} {modified}", meta.len());
             }
+        }
+        if let Some(api) = &self.main_api {
+            let _ = writeln!(s, "main-api {api}");
         }
         for source in &self.sources {
             s.push_str(&source.display().to_string());
@@ -400,6 +412,7 @@ mod tests {
             extra_args: vec!["-Xlint:all".into()],
             work_dir: root.join("target/.jrs"),
             foreign: None,
+            main_api: None,
         }
     }
 

@@ -53,6 +53,7 @@ fn compile_main(manifest: &Manifest, toolchain: &Toolchain, classpath: Vec<PathB
         extra_args: manifest.java.javac_args.clone(),
         work_dir: project.work_dir(),
         foreign: None,
+        main_api: None,
     };
     match compile::compile(toolchain, &unit, &silent_ui()).unwrap() {
         compile::Outcome::Compiled { classes } => classes,
@@ -192,6 +193,7 @@ fn a_second_build_is_up_to_date_and_a_touched_source_is_not() {
         extra_args: manifest.java.javac_args.clone(),
         work_dir: project.work_dir(),
         foreign: None,
+        main_api: None,
     };
 
     compile::compile(&toolchain, &unit(), &silent_ui()).unwrap();
@@ -209,6 +211,100 @@ fn a_second_build_is_up_to_date_and_a_touched_source_is_not() {
         compile::compile(&toolchain, &unit(), &silent_ui()).unwrap(),
         compile::Outcome::Compiled { .. }
     ));
+}
+
+const CALC_V1: &str = "package com.example;\n\npublic final class Calc {\n    \
+    public static final int LIMIT = 10;\n\n    private Calc() {}\n\n    \
+    public static int add(int a, int b) {\n        return a + b;\n    }\n}\n";
+
+/// `CALC_V1`'s API with another body: a lambda and an anonymous class in it,
+/// a private helper, an import and a comment.
+const CALC_NEW_BODY: &str = "package com.example;\n\n\
+    import java.util.function.IntBinaryOperator;\n\n// Adds, the long way round.\n\
+    public final class Calc {\n    public static final int LIMIT = 10;\n\n    \
+    private Calc() {}\n\n    public static int add(int a, int b) {\n        \
+    IntBinaryOperator op = (x, y) -> twice(x) / 2 + y;\n        \
+    Runnable noop = new Runnable() {\n            public void run() {}\n        };\n        \
+    noop.run();\n        return op.applyAsInt(a, b);\n    }\n\n    \
+    private static int twice(int x) {\n        return x * 2;\n    }\n}\n";
+
+#[test]
+fn tests_recompile_when_the_main_api_changes_and_only_then() {
+    let toolchain = require_jdk!();
+    let scratch = Scratch::new("build-compile-avoidance");
+    let calc = scratch.write("app/src/main/java/com/example/Calc.java", CALC_V1);
+    let check = scratch.write(
+        "app/src/test/java/com/example/CalcCheck.java",
+        "package com.example;\n\nclass CalcCheck {\n    int sum = Calc.add(1, 2) + Calc.LIMIT;\n}\n",
+    );
+    let target = scratch.join("app/target");
+    let classes = target.join("classes");
+    let release = toolchain.release(None).unwrap();
+    let unit = |label: &str, source: &Path, output: PathBuf, classpath: Vec<PathBuf>| CompileUnit {
+        label: label.into(),
+        sources: vec![source.to_path_buf()],
+        output_dir: output,
+        classpath,
+        release,
+        target: None,
+        encoding: "UTF-8".into(),
+        extra_args: Vec::new(),
+        work_dir: target.join(".jrs"),
+        foreign: None,
+        main_api: None,
+    };
+    let main = || unit("main", &calc, classes.clone(), Vec::new());
+    // As `jrs test` builds it: the main classes' API, taken after main built.
+    let test = || CompileUnit {
+        main_api: Some(compile::api_digest(&classes).unwrap()),
+        ..unit(
+            "test",
+            &check,
+            target.join("test-classes"),
+            vec![classes.clone()],
+        )
+    };
+    let ui = silent_ui();
+    let rebuild_main = |text: &str| {
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        std::fs::write(&calc, text).unwrap();
+        assert!(matches!(
+            compile::compile(&toolchain, &main(), &ui).unwrap(),
+            compile::Outcome::Compiled { .. }
+        ));
+    };
+
+    compile::compile(&toolchain, &main(), &ui).unwrap();
+    compile::compile(&toolchain, &test(), &ui).unwrap();
+    assert!(!compile::is_stale(&test()).unwrap());
+
+    rebuild_main(CALC_NEW_BODY);
+    assert!(
+        classes.join("com/example/Calc$1.class").is_file(),
+        "the anonymous class was compiled"
+    );
+    assert!(
+        !compile::is_stale(&test()).unwrap(),
+        "a new body is not a new API"
+    );
+
+    rebuild_main(&CALC_NEW_BODY.replace("LIMIT = 10", "LIMIT = 11"));
+    assert!(
+        compile::is_stale(&test()).unwrap(),
+        "javac inlined the old constant into the tests"
+    );
+    compile::compile(&toolchain, &test(), &ui).unwrap();
+    assert!(!compile::is_stale(&test()).unwrap());
+
+    rebuild_main(&CALC_V1.replace("LIMIT = 10", "LIMIT = 11").replace(
+        "    private Calc() {}\n",
+        "    private Calc() {}\n\n    public static int sub(int a, int b) {\n        \
+         return a - b;\n    }\n",
+    ));
+    assert!(
+        compile::is_stale(&test()).unwrap(),
+        "a new public method is a new API"
+    );
 }
 
 #[test]
@@ -264,6 +360,7 @@ fn a_compilation_error_fails_the_build_and_leaves_no_fingerprint() {
         extra_args: manifest.java.javac_args.clone(),
         work_dir: project.work_dir(),
         foreign: None,
+        main_api: None,
     };
     let error = compile::compile(&toolchain, &unit, &silent_ui()).unwrap_err();
     assert!(error.to_string().contains("compilation failed"), "{error}");
@@ -2353,6 +2450,52 @@ fn junit_project(
         cache: scratch.join("jrs-cache"),
         config: scratch.join("no-config.toml"),
     }
+}
+
+const ADD_TEST: &str = "package com.example;\n\nimport org.junit.jupiter.api.Test;\n\n\
+    class AddTest {\n    @Test\n    void adds() {\n        \
+    if (Calc.add(2, 2) != 4) throw new AssertionError(\"2 + 2\");\n    }\n}\n";
+
+#[test]
+fn jrs_test_recompiles_the_tests_only_for_a_new_main_api() {
+    let toolchain = require_jdk!();
+    let scratch = Scratch::new("test-compile-avoidance");
+    let p = junit_project(
+        &scratch,
+        &toolchain,
+        FAKE_LAUNCHER_6,
+        "",
+        &[("AddTest.java", ADD_TEST)],
+    );
+    let (code, _, stderr) = p.jrs(&["test"]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stderr.contains("Compiling 1 test sources"), "{stderr}");
+
+    let calc = p.root.join("src/main/java/com/example/Calc.java");
+    let text = std::fs::read_to_string(&calc).unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    std::fs::write(&calc, text.replace("return a + b;", "return b + a;")).unwrap();
+    let (code, _, stderr) = p.jrs(&["test"]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stderr.contains("Compiling tested v1.0.0"), "{stderr}");
+    assert!(
+        !stderr.contains("Compiling 1 test sources"),
+        "the main classes' API did not change: {stderr}"
+    );
+
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    std::fs::write(
+        &calc,
+        text.replace(
+            "    public static int add",
+            "    public static int twice(int a) {\n        return a + a;\n    }\n\n    \
+             public static int add",
+        ),
+    )
+    .unwrap();
+    let (code, _, stderr) = p.jrs(&["test"]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stderr.contains("Compiling 1 test sources"), "{stderr}");
 }
 
 /// Every launch of the fake launcher, as the argument line it starts with.

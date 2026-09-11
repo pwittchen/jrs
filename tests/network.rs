@@ -138,6 +138,7 @@ fn a_project_with_dependencies_compiles_tests_and_runs_them() {
         extra_args: Vec::new(),
         work_dir: project.work_dir(),
         foreign: None,
+        main_api: None,
     };
 
     compile::compile(

@@ -56,7 +56,8 @@ your own requirements before adopting it for production builds.
   steps and chores, run with the project's JDK and classpath
 - Javadoc, dependency trees with `--why`, outdated-dependency reports, and
   `jrs add` / `jrs remove`
-- Parallel resolution, download and compilation
+- Parallel resolution, download and compilation, and tests that recompile only
+  when the main classes' API changes
 - Progress output that adapts to the terminal: spinners, live download bars and
   a build summary, with ASCII and no-colour fallbacks
 - One-shot migration from Maven (`pom.xml`) and Gradle (`build.gradle`,
@@ -407,7 +408,7 @@ for any repository.
 | Command | Behaviour |
 | --- | --- |
 | `jrs build [--watch]` | Resolve → compile main sources → copy resources. `--watch` rebuilds on every change. |
-| `jrs test` | `build` + compile test sources + run the tests. See [Tests](#tests) for its flags. |
+| `jrs test` | `build` + compile test sources + run the tests. The tests are not recompiled for a main change that leaves the main classes' API alone. See [Tests](#tests) for its flags. |
 | `jrs run [--debug[=<port>]] [-- args...]` | `build` + run `main-class` with `args`. `--debug` waits for a debugger first; see below. |
 | `jrs package` | `build` + produce `target/<name>-<version>.jar`. |
 | `jrs package --portable` | Same, with the runtime dependencies copied into `target/lib/`. |

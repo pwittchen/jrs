@@ -83,6 +83,7 @@ src/
 ├── toolchain.rs       finding the JDK; running subprocesses (captured/inherited)
 ├── compile/
 │   ├── mod.rs         CompileUnit: steps, fingerprint, staleness, argfiles
+│   ├── abi.rs         the main classes' API digest: compile avoidance for tests
 │   ├── javac.rs       javac and javadoc
 │   └── lang.rs        enum Language: Kotlin/Scala/Groovy as plain data
 ├── resolve/
@@ -247,7 +248,8 @@ add to it:
  │  --rerun-failed: the last run's XML ─► what to select, before it is replaced
  │  build()
  │  hook(pre-test)
- │  compile_unit("test")  classpath = target/classes + test classpath
+ │  compile_unit("test")  classpath = target/classes + test classpath,
+ │                        main_api = api_digest(target/classes)
  │  sync test resources
  │  fetch_internal: JUnit console launcher (+ JaCoCo agent/cli with --coverage)
  │  test::run  ─► java … ConsoleLauncher --scan-class-path …   (+ test.env)
@@ -425,7 +427,8 @@ directory so a deleted source cannot leave its class behind.
                foreign: Option<ForeignCompiler> }
       │
       ▼
- is_stale?  ── fingerprint differs (flags, every jar's size+mtime, source list)
+ is_stale?  ── fingerprint differs (flags, every jar's size+mtime, source list;
+      │        for the tests, the main classes' API digest)
       │        or newest source is newer than newest class
       │
       ├── Java only
@@ -455,6 +458,26 @@ test are separate units, so Kotlin code with Spock tests is fine.
 Every compiler is run as `java @argfile` (or `javac @argfile`), never with a
 long command line: a few dozen dependency jars exceed the OS argument limit.
 Compiler output is passed through verbatim.
+
+The test unit compiles against `target/classes`, which is a directory, not a
+jar, so its size and mtime say nothing. What its fingerprint holds instead is
+`compile::api_digest` of it (`compile/abi.rs`): a hand-written class-file
+reader renders what another unit's `javac` can see and hashes that, with
+constant-pool indices resolved. That means flags, supertypes, own nesting,
+and non-private members with their signatures, annotations and constant
+values. Bodies, private members and anonymous classes are left out. A class
+counts by its raw bytes instead when that is not enough: Kotlin and Scala
+classes, `module-info`, anything unreadable, and every class once the main
+classes register an annotation processor or a Groovy AST transformation.
+
+```
+ main change ─► compile main ─► api_digest(target/classes)
+                                      │
+                    same as in test.fingerprint? ── yes ─► tests "fresh"
+                                      │ no
+                                      ▼
+                               compile the tests
+```
 
 ## 8. Tests
 

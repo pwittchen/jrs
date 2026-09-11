@@ -1353,7 +1353,7 @@ impl<'a> Session<'a> {
         // Kotlin tests may use the main module's `internal` declarations.
         let mut classpath = vec![project.classes_dir()];
         classpath.extend(built.resolution.classpath(Classpath::Test));
-        let unit = self.compile_unit(
+        let mut unit = self.compile_unit(
             "test",
             &sources,
             project.test_classes_dir(),
@@ -1361,6 +1361,9 @@ impl<'a> Session<'a> {
             vec![project.classes_dir()],
         )?;
         let checking = Instant::now();
+        // Compile avoidance: the tests see the main classes' API, not their
+        // bytes, so a changed method body leaves them fresh (SPEC §7.2).
+        unit.main_api = Some(compile::api_digest(&project.classes_dir())?);
         if compile::is_stale(&unit)? {
             let what = sources.describe("test sources");
             self.ui.phase("Compiling", &what);
@@ -2428,6 +2431,7 @@ impl<'a> Session<'a> {
             extra_args: self.manifest.java.javac_args.clone(),
             work_dir: self.project().work_dir(),
             foreign,
+            main_api: None,
         })
     }
 

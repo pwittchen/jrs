@@ -17,7 +17,8 @@ runtime-only dependencies, local jar files (SPEC §8.8), repository content
 filtering (SPEC §8.7), and, for the test and run JVMs, Java agents from the
 resolved graph, an environment and working directory, and `--debug`. So have
 the HTML test report, `--rerun-failed`, `--fail-fast`, test retries that
-report flaky tests, and coverage minimums.
+report flaky tests, and coverage minimums. So have compile avoidance for the
+tests, which recompile only when the main classes' API changes (SPEC §7.2).
 
 What is left is below. Much of it closes a gap with Gradle, and those items
 name the Gradle feature they answer. jrs is not trying to become Gradle
@@ -30,13 +31,12 @@ decision (see the last section) — it needs a spec change before it needs code.
 
 ## 1. Build and compilation
 
-- **Finer-grained incremental compilation.** The staleness check is
-  all-or-nothing by design (SPEC §7.2). Worth revisiting only if large projects
-  show `javac` time dominating a no-dependency-change rebuild; the M5 benchmark
-  harness is the place to measure it first. A cheaper first step is Gradle's
-  compile avoidance, applied to the one boundary a single module has: when a
-  main-source change leaves the classes' public API alone, the test sources do
-  not need recompiling.
+- **Finer-grained incremental compilation.** Each unit's staleness check is
+  all-or-nothing by design (SPEC §7.2). Compile avoidance already spares the
+  tests a recompile when a main change leaves the classes' API alone. Doing
+  the same file by file inside a unit is worth revisiting only if large
+  projects show `javac` time dominating a no-dependency-change rebuild; the M5
+  benchmark harness is the place to measure it first.
 - **Compiler start-up.** kotlinc and scalac add a second or so of JVM start-up
   to a changed build ([JVM_LANGUAGES.md §14.1](specs/JVM_LANGUAGES.md#14-open-questions)).
   A compiler daemon would hide it, at the cost of jrs managing a long-lived
