@@ -47,7 +47,50 @@ and testing the same projects, with the results written up in a report.
   a tool that is not installed, as `require_jdk!` does. It adds no crate to jrs.
   A manually triggered CI workflow can regenerate the report on a fixed runner.
 
-## 2. Needs a spec decision first
+## 2. Version variables in `jrs migrate`
+
+Gradle builds often keep a version in a variable and use it in several
+dependency declarations, so that one line upgrades a family of artifacts
+together. Today `jrs migrate` reads none of them (SPEC §11.3 lists "dependencies
+built from variables, `ext` blocks" as skipped). `"g:a:$fooVersion"` is dropped
+with a review line. Worse, map notation with a bare identifier
+(`version: fooVersion`) comes out as a dependency with an empty version,
+because `parse_map_notation` reads only quoted values. With no `[managed]`
+section to supply one, that entry does not resolve. Migration should find the
+value the variable holds and write it into the dependency, as it already does
+for a version catalog.
+
+- **Where a variable is defined.** `ext { fooVersion = '1.2' }` and
+  `ext.fooVersion = '1.2'` (also inside `buildscript { }`), `def fooVersion =
+  '1.2'` in Groovy, `val fooVersion = "1.2"` and `extra["fooVersion"] = "1.2"`
+  in Kotlin, and `fooVersion=1.2` in `gradle.properties` beside the build file
+  (read by Kotlin's `val fooVersion: String by project` and by
+  `project.property("fooVersion")`).
+- **Where it is used.** `"g:a:$fooVersion"`, `"g:a:${fooVersion}"`,
+  `"g:a:${project.fooVersion}"`, `"g:a:${rootProject.ext.fooVersion}"`, map
+  notation's `version: fooVersion` and `version: "$fooVersion"`, and the same
+  forms inside `platform(...)`, `enforcedPlatform(...)`, `mavenBom`,
+  `constraints { }` and the Spring Boot plugin's version, which feed
+  `[managed]`.
+- **Literal or nothing.** A variable is used only when it is assigned exactly
+  once, to a string literal, outside a conditional or a loop. A value built
+  from another variable is followed through that one, so
+  `springVersion = "$bootVersion"` works; concatenation, method calls,
+  reassignment and `System.getenv` are not evaluated. Anything else keeps
+  today's behaviour: the dependency is left out and reported with the variable's
+  name, never written without a version. Map notation's empty version is fixed
+  either way.
+- **The report says where a version came from.** A resolved version gets a
+  review line naming the variable (`fooVersion = 1.2 → 3 dependencies`), since
+  the manifest no longer shows that the versions move together. The `ext { }`
+  review line goes away when every variable in the block has been used.
+- **Tests.** A `gradle-variables` fixture in `tests/fixtures/migrate/` with a
+  Groovy build, a `-kts` twin, and a `gradle.properties`, covering each form
+  above, one variable that cannot be resolved, and a map-notation dependency
+  that proves no empty version is written. SPEC §11.3 moves variables from the
+  "skipped" list to the "read" list.
+
+## 3. Needs a spec decision first
 
 These cross a line drawn in SPEC §1.2 or §13 (or the dependency list). They are
 listed so the discussion has a home, not because they are planned.
