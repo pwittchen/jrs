@@ -1368,6 +1368,82 @@ fn read_kotlin(script: &str, plugins: &[Plugin], out: &mut Manifest, report: &mu
         out.java.jdk = Some(jdk);
         report.migrated(format!("java.jdk = {jdk} (from kotlin {{ jvmToolchain }})"));
     }
+    read_kotlinc_args(script, out, report);
+}
+
+/// `freeCompilerArgs` → `[kotlin] kotlinc-args`, when every argument is a
+/// literal: in `kotlin { compilerOptions { } }`, as start.spring.io writes
+/// it, or in the older `kotlinOptions { }` of a `KotlinCompile` task. An
+/// `addAll(` or `listOf(` may carry on over several lines.
+fn read_kotlinc_args(script: &str, out: &mut Manifest, report: &mut Report) {
+    let lines: Vec<&str> = script.lines().map(str::trim).collect();
+    let mut args = Vec::new();
+    let mut next = 0;
+    while next < lines.len() {
+        let line = lines[next];
+        next += 1;
+        if !line.contains("freeCompilerArgs") || line.starts_with("//") {
+            continue;
+        }
+        let mut statement = line.to_string();
+        while statement.matches('(').count() > statement.matches(')').count() && next < lines.len()
+        {
+            statement.push(' ');
+            statement.push_str(lines[next]);
+            next += 1;
+        }
+        let literals = quoted(&statement);
+        if literals.is_empty()
+            || literals.iter().any(|l| l.contains('$'))
+            || !only_literals(&statement)
+        {
+            report.skipped(format!(
+                "`{statement}` — not every argument is a literal; set [kotlin] kotlinc-args \
+                 by hand"
+            ));
+            continue;
+        }
+        args.extend(literals);
+    }
+    if args.is_empty() {
+        return;
+    }
+    let Some(kotlin) = out
+        .languages
+        .iter_mut()
+        .find(|c| c.language == Language::Kotlin)
+    else {
+        report.skipped(format!(
+            "freeCompilerArgs {args:?} — no [kotlin] table was written to hold them"
+        ));
+        return;
+    };
+    report.migrated(format!(
+        "[kotlin] kotlinc-args = {args:?} (from freeCompilerArgs)"
+    ));
+    kotlin.compiler_args.extend(args);
+}
+
+/// Whether a `freeCompilerArgs` statement is made of string literals and the
+/// few words that put them in a list, and nothing that is worked out when
+/// Gradle runs.
+fn only_literals(statement: &str) -> bool {
+    let mut rest = String::new();
+    let mut quote = None;
+    for c in statement.chars() {
+        match quote {
+            Some(q) if c == q => quote = None,
+            Some(_) => {}
+            None if c == '"' || c == '\'' => quote = Some(c),
+            None => rest.push(c),
+        }
+    }
+    let mut rest = rest.replace("freeCompilerArgs", "");
+    for word in ["mutableListOf", "listOf", "arrayOf", "addAll", "add", "set"] {
+        rest = rest.replace(word, "");
+    }
+    rest.chars()
+        .all(|c| c.is_whitespace() || "=+.,()[]{}".contains(c))
 }
 
 /// `groovy` and `scala` name no version: it is their library's, read out of
@@ -1918,6 +1994,51 @@ application {
                 .not_migrated
                 .iter()
                 .any(|s| s.contains("TestNG"))
+        );
+    }
+
+    #[test]
+    fn free_compiler_args_become_kotlinc_args_when_they_are_literals() {
+        let dir = Dir::new("kotlinc-args");
+        let plugin = "plugins {\n  kotlin(\"jvm\") version \"2.2.21\"\n}\n";
+        for (body, expected) in [
+            (
+                "kotlin {\n  compilerOptions {\n    freeCompilerArgs.addAll(\"-Xjsr305=strict\", \
+                 \"-Xcontext-parameters\")\n  }\n}\n",
+                &["-Xjsr305=strict", "-Xcontext-parameters"][..],
+            ),
+            (
+                "kotlin {\n  compilerOptions {\n    freeCompilerArgs.addAll(\n      \
+                 \"-Xjsr305=strict\",\n      \"-Xcontext-parameters\"\n    )\n  }\n}\n",
+                &["-Xjsr305=strict", "-Xcontext-parameters"][..],
+            ),
+            (
+                "tasks.withType<KotlinCompile> {\n  kotlinOptions {\n    \
+                 freeCompilerArgs += \"-Xjsr305=strict\"\n    jvmTarget = \"17\"\n  }\n}\n",
+                &["-Xjsr305=strict"][..],
+            ),
+            (
+                "tasks.withType<KotlinCompile> {\n  kotlinOptions {\n    \
+                 freeCompilerArgs = freeCompilerArgs + listOf(\"-Xjsr305=strict\")\n  }\n}\n",
+                &["-Xjsr305=strict"][..],
+            ),
+        ] {
+            let migration = dir.migrate(&format!("{plugin}{body}"));
+            let kotlin = &migration.manifest.languages[0];
+            assert_eq!(kotlin.compiler_args, expected, "{body}");
+            assert!(migration.report.not_migrated.is_empty(), "{body}");
+        }
+
+        let computed = dir.migrate(&format!(
+            "{plugin}kotlin {{\n  compilerOptions {{\n    freeCompilerArgs.addAll(strictArgs)\n    \
+             freeCompilerArgs.add(\"-Xopt-in=${{optIn}}\")\n  }}\n}}\n"
+        ));
+        assert!(computed.manifest.languages[0].compiler_args.is_empty());
+        let skipped = computed.report.not_migrated.join("\n");
+        assert_eq!(
+            skipped.matches("not every argument is a literal").count(),
+            2,
+            "{skipped}"
         );
     }
 

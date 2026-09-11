@@ -1799,6 +1799,8 @@ What the builds already say about the other languages (§7.7) is translated too:
 | Maven | `kotlin-maven-plugin` at `${kotlin.version}` | `[kotlin]`; its `<jvmTarget>` → `java.source` when that is not set |
 | Maven | `scala-maven-plugin`, `gmavenplus-plugin` | `[scala]` / `[groovy]` |
 | both | an explicit `kotlin-stdlib` / `scala-library` / `groovy` dependency at the compiler's version | dropped from `[dependencies]`, since it is implied; reported as migrated |
+| Gradle | `freeCompilerArgs`, in `kotlin { compilerOptions { } }` or a `KotlinCompile` task's `kotlinOptions { }`, every argument a literal | `kotlinc-args`; a computed one is reported |
+| Maven | `kotlin-maven-plugin` `<args>`, in its configuration or an execution's | `kotlinc-args`, each argument once |
 | both | compiler plugins (`allopen`, `spring`, `serialization`, `kapt`) | not migrated, each with its reason |
 
 A version below jrs's minimum is not migrated, and the report says why.

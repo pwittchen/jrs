@@ -1,0 +1,25 @@
+[project]
+name = "demo"
+version = "0.0.1-SNAPSHOT"
+main-class = "com.example.demo.DemoApplicationKt"
+
+[java]
+source = 17
+javac-args = ["-parameters"]
+
+[kotlin]
+version = "2.2.21"
+kotlinc-args = ["-Xjsr305=strict", "-Xannotation-default-target=param-property"]
+
+[managed]
+"org.springframework.boot:spring-boot-dependencies" = { version = "4.1.1", bom = true }
+
+[dependencies]
+"org.springframework.boot:spring-boot-starter-webmvc" = {}
+"org.jetbrains.kotlin:kotlin-reflect" = {}
+"tools.jackson.module:jackson-module-kotlin" = {}
+
+[dev-dependencies]
+"org.springframework.boot:spring-boot-starter-webmvc-test" = {}
+"org.jetbrains.kotlin:kotlin-test-junit5" = {}
+"org.junit.platform:junit-platform-launcher" = {}

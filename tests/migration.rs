@@ -362,6 +362,33 @@ fn the_gradle_local_fixture_translates_exactly() {
     );
 }
 
+/// start.spring.io's Kotlin build, taken unchanged: Boot's BOM, the
+/// `freeCompilerArgs` as kotlinc's, `DemoApplicationKt` as the main class —
+/// and the `spring` compiler plugin reported, since without it Spring cannot
+/// proxy Kotlin's final classes (JVM_LANGUAGES.md §14.2).
+#[test]
+fn the_spring_boot_kotlin_fixture_translates_exactly() {
+    let (migration, dir) = migrate_fixture("spring-boot-kotlin");
+    assert_eq!(migration.manifest.render(None), expected(&dir));
+
+    let migrated = migration.report.migrated.join("\n");
+    assert!(
+        migrated.contains(
+            "project.main-class = com.example.demo.DemoApplicationKt (the @SpringBootApplication \
+             class)"
+        ),
+        "{migrated}"
+    );
+    assert!(
+        migrated.contains("[kotlin] kotlinc-args = [\"-Xjsr305=strict\""),
+        "{migrated}"
+    );
+    let skipped = &migration.report.not_migrated;
+    assert_eq!(skipped.len(), 1, "{skipped:?}");
+    assert!(skipped[0].contains("plugin.spring"), "{skipped:?}");
+    assert!(skipped[0].contains("Spring's proxies"), "{skipped:?}");
+}
+
 /// `maxParallelForks` becomes `test.forks`; `forkEvery` is reported, since
 /// jrs never restarts a test JVM part of the way through its share.
 #[test]
@@ -432,6 +459,7 @@ fn every_expected_manifest_is_a_manifest_jrs_can_read() {
         "spring-boot-gradle",
         "spring-boot-kts",
         "spring-boot-maven",
+        "spring-boot-kotlin",
         "maven-exec",
         "maven-profiles",
         "gradle-forks",

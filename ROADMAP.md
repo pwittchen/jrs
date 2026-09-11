@@ -92,15 +92,17 @@ and testing the same projects, with the results written up in a report.
 
 - **Migration fidelity.** Keep growing the `tests/fixtures/migrate/` corpus
   from real-world `pom.xml` and Gradle builds. Every construct that lands in the
-  "not migrated" block is a candidate for translation. The profiles a plain
-  `mvn` build does not activate and anything computed still do not
-  translate, and neither does `maven-antrun-plugin`; an `exec-maven-plugin`
-  execution in a phase jrs has no hook for is reported whole. A Spring Boot
-  build in Kotlin migrates, but does not build as Spring expects: Kotlin on
-  Spring needs the `allopen` compiler plugin (see the last section). Each
-  item in sections 1–2 that answers a Gradle construct should arrive with
-  its migration row and a fixture, as `test.forks` did for
-  `maxParallelForks` (`gradle-forks`).
+  "not migrated" block is a candidate for translation, and so is one that lands
+  in no block at all, as start.spring.io's `freeCompilerArgs` did until its
+  Kotlin build joined the corpus. The profiles a plain `mvn` build does not
+  activate and anything computed still do not translate, and neither does
+  `maven-antrun-plugin`; an `exec-maven-plugin` execution in a phase jrs has no
+  hook for is reported whole. A Spring Boot build in Kotlin migrates
+  (`spring-boot-kotlin`), but does not build as Spring expects: Kotlin on
+  Spring needs the `allopen` compiler plugin (see the last section). Each item
+  in sections 1–2 that answers a Gradle construct should arrive with its
+  migration row and a fixture, as `test.forks` did for `maxParallelForks`
+  (`gradle-forks`).
 
 ## 6. Needs a spec decision first
 

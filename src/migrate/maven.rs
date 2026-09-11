@@ -1363,6 +1363,46 @@ fn read_kotlin(
     if kapt {
         report_compiler_plugin("kapt", "kotlin-maven-plugin's `kapt` goal", report);
     }
+
+    read_kotlinc_args(&configurations, effective, out, report);
+}
+
+/// kotlin-maven-plugin's `<args><arg>-Xjsr305=strict</arg></args>`, as
+/// start.spring.io writes it, in the plugin's configuration or an
+/// execution's → `[kotlin] kotlinc-args`, each argument once.
+fn read_kotlinc_args(
+    configurations: &[&Element],
+    effective: &Effective,
+    out: &mut Manifest,
+    report: &mut Report,
+) {
+    let mut args: Vec<String> = Vec::new();
+    for arg in configurations
+        .iter()
+        .filter_map(|c| c.child("args"))
+        .flat_map(|list| &list.children)
+        .map(|a| pom::interpolate(a.text.trim(), &effective.properties))
+        .filter(|a| !a.is_empty())
+    {
+        if arg.contains("${") {
+            report.skipped(format!(
+                "kotlin-maven-plugin <arg>{arg}</arg> — the property did not interpolate"
+            ));
+        } else if !args.contains(&arg) {
+            args.push(arg);
+        }
+    }
+    if !args.is_empty()
+        && let Some(config) = out
+            .languages
+            .iter_mut()
+            .find(|c| c.language == Language::Kotlin)
+    {
+        report.migrated(format!(
+            "[kotlin] kotlinc-args = {args:?} (from kotlin-maven-plugin <args>)"
+        ));
+        config.compiler_args = args;
+    }
 }
 
 /// A plugin's `<version>`, which `PluginInfo` does not keep: from `<plugins>`,
@@ -1894,6 +1934,27 @@ mod tests {
         assert_eq!(
             migration.manifest.java.javac_args,
             vec!["-Xlint:all", "-Werror"]
+        );
+    }
+
+    #[test]
+    fn kotlin_compiler_arguments_become_kotlinc_args() {
+        let dir = Dir::new("kotlinc-args");
+        let migration = dir.migrate(
+            "<project><groupId>g</groupId><artifactId>a</artifactId><version>1</version>\
+             <properties><kotlin.version>2.2.21</kotlin.version></properties>\
+             <build><plugins><plugin><groupId>org.jetbrains.kotlin</groupId>\
+             <artifactId>kotlin-maven-plugin</artifactId><version>${kotlin.version}</version>\
+             <configuration><args><arg>-Xjsr305=strict</arg></args></configuration>\
+             <executions><execution><id>compile</id><configuration><args>\
+             <arg>-Xjsr305=strict</arg><arg>-Xcontext-parameters</arg></args>\
+             </configuration></execution></executions></plugin></plugins></build></project>",
+        );
+        let kotlin = &migration.manifest.languages[0];
+        assert_eq!(
+            kotlin.compiler_args,
+            ["-Xjsr305=strict", "-Xcontext-parameters"],
+            "each argument once"
         );
     }
 

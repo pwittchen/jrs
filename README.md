@@ -982,7 +982,9 @@ Kotlin, Scala and Groovy builds migrate too. The Kotlin Gradle plugin,
 `id 'groovy'` and `id 'scala'`, and Maven's `kotlin-maven-plugin`,
 `scala-maven-plugin` and `gmavenplus-plugin` become language tables. An
 explicit standard-library dependency is dropped, since it is implied now.
-Compiler plugins are reported as not migrated.
+Kotlin compiler flags — Gradle's `freeCompilerArgs`, Maven's `<args>` —
+become `kotlinc-args` when they are literals. Compiler plugins are reported
+as not migrated.
 
 ## Roadmap
 
