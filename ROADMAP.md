@@ -10,20 +10,7 @@ decision (see the last section) — it needs a spec change before it needs code.
 
 ---
 
-## 1. Build and compilation
-
-- **Compiler start-up.** kotlinc and scalac add a second or so of JVM start-up
-  to a changed build ([JVM_LANGUAGES.md §14.1](specs/JVM_LANGUAGES.md#14-open-questions)).
-  A compiler daemon would hide it, at the cost of jrs managing a long-lived
-  process; worth it only if real projects feel it. This is the gap the Gradle
-  daemon closes, and it does so for `javac` too, by running it in-process.
-  SPEC §1.2 lists compiler daemons as a non-goal, so this needs a spec change
-  before it needs code.
-- **Dokka.** `jrs doc` runs Scaladoc and Groovydoc, but a Kotlin unit's Kotlin
-  sources are still left out of its `javadoc`, with a warning. Dokka is a
-  plugin host with its own configuration (JVM_LANGUAGES.md §14.4).
-
-## 2. Tests
+## 1. Tests
 
 - **Java agents outside the graph.** `test.java-agents` and `run.java-agents`
   load the jar the resolved graph pinned, so an agent has to be a dependency.
@@ -36,10 +23,10 @@ decision (see the last section) — it needs a spec change before it needs code.
   starts one launcher JVM. Forking several JVMs means splitting the test classes
   among launchers and merging their summaries, XML and coverage data. The live
   counter would then follow several processes, and `--debug` would have several
-  JVMs to attach to. Worth it once the section 5 benchmark shows test time
+  JVMs to attach to. Worth it once the section 4 benchmark shows test time
   dominating.
 
-## 3. Packaging
+## 2. Packaging
 
 - **Shading.** Package relocation for conflicting dependencies was ruled out
   for v1 (SPEC §13.5). Duplicate classes are reported today; relocation — which
@@ -62,7 +49,7 @@ decision (see the last section) — it needs a spec change before it needs code.
   a real need. It adds a manifest key, a `[[tool]]` block and a lockfile entry,
   so it is a spec-level decision (see the last section).
 
-## 4. Editors and tooling
+## 3. Editors and tooling
 
 - **Checks and formatting.** Gradle has the Checkstyle, PMD, SpotBugs and
   Spotless plugins. In jrs these are tasks, and a task can depend on a pinned
@@ -72,7 +59,7 @@ decision (see the last section) — it needs a spec change before it needs code.
   it is a `javac` plugin, so it waits on the annotation-processor path (see the
   last section).
 
-## 5. Benchmarks against Maven and Gradle
+## 4. Benchmarks against Maven and Gradle
 
 The M5 benchmark (`benches/resolution.rs`) measures jrs against itself and the
 network floor. It does not say how jrs compares to the tools people would
@@ -107,7 +94,7 @@ and testing the same projects, with the results written up in a report.
   a tool that is not installed, as `require_jdk!` does. It adds no crate to jrs.
   A manually triggered CI workflow can regenerate the report on a fixed runner.
 
-## 6. jrs itself
+## 5. jrs itself
 
 - **Migration fidelity.** Keep growing the `tests/fixtures/migrate/` corpus
   from real-world `pom.xml` and Gradle builds. Every construct that lands in the
@@ -116,10 +103,10 @@ and testing the same projects, with the results written up in a report.
   `exec-maven-plugin` execution in a phase jrs has no hook for is reported
   whole. A Spring Boot build in Kotlin migrates, but does not build as Spring
   expects: Kotlin on Spring needs the `allopen` compiler plugin (see the last
-  section). Each item in sections 2–3 that answers a Gradle construct
+  section). Each item in sections 1–2 that answers a Gradle construct
   (`maxParallelForks`) should arrive with its migration row and a fixture.
 
-## 7. Needs a spec decision first
+## 6. Needs a spec decision first
 
 These cross a line drawn in SPEC §1.2 or §13 (or the dependency list). They are
 listed so the discussion has a home, not because they are planned.
@@ -135,11 +122,13 @@ listed so the discussion has a home, not because they are planned.
 | Extra source sets and test suites (`integrationTest`, `java-test-fixtures`), multi-release jars | SPEC §3's layout is `main` plus `test`. A second test suite with its own dependencies and its own `jrs test` selection is Gradle's JVM Test Suite plugin; multi-release jars need a source root per Java release |
 | Build variants (Gradle `-P` properties, Maven profiles) | The manifest is one fixed configuration. Conditional configuration is the start of a DSL |
 | PGP signature verification (Gradle's dependency verification) | An OpenPGP crate and a trust store. `jrs.lock` already pins a checksum for every non-snapshot jar, which covers the "bytes changed under the same version" case |
+| A compiler daemon (the Gradle daemon) | Non-goal: SPEC §1.2 rules out compiler daemons. kotlinc and scalac add a second or so of JVM start-up to a changed build ([JVM_LANGUAGES.md §14.1](specs/JVM_LANGUAGES.md#14-open-questions)); a daemon would hide it, and the Gradle daemon does so for `javac` too, by running it in-process. The cost is jrs managing a long-lived process, worth it only if real projects feel the start-up |
 | A Build Server Protocol server | A long-lived JSON-RPC process that IntelliJ, Metals and VS Code can talk to. `jrs metadata` (SPEC §5.4) is the first step and needs no daemon |
 | Annotation-processor path in the manifest | Non-goal: no annotation-processor configuration. Processors on the compile classpath, as `compile-only` dependencies with `-proc:full`, work today. Error Prone, NullAway and other `javac` plugins need a processor path too |
 | JPMS (`module-info.java`, module path) | Non-goal |
 | JVM languages beyond Kotlin, Scala and Groovy; Kotlin Multiplatform | Non-goal (SPEC §1.2) |
 | Kotlin compiler plugins (`allopen`, `spring`, `serialization`), kapt/KSP | Non-goal: compiler-plugin configuration ([JVM_LANGUAGES.md §14.2](specs/JVM_LANGUAGES.md#14-open-questions)). Kotlin on Spring needs `allopen`, so this is the first to revisit |
+| Dokka | A plugin host with its own configuration (JVM_LANGUAGES.md §14.4). `jrs doc` runs Scaladoc and Groovydoc, but a Kotlin unit's Kotlin sources are still left out of its `javadoc`, with a warning |
 | sbt-style `%%` cross-version keys | New key syntax, touching `edit.rs`, the lockfile and migration (JVM_LANGUAGES.md §14.3) |
 | TestNG | SPEC §13.7: the JUnit Platform only (Jupiter and Vintage) |
 | Version ranges | SPEC §8.2 rejects them rather than guessing |
