@@ -10,7 +10,7 @@
   <a href="https://github.com/pwittchen/jrs/actions/workflows/rust.yml"><img src="https://github.com/pwittchen/jrs/actions/workflows/rust.yml/badge.svg" alt="Rust"></a>
 </p>
 
-jrs builds, tests, runs and packages a single-module Java project from one
+[jrs](https://pwittchen.github.io/jrs/) builds, tests, runs and packages a single-module Java project from one
 `jrs.toml` manifest, resolving dependencies from Maven Central. Kotlin, Scala
 and Groovy sources compile alongside the Java ones. It aims for the
 ergonomics of Cargo: a small manifest, a committed lockfile, one binary, and no
