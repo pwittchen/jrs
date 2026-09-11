@@ -228,15 +228,15 @@ jobs:
 
   # The website shows the crate version, and the version commit pushed by
   # `bump` triggers no workflow of its own, so the site is republished from it
-  # here, once the release it links to exists.
+  # here, once the release it links to exists. A called workflow sees no
+  # secrets unless they are passed on, and it needs the VPS ones to deploy.
   website:
     needs: [ bump, release ]
 
     permissions:
       contents: read
-      pages: write
-      id-token: write
 
     uses: ./.github/workflows/website.yml
     with:
       ref: ${{ needs.bump.outputs.sha }}
+    secrets: inherit

@@ -1,11 +1,17 @@
 name: Website
 
-# Builds website/ with Bun and publishes it to GitHub Pages.
+# Builds website/ with Bun and publishes it to https://getjrs.dev, a static
+# site on the mikr.us VPS, by rsyncing dist/ into the directory it serves.
 #
 # A change under website/ publishes it on its own. The version in the header is
 # read from Cargo.toml at build time, and a release sets that version in a
 # commit pushed with the workflow token, which triggers no further runs, so the
 # release pipeline in rust.yml calls this workflow once the release is out.
+#
+# Secrets: VPS_HOST, VPS_PORT (the VPS's SSH port), VPS_USER, VPS_SSH_KEY (a
+# private key whose public half is in the user's authorized_keys) and VPS_PATH
+# (the site's document root, without a trailing slash). rust.yml passes them
+# through with `secrets: inherit`.
 on:
   push:
     branches: [ "master" ]
@@ -22,22 +28,22 @@ on:
         type: string
   workflow_dispatch:
 
-# One deployment at a time; a queued one waits rather than cancelling a
-# deployment halfway through.
+# One deployment at a time; a queued one waits rather than cancelling an rsync
+# halfway through.
 concurrency:
-  group: pages
+  group: website
   cancel-in-progress: false
 
 jobs:
-  build:
+  deploy:
     runs-on: ubuntu-latest
 
     permissions:
       contents: read
 
-    defaults:
-      run:
-        working-directory: website
+    environment:
+      name: website
+      url: https://getjrs.dev
 
     steps:
     - uses: actions/checkout@v7
@@ -49,30 +55,22 @@ jobs:
         bun-version: '1.3.6'
 
     - name: Install dependencies
+      working-directory: website
       run: bun install --frozen-lockfile
 
-    # dist/ links its assets relatively, so it works under the /jrs/ path
-    # GitHub Pages serves a project site from.
     - name: Build the site
+      working-directory: website
       run: bun run build
 
-    - uses: actions/upload-pages-artifact@v5
+    # --delete drops the previous build's hashed assets, so the document root
+    # holds exactly one build.
+    - name: Deploy to the VPS
+      uses: burnett01/rsync-deployments@7.0.1
       with:
-        path: website/dist
-
-  deploy:
-    needs: build
-    runs-on: ubuntu-latest
-
-    permissions:
-      pages: write
-      id-token: write
-
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
-
-    steps:
-    - name: Deploy to GitHub Pages
-      id: deployment
-      uses: actions/deploy-pages@v5
+        switches: -avz --delete
+        path: website/dist/
+        remote_path: ${{ secrets.VPS_PATH }}/
+        remote_host: ${{ secrets.VPS_HOST }}
+        remote_port: ${{ secrets.VPS_PORT }}
+        remote_user: ${{ secrets.VPS_USER }}
+        remote_key: ${{ secrets.VPS_SSH_KEY }}

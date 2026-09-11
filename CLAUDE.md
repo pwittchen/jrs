@@ -36,10 +36,12 @@ and `Cargo.lock` and commits it to `master` (the tag itself is never moved), the
 commit, and `release` publishes them. The tag must point at the tip of `master`. Don't
 bump the version by hand — tagging is the release process.
 
-`.github/workflows/website.yml` builds `website/` with Bun and deploys it to GitHub
-Pages on pushes to `master` that touch `website/` or `logo.png`. `rust.yml` also calls
-it after `release`, with the version commit, since that commit is pushed with the
-workflow token and triggers nothing itself — so the site's version stays current.
+`.github/workflows/website.yml` builds `website/` with Bun and rsyncs it to
+`getjrs.dev` on the mikr.us VPS (the `VPS_*` repository secrets) on pushes to
+`master` that touch `website/` or `logo.png`. `rust.yml` also calls it after
+`release`, with the version commit and `secrets: inherit`, since that commit is
+pushed with the workflow token and triggers nothing itself — so the site's
+version stays current.
 
 Single tests and single suites:
 

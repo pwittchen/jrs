@@ -12,7 +12,9 @@ bun run preview    # build, then serve dist/ on http://localhost:4173
 `dist/` is self-contained, with relative links, so it can be served from any
 static host and from any path.
 
-It is published to GitHub Pages by `.github/workflows/website.yml`: on every
+It is published to [getjrs.dev](https://getjrs.dev), a static site on the
+mikr.us VPS, by `.github/workflows/website.yml`, which rsyncs `dist/` into the
+site's directory there: on every
 push to `master` that touches `website/` or `logo.png`, and after each release,
 when `rust.yml` calls it with the version commit so the header shows the new
 version. It can also be run by hand from the Actions tab.
