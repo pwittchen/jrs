@@ -943,6 +943,16 @@ cargo bench --bench resolution
 JRS_BENCH_LATENCY_MS=50 JRS_BENCH_RUNS=10 cargo bench --bench resolution
 ```
 
+The rebuild benchmark generates a project of a few hundred classes, then times
+a clean build, a no-op build and a rebuild after each of three one-file edits.
+It prints how much of each is `javac` and how many sources the build
+compiled (SPEC §7.2). It needs a JDK:
+
+```
+cargo bench --bench incremental
+JRS_BENCH_CLASSES=1000 JRS_BENCH_RUNS=7 cargo bench --bench incremental
+```
+
 To cut a release, tag the tip of `master` and push the tag:
 
 ```

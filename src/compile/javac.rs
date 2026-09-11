@@ -13,10 +13,11 @@ use crate::ui::{Stream, Ui};
 
 impl CompileUnit {
     /// The flags jrs generates for `javac`, in the order it sees them.
-    /// `after_foreign` puts the unit's own output directory at the head of the
-    /// classpath: the classes an earlier step wrote there are what the Java
-    /// sources compile against.
-    pub(super) fn javac_flags(&self, after_foreign: bool) -> Vec<String> {
+    /// `output_first` puts the unit's own output directory at the head of the
+    /// classpath: the classes an earlier step wrote there, or an earlier
+    /// build when only some sources are compiled, are what these sources
+    /// compile against.
+    pub(super) fn javac_flags(&self, output_first: bool) -> Vec<String> {
         let mut args = if let Some(target) = self.target {
             // `--release` already pins both, so an explicit target is only
             // meaningful as the older -source/-target pair.
@@ -36,7 +37,7 @@ impl CompileUnit {
             self.output_dir.display().to_string(),
         ]);
         let mut classpath = Vec::new();
-        if after_foreign {
+        if output_first {
             classpath.push(self.output_dir.clone());
         }
         classpath.extend(self.classpath.iter().cloned());
@@ -60,14 +61,14 @@ pub(super) fn run(
     toolchain: &Toolchain,
     unit: &CompileUnit,
     sources: &[PathBuf],
-    after_foreign: bool,
+    output_first: bool,
     what: &str,
     ui: &Ui,
 ) -> Result<()> {
     let argfile = unit.work_dir.join(format!("javac-{}.args", unit.label));
     std::fs::write(
         &argfile,
-        render_argfile(&unit.javac_flags(after_foreign), sources),
+        render_argfile(&unit.javac_flags(output_first), sources),
     )
     .path(&argfile)?;
 

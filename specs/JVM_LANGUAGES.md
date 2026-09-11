@@ -49,7 +49,7 @@ the three named languages, **on the JVM only**, and keeps the rest:
 | --- | --- |
 | Kotlin Multiplatform, Kotlin/JS, Kotlin/Native, Scala.js, Scala Native, Android | Not the JVM. Different toolchains, different outputs, often Gradle Module Metadata (ROADMAP §8). |
 | `kapt`, KSP, Compose, macro-paradise style setups | Annotation-processor or compiler-plugin *configuration*, already a non-goal. Java annotation processing in a mixed project keeps working (it is `javac`'s). |
-| Incremental compilation (Zinc, Kotlin IC) | SPEC §7.2 is all-or-nothing on purpose. |
+| Incremental compilation (Zinc, Kotlin IC) | A unit with another language is compiled whole (SPEC §7.2). Only a Java-only unit compiles file by file, since jrs can read its class files' API. |
 | Compiler daemons (Kotlin daemon, Bloop) | A long-lived process jrs would have to manage. See §14.1. |
 | sbt-style `%%` cross-version keys | New key syntax. See §14.3. |
 | Other JVM languages (Clojure, JRuby, Jython, …) | No demand has shown up, and each has its own model (Clojure AOT, a scripting runtime). The design in §6 leaves room for them without promising them. |
@@ -332,7 +332,8 @@ that share one output directory, one fingerprint and one staleness decision:
 
 - Step 2 is skipped when there are no `.java` files. Step 1 is skipped when
   there are no files in the language.
-- **Still all-or-nothing** (SPEC §7.2). Any change reruns every step into an
+- **Still all-or-nothing** (SPEC §7.2): file-by-file compilation is for
+  Java-only units. Any change reruns every step into an
   emptied output directory. The fingerprint concatenates every step's flags,
   every step's tool classpath (jar size and mtime, as today) and the full
   source list. `is_stale` does not change otherwise.

@@ -12,12 +12,6 @@ decision (see the last section) — it needs a spec change before it needs code.
 
 ## 1. Build and compilation
 
-- **Finer-grained incremental compilation.** Each unit's staleness check is
-  all-or-nothing by design (SPEC §7.2). Compile avoidance already spares the
-  tests a recompile when a main change leaves the classes' API alone. Doing
-  the same file by file inside a unit is worth revisiting only if large
-  projects show `javac` time dominating a no-dependency-change rebuild; the M5
-  benchmark harness is the place to measure it first.
 - **Compiler start-up.** kotlinc and scalac add a second or so of JVM start-up
   to a changed build ([JVM_LANGUAGES.md §14.1](specs/JVM_LANGUAGES.md#14-open-questions)).
   A compiler daemon would hide it, at the cost of jrs managing a long-lived

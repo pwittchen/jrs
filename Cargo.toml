@@ -28,3 +28,8 @@ libc = "0.2.189"
 [[bench]]
 name = "resolution"
 harness = false
+
+# SPEC §7.2: rebuild time after a one-file change, and how much of it is javac.
+[[bench]]
+name = "incremental"
+harness = false

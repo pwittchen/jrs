@@ -619,6 +619,7 @@ src/
 ├── compile/
 │   ├── mod.rs        # compile units and their steps, fingerprint, staleness, argfiles
 │   ├── javac.rs      # javac and javadoc invocation
+│   ├── incremental.rs # file-by-file compilation of a Java unit (§7.2)
 │   └── lang.rs       # Kotlin, Scala, Groovy: compilers, runtime libraries, flags (§7.7)
 ├── image.rs          # jdeps, jlink, jpackage (§9.4)
 ├── resolve/
@@ -715,15 +716,38 @@ own.
 
 - Glob `**/*.java` under the source root — and with another language on, every
   root for every language's extension (§7.7).
-- Compute a staleness check: recompile everything if any source is newer than
-  the newest `.class` in `target/classes/`, or if the classpath changed —
-  including a jar's size or modification time, which is how a snapshot rebuilt
-  under the same path is noticed.
-  (v1 is coarse-grained, all-or-nothing; per-file incremental compilation is
-  explicitly out of scope — `javac` needs the full source set for correctness
-  anyway when types are interdependent.)
-- A recompile empties `target/classes/` first, so a class whose source was
-  deleted or renamed cannot survive onto the classpath or into the jar.
+- Compute a staleness check: the unit is stale if a source changed, or if the
+  settings did — the flags, the source list, and the classpath, including a
+  jar's size or modification time, which is how a snapshot rebuilt under the
+  same path is noticed. A source has changed when its contents have: one
+  whose size or mtime moved is hashed and compared with the index below, so a
+  touched file is not a change. A unit without an index compares the newest
+  source with the newest `.class` in `target/classes/`.
+- A Java-only unit compiles **file by file** when it can. Every build records
+  in `target/.jrs/<unit>.index` which classes each source compiled to, tied
+  by their `SourceFile` attribute, with each class's API digest (as below),
+  its constants, and the unit's classes it refers to. With the settings
+  unchanged, the next build deletes the changed sources' classes and runs
+  `javac` over those sources alone, with `target/classes` first on `-cp`. If
+  the API of a class they compile to changed, a second run compiles every
+  source that refers to one of those classes, and every source that refers
+  to one of theirs, transitively, since a subclass passes an inherited change
+  on to its own users. A change that stays inside method bodies compiles one
+  source. The classes are the ones a whole build would write, byte for byte.
+- The whole unit is compiled instead, into an emptied `target/classes/`, when
+  file by file cannot be sure. That means changed settings or no index; a
+  source added or deleted, or a top-level class that appeared or went away,
+  since a simple name elsewhere may now mean a different class; a changed
+  compile-time constant, which `javac` inlines without a reference back; a
+  class not tied to exactly one source; annotation processors or `javac`
+  plugins (a `-processor*` or `-Xplugin` flag, or a processor registered on
+  the classpath or in `target/classes` without `-proc:none`); a
+  `module-info.java`; and any unit with Kotlin, Scala or Groovy. Emptying
+  the directory first means a class whose source was deleted or renamed
+  cannot survive onto the classpath or into the jar.
+- A failed `javac` run leaves the index saying that every source it was given
+  must be compiled again, and the next build deletes every class no
+  unchanged source owns before it compiles.
 - The test unit compiles against `target/classes`, and counts it by its API,
   not its bytes (compile avoidance): its fingerprint holds a digest of what
   `javac` can see of those classes from another unit. That is each class's
@@ -743,8 +767,8 @@ own.
   ```
 - Non-zero exit → surface `javac` stderr and exit `1`.
 - A unit with Kotlin, Scala or Groovy sources runs that language's compiler
-  first, into the same output directory and under the same fingerprint; the
-  unit is still all-or-nothing (§7.7).
+  first, into the same output directory and under the same fingerprint; such
+  a unit is all-or-nothing (§7.7).
 
 ### 7.3 Resource handling
 

@@ -56,7 +56,7 @@ fn compile_main(manifest: &Manifest, toolchain: &Toolchain, classpath: Vec<PathB
         main_api: None,
     };
     match compile::compile(toolchain, &unit, &silent_ui()).unwrap() {
-        compile::Outcome::Compiled { classes } => classes,
+        compile::Outcome::Compiled { classes, .. } => classes,
         compile::Outcome::UpToDate => panic!("a fresh output directory cannot be up to date"),
     }
 }
@@ -369,6 +369,188 @@ fn a_compilation_error_fails_the_build_and_leaves_no_fingerprint() {
         compile::is_stale(&unit).unwrap(),
         "a failed build must not be recorded as up to date"
     );
+}
+
+/// A Java unit over every source under `root/src`, into `root/<out>`.
+fn java_unit(toolchain: &Toolchain, root: &Path, out: &str) -> CompileUnit {
+    CompileUnit {
+        label: "main".into(),
+        sources: project::find_by_extension(&root.join("src"), "java").unwrap(),
+        output_dir: root.join(out).join("classes"),
+        classpath: Vec::new(),
+        release: toolchain.release(None).unwrap(),
+        target: None,
+        encoding: "UTF-8".into(),
+        extra_args: Vec::new(),
+        work_dir: root.join(out).join(".jrs"),
+        foreign: None,
+        main_api: None,
+    }
+}
+
+/// Build `root` again and say how many sources that compiled.
+fn rebuild(toolchain: &Toolchain, root: &Path) -> Result<usize, jrs::JrsError> {
+    match compile::compile(
+        toolchain,
+        &java_unit(toolchain, root, "target"),
+        &silent_ui(),
+    )? {
+        compile::Outcome::Compiled { sources, .. } => Ok(sources),
+        compile::Outcome::UpToDate => Ok(0),
+    }
+}
+
+/// Every file under `dir`, with its bytes.
+fn tree_of(dir: &Path) -> Vec<(PathBuf, Vec<u8>)> {
+    project::find_all(dir)
+        .unwrap()
+        .into_iter()
+        .map(|p| {
+            (
+                p.strip_prefix(dir).unwrap().to_path_buf(),
+                std::fs::read(&p).unwrap(),
+            )
+        })
+        .collect()
+}
+
+/// The classes compiled file by file are the classes a whole build makes.
+fn assert_matches_a_whole_build(toolchain: &Toolchain, root: &Path) {
+    let whole = java_unit(toolchain, root, "whole");
+    let _ = std::fs::remove_dir_all(root.join("whole"));
+    compile::compile(toolchain, &whole, &silent_ui()).unwrap();
+    assert_eq!(
+        tree_of(&root.join("target/classes")),
+        tree_of(&whole.output_dir),
+        "an incremental build differs from a whole one"
+    );
+}
+
+const SHAPE: &str = "package geo;\n\npublic abstract class Shape {\n    \
+    public abstract double area();\n\n    public String describe() {\n        \
+    return \"area \" + area();\n    }\n}\n";
+const SQUARE: &str = "package geo;\n\npublic final class Square extends Shape {\n    \
+    private final double side;\n\n    public Square(double side) {\n        \
+    this.side = side;\n    }\n\n    public double area() {\n        \
+    return side * side;\n    }\n\n    public static final class Builder {\n        \
+    public Square build() {\n            return new Square(1);\n        }\n    }\n}\n";
+/// Calls `describe`, which `Square` inherits: its class file names `Square`
+/// and never `Shape`.
+const REPORT: &str = "package app;\n\nimport geo.Square;\n\npublic final class Report {\n    \
+    public static String of(Square s) {\n        return s.describe();\n    }\n}\n";
+const LIMITS: &str = "package geo;\n\npublic final class Limits {\n    \
+    public static final int MAX = 10;\n}\n";
+/// Reads `Limits.MAX`, which `javac` copies in: no reference to `Limits`.
+const CLAMP: &str = "package app;\n\nfinal class Clamp {\n    \
+    static int clamp(int x) {\n        return Math.min(x, geo.Limits.MAX);\n    }\n}\n";
+const ALONE: &str = "package app;\n\nfinal class Alone {\n    int one() {\n        \
+    return 1;\n    }\n}\n";
+
+fn geometry(scratch: &Scratch) -> PathBuf {
+    for (path, text) in [
+        ("geo/src/geo/Shape.java", SHAPE),
+        ("geo/src/geo/Square.java", SQUARE),
+        ("geo/src/geo/Limits.java", LIMITS),
+        ("geo/src/app/Report.java", REPORT),
+        ("geo/src/app/Clamp.java", CLAMP),
+        ("geo/src/app/Alone.java", ALONE),
+    ] {
+        scratch.write(path, text);
+    }
+    scratch.join("geo")
+}
+
+#[test]
+fn a_changed_body_compiles_only_its_own_source() {
+    let toolchain = require_jdk!();
+    let scratch = Scratch::new("build-file-by-file");
+    let root = geometry(&scratch);
+    let square = root.join("src/geo/Square.java");
+    assert_eq!(rebuild(&toolchain, &root).unwrap(), 6);
+
+    std::fs::write(&square, SQUARE.replace("side * side", "Math.pow(side, 2)")).unwrap();
+    assert_eq!(rebuild(&toolchain, &root).unwrap(), 1, "only Square");
+    assert_matches_a_whole_build(&toolchain, &root);
+
+    // Touched, same contents: nothing to compile, and not even stale.
+    let text = std::fs::read(&square).unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    std::fs::write(&square, text).unwrap();
+    assert!(!compile::is_stale(&java_unit(&toolchain, &root, "target")).unwrap());
+
+    // A nested class taken away is an API change: its class goes, and
+    // Report, which names Square, compiles again. Clamp and Alone do not.
+    let builder = root.join("target/classes/geo/Square$Builder.class");
+    assert!(builder.is_file());
+    let without = SQUARE.replace(
+        "    public static final class Builder {\n        public Square build() {\n            \
+         return new Square(1);\n        }\n    }\n",
+        "",
+    );
+    assert_ne!(without, SQUARE);
+    std::fs::write(&square, without).unwrap();
+    assert_eq!(rebuild(&toolchain, &root).unwrap(), 2, "Square and Report");
+    assert!(!builder.exists(), "the removed class was left behind");
+    assert_matches_a_whole_build(&toolchain, &root);
+}
+
+#[test]
+fn an_api_change_reaches_callers_through_a_subclass() {
+    let toolchain = require_jdk!();
+    let scratch = Scratch::new("build-inherited-api");
+    let root = geometry(&scratch);
+    let shape = root.join("src/geo/Shape.java");
+    rebuild(&toolchain, &root).unwrap();
+
+    // Report calls describe() on a Square. Square's own API is unchanged,
+    // but what it inherits is not, so Report has to be compiled — and fail.
+    let without = SHAPE.replace(
+        "\n    public String describe() {\n        return \"area \" + area();\n    }\n",
+        "",
+    );
+    assert_ne!(without, SHAPE);
+    std::fs::write(&shape, without).unwrap();
+    let error = rebuild(&toolchain, &root).unwrap_err();
+    assert_eq!(error.exit_code(), 1, "{error}");
+    assert!(compile::is_stale(&java_unit(&toolchain, &root, "target")).unwrap());
+
+    // Put back, the next build compiles everything the failed one had
+    // started on, and ends where a whole build would.
+    std::fs::write(&shape, SHAPE).unwrap();
+    assert_eq!(
+        rebuild(&toolchain, &root).unwrap(),
+        3,
+        "Shape, Square, Report"
+    );
+    assert_matches_a_whole_build(&toolchain, &root);
+    assert_eq!(rebuild(&toolchain, &root).unwrap(), 0);
+}
+
+#[test]
+fn a_changed_constant_or_a_new_source_compiles_the_whole_unit() {
+    let toolchain = require_jdk!();
+    let scratch = Scratch::new("build-whole-unit");
+    let root = geometry(&scratch);
+    rebuild(&toolchain, &root).unwrap();
+
+    std::fs::write(
+        root.join("src/geo/Limits.java"),
+        LIMITS.replace("MAX = 10", "MAX = 100"),
+    )
+    .unwrap();
+    assert_eq!(
+        rebuild(&toolchain, &root).unwrap(),
+        6,
+        "Clamp holds the old constant and does not name Limits"
+    );
+    assert_matches_a_whole_build(&toolchain, &root);
+
+    scratch.write(
+        "geo/src/app/Extra.java",
+        "package app;\n\nfinal class Extra {}\n",
+    );
+    assert_eq!(rebuild(&toolchain, &root).unwrap(), 7);
+    assert_matches_a_whole_build(&toolchain, &root);
 }
 
 #[test]

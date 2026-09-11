@@ -83,7 +83,8 @@ src/
 ├── toolchain.rs       finding the JDK; running subprocesses (captured/inherited)
 ├── compile/
 │   ├── mod.rs         CompileUnit: steps, fingerprint, staleness, argfiles
-│   ├── abi.rs         the main classes' API digest: compile avoidance for tests
+│   ├── abi.rs         class-file API digests: compile avoidance, per-class reads
+│   ├── incremental.rs file-by-file compilation of a Java unit: <unit>.index
 │   ├── javac.rs       javac and javadoc
 │   ├── doc.rs         Scaladoc and Groovydoc
 │   └── lang.rs        enum Language: Kotlin/Scala/Groovy as plain data
@@ -418,10 +419,12 @@ can be inspected with `ls`.
 
 ## 7. Compile units
 
-A compile unit (`compile/mod.rs`) is the main sources or the test sources. It
-is **all-or-nothing**: its steps share one output directory, one fingerprint and
-one staleness decision, and a stale unit is compiled from an emptied output
-directory so a deleted source cannot leave its class behind.
+A compile unit (`compile/mod.rs`) is the main sources or the test sources. Its
+steps share one output directory, one fingerprint and one staleness decision.
+A stale unit with another language is compiled whole, from an emptied output
+directory, so a deleted source cannot leave its class behind. A Java-only
+unit compiles file by file when its index allows it (below), and whole
+otherwise.
 
 ```
  CompileUnit { sources, output_dir, classpath, release, javac flags,
@@ -430,7 +433,10 @@ directory so a deleted source cannot leave its class behind.
       ▼
  is_stale?  ── fingerprint differs (flags, every jar's size+mtime, source list;
       │        for the tests, the main classes' API digest)
-      │        or newest source is newer than newest class
+      │        or a source's contents differ from <unit>.index
+      │        (no index: newest source is newer than newest class)
+      │
+      ├── Java only, same settings, <unit>.index  ──►  file by file (below)
       │
       ├── Java only
       │     javac @target/.jrs/javac-main.args
@@ -448,7 +454,44 @@ directory so a deleted source cannot leave its class behind.
       │
       ▼
  success ─► write target/.jrs/main.fingerprint      failure ─► delete it
+             and main.index (Java only)                  and main.index
 ```
+
+`compile/incremental.rs` keeps `target/.jrs/<unit>.index`, written after every
+successful Java-only build. It records each source's size, mtime and hash, the
+classes it compiled to (tied to it by their `SourceFile` attribute), each
+class's API and constants digests (`abi::class_info`), and the unit's classes
+it refers to. With unchanged settings the next build works from it:
+
+```
+ changed sources (by hash)   none ─► refresh the mtimes, done
+      │ a source added or deleted ─► whole unit
+      ▼
+ delete every class no unchanged source owns
+ javac @javac-main.args  changed sources, target/classes first on -cp
+      │
+      ▼
+ compare with the index   a top-level class came or went,
+      │                   a constant changed, a class with   ─► whole unit
+      │                   no single source
+      │ API unchanged ─► write index, done
+      ▼
+ every source that refers to a changed class, transitively
+ (a subclass passes inherited changes on), less those compiled
+      │
+ delete their classes; javac over them; write index, done
+
+ javac fails ─► index marks every source it was given as changed; no fingerprint
+```
+
+It is only tried when nothing else can write into the unit. An annotation
+processor or `javac` plugin, a `module-info.java`, or a Kotlin, Scala or
+Groovy step keeps the unit whole, and so does a processor registered on the
+classpath or in the output directory, which is on the classpath during a
+partial run. A compile-time constant is the one API change that leaves no
+reference behind, since `javac` inlines it, so it compiles the unit whole.
+`tests/build.rs` checks that the classes built file by file equal a whole
+build's, byte for byte.
 
 What jrs knows about each language — file extension, source roots, compiler
 coordinate and main class, implied runtime library, generated flags — is plain
@@ -754,6 +797,7 @@ poisoning, which is documented under each function's `# Panics`.
      └── .jrs/                    jrs's own scratch space
          ├── javac-main.args  javac-test.args  kotlinc-main.args  …
          ├── main.fingerprint  test.fingerprint
+         ├── main.index  test.index  per source: classes, API digests, references
          ├── resources-main.list  resources-test.list  resources-*-generated-*.list
          ├── tasks/                 <task>.fingerprint  <task>.cp.args
          ├── javadoc.args  scaladoc.args  groovydoc.args
@@ -807,6 +851,9 @@ can never lose user data, and task-generated sources must live under
 
  cargo bench --bench resolution
  └── benches/resolution.rs SPEC §12 M5: network vs jrs vs renderer cost
+
+ cargo bench --bench incremental
+ └── benches/incremental.rs SPEC §7.2: rebuilds after one edit, javac's share
 ```
 
 ## 15. Invariants

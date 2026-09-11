@@ -6,8 +6,10 @@
 //! length limit that a few dozen dependencies will otherwise hit (SPEC §6.2).
 //! Every compiler's output is passed through verbatim — their diagnostics are
 //! already good, and jrs reformatting them would only make them worse. And a
-//! unit is all-or-nothing whatever it holds (SPEC §7.2): its steps share one
-//! output directory, one fingerprint and one staleness decision.
+//! unit's steps share one output directory, one fingerprint and one
+//! staleness decision (SPEC §7.2). A Java-only unit may then compile only
+//! the sources a change reaches (`incremental.rs`); any other unit is
+//! compiled whole.
 //!
 //! Kotlin, Scala and Groovy compilers are Java programs, run on the project's
 //! JDK as `java @argfile`. The one argfile holds the compiler's classpath, its
@@ -18,6 +20,7 @@
 
 pub mod abi;
 pub mod doc;
+mod incremental;
 pub mod javac;
 pub mod lang;
 
@@ -90,6 +93,8 @@ pub enum Outcome {
     UpToDate,
     Compiled {
         classes: usize,
+        /// The sources compiled: all of them, or those a change reached.
+        sources: usize,
     },
 }
 
@@ -119,8 +124,19 @@ impl CompileUnit {
     }
 
     /// Everything that, if changed, means the previous output cannot be reused:
-    /// every step's flags, every jar either compiler reads, the main classes'
-    /// API for the tests, and the sources.
+    /// the [`settings`](Self::settings), and the sources.
+    fn fingerprint(&self) -> String {
+        let mut s = self.settings();
+        for source in &self.sources {
+            s.push_str(&source.display().to_string());
+            s.push('\n');
+        }
+        s
+    }
+
+    /// What every source is compiled under: every step's flags, every jar
+    /// either compiler reads, and the main classes' API for the tests. A
+    /// change here compiles the whole unit.
     ///
     /// A jar's path names its version, so a new version is already a new
     /// classpath. A snapshot is the exception — a new build lands at the same
@@ -128,7 +144,7 @@ impl CompileUnit {
     /// too. Both come from one `stat`, which costs nothing next to a compiler.
     /// A class directory on the classpath is not a jar: the tests see
     /// `target/classes` through `main_api` instead.
-    fn fingerprint(&self) -> String {
+    fn settings(&self) -> String {
         let mut s = String::new();
         s.push_str(&self.javac_flags(false).join("\u{1}"));
         s.push('\n');
@@ -164,19 +180,14 @@ impl CompileUnit {
         if let Some(api) = &self.main_api {
             let _ = writeln!(s, "main-api {api}");
         }
-        for source in &self.sources {
-            s.push_str(&source.display().to_string());
-            s.push('\n');
-        }
         s
     }
 }
 
-/// Whether the unit has to be compiled again.
-///
-/// v1 is deliberately coarse: all-or-nothing, because `javac` needs the full
-/// source set anyway when types are interdependent (SPEC §7.2) — and so does
-/// every other compiler.
+/// Whether the unit has to be compiled again: its fingerprint changed, or a
+/// source did. A unit with an index knows each source's contents, so a
+/// source touched but not changed is not a change; one without compares the
+/// newest source with the newest class.
 ///
 /// # Errors
 ///
@@ -196,6 +207,9 @@ pub fn is_stale(unit: &CompileUnit) -> Result<bool> {
     let Some(newest_class) = project::newest_mtime_under(&unit.output_dir) else {
         return Ok(true);
     };
+    if let Some(index) = incremental::Index::load(unit) {
+        return Ok(!index.holds(&unit.sources));
+    }
     let Some(newest_source) = project::newest_mtime(&unit.sources) else {
         return Ok(true);
     };
@@ -204,7 +218,10 @@ pub fn is_stale(unit: &CompileUnit) -> Result<bool> {
 
 /// Compile, unless nothing changed.
 ///
-/// The steps run in order into one emptied output directory: the unit's
+/// A Java-only unit compiled before under the same settings compiles the
+/// changed sources and what depends on them, into the output directory as
+/// it is (`incremental.rs`). Otherwise, the steps run in order into one
+/// emptied output directory: the unit's
 /// other compiler over its sources and the Java ones (which Kotlin and Scala
 /// only read, for their symbols), then `javac` over the Java sources with
 /// those classes on its classpath. Groovy compiles both itself, running the
@@ -239,28 +256,42 @@ pub fn compile_timed(
     if !is_stale(unit)? {
         return Ok(Outcome::UpToDate);
     }
+    std::fs::create_dir_all(&unit.work_dir).path(&unit.work_dir)?;
 
-    // Compilation is all-or-nothing, so the output starts empty: a class whose
-    // source was deleted or renamed must not survive onto the classpath and
-    // into the jar. Resources are copied in again afterwards.
+    let tracker = incremental::Tracker::new(unit)?;
+    if let Some(tracker) = &tracker
+        && let Some(sources) = tracker.recompile(toolchain, unit, ui, steps)?
+    {
+        return finish(unit, sources);
+    }
+
+    // The whole unit compiles into an empty directory: a class whose source
+    // was deleted or renamed must not survive onto the classpath and into
+    // the jar. Resources are copied in again afterwards.
     if unit.output_dir.exists() {
         std::fs::remove_dir_all(&unit.output_dir).path(&unit.output_dir)?;
     }
     std::fs::create_dir_all(&unit.output_dir).path(&unit.output_dir)?;
-    std::fs::create_dir_all(&unit.work_dir).path(&unit.work_dir)?;
 
     let result = run_steps(toolchain, unit, ui, steps);
     if result.is_err() {
         // A failed build must never be recorded as up to date.
         let _ = std::fs::remove_file(unit.fingerprint_path());
+        incremental::forget(unit);
     }
     result?;
+    if let Some(tracker) = &tracker {
+        tracker.record_all(unit)?;
+    }
+    finish(unit, unit.sources.len())
+}
 
+/// Record a compiled unit as up to date.
+fn finish(unit: &CompileUnit, sources: usize) -> Result<Outcome> {
     let fingerprint = unit.fingerprint_path();
     std::fs::write(&fingerprint, unit.fingerprint()).path(&fingerprint)?;
-
     let classes = project::find_by_extension(&unit.output_dir, "class")?.len();
-    Ok(Outcome::Compiled { classes })
+    Ok(Outcome::Compiled { classes, sources })
 }
 
 fn run_steps(

@@ -49,6 +49,7 @@ cargo test --test output the_ascii_fallback         # one integration test
 cargo test resolve::                                # unit tests in one module
 cargo test --features network-tests --test network  # the Maven Central tests
 cargo bench --bench resolution                      # SPEC §12 M5: network vs jrs vs renderer
+cargo bench --bench incremental                     # SPEC §7.2: rebuild time after one edit, javac's share
 ```
 
 Driving jrs against a Java project:
@@ -148,6 +149,11 @@ regression, not a style nit.
   bytes, and so does every class once the main classes carry an annotation
   processor or a Groovy AST transformation. When in doubt, a class counts by its
   bytes: a spurious recompile costs seconds, a stale test class costs a wrong result.
+  The same rule governs file-by-file compilation inside a Java-only unit
+  (`compile/incremental.rs`, `target/.jrs/<unit>.index`): a body change compiles
+  its own source, an API change also compiles everything that transitively
+  refers to it, and anything the index cannot account for — a new or deleted
+  source, a changed constant, a processor, another language — compiles the unit whole.
 - **Nearest-wins mediation, breadth-first by level** (`resolve/mod.rs`), ties broken on
   manifest declaration order — which is why `manifest.rs` parses a `toml::Table` by
   hand instead of using a `serde` derive (order preservation, per-key diagnostics,

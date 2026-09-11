@@ -24,7 +24,14 @@
 //! Groovy AST transformation, which run while the tests compile — every class
 //! counts by its bytes. Being conservative costs a recompile; being wrong
 //! costs a test run against stale classes.
+//!
+//! [`class_info`] gives the same reading one class at a time, for
+//! recompiling a unit file by file (`incremental.rs`): the class's API
+//! digest, its constants alone, the source it came from and the classes it
+//! refers to.
 
+use std::cell::Cell;
+use std::collections::BTreeSet;
 use std::path::Path;
 
 use crate::error::{IoResultExt, Result};
@@ -117,10 +124,102 @@ enum Api {
 
 fn api(bytes: &[u8]) -> Api {
     match parse(bytes) {
-        Some((Verdict::Fine, rendered)) => Api::Visible(rendered),
-        Some((Verdict::Hidden, _)) => Api::Hidden,
-        Some((Verdict::CompilerCode, _)) => Api::CompilerCode,
-        Some((Verdict::Opaque, _)) | None => Api::Opaque,
+        Some(Parsed {
+            verdict: Verdict::Fine,
+            rendered,
+            ..
+        }) => Api::Visible(rendered),
+        Some(Parsed {
+            verdict: Verdict::Hidden,
+            ..
+        }) => Api::Hidden,
+        Some(Parsed {
+            verdict: Verdict::CompilerCode,
+            ..
+        }) => Api::CompilerCode,
+        Some(_) | None => Api::Opaque,
+    }
+}
+
+/// How another source can see a class.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Kind {
+    /// A top-level class, or one jrs cannot read well enough to say.
+    TopLevel,
+    /// A member class another source can name.
+    Nested,
+    /// Nothing another source can name: a local, anonymous, private nested
+    /// or synthetic class.
+    Hidden,
+}
+
+/// One class file, as the incremental compiler needs it.
+#[derive(Debug)]
+pub(super) struct ClassInfo {
+    /// `com/example/Main$Inner`.
+    pub name: String,
+    /// The `SourceFile` attribute: `Main.java`.
+    pub source_file: Option<String>,
+    pub kind: Kind,
+    /// A digest of what [`api_digest`] keeps of the class; of its bytes when
+    /// that is not enough; `-` for a hidden class.
+    pub api: String,
+    /// A digest of its visible compile-time constants alone, which `javac`
+    /// copies into every class that reads them; `-` when it has none.
+    pub constants: String,
+    /// Every class name its constant pool mentions, the class's own too.
+    pub refs: BTreeSet<String>,
+}
+
+/// Read one class file. `None` if it cannot be parsed.
+pub(super) fn class_info(bytes: &[u8]) -> Option<ClassInfo> {
+    let parsed = parse(bytes)?;
+    let kind = match parsed.verdict {
+        Verdict::Hidden => Kind::Hidden,
+        Verdict::Fine if parsed.nested => Kind::Nested,
+        _ => Kind::TopLevel,
+    };
+    let api = match parsed.verdict {
+        Verdict::Fine => sha256_hex(&parsed.rendered),
+        Verdict::Hidden => "-".to_string(),
+        Verdict::Opaque | Verdict::CompilerCode => sha256_hex(bytes),
+    };
+    let constants = if kind == Kind::Hidden || parsed.constants.is_empty() {
+        "-".to_string()
+    } else {
+        sha256_hex(&parsed.constants)
+    };
+    Some(ClassInfo {
+        name: String::from_utf8_lossy(parsed.name).into_owned(),
+        source_file: parsed
+            .source_file
+            .map(|s| String::from_utf8_lossy(s).into_owned()),
+        kind,
+        api,
+        constants,
+        refs: parsed.refs,
+    })
+}
+
+/// A class name in each `L<name>;` or `L<name><` of a descriptor or
+/// signature. A stray `L` in other text yields a name that matches no class,
+/// which costs nothing; a candidate with a character no class name has is
+/// passed over one byte at a time, so it cannot hide a real one.
+fn descriptor_names(bytes: &[u8], out: &mut BTreeSet<String>) {
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] != b'L' {
+            i += 1;
+            continue;
+        }
+        let rest = &bytes[i + 1..];
+        match rest.iter().position(|&b| b == b';' || b == b'<') {
+            Some(end) if end > 0 && !rest[..end].iter().any(|b| b":()[].>; ".contains(b)) => {
+                out.insert(String::from_utf8_lossy(&rest[..end]).into_owned());
+                i += end + 2;
+            }
+            _ => i += 1,
+        }
     }
 }
 
@@ -239,7 +338,21 @@ fn constant_pool<'a>(r: &mut Reader<'a>) -> Option<Vec<Const<'a>>> {
     Some(pool)
 }
 
-fn parse(bytes: &[u8]) -> Option<(Verdict, Vec<u8>)> {
+/// What one class file holds, read once for both [`api_digest`] and
+/// [`class_info`].
+struct Parsed<'a> {
+    verdict: Verdict,
+    rendered: Vec<u8>,
+    /// The visible fields with a `ConstantValue`, rendered as in `rendered`.
+    constants: Vec<u8>,
+    name: &'a [u8],
+    source_file: Option<&'a [u8]>,
+    /// Whether the class has an `InnerClasses` entry of its own.
+    nested: bool,
+    refs: BTreeSet<String>,
+}
+
+fn parse(bytes: &[u8]) -> Option<Parsed<'_>> {
     let mut r = Reader::new(bytes);
     if r.u4()? != 0xCAFE_BABE {
         return None;
@@ -250,20 +363,33 @@ fn parse(bytes: &[u8]) -> Option<(Verdict, Vec<u8>)> {
     let access = r.u2()?;
     let this = r.u2()?;
     let superclass = r.u2()?;
+    let class = Class {
+        pool,
+        this,
+        source_file: Cell::new(None),
+        nested: Cell::new(false),
+        constant: Cell::new(false),
+    };
+    let name = class.class_name(this)?;
     if access & ACC_MODULE != 0 {
-        return Some((Verdict::Opaque, Vec::new()));
+        return Some(Parsed {
+            verdict: Verdict::Opaque,
+            rendered: Vec::new(),
+            constants: Vec::new(),
+            name,
+            source_file: None,
+            nested: false,
+            refs: BTreeSet::new(),
+        });
     }
-    if access & ACC_SYNTHETIC != 0 {
-        return Some((Verdict::Hidden, Vec::new()));
-    }
-    let class = Class { pool, this };
 
     let mut out = Vec::new();
+    let mut constants = Vec::new();
     let mut verdict = Verdict::Fine;
     put(&mut out, b"class");
     num(&mut out, major);
     num(&mut out, access);
-    put(&mut out, class.class_name(this)?);
+    put(&mut out, name);
     put(
         &mut out,
         if superclass == 0 {
@@ -281,6 +407,7 @@ fn parse(bytes: &[u8]) -> Option<(Verdict, Vec<u8>)> {
     for kind in [&b"field"[..], &b"method"[..]] {
         let count = r.u2()?;
         let mut members = Vec::new();
+        let mut constant_members = Vec::new();
         for _ in 0..count {
             let flags = r.u2()?;
             let name = class.utf8(r.u2()?)?;
@@ -293,9 +420,13 @@ fn parse(bytes: &[u8]) -> Option<(Verdict, Vec<u8>)> {
             // A private member's attributes are read past, and cannot make
             // the class opaque: nothing outside it sees them.
             let mut own = Verdict::Fine;
+            class.constant.set(false);
             class.attributes(&mut r, &mut member, &mut own)?;
             if flags & (ACC_PRIVATE | ACC_SYNTHETIC) == 0 {
                 raise(&mut verdict, own);
+                if class.constant.get() {
+                    constant_members.push(member.clone());
+                }
                 members.push(member);
             }
         }
@@ -305,20 +436,62 @@ fn parse(bytes: &[u8]) -> Option<(Verdict, Vec<u8>)> {
         for member in members {
             out.extend(member);
         }
+        constant_members.sort();
+        for member in constant_members {
+            constants.extend(member);
+        }
     }
     class.attributes(&mut r, &mut out, &mut verdict)?;
     if !r.done() {
         return None;
     }
-    Some((verdict, out))
+    if access & ACC_SYNTHETIC != 0 {
+        verdict = Verdict::Hidden;
+    }
+    let refs = class.refs();
+    Some(Parsed {
+        verdict,
+        rendered: out,
+        constants,
+        name,
+        source_file: class.source_file.get().and_then(|i| class.utf8(i)),
+        nested: class.nested.get(),
+        refs,
+    })
 }
 
 struct Class<'a> {
     pool: Vec<Const<'a>>,
     this: u16,
+    /// Found on the way through the attributes.
+    source_file: Cell<Option<u16>>,
+    nested: Cell<bool>,
+    /// Whether the member being read has a `ConstantValue`.
+    constant: Cell<bool>,
 }
 
 impl<'a> Class<'a> {
+    /// Every class the pool names: its `Class` entries, and the classes in
+    /// every descriptor and signature, which name types the class uses
+    /// without a `Class` entry for them.
+    fn refs(&self) -> BTreeSet<String> {
+        let mut out = BTreeSet::new();
+        for entry in &self.pool {
+            match *entry {
+                Const::Class(name) => match self.utf8(name) {
+                    Some(array) if array.starts_with(b"[") => descriptor_names(array, &mut out),
+                    Some(name) => {
+                        out.insert(String::from_utf8_lossy(name).into_owned());
+                    }
+                    None => {}
+                },
+                Const::Utf8(bytes) => descriptor_names(bytes, &mut out),
+                _ => {}
+            }
+        }
+        out
+    }
+
     fn utf8(&self, index: u16) -> Option<&'a [u8]> {
         match self.pool.get(usize::from(index))? {
             Const::Utf8(bytes) => Some(bytes),
@@ -374,8 +547,11 @@ impl<'a> Class<'a> {
             match name {
                 // Bodies, debugging information, and what only the JVM
                 // reads: none of it is seen by a compiler reading the class.
+                b"SourceFile" => {
+                    self.source_file.set(Some(b.u2()?));
+                    continue;
+                }
                 b"Code"
-                | b"SourceFile"
                 | b"SourceDebugExtension"
                 | b"NestHost"
                 | b"NestMembers"
@@ -392,6 +568,7 @@ impl<'a> Class<'a> {
                     put(out, self.utf8(b.u2()?)?);
                 }
                 b"ConstantValue" => {
+                    self.constant.set(true);
                     put(out, b"ConstantValue");
                     self.constant(b.u2()?, out)?;
                 }
@@ -497,8 +674,11 @@ impl<'a> Class<'a> {
             let simple_name = b.u2()?;
             let flags = b.u2()?;
             let own = self.class_name(inner)? == this;
-            if own && (outer == 0 || flags & ACC_PRIVATE != 0) {
-                raise(verdict, Verdict::Hidden);
+            if own {
+                self.nested.set(true);
+                if outer == 0 || flags & ACC_PRIVATE != 0 {
+                    raise(verdict, Verdict::Hidden);
+                }
             }
             let member = outer != 0
                 && self.class_name(outer)? == this
@@ -953,6 +1133,45 @@ mod tests {
         let before = tree.digest();
         tree.write("com/example/Main.tasty", b"two");
         assert_ne!(tree.digest(), before);
+    }
+
+    #[test]
+    fn descriptors_and_signatures_name_their_classes() {
+        let names = |text: &str| {
+            let mut out = BTreeSet::new();
+            descriptor_names(text.as_bytes(), &mut out);
+            out.into_iter().collect::<Vec<_>>()
+        };
+        assert_eq!(names("(ILp/A;[Lp/B;)Lp/C;"), ["p/A", "p/B", "p/C"]);
+        assert_eq!(
+            names("Ljava/util/Map<Lp/K;Lp/V;>;"),
+            ["java/util/Map", "p/K", "p/V"]
+        );
+        // A type parameter whose name holds an `L` cannot hide its bound.
+        assert!(names("<ELEM:Lp/Base;>Ljava/lang/Object;").contains(&"p/Base".to_string()));
+        assert!(names("hello").is_empty());
+    }
+
+    #[test]
+    fn class_info_names_the_source_and_the_constants() {
+        let info = class_info(&calc(&[1], 10, &[], 0)).unwrap();
+        assert_eq!(info.name, "com/example/Calc");
+        assert_eq!(info.kind, Kind::TopLevel);
+        assert_ne!(info.constants, "-");
+        assert!(info.refs.contains("java/lang/Object"));
+        let body = class_info(&calc(&[2, 3], 10, &[], 2)).unwrap();
+        assert_eq!(
+            (body.api, body.constants),
+            (info.api, info.constants.clone())
+        );
+        assert_ne!(
+            class_info(&calc(&[1], 11, &[], 0)).unwrap().constants,
+            info.constants
+        );
+        assert_eq!(
+            class_info(&anonymous("com/example/Calc$1")).unwrap().kind,
+            Kind::Hidden
+        );
     }
 
     #[test]

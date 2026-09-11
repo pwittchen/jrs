@@ -722,6 +722,19 @@ impl<'a> Session<'a> {
     }
 
     /// A compile unit's steps, as `compile main: kotlinc` rows.
+    /// Under `-v`, how many sources a unit compiled that only compiled some.
+    fn report_recompiled(&self, unit: &CompileUnit, outcome: &compile::Outcome) {
+        if let compile::Outcome::Compiled { sources, .. } = *outcome
+            && sources < unit.sources.len()
+        {
+            self.ui.verbose(format!(
+                "{} unit: compiled {sources} of {} source files, the rest are unchanged",
+                unit.label,
+                unit.sources.len()
+            ));
+        }
+    }
+
     fn record_steps(&self, unit: &str, steps: &[(&str, Duration)]) {
         for (compiler, took) in steps {
             self.timings
@@ -1372,7 +1385,7 @@ impl<'a> Session<'a> {
             let result = compile::compile_timed(&toolchain, &unit, self.ui, &mut steps);
             scope.finish();
             self.record_steps("test", &steps);
-            result?;
+            self.report_recompiled(&unit, &result?);
         } else {
             self.timings.since("compile test (fresh)", checking);
         }
@@ -2435,7 +2448,9 @@ impl<'a> Session<'a> {
             let result = compile::compile_timed(&toolchain, &unit, self.ui, &mut steps);
             scope.finish();
             self.record_steps("main", &steps);
-            result?
+            let outcome = result?;
+            self.report_recompiled(&unit, &outcome);
+            outcome
         } else {
             self.ui.phase(
                 "Fresh",
@@ -2464,7 +2479,7 @@ impl<'a> Session<'a> {
         self.hook(Hook::PostCompile)?;
 
         let classes = match outcome {
-            compile::Outcome::Compiled { classes } => classes,
+            compile::Outcome::Compiled { classes, .. } => classes,
             compile::Outcome::UpToDate => {
                 project::find_by_extension(&project.classes_dir(), "class")?.len()
             }
