@@ -57,6 +57,43 @@ fn the_maven_extras_fixture_translates_exactly() {
     assert!(review.contains("annotation processors"), "{review}");
 }
 
+/// `proguard-maven-plugin` → `[obfuscate]`: its `<proguardVersion>` pins
+/// ProGuard, its `<options>` pass through, and nothing is left unmigrated.
+#[test]
+fn the_maven_proguard_fixture_translates_exactly() {
+    let (migration, dir) = migrate_fixture("maven-proguard");
+    assert_eq!(migration.source, Source::Maven);
+    assert_eq!(migration.manifest.render(None), expected(&dir));
+    assert!(
+        migration.report.not_migrated.is_empty(),
+        "{:?}",
+        migration.report.not_migrated
+    );
+    assert!(
+        migration
+            .report
+            .migrated
+            .iter()
+            .any(|m| m == "obfuscate.version = 7.6.1"),
+        "{:?}",
+        migration.report.migrated
+    );
+}
+
+/// The Guardsquare Gradle plugin: its version pins ProGuard, and the
+/// `proguard { }` task's rules are flagged for review since jrs cannot read them.
+#[test]
+fn the_gradle_proguard_fixture_translates_exactly() {
+    let (migration, dir) = migrate_fixture("gradle-proguard");
+    assert_eq!(migration.source, Source::Gradle);
+    assert_eq!(migration.manifest.render(None), expected(&dir));
+    let review = migration.report.needs_review.join("\n");
+    assert!(
+        review.contains("com.guardsquare.proguard") && review.contains("proguard { }"),
+        "{review}"
+    );
+}
+
 /// start.spring.io's Gradle builds, in both DSLs, taken unchanged: the Boot
 /// plugins become Boot's BOM in [managed], the starters stay versionless, and
 /// the @SpringBootApplication class is the main class.

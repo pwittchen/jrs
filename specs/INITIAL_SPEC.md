@@ -219,6 +219,7 @@ post-package = ["checksum"]
 | `package.add-modules` | no | `[]` | Modules a runtime image needs beyond what `jdeps` finds (§9.4). |
 | `package.manifest.*` | no | `{}` | Extra `MANIFEST.MF` main attributes, written after jrs's own in declaration order (§9.1). Values may use `{project.name}` and `{project.version}`; `Main-Class`, `Class-Path`, `Created-By`, `Manifest-Version` and `Name` are jrs's and refused. |
 | `package.native-image-args` | no | `[]` | Passed through verbatim to `native-image` by `--native-image` (§9.7). |
+| `obfuscate.*` | no | — | The table turns obfuscation on (§9.8): `version` (required, exact — the ProGuard release), `keep` (class names whose names must survive), `proguard-args` (passed to ProGuard verbatim). Opt-in; `jrs package --obfuscate` runs it. |
 | `kotlin.*`, `scala.*`, `groovy.*` | no | — | The table turns the language on (§7.7): `version` (required, exact), `source-dir` / `test-dir` (`src/main/<lang>` / `src/test/<lang>`), `kotlinc-args` / `scalac-args` / `groovyc-args`, `compiler-jvm-args`. |
 | `dependencies.*` | no | `{}` | Key is `group:artifact` or `group:artifact:classifier`; value is a version, or a table with `version` and optionally `classifier`, `exclusions` (`group:artifact` patterns, `*` allowed), and `compile-only` or `runtime-only`. A table without `version`, `{}` at its shortest, takes the version `[managed]` gives it (§8.9). A table with `path` instead is a local jar: the key is a name, the path is relative to the project root, and only `compile-only` / `runtime-only` go with it (§8.8). |
 | `dev-dependencies.*` | no | `{}` | Test classpath only; never packaged. Same forms, without `compile-only` or `runtime-only`. |
@@ -315,6 +316,7 @@ jrs <command> [options]
 | `jrs package --sources` / `--javadoc` | Also `target/<name>-<version>-sources.jar` / `-javadoc.jar` (§9.5). |
 | `jrs package --dist` | Also a distribution with launch scripts, zipped into `target/<name>-<version>.zip` (§9.6). |
 | `jrs package --native-image` | Also a GraalVM native executable in `target/native` (§9.7). |
+| `jrs package --obfuscate` | Obfuscate the packaged jar with ProGuard; needs `[obfuscate]` (§9.8). |
 | `jrs doc` | Generate Javadoc into `target/doc` (§7.4). |
 | `jrs clean` | Remove `target/`. |
 | `jrs tree [--depth n] [--why artifact] [--tool name] [--task name]` | Print the resolved dependency graph, `n` levels deep, inverted from one artifact to the manifest, a compiler's own graph (§7.7), or a task's (§7.6). |
@@ -1456,6 +1458,36 @@ go into `target/.jrs/native-image.args`. `target/native` is emptied first, and
 that libraries ship under `META-INF/native-image/` is read by `native-image`
 itself; jrs does not download the shared metadata repository the Gradle plugin
 uses.
+
+### 9.8 Obfuscation (`--obfuscate`)
+
+`[obfuscate]` turns obfuscation on; `jrs package --obfuscate` runs it. It is
+opt-in, and the plain jar is unaffected. The obfuscator is ProGuard, resolved
+from Maven Central as an isolated tool graph (`com.guardsquare:proguard-base`,
+entry point `proguard.ProGuard`) and pinned in `jrs.lock` as a `[[tool]]` named
+`obfuscator`, exactly as a compiler is (§7.7): the graph is pinned whenever
+`[obfuscate]` is present, so the lockfile is stable whether or not the flag is
+passed, and downloaded when `--obfuscate` first reaches it. jrs shells out to
+ProGuard and never rewrites class files itself.
+
+Obfuscation runs after the jar is assembled, over that jar, so it composes with
+the fat-jar merge rules (§9.2) rather than redoing them. jrs writes a ProGuard
+configuration to `target/.jrs/obfuscate.pro` and runs `java -cp <graph>
+proguard.ProGuard @obfuscate.pro` on the project's JDK; the launcher leaves the
+trailing `@file` for ProGuard, since it follows the main class (§5.3). ProGuard
+writes a new jar that jrs renames over the input, so an interrupted run leaves
+the plain jar intact, and its output is passed through verbatim.
+
+The configuration keeps `project.main-class` (the entry point the JVM launches
+by name) and every class named in a `META-INF/services/` file (the
+`ServiceLoader` providers), so reflection and `ServiceLoader` still resolve;
+`obfuscate.keep` adds any other names a framework looks up, and
+`obfuscate.proguard-args` passes flags through for anything else. jrs disables
+shrinking and optimization (`-dontshrink`, `-dontoptimize`), so nothing is
+removed or reordered — only names change and debug information is stripped, and
+the program behaves and times as the plain jar does. The JDK's modules are the
+library path; the dependency jars join it unless a `--fat` jar already holds
+their classes.
 
 ---
 

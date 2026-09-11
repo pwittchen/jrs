@@ -31,6 +31,7 @@ use crate::manifest::{
 use crate::migrate;
 use crate::model;
 use crate::native_image::{self, NativeImage};
+use crate::obfuscate::{self, Obfuscation};
 use crate::package::{self, JarManifest};
 use crate::project::{self, Project, Snapshot, Sources, Unit};
 use crate::resolve::cache::{Cache, Prune};
@@ -471,6 +472,11 @@ pub struct PackageArgs {
     /// which needs a `GraalVM` JDK.
     #[arg(long)]
     pub native_image: bool,
+    /// Obfuscate the packaged jar with ProGuard, which needs an `[obfuscate]`
+    /// table in jrs.toml. Renames classes, methods and fields and strips debug
+    /// information, leaving behaviour untouched.
+    #[arg(long)]
+    pub obfuscate: bool,
 }
 
 #[derive(Debug, Subcommand)]
@@ -666,6 +672,10 @@ struct Session<'a> {
     /// and pinned with the project's, and downloaded then, or when the task
     /// first runs.
     task_tools: OnceCell<Vec<(String, Resolution)>>,
+    /// ProGuard's graph when `[obfuscate]` turns obfuscation on, resolved and
+    /// pinned with the project's, and downloaded then or when `--obfuscate`
+    /// runs. `Some(None)` means the project does not obfuscate.
+    obfuscator: OnceCell<Option<Resolution>>,
     /// The classpaths of the task graphs downloaded so far, by task name.
     task_classpaths: RefCell<HashMap<String, Vec<PathBuf>>>,
     built: OnceCell<Built>,
@@ -702,6 +712,7 @@ impl<'a> Session<'a> {
             resolution: OnceCell::new(),
             tools: OnceCell::new(),
             task_tools: OnceCell::new(),
+            obfuscator: OnceCell::new(),
             task_classpaths: RefCell::new(HashMap::new()),
             built: OnceCell::new(),
             ran: RefCell::new(HashSet::new()),
@@ -1012,6 +1023,14 @@ impl<'a> Session<'a> {
             // Before anything is built: without GraalVM nothing can use it.
             native_image::find(&self.toolchain()?)?;
         }
+        if args.obfuscate && self.manifest.obfuscate.is_none() {
+            return Err(JrsError::usage(
+                "`jrs package --obfuscate` needs an [obfuscate] table in jrs.toml\n\n\
+                 add one with the ProGuard release to pin, for example:\n\n    \
+                 [obfuscate]\n    version = \"7.6.1\""
+                    .to_string(),
+            ));
+        }
         let attributes = self.manifest.jar_attributes()?;
         let built = self.build()?;
         let project = self.project();
@@ -1309,6 +1328,43 @@ impl<'a> Session<'a> {
             let executable = result?;
             let bytes = std::fs::metadata(&executable).path(&executable)?.len();
             rows.push(("native", row(&executable, bytes)));
+        }
+
+        if args.obfuscate {
+            // Present: `package` checked it before the build (see `package`).
+            let config = self
+                .manifest
+                .obfuscate
+                .as_ref()
+                .expect("--obfuscate requires [obfuscate]");
+            let toolchain = self.toolchain()?;
+            let tool_classpath = self.obfuscator_classpath()?;
+            // The JDK's modules are always library jars; the dependency jars are
+            // too unless a fat jar already holds their classes.
+            let mut library_jars = obfuscate::jdk_library_jars(&toolchain);
+            if !args.fat {
+                library_jars.extend(built.resolution.runtime_classpath());
+            }
+            let obfuscation = Obfuscation {
+                jar,
+                tool_classpath: &tool_classpath,
+                library_jars: &library_jars,
+                main_class: self.manifest.main_class.as_deref(),
+                keep: &config.keep,
+                extra_args: &config.proguard_args,
+            };
+            self.ui.phase(
+                "Obfuscating",
+                format!("{} with ProGuard {}", jar.display(), config.version),
+            );
+            let started = Instant::now();
+            let scope = self.ui.spinner("Obfuscating", "with ProGuard");
+            let result =
+                obfuscate::build(&toolchain.java, &obfuscation, &project.work_dir(), self.ui);
+            scope.finish();
+            self.timings.since("obfuscate", started);
+            let bytes = result?;
+            rows.push(("obfuscated", row(jar, bytes)));
         }
         Ok(rows)
     }
@@ -2914,9 +2970,14 @@ impl<'a> Session<'a> {
             .iter()
             .filter(|t| !t.dependencies.is_empty())
             .collect();
-        if declared == 0 && manifest.languages.is_empty() && tasks_with_tools.is_empty() {
+        if declared == 0
+            && manifest.languages.is_empty()
+            && tasks_with_tools.is_empty()
+            && manifest.obfuscate.is_none()
+        {
             let _ = self.tools.set(Vec::new());
             let _ = self.task_tools.set(Vec::new());
+            let _ = self.obfuscator.set(None);
             return Ok(Resolution::default());
         }
 
@@ -2926,7 +2987,7 @@ impl<'a> Session<'a> {
         let lock_path = manifest.lock_path();
         let existing = Lockfile::load(&lock_path)?;
 
-        let (mut resolution, mut tools, mut task_tools, fresh) = match existing {
+        let (mut resolution, mut tools, mut task_tools, mut obfuscator, fresh) = match existing {
             Some(lock) if lock.matches(manifest) && !force_update => {
                 self.ui.verbose(format!("reusing {}", lock_path.display()));
                 let tools = manifest
@@ -2943,7 +3004,11 @@ impl<'a> Session<'a> {
                     .iter()
                     .filter_map(|t| Some((t.name.clone(), lock.tool(&t.tool_name())?)))
                     .collect();
-                (lock.to_resolution(), tools, task_tools, false)
+                let obfuscator = manifest
+                    .obfuscate
+                    .as_ref()
+                    .and_then(|_| lock.tool(obfuscate::TOOL_NAME));
+                (lock.to_resolution(), tools, task_tools, obfuscator, false)
             }
             _ => {
                 let what = Self::resolving_what(manifest, declared, &tasks_with_tools);
@@ -2951,8 +3016,8 @@ impl<'a> Session<'a> {
                 let scope = self.ui.spinner("Resolving", &what);
                 let resolved = self.resolve_with_tools(&fetcher);
                 scope.finish();
-                let (resolution, tools, task_tools) = resolved?;
-                (resolution, tools, task_tools, true)
+                let (resolution, tools, task_tools, obfuscator) = resolved?;
+                (resolution, tools, task_tools, obfuscator, true)
             }
         };
 
@@ -2986,7 +3051,8 @@ impl<'a> Session<'a> {
 
         self.fetch_tools(&mut tools, &fetcher)?;
         // A fresh graph is downloaded now, so that jrs.lock pins its jars'
-        // checksums; one read from jrs.lock waits until its task runs.
+        // checksums; one read from jrs.lock waits until its task runs, or until
+        // `--obfuscate` reaches the obfuscator.
         if fresh {
             for (name, graph) in &mut task_tools {
                 let classpath = self.fetch_task_tool(name, graph, &fetcher)?;
@@ -2994,10 +3060,19 @@ impl<'a> Session<'a> {
                     .borrow_mut()
                     .insert(name.clone(), classpath);
             }
+            if let Some(graph) = &mut obfuscator {
+                self.fetch_obfuscator(graph, &fetcher)?;
+            }
         }
 
         if fresh {
-            self.write_lock(&lock_path, &resolution, &tools, &task_tools)?;
+            self.write_lock(
+                &lock_path,
+                &resolution,
+                &tools,
+                &task_tools,
+                obfuscator.as_ref(),
+            )?;
         }
         // So that `jrs cache prune` knows this project still wants these
         // artifacts. Bookkeeping: a cache that cannot record it still builds.
@@ -3013,6 +3088,7 @@ impl<'a> Session<'a> {
         }
         let _ = self.tools.set(tools);
         let _ = self.task_tools.set(task_tools);
+        let _ = self.obfuscator.set(obfuscator);
         Ok(resolution)
     }
 
@@ -3049,6 +3125,7 @@ impl<'a> Session<'a> {
         resolution: &Resolution,
         tools: &[Tool],
         task_tools: &[(String, Resolution)],
+        obfuscator: Option<&Resolution>,
     ) -> Result<()> {
         let mut lock = Lockfile::from_resolution(&self.manifest, resolution);
         for tool in tools {
@@ -3058,6 +3135,9 @@ impl<'a> Session<'a> {
             if let Some(def) = self.manifest.task(name) {
                 lock = lock.with_tool(&def.tool_name(), graph);
             }
+        }
+        if let Some(graph) = obfuscator {
+            lock = lock.with_tool(obfuscate::TOOL_NAME, graph);
         }
         lock.write(lock_path)?;
         self.ui.verbose(format!("wrote {}", lock_path.display()));
@@ -3130,6 +3210,47 @@ impl<'a> Session<'a> {
         Ok(classpath)
     }
 
+    /// Download ProGuard's graph, as a task tool's is, and return its classpath.
+    fn fetch_obfuscator(&self, graph: &mut Resolution, fetcher: &Fetcher) -> Result<Vec<PathBuf>> {
+        let started = Instant::now();
+        resolve::locate_cached(graph, fetcher);
+        let missing = graph
+            .packages
+            .iter()
+            .filter(|p| p.jar.is_none() && p.packaging != "pom")
+            .count();
+        if missing > 0 && !self.offline {
+            self.ui.phase(
+                "Downloading",
+                format!("{} (obfuscator)", obfuscate::ARTIFACT),
+            );
+            let scope = self.ui.downloads(missing);
+            let result = resolve::fetch_jars(graph, fetcher, self.jobs);
+            scope.finish();
+            result?;
+        } else {
+            resolve::fetch_jars(graph, fetcher, self.jobs)?;
+        }
+        self.timings.since("downloads (obfuscator)", started);
+        for warning in &graph.warnings {
+            self.ui
+                .verbose(format!("{}: {warning}", obfuscate::TOOL_NAME));
+        }
+        Ok(graph.runtime_classpath())
+    }
+
+    /// ProGuard's classpath, downloaded if this invocation has not yet, or an
+    /// error naming the missing `[obfuscate]` table.
+    fn obfuscator_classpath(&self) -> Result<Vec<PathBuf>> {
+        self.resolved()?;
+        let mut graph = self.obfuscator.get().cloned().flatten().ok_or_else(|| {
+            JrsError::build(
+                "the obfuscator was not resolved: add an [obfuscate] table to jrs.toml".to_string(),
+            )
+        })?;
+        self.fetch_obfuscator(&mut graph, &self.fetcher()?)
+    }
+
     /// Download the compilers' jars, as the test launcher's are: one line
     /// naming each compiler, then the shared download bars.
     fn fetch_tools(&self, tools: &mut [Tool], fetcher: &Fetcher) -> Result<()> {
@@ -3193,7 +3314,15 @@ impl<'a> Session<'a> {
             let graph = resolve::resolve_tool_dependencies(&def.dependencies, fetcher, self.jobs)?;
             task_tools.push((def.name.clone(), graph));
         }
-        Ok((resolution, tools, task_tools))
+        let obfuscator = match &self.manifest.obfuscate {
+            Some(config) => Some(resolve::resolve_tool(
+                &[obfuscate::coord(&config.version)],
+                fetcher,
+                self.jobs,
+            )?),
+            None => None,
+        };
+        Ok((resolution, tools, task_tools, obfuscator))
     }
 
     /// `jrs tree --task <name>`: a task's own dependency graph.
@@ -3222,8 +3351,31 @@ impl<'a> Session<'a> {
         Ok(root)
     }
 
-    /// `jrs tree --tool <name>`: a compiler's own graph.
+    /// `jrs tree --tool <name>`: a compiler's own graph, or the obfuscator's.
     fn tool_tree(&self, name: &str, limit: Option<usize>) -> Result<TreeNode> {
+        if name == obfuscate::TOOL_NAME {
+            let graph = self.obfuscator.get().cloned().flatten().ok_or_else(|| {
+                JrsError::usage(
+                    "this project does not obfuscate: add an [obfuscate] table to turn it on"
+                        .to_string(),
+                )
+            })?;
+            let version = self
+                .manifest
+                .obfuscate
+                .as_ref()
+                .map_or("", |c| c.version.as_str());
+            let mut root = TreeNode::styled(format!("{name} (ProGuard {version})"), Style::Bold);
+            if limit == Some(0) {
+                return Ok(root);
+            }
+            let mut seen = Vec::new();
+            for ga in &graph.roots {
+                root.children
+                    .push(Self::tree_node(&graph, ga, &mut seen, 0, limit));
+            }
+            return Ok(root);
+        }
         let tools = self.tools.get().cloned().unwrap_or_default();
         let Some(tool) = tools.iter().find(|t| t.language.tool_name() == name) else {
             let known: Vec<String> = tools
@@ -3429,9 +3581,14 @@ struct Built {
     classes: usize,
 }
 
-/// The project's graph, the compilers' and the tasks' tools', freshly
-/// resolved.
-type ResolvedWithTools = (Resolution, Vec<Tool>, Vec<(String, Resolution)>);
+/// The project's graph, the compilers' and the tasks' tools', and the
+/// obfuscator's when it is on, freshly resolved.
+type ResolvedWithTools = (
+    Resolution,
+    Vec<Tool>,
+    Vec<(String, Resolution)>,
+    Option<Resolution>,
+);
 
 /// A language's compiler, as the graph jrs resolved for it.
 #[derive(Clone)]
@@ -4469,16 +4626,17 @@ mod tests {
             "--javadoc",
             "--dist",
             "--native-image",
+            "--obfuscate",
         ])
         .command
         else {
             panic!("expected package");
         };
-        assert!(p.portable && p.sources && p.javadoc && p.dist && p.native_image);
+        assert!(p.portable && p.sources && p.javadoc && p.dist && p.native_image && p.obfuscate);
         let Command::Package(p) = parse(&["jrs", "package"]).command else {
             panic!("expected package");
         };
-        assert!(!p.sources && !p.javadoc && !p.dist && !p.native_image);
+        assert!(!p.sources && !p.javadoc && !p.dist && !p.native_image && !p.obfuscate);
     }
 
     #[test]

@@ -1,0 +1,11 @@
+[project]
+name = "obf-app"
+version = "1.0.0"
+main-class = "com.example.Main"
+
+[java]
+source = 17
+
+[obfuscate]
+version = "7.6.1"
+proguard-args = ["-dontwarn com.example.internal.**", "-keep class com.example.Config { *; }"]

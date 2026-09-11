@@ -53,6 +53,10 @@ your own requirements before adopting it for production builds.
   a `jlink` runtime image, a `jpackage` installer or a GraalVM native
   executable, plus sources and Javadoc jars and jar manifest attributes of
   your own
+- Optional obfuscation of the packaged jar with ProGuard — renamed classes,
+  methods and fields and stripped debug information, the entry point and
+  `ServiceLoader` providers kept — resolved from Maven Central and pinned in
+  `jrs.lock` like the compilers
 - Running the project's main class directly, and rebuilding on every change
 - User-defined tasks and lifecycle hooks, for code generators, post-packaging
   steps and chores, run with the project's JDK and classpath, or with Java
@@ -317,6 +321,31 @@ reads it.
 `jrs package --native-image`: `--no-fallback`, `--initialize-at-build-time`,
 resource and reflection configuration.
 
+### `[obfuscate]`
+
+```toml
+[obfuscate]
+version = "7.6.1"                            # the ProGuard release to pin
+keep = ["com.example.plugin.Api"]            # class names reflection looks up; optional
+proguard-args = ["-dontwarn org.foo.**"]     # passed to ProGuard verbatim; optional
+```
+
+The table turns obfuscation on and is opt-in: `jrs package --obfuscate` runs
+ProGuard over the assembled jar, renaming classes, methods and fields and
+stripping debug information while leaving behaviour untouched — the same entry
+point runs and the same tests pass against the obfuscated jar. Plain
+`jrs package` is unaffected. ProGuard is resolved from Maven Central as its own
+tool graph, pinned in `jrs.lock` and run on the project's JDK, exactly as the
+compilers are; `jrs tree --tool obfuscator` prints its graph.
+
+Obfuscation runs after packaging, over the jar just written, so it composes
+with the fat-jar merge rules rather than redoing them. The entry point and
+every `META-INF/services/` provider keep their names, so reflection and
+`ServiceLoader` still work; `keep` adds any other names a framework looks up,
+and `proguard-args` passes flags through for anything else. Nothing is removed
+or reordered, so the measured `run` timing does not change. Pair `--obfuscate`
+with `--fat` for a self-contained obfuscated jar.
+
 ### `[dependencies]` and `[dev-dependencies]`
 
 Each entry maps a `"group:artifact"` coordinate to a version string.
@@ -448,9 +477,10 @@ for any repository.
 | `jrs package --sources` / `--javadoc` | Also write `target/<name>-<version>-sources.jar` / `-javadoc.jar`; `--javadoc` runs `jrs doc` first. |
 | `jrs package --dist` | Also write a distribution with launch scripts in `bin/`, zipped into `target/<name>-<version>.zip`. |
 | `jrs package --native-image` | Also build a native executable in `target/native` with GraalVM's `native-image`. |
+| `jrs package --obfuscate` | Obfuscate the packaged jar with ProGuard; needs an `[obfuscate]` table. |
 | `jrs doc` | Generate API docs into `target/doc`: Javadoc, or Scaladoc / Groovydoc for Scala and Groovy code. |
 | `jrs clean` | Remove `target/`. |
-| `jrs tree [--depth <n>] [--why <artifact>] [--tool <name>] [--task <name>]` | Print the resolved dependency graph, every path that leads to one artifact, a compiler's own graph (`kotlin-compiler`, `scala-compiler`, `groovy-compiler`), or a task's. |
+| `jrs tree [--depth <n>] [--why <artifact>] [--tool <name>] [--task <name>]` | Print the resolved dependency graph, every path that leads to one artifact, a compiler's own graph (`kotlin-compiler`, `scala-compiler`, `groovy-compiler`), the obfuscator's (`obfuscator`), or a task's. |
 | `jrs classpath [--test \| --runtime]` | Print the resolved classpath, for editors and `java -cp "$(jrs classpath)"`. |
 | `jrs update` | Re-resolve and rewrite `jrs.lock`. |
 | `jrs verify` | Re-hash the cached dependency jars against the checksums in `jrs.lock`. |
@@ -948,6 +978,13 @@ A `jar { manifest { attributes(...) } }` block, and Maven's
 `<manifestEntries>`, become `[package.manifest]` when the values are literals
 or the project's version. `withSourcesJar()` and `withJavadocJar()` are
 reported: in jrs they are the `jrs package --sources` and `--javadoc` flags.
+
+The `proguard-maven-plugin` and the Guardsquare Gradle plugin
+(`com.guardsquare.proguard`) become `[obfuscate]`: the pinned ProGuard version
+carries over — from the Maven plugin's `<proguardVersion>` or the Gradle
+plugin's own version — and the Maven `<options>` pass through to
+`proguard-args`. The Gradle `proguard { }` task's keep rules are reported to
+move into `keep` / `proguard-args` by hand.
 
 Scopes keep their meaning. Maven's `provided` and Gradle's `compileOnly` become
 `compile-only`, and `runtime` and `runtimeOnly` become `runtime-only`. Gradle's

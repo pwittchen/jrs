@@ -143,6 +143,7 @@ impl Lockfile {
                 .iter()
                 .filter(|t| !t.dependencies.is_empty())
                 .all(|t| pinned(t.tool_name()))
+            && (manifest.obfuscate.is_none() || pinned(crate::obfuscate::TOOL_NAME.to_string()))
     }
 
     /// Read and parse the lockfile at `path`; `Ok(None)` when there is none.
@@ -486,6 +487,13 @@ pub fn manifest_checksum(manifest: &Manifest) -> String {
     for c in &manifest.languages {
         let _ = writeln!(canonical, "lang {} {}", c.language.key(), c.version);
     }
+    // The obfuscator's version decides which ProGuard graph is resolved and
+    // pinned; its `keep` and `proguard-args` change the run, not the graph, so
+    // a fingerprint governs re-obfuscation, not the lockfile. A manifest
+    // without [obfuscate] adds nothing, keeping its lockfile byte for byte.
+    if let Some(obf) = &manifest.obfuscate {
+        let _ = writeln!(canonical, "obfuscate {}", obf.version);
+    }
     // A task's own dependencies are resolved and pinned too (TASKS.md §8);
     // the rest of a task changes no resolution.
     for task in &manifest.tasks {
@@ -653,6 +661,33 @@ mod tests {
             manifest_checksum(&java),
             format!("sha256:{}", sha256_hex(canonical.as_bytes()))
         );
+    }
+
+    #[test]
+    fn the_checksum_follows_the_obfuscator_version() {
+        let plain = manifest("[dependencies]\n'g:a'='1.0'");
+        let obf = manifest("[dependencies]\n'g:a'='1.0'\n[obfuscate]\nversion='7.6.1'");
+        let newer = manifest("[dependencies]\n'g:a'='1.0'\n[obfuscate]\nversion='7.7.0'");
+        let extra = manifest(
+            "[dependencies]\n'g:a'='1.0'\n[obfuscate]\nversion='7.6.1'\nproguard-args=['-dontwarn']",
+        );
+        assert_ne!(manifest_checksum(&plain), manifest_checksum(&obf));
+        assert_ne!(manifest_checksum(&obf), manifest_checksum(&newer));
+        assert_eq!(
+            manifest_checksum(&obf),
+            manifest_checksum(&extra),
+            "proguard-args change the run, not what is resolved"
+        );
+    }
+
+    #[test]
+    fn the_obfuscator_must_be_pinned_when_obfuscation_is_on() {
+        let m = manifest("[dependencies]\n'g:a'='1.0'\n[obfuscate]\nversion='7.6.1'");
+        let without = Lockfile::from_resolution(&m, &resolution());
+        assert!(!without.matches(&m), "the obfuscator is not pinned");
+        let with = without.with_tool(crate::obfuscate::TOOL_NAME, &compiler_graph());
+        assert_eq!(with.version, TOOLS_LOCK_VERSION);
+        assert!(with.matches(&m));
     }
 
     fn compiler_graph() -> Resolution {

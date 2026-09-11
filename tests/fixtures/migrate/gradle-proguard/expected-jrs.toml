@@ -1,0 +1,7 @@
+[project]
+name = "obf-app"
+version = "1.0.0"
+main-class = "com.example.Main"
+
+[obfuscate]
+version = "7.6.1"

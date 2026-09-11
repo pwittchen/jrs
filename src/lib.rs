@@ -21,6 +21,7 @@ pub mod lockfile;
 pub mod manifest;
 pub mod migrate;
 pub mod native_image;
+pub mod obfuscate;
 pub mod package;
 pub mod project;
 pub mod resolve;

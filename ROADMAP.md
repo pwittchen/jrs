@@ -28,23 +28,6 @@ decision (see the last section) — it needs a spec change before it needs code.
   for v1 (SPEC §13.5). Duplicate classes are reported today; relocation — which
   means rewriting class files' constant pools — is the next step if real
   projects hit it.
-- **Obfuscation.** An opt-in step that obfuscates the compiled bytecode and
-  bundled resources in the packaged jar to make the shipped artifact harder to
-  read back into source — renamed classes, methods and fields, stripped debug
-  information — while leaving the program's behaviour untouched: the same
-  entry point runs, the same tests pass against the obfuscated jar, and the
-  measured `run` timing is unchanged. It is off by default and set from the
-  manifest; the plain jar is unaffected. In keeping with jrs being a driver,
-  the obfuscator (ProGuard, R8) is resolved from Maven Central as its own
-  isolated tool graph and pinned in `jrs.lock`, exactly as the JVM-language
-  compilers are (SPEC §7.7), and jrs shells out to it rather than rewriting
-  class files itself — obfuscation runs after `package`, over the assembled
-  jar, so it composes with the fat-jar merge rules instead of fighting them.
-  Reflection and `ServiceLoader` entries survive by keeping the names they
-  name; getting that wrong breaks an app silently, so like shading it waits on
-  a real need. It adds a manifest key, a `[[tool]]` block and a lockfile entry,
-  so it is a spec-level decision (see the last section).
-
 ## 3. Editors and tooling
 
 - **Checks and formatting.** Gradle has the Checkstyle, PMD, SpotBugs and

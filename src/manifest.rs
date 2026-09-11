@@ -405,6 +405,25 @@ pub struct PackageConfig {
     pub native_image_args: Vec<String>,
 }
 
+/// `[obfuscate]`: the table's presence turns obfuscation on (SPEC §7.7,
+/// ROADMAP). It is opt-in and set only from the manifest; `jrs package
+/// --obfuscate` runs it, and the plain jar is unaffected. Its `version` pins
+/// ProGuard, resolved as an isolated tool graph like a compiler's.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ObfuscateConfig {
+    /// The ProGuard release, exact: an unpinned obfuscator is not reproducible,
+    /// as an unpinned compiler is not.
+    pub version: String,
+    /// Fully-qualified class names whose names must survive, for reflection or
+    /// a framework that looks them up by name. The entry point and every
+    /// `ServiceLoader` provider are kept without being listed here.
+    pub keep: Vec<String>,
+    /// Passed through verbatim to ProGuard, after jrs's own configuration.
+    pub proguard_args: Vec<String>,
+}
+
+const OBFUSCATE_KEYS: &[&str] = &["version", "keep", "proguard-args"];
+
 /// The `MANIFEST.MF` main attributes jrs writes itself, which
 /// `[package.manifest]` may not set. `Name` is here too: it starts a
 /// per-entry section, and jrs writes the main section only.
@@ -861,6 +880,9 @@ pub struct Manifest {
     pub run: RunConfig,
     pub test: TestConfig,
     pub package: PackageConfig,
+    /// `[obfuscate]`, when the project turns it on; `None` leaves the plain jar
+    /// unaffected and pins no obfuscator.
+    pub obfuscate: Option<ObfuscateConfig>,
     /// The languages turned on besides Java, in `Language::FOREIGN` order.
     pub languages: Vec<LanguageConfig>,
     pub dependencies: Vec<Dependency>,
@@ -945,6 +967,7 @@ const TOP_KEYS: &[&str] = &[
     "run",
     "test",
     "package",
+    "obfuscate",
     "kotlin",
     "scala",
     "groovy",
@@ -1158,6 +1181,22 @@ impl Manifest {
                 native_image_args: string_array(t, "native-image-args", "package")?,
             },
         };
+        let obfuscate = match section(&table, "obfuscate", OBFUSCATE_KEYS, &mut warnings)? {
+            None => None,
+            Some(t) => {
+                let version = required_string(t, "version", "obfuscate")?;
+                if version.trim().is_empty() {
+                    return Err(JrsError::manifest(
+                        "`obfuscate.version` must name a ProGuard release".to_string(),
+                    ));
+                }
+                Some(ObfuscateConfig {
+                    version,
+                    keep: string_array(t, "keep", "obfuscate")?,
+                    proguard_args: string_array(t, "proguard-args", "obfuscate")?,
+                })
+            }
+        };
 
         let languages = parse_languages(&table, &mut warnings)?;
         let dependencies = parse_dependencies(&table, "dependencies")?;
@@ -1207,6 +1246,7 @@ impl Manifest {
             run,
             test,
             package,
+            obfuscate,
             languages,
             dependencies,
             dev_dependencies,
@@ -1504,6 +1544,16 @@ impl Manifest {
                 let _ = writeln!(s, "{name} = {}", quote(&value.raw));
             }
         }
+        if let Some(obf) = &self.obfuscate {
+            let _ = writeln!(s, "\n[obfuscate]");
+            let _ = writeln!(s, "version = {}", quote(&obf.version));
+            if !obf.keep.is_empty() {
+                let _ = writeln!(s, "keep = {}", quote_list(&obf.keep));
+            }
+            if !obf.proguard_args.is_empty() {
+                let _ = writeln!(s, "proguard-args = {}", quote_list(&obf.proguard_args));
+            }
+        }
 
         if !self.managed.is_empty() {
             let _ = writeln!(s, "\n[managed]");
@@ -1657,6 +1707,7 @@ pub fn blank(name: &str, version: &str, root: &Path) -> Manifest {
         run: RunConfig::default(),
         test: TestConfig::default(),
         package: PackageConfig::default(),
+        obfuscate: None,
         languages: Vec::new(),
         dependencies: Vec::new(),
         dev_dependencies: Vec::new(),
@@ -3223,6 +3274,48 @@ version = "1"
         assert!(text.contains("\n[package.manifest]\nZ-Last-Alphabetically = \"first\"\n"));
         let again = parse(&text).unwrap();
         assert_eq!(again.package, m.package);
+    }
+
+    #[test]
+    fn obfuscate_is_off_until_the_table_turns_it_on() {
+        assert!(parse(DEMO).unwrap().obfuscate.is_none());
+    }
+
+    #[test]
+    fn obfuscate_pins_the_version_and_carries_keep_and_args() {
+        let m = parse(&format!(
+            "{DEMO}[obfuscate]\nversion = \"7.6.1\"\nkeep = [\"com.example.Api\"]\n\
+             proguard-args = [\"-dontwarn org.foo.**\"]\n"
+        ))
+        .unwrap();
+        assert!(m.warnings.is_empty(), "{:?}", m.warnings);
+        let obf = m.obfuscate.as_ref().unwrap();
+        assert_eq!(obf.version, "7.6.1");
+        assert_eq!(obf.keep, vec!["com.example.Api"]);
+        assert_eq!(obf.proguard_args, vec!["-dontwarn org.foo.**"]);
+        // Rendered back, it reads the same.
+        let again = parse(&m.render(None)).unwrap();
+        assert_eq!(again.obfuscate, m.obfuscate);
+    }
+
+    #[test]
+    fn obfuscate_needs_a_version() {
+        let err = parse(&format!("{DEMO}[obfuscate]\nkeep = [\"x\"]\n")).unwrap_err();
+        assert_eq!(err.exit_code(), 2);
+        assert!(err.to_string().contains("obfuscate.version"), "{err}");
+    }
+
+    #[test]
+    fn an_unknown_obfuscate_key_warns() {
+        let m = parse(&format!(
+            "{DEMO}[obfuscate]\nversion = \"7.6.1\"\nmangle = true\n"
+        ))
+        .unwrap();
+        assert!(
+            m.warnings.iter().any(|w| w.contains("obfuscate.mangle")),
+            "{:?}",
+            m.warnings
+        );
     }
 
     #[test]

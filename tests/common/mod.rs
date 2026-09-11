@@ -265,6 +265,46 @@ impl FixtureRepo {
     }
 }
 
+impl FixtureRepo {
+    /// Compile `tests/fixtures/fake-compiler` and publish it as ProGuard
+    /// (`com.guardsquare:proguard-base`), with the support jar as its one
+    /// transitive dependency — so the obfuscator is resolved as a graph, as the
+    /// compilers are. Needs a JDK; nothing binary is committed.
+    pub fn publish_fake_obfuscator(&self, scratch: &Scratch, toolchain: &Toolchain) {
+        let src = fixtures().join("fake-compiler");
+        let work = scratch.join("fake-obfuscator");
+        let support_classes = work.join("support");
+        let tool_classes = work.join("tool");
+        javac(
+            toolchain,
+            &[src.join("fake/support/Support.java")],
+            &support_classes,
+            &[],
+        );
+        let sources: Vec<PathBuf> = find_java(&src)
+            .into_iter()
+            .filter(|p| !p.starts_with(src.join("fake/support")))
+            .collect();
+        javac(
+            toolchain,
+            &sources,
+            &tool_classes,
+            std::slice::from_ref(&support_classes),
+        );
+
+        let support = Coord::new("org.example.fake", "fake-compiler-support", "1.0");
+        self.publish_pom(&support, &pom(&support, &[]));
+        self.publish_jar(&support, &jar(&support_classes, &work.join("support.jar")));
+
+        let proguard = Coord::new("com.guardsquare", "proguard-base", FAKE_PROGUARD);
+        self.publish_pom(&proguard, &pom(&proguard, &[&support]));
+        self.publish_jar(&proguard, &jar(&tool_classes, &work.join("proguard.jar")));
+    }
+}
+
+/// The version the fake ProGuard is published at: not a real release.
+pub const FAKE_PROGUARD: &str = "7.9.9";
+
 /// The versions the fake compilers are published at: new enough for jrs's
 /// minimums, and not a real release of anything.
 pub const FAKE_KOTLIN: &str = "2.9.9";

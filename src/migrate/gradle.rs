@@ -108,6 +108,7 @@ pub fn migrate(build_file: &Path, root: &Path) -> Result<Migration> {
     read_jvm_args(&script, &mut out, &mut report);
     super::gradle_tasks::read_jvm_environment(&script, &mut out, &mut report);
     read_jar_manifest(&script, &mut out, &mut report);
+    read_proguard(&plugins, &mut out, &mut report);
     super::gradle_repos::read(&script, &mut out, &mut report);
     super::gradle_tasks::read(&script, &mut out, &mut report);
     report_the_unreadable(&script, &settings, &plugins, &mut report);
@@ -1252,6 +1253,7 @@ fn report_the_unreadable(
                 | "application"
                 | "org.springframework.boot"
                 | "io.spring.dependency-management"
+                | "com.guardsquare.proguard"
         ) || language_plugin(id).is_some()
             || kotlin_compiler_plugin(id).is_some();
         if !understood {
@@ -1456,6 +1458,37 @@ fn read_library_languages(plugins: &[Plugin], out: &mut Manifest, report: &mut R
         }
     }
     super::drop_implied_libraries(out, report);
+}
+
+/// The Guardsquare ProGuard plugin (`com.guardsquare.proguard`) → `[obfuscate]`.
+/// The plugin's own version is the ProGuard release, so it pins `version`; the
+/// keep rules and options live in a `proguard { }` task jrs cannot read, so
+/// they are flagged for `keep` / `proguard-args`.
+fn read_proguard(plugins: &[Plugin], out: &mut Manifest, report: &mut Report) {
+    let Some(plugin) = plugins.iter().find(|p| p.id == "com.guardsquare.proguard") else {
+        return;
+    };
+    match &plugin.version {
+        Some(version) => {
+            report.migrated(format!("obfuscate.version = {version}"));
+            report.review(
+                "com.guardsquare.proguard — the `proguard { }` task's keep rules and options \
+                 do not translate; add them to [obfuscate].keep / proguard-args, then run \
+                 `jrs package --obfuscate`"
+                    .to_string(),
+            );
+            out.obfuscate = Some(manifest::ObfuscateConfig {
+                version: version.clone(),
+                keep: Vec::new(),
+                proguard_args: Vec::new(),
+            });
+        }
+        None => report.review(
+            "com.guardsquare.proguard — set obfuscate.version to the ProGuard release to pin \
+             (the plugin block names no version)"
+                .to_string(),
+        ),
+    }
 }
 
 /// The `kotlin { }` extension's lines, opening lines included: `kotlin {

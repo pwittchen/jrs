@@ -34,6 +34,7 @@ const UNDERSTOOD_PLUGINS: &[&str] = &[
     "gmavenplus-plugin",
     "spring-boot-maven-plugin",
     "exec-maven-plugin",
+    "proguard-maven-plugin",
 ];
 
 /// Translate the POM at `pom_path`, and the parents beside it on disk.
@@ -61,6 +62,7 @@ pub fn migrate(pom_path: &Path, root: &Path) -> Result<Migration> {
     }
     read_main_class(pom, &effective, &mut out, &mut report);
     read_jar_manifest(pom, &mut out, &mut report);
+    read_proguard(pom, &mut out, &mut report);
     // Before the dependencies: a BOM there versions the ones that name none.
     read_managed(&effective, boot_parent.as_deref(), &mut out, &mut report);
     read_dependencies(&effective, pom, &mut out, &mut report);
@@ -455,6 +457,45 @@ fn read_jar_manifest(pom: &Pom, out: &mut Manifest, report: &mut Report) {
             }
             Err(e) => report.skipped(format!("jar manifest entry — {e}")),
         }
+    }
+}
+
+/// `proguard-maven-plugin` → `[obfuscate]`. Its `<proguardVersion>` pins
+/// ProGuard, and its `<options>` pass through verbatim; jrs adds its own keeps
+/// for the entry point and the `ServiceLoader` providers. Without a pinned
+/// version there is nothing reproducible to write, so that is flagged instead.
+fn read_proguard(pom: &Pom, out: &mut Manifest, report: &mut Report) {
+    let Some(config) = plugin(pom, "proguard-maven-plugin").and_then(|p| p.configuration.as_ref())
+    else {
+        return;
+    };
+    let options: Vec<String> = config
+        .child("options")
+        .map(|opts| {
+            opts.children
+                .iter()
+                .map(|o| o.text.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect()
+        })
+        .unwrap_or_default();
+    match config.text_of("proguardVersion") {
+        Some(version) => {
+            report.migrated(format!("obfuscate.version = {version}"));
+            for option in &options {
+                report.migrated(format!("obfuscate.proguard-args += {option}"));
+            }
+            out.obfuscate = Some(manifest::ObfuscateConfig {
+                version: version.to_string(),
+                keep: Vec::new(),
+                proguard_args: options,
+            });
+        }
+        None => report.review(
+            "proguard-maven-plugin — set obfuscate.version to the ProGuard release to pin, \
+             then run `jrs package --obfuscate` (it has no <proguardVersion>)"
+                .to_string(),
+        ),
     }
 }
 

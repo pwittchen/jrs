@@ -101,6 +101,7 @@ src/
 ├── image.rs           jdeps, jlink, jpackage
 ├── dist.rs            --dist: launch scripts, the staged directory, the zip
 ├── native_image.rs    --native-image: GraalVM's native-image, by argfile
+├── obfuscate.rs       --obfuscate: ProGuard over the assembled jar, by config file
 ├── runner.rs          `jrs run`: the user's program gets the terminal
 ├── task.rs            [tasks] and [hooks]: plan, cycles, placeholders, freshness
 ├── migrate/
@@ -656,6 +657,8 @@ set to `append=true`.
    --javadoc       jrs doc ─► target/doc ─► <n>-<v>-javadoc.jar
    --native-image  classes + runtime classpath ─► native-image (the GraalVM
                    JDK's bin/, by argfile) ─► target/native/<name>
+   --obfuscate     the assembled jar ─► ProGuard (Maven Central, pinned; run as
+                   java @args over a config file) ─► same jar, renamed
 ```
 
 All jars are **deterministic**: entries sorted, a fixed 1980 timestamp, fixed
@@ -675,6 +678,21 @@ distribution archives are byte-identical across builds as well.
 launchers reuse `image.rs`'s quoting; `native-image` is found beside `javac`,
 and its absence means the JDK is not GraalVM, which is reported before the
 build starts.
+
+`--obfuscate` lives in `obfuscate.rs` and runs last, over the assembled jar, so
+it composes with the merge rules above instead of redoing them. ProGuard is
+resolved as an isolated tool graph and pinned in `jrs.lock` as the
+`obfuscator` `[[tool]]` whenever `[obfuscate]` is present — like a compiler, so
+the lockfile is stable whether or not the flag is passed — and downloaded when
+`--obfuscate` first reaches it. jrs writes a ProGuard config file
+(`target/.jrs/obfuscate.pro`) and runs `java -cp <graph> proguard.ProGuard
+@obfuscate.pro`; the launcher leaves that trailing `@file` for ProGuard because
+it follows the main class. The config keeps the entry point and every
+`META-INF/services/` provider by name, adds `[obfuscate].keep` and
+`proguard-args`, and disables shrinking and optimization so behaviour and
+timing are untouched — only names change and debug information is stripped.
+ProGuard writes a new jar that jrs renames over the input, so an interrupted
+run leaves the plain jar intact.
 
 ## 10. Tasks and hooks
 
@@ -811,7 +829,7 @@ poisoning, which is documented under each function's `# Panics`.
 ```
  my-project/
  ├── jrs.toml                     the manifest (committed)
- ├── jrs.lock                     the resolved graph + compiler graphs (committed)
+ ├── jrs.lock                     the resolved graph + compiler / obfuscator graphs (committed)
  ├── src/main/{java,kotlin,scala,groovy,resources}
  ├── src/test/{java,kotlin,scala,groovy,resources}
  └── target/                      fully disposable: `jrs clean` removes it
@@ -839,6 +857,7 @@ poisoning, which is documented under each function's `# Panics`.
          ├── javadoc.args  scaladoc.args  groovydoc.args
          ├── junit-palette.properties  jpackage-input/
          │   native-image.args
+         ├── obfuscate.pro  obfuscate.args  obfuscated.jar   --obfuscate
          └── timings.txt            --timings: phase<TAB>ms, the last run's
 
  shared cache  (JRS_CACHE_DIR, or ~/Library/Caches/jrs, $XDG_CACHE_HOME/jrs,
@@ -875,9 +894,9 @@ can never lose user data, and task-generated sources must live under
  │                           ├── tests/fixtures/repo/…/*.pom   checked in
  │                           ├── jars                           synthesised at test time
  │                           └── tests/fixtures/fake-compiler   Java classes named like
- │                                kotlinc/scalac/groovyc main classes, compiled and
- │                                published into the fixture repo, run with their
- │                                own JRS_CACHE_DIR
+ │                                kotlinc/scalac/groovyc and proguard.ProGuard main
+ │                                classes, compiled and published into the fixture repo,
+ │                                run with their own JRS_CACHE_DIR
  │
  └── require_jdk!          tests needing javac skip loudly (SKIPPED) without one
 
@@ -913,7 +932,8 @@ design regression, not a style nit.
 | `jrs.lock` holds no absolute paths; `manifest-checksum` triggers re-resolution | `lockfile.rs` |
 | Resolution reads `effective_dependencies()`, never `dependencies` alone | `manifest.rs`, `resolve/mod.rs` |
 | A managed version replaces what a POM asks for, before mediation; a declared version still wins for its own dependency | `resolve::admissible`, `resolve::with_managed_versions` |
-| A compiler's or a task's graph never meets the project's | `resolve::resolve_tool`, `resolve::resolve_tool_dependencies` |
+| A compiler's, a task's or the obfuscator's graph never meets the project's | `resolve::resolve_tool`, `resolve::resolve_tool_dependencies` |
+| Obfuscation runs after packaging, over the assembled jar, keeping the entry point and `ServiceLoader` names; it changes names, not behaviour or timing | `obfuscate.rs`, `cli.rs` |
 | A group a repository's `groups` claim is looked up nowhere else | `resolve::repo::repositories_for` |
 | Tasks are subprocesses at fixed points; built-in phases cannot be reordered | `task.rs`, `cli.rs` |
 

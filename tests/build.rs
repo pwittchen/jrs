@@ -8,7 +8,9 @@ mod common;
 
 use std::path::{Path, PathBuf};
 
-use common::{FAKE_LAUNCHER_1, FAKE_LAUNCHER_6, FixtureRepo, Scratch, copy_dir, fixtures};
+use common::{
+    FAKE_LAUNCHER_1, FAKE_LAUNCHER_6, FAKE_PROGUARD, FixtureRepo, Scratch, copy_dir, fixtures,
+};
 use jrs::cli;
 use jrs::compile::{self, CompileUnit};
 use jrs::manifest::Manifest;
@@ -1587,6 +1589,118 @@ fn a_task_runs_a_java_tool_resolved_as_a_graph_of_its_own() {
         std::fs::read_to_string(root.join("target/greeting.txt")).unwrap(),
         "greeted offline"
     );
+}
+
+#[test]
+fn package_obfuscate_runs_proguard_over_the_assembled_jar() {
+    let toolchain = require_jdk!();
+    let scratch = Scratch::new("build-obfuscate");
+    let fixture = FixtureRepo::new(&scratch);
+    fixture.publish_fake_obfuscator(&scratch, &toolchain);
+
+    scratch.write(
+        "app/jrs.toml",
+        &format!(
+            "[project]\nname = \"app\"\nversion = \"1.0.0\"\nmain-class = \"com.example.Main\"\n\n\
+             [obfuscate]\nversion = \"{FAKE_PROGUARD}\"\nkeep = [\"com.example.Api\"]\n\n{}",
+            fixture.manifest_section()
+        ),
+    );
+    scratch.write(
+        "app/src/main/java/com/example/Main.java",
+        "package com.example;\n\npublic class Main {\n    \
+         public static void main(String[] a) { System.out.println(\"hi\"); }\n}\n",
+    );
+    // A ServiceLoader provider: its name must survive obfuscation, so the
+    // services file still resolves.
+    scratch.write(
+        "app/src/main/resources/META-INF/services/com.example.Greeter",
+        "com.example.GreeterImpl\n# a comment line is ignored\n",
+    );
+    let root = scratch.join("app");
+
+    // Plain `jrs package` leaves the jar untouched and pins nothing to run.
+    let (code, _, stderr) = jrs_isolated(&scratch, &root, &["package"]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(!stderr.contains("Obfuscating"), "{stderr}");
+    assert!(
+        !std::path::Path::new(&root.join("target/.jrs/obfuscated.jar.proguard")).exists(),
+        "the plain jar is unaffected"
+    );
+
+    // But the obfuscator's graph is pinned whenever [obfuscate] is present, so
+    // the lockfile is stable whether or not the flag is passed.
+    let lock = std::fs::read_to_string(root.join("jrs.lock")).unwrap();
+    assert!(lock.contains("version = 2\n"), "{lock}");
+    let (_, tool) = lock.split_once("\n[[tool]]\n").unwrap();
+    assert!(tool.starts_with("name = \"obfuscator\"\n"), "{tool}");
+    assert!(
+        tool.contains("artifact = \"proguard-base\"")
+            && tool.contains(&format!("version = \"{FAKE_PROGUARD}\"")),
+        "{tool}"
+    );
+    assert!(
+        tool.contains("checksum = \"sha1:"),
+        "a fresh graph is pinned: {tool}"
+    );
+
+    // `--obfuscate` runs ProGuard over the assembled jar.
+    let (code, stdout, stderr) = jrs_isolated(&scratch, &root, &["package", "--obfuscate"]);
+    assert_eq!(code, 0, "{stdout}{stderr}");
+    assert!(stderr.contains("Obfuscating"), "{stderr}");
+    // The summary row reports the obfuscated jar (to stderr in plain mode).
+    assert!(stderr.contains("obfuscated"), "{stderr}");
+    assert!(root.join("target/app-1.0.0.jar").is_file());
+
+    // The configuration ProGuard was handed keeps the entry point, the service
+    // provider by name, and the manifest's own `keep` — and it saw the support
+    // jar, so the tool was resolved as a graph.
+    let config = std::fs::read_to_string(root.join("target/.jrs/obfuscated.jar.proguard")).unwrap();
+    assert!(
+        config.contains("-keep public class com.example.Main {"),
+        "{config}"
+    );
+    assert!(
+        config.contains("public static void main(java.lang.String[]);"),
+        "{config}"
+    );
+    assert!(
+        config.contains("-keep class com.example.GreeterImpl {"),
+        "the ServiceLoader provider keeps its name: {config}"
+    );
+    assert!(config.contains("-keep class com.example.Api"), "{config}");
+    assert!(config.contains("-dontshrink"), "{config}");
+    assert!(config.contains("-dontoptimize"), "{config}");
+    assert!(
+        config.contains("support=fake-compiler-support"),
+        "resolved as a graph: {config}"
+    );
+
+    // `jrs tree --tool obfuscator` prints ProGuard's own graph.
+    let (code, tree, stderr) = jrs_isolated(&scratch, &root, &["tree", "--tool", "obfuscator"]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(
+        tree.contains(&format!("com.guardsquare:proguard-base:{FAKE_PROGUARD}")),
+        "{tree}"
+    );
+
+    // Without the flag it never runs; with the flag on a project that has no
+    // [obfuscate] table it is a usage error.
+    scratch.write(
+        "bare/jrs.toml",
+        &format!(
+            "[project]\nname = \"bare\"\nversion = \"1.0.0\"\nmain-class = \"com.example.Main\"\n\n{}",
+            fixture.manifest_section()
+        ),
+    );
+    scratch.write(
+        "bare/src/main/java/com/example/Main.java",
+        "package com.example;\n\npublic class Main {\n    public static void main(String[] a) {}\n}\n",
+    );
+    let (code, _, stderr) =
+        jrs_isolated(&scratch, &scratch.join("bare"), &["package", "--obfuscate"]);
+    assert_eq!(code, 2, "{stderr}");
+    assert!(stderr.contains("[obfuscate] table"), "{stderr}");
 }
 
 #[test]

@@ -1,0 +1,20 @@
+// The Guardsquare ProGuard plugin: the plugin's own version is the ProGuard
+// release, so it pins [obfuscate].version. The keep rules live in a
+// `proguard { }` task jrs cannot read, so they are flagged for review.
+plugins {
+    id 'java'
+    id 'application'
+    id 'com.guardsquare.proguard' version '7.6.1'
+}
+
+version = '1.0.0'
+
+application {
+    mainClass = 'com.example.Main'
+}
+
+proguard {
+    configurations.register('release') {
+        configuration file('proguard-rules.pro')
+    }
+}
