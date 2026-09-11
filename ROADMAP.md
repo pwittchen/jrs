@@ -1,27 +1,7 @@
 # jrs — Roadmap
 
-Every milestone in [SPEC §12](specs/INITIAL_SPEC.md#12-roadmap) has landed, and so has
-most of what this document used to list: Windows and macOS in CI, SNAPSHOT
-dependencies, the long dependency form, cache maintenance, JVM arguments, JDK
-pinning, watch mode, Javadoc, test reports and selection, JUnit 4, coverage,
-the portable layout, runtime images, jar manifest attributes, sources and
-Javadoc jars, distribution archives, GraalVM native images, Spring's
-registries merged in fat jars, `add`/`remove`/`outdated`, `tree` filters,
-`classpath`, `init` templates, shell completions, the M5 benchmark,
-user-defined tasks and lifecycle hooks (SPEC §7.6), with literal Gradle
-tasks translated by `jrs migrate`, Kotlin, Scala and
-Groovy alongside Java (SPEC §7.7), build timings (`--timings`, SPEC §5.3.9),
-the `project.jrs-version` minimum (SPEC §4.3), the machine-readable
-project model: `jrs metadata` and `jrs fetch --sources` (SPEC §5.4),
-runtime-only dependencies, local jar files (SPEC §8.8), repository content
-filtering (SPEC §8.7), and, for the test and run JVMs, Java agents from the
-resolved graph, an environment and working directory, and `--debug`. So have
-the HTML test report, `--rerun-failed`, `--fail-fast`, test retries that
-report flaky tests, and coverage minimums. So have compile avoidance for the
-tests, which recompile only when the main classes' API changes (SPEC §7.2),
-and Scaladoc and Groovydoc for `jrs doc` (SPEC §7.4).
-
-What is left is below. Much of it closes a gap with Gradle, and those items
+Every milestone in [SPEC §12](specs/INITIAL_SPEC.md#12-roadmap) has landed. This
+document lists only what is still open. Much of it closes a gap with Gradle, and those items
 name the Gradle feature they answer. jrs is not trying to become Gradle
 (SPEC §1.2), so each one is the single-module, declarative version of what a
 Gradle build gets from a plugin or a DSL block. Anything that touches a
@@ -154,15 +134,9 @@ and testing the same projects, with the results written up in a report.
 
 - **Migration fidelity.** Keep growing the `tests/fixtures/migrate/` corpus
   from real-world `pom.xml` and Gradle builds. Every construct that lands in the
-  "not migrated" block is a candidate for translation. Classifiers, exclusions,
-  `provided`/`compileOnly`, `runtime`/`runtimeOnly`, test-jars, annotation
-  processors, Surefire's `argLine`, Gradle's JVM arguments, `environment` and
-  `workingDir`, `jar { manifest { attributes } }`, literal `files()` and
-  `fileTree()`, repository `content { }` / `exclusiveContent { }` group
-  filters, and literal Gradle tasks (`Exec`, `JavaExec`, `dependsOn`-only
-  aggregates, and `dependsOn` / `finalizedBy` as hooks) now translate;
-  profiles, `system` scope and anything computed still do not. A
-  `system`-scoped jar under `${project.basedir}` could now become a local jar.
+  "not migrated" block is a candidate for translation. Profiles, `system` scope
+  and anything computed still do not translate. A `system`-scoped jar under
+  `${project.basedir}` could become a local jar.
   Maven's `exec-maven-plugin` is still reported whole; an execution bound to
   `generate-sources` would map cleanly onto a `pre-compile` task
   ([TASKS.md §12](specs/TASKS.md#12-open-questions)). Each item in sections
@@ -176,8 +150,10 @@ and testing the same projects, with the results written up in a report.
   The versions come from the `spring-boot-dependencies` BOM that the plugins
   import. The Gradle reader needs `g:a:v`, so every starter is listed as not
   migrated, both plugins get "jrs has no plugin system", and the manifest ends up
-  with an empty `[dependencies]`. Getting this working takes three pieces, and
-  the second has landed:
+  with an empty `[dependencies]`. The fat jar already merges Spring's
+  registries (SPEC §9.2); jrs builds a flat fat jar, not Boot's nested
+  `bootJar` layout, and the proof below is what shows that is enough. Two
+  pieces are left:
   - *Versions from a BOM.* The resolver already folds imported BOMs into a
     POM's managed versions (`absorb_import` in `resolve/pom.rs`), but a
     manifest cannot declare a BOM, and it rejects a dependency with an empty
@@ -193,12 +169,6 @@ and testing the same projects, with the results written up in a report.
     never touches the network today (`migrate/maven.rs`). Either way it needs a spec
     decision. Maven's `spring-boot-starter-parent` has the same problem: it is a
     parent in a repository, so it is reported and its managed versions are lost.
-  - *A fat jar that boots* — done. The fat jar merges
-    `META-INF/spring.factories` key by key, takes the union of the
-    `META-INF/spring/*.imports` files' lines, and concatenates
-    `spring.handlers`, `spring.schemas` and `spring.tooling`, the project's own
-    copy first (SPEC §9.2). jrs builds a flat fat jar, not Boot's nested
-    `bootJar` layout; the proof below is what shows that is enough.
   - *Proof.* Add Groovy and Kotlin DSL fixtures under `tests/fixtures/migrate/`,
     taken unchanged from `start.spring.io`. Add a `network-tests` case that
     migrates one of them, then builds it, runs its tests and runs the packaged
@@ -224,11 +194,11 @@ listed so the discussion has a home, not because they are planned.
 | Publishing (Gradle's `maven-publish`, `publishToMavenLocal`) | Non-goal: SPEC §1.2 rules out `deploy`/`publish`. Done properly it means generating a POM from the manifest, sources and Javadoc jars (`jrs package --sources --javadoc` writes them), signing, and uploading with credentials. A `jrs install` into `~/.m2` is the smallest version, and it is the one that makes library development across projects bearable without a reactor |
 | A build cache (Gradle's local and remote build cache) | New shared state beside the dependency cache, holding compile, test and task outputs keyed by their inputs' hash. The fingerprints already exist; the cache would reuse outputs across branches, checkouts and CI machines |
 | JDK auto-provisioning (Gradle's toolchain resolvers, foojay) | Downloads from a host that is not a Maven repository. Unix JDKs ship as tar.gz, which means new crates. Today a pinned JDK that is not installed is an error listing the ones that are (SPEC §7.1) |
-| A wrapper that fetches the pinned jrs (Gradle's `gradlew`) | jrs would download and run executables. `project.jrs-version` (SPEC §4.3), which has landed, was the part that needed no spec change: an older jrs stops and names the version the project needs |
+| A wrapper that fetches the pinned jrs (Gradle's `gradlew`) | jrs would download and run executables. Today `project.jrs-version` (SPEC §4.3) makes an older jrs stop and name the version the project needs |
 | Extra source sets and test suites (`integrationTest`, `java-test-fixtures`), multi-release jars | SPEC §3's layout is `main` plus `test`. A second test suite with its own dependencies and its own `jrs test` selection is Gradle's JVM Test Suite plugin; multi-release jars need a source root per Java release |
 | Build variants (Gradle `-P` properties, Maven profiles) | The manifest is one fixed configuration. Conditional configuration is the start of a DSL |
 | PGP signature verification (Gradle's dependency verification) | An OpenPGP crate and a trust store. `jrs.lock` already pins a checksum for every non-snapshot jar, which covers the "bytes changed under the same version" case |
-| A Build Server Protocol server | A long-lived JSON-RPC process that IntelliJ, Metals and VS Code can talk to. `jrs metadata` (SPEC §5.4), which has landed, is the first step and needs no daemon |
+| A Build Server Protocol server | A long-lived JSON-RPC process that IntelliJ, Metals and VS Code can talk to. `jrs metadata` (SPEC §5.4) is the first step and needs no daemon |
 | Annotation-processor path in the manifest | Non-goal: no annotation-processor configuration. Processors on the compile classpath, as `compile-only` dependencies with `-proc:full`, work today. Error Prone, NullAway and other `javac` plugins need a processor path too |
 | JPMS (`module-info.java`, module path) | Non-goal |
 | JVM languages beyond Kotlin, Scala and Groovy; Kotlin Multiplatform | Non-goal (SPEC §1.2) |
