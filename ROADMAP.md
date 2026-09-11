@@ -8,7 +8,8 @@ the portable layout, runtime images, jar manifest attributes, sources and
 Javadoc jars, distribution archives, GraalVM native images, Spring's
 registries merged in fat jars, `add`/`remove`/`outdated`, `tree` filters,
 `classpath`, `init` templates, shell completions, the M5 benchmark,
-user-defined tasks and lifecycle hooks (SPEC §7.6), Kotlin, Scala and
+user-defined tasks and lifecycle hooks (SPEC §7.6), with literal Gradle
+tasks translated by `jrs migrate`, Kotlin, Scala and
 Groovy alongside Java (SPEC §7.7), build timings (`--timings`, SPEC §5.3.9),
 the `project.jrs-version` minimum (SPEC §4.3), the machine-readable
 project model: `jrs metadata` and `jrs fetch --sources` (SPEC §5.4),
@@ -155,11 +156,13 @@ and testing the same projects, with the results written up in a report.
   `provided`/`compileOnly`, `runtime`/`runtimeOnly`, test-jars, annotation
   processors, Surefire's `argLine`, Gradle's JVM arguments, `environment` and
   `workingDir`, `jar { manifest { attributes } }`, literal `files()` and
-  `fileTree()`, and repository `content { }` / `exclusiveContent { }` group
-  filters now translate; profiles, `system` scope and anything computed still
-  do not. A `system`-scoped jar under `${project.basedir}` could now become a
-  local jar. An `exec-maven-plugin` execution bound
-  to `generate-sources` would map cleanly onto a `pre-compile` task
+  `fileTree()`, repository `content { }` / `exclusiveContent { }` group
+  filters, and literal Gradle tasks (`Exec`, `JavaExec`, `dependsOn`-only
+  aggregates, and `dependsOn` / `finalizedBy` as hooks) now translate;
+  profiles, `system` scope and anything computed still do not. A
+  `system`-scoped jar under `${project.basedir}` could now become a local jar.
+  Maven's `exec-maven-plugin` is still reported whole; an execution bound to
+  `generate-sources` would map cleanly onto a `pre-compile` task
   ([TASKS.md §12](specs/TASKS.md#12-open-questions)). Each item in sections
   2–4 that answers a Gradle construct (`platform()`, `maxParallelForks`)
   should arrive with its migration row and a fixture.
