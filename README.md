@@ -6,7 +6,7 @@
 
 <p align="center">A JVM build system, written in Rust.</p>
 
-<p align="center"><a href="https://getjrs.dev">https://getjrs.dev</a></p>
+<p align="center"><a href="https://getjrs.dev"><strong>getjrs.dev</strong></a></p>
 
 <p align="center">
   <a href="https://github.com/pwittchen/jrs/actions/workflows/rust.yml"><img src="https://github.com/pwittchen/jrs/actions/workflows/rust.yml/badge.svg" alt="Rust"></a>
