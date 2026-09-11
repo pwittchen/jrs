@@ -482,6 +482,43 @@ fn the_gradle_forks_fixture_translates_exactly() {
     );
 }
 
+/// Versions kept in variables, in both DSLs: `ext`, `def`, `val`, `extra` and
+/// gradle.properties, used in dependency strings, map notation, platforms, a
+/// BOM, a constraint and Spring Boot's plugin. A variable jrs cannot read
+/// leaves what uses it out, by name — never in without a version.
+#[test]
+fn the_gradle_variables_fixtures_translate_exactly() {
+    for name in ["gradle-variables", "gradle-variables-kts"] {
+        let (migration, dir) = migrate_fixture(name);
+        assert_eq!(migration.manifest.render(None), expected(&dir), "{name}");
+
+        let review = migration.report.needs_review.join("\n");
+        for line in [
+            "nettyVersion = 4.2.4.Final → 2 dependencies — the manifest writes",
+            "junitBomVersion = 5.13.4 (from `junitVersion`) → 1 dependency",
+            "springBootVersion = 3.5.4 → plugin `org.springframework.boot`",
+            "snakeyamlVersion = 2.4 → 1 dependency",
+        ] {
+            assert!(review.contains(line), "{name}: {review}");
+        }
+
+        let skipped = &migration.report.not_migrated;
+        assert_eq!(skipped.len(), 2, "{name}: {skipped:?}");
+        assert!(
+            skipped[0].contains("`buildNumber` is `System.getenv("),
+            "{name}: {skipped:?}"
+        );
+        assert!(
+            skipped[1].contains("`h2Version` is assigned more than once"),
+            "{name}: {skipped:?}"
+        );
+        assert!(
+            !skipped.iter().any(|s| s.contains("ext")),
+            "every variable in `ext {{ }}` was used: {skipped:?}"
+        );
+    }
+}
+
 /// Profiles as a plain `mvn` build picks them: the default one merged in —
 /// its property, its dependency and its surefire settings, merged over the
 /// project's own — and the ones waiting on `-P`, a property or the JDK
@@ -536,6 +573,8 @@ fn every_expected_manifest_is_a_manifest_jrs_can_read() {
         "maven-exec",
         "maven-profiles",
         "gradle-forks",
+        "gradle-variables",
+        "gradle-variables-kts",
     ] {
         let (migration, dir) = migrate_fixture(name);
         let text = migration.render_manifest();

@@ -1,0 +1,88 @@
+// Versions kept in variables: set in `ext`, `def` and gradle.properties, used
+// in dependency strings, map notation, platforms, a BOM, a constraint and
+// Spring Boot's plugin. Two cannot be read, and what uses them is reported.
+buildscript {
+    ext {
+        springBootVersion = '3.5.4'
+    }
+    repositories {
+        mavenCentral()
+    }
+    dependencies {
+        classpath "org.springframework.boot:spring-boot-gradle-plugin:${springBootVersion}"
+    }
+}
+
+plugins {
+    id 'java'
+    id 'application'
+}
+
+apply plugin: 'org.springframework.boot'
+apply plugin: 'io.spring.dependency-management'
+
+group = 'com.example'
+version = '1.4.0'
+
+java {
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(21)
+    }
+}
+
+ext {
+    guavaVersion = '33.4.8-jre'
+    slf4jVersion = '2.0.17'
+    set('springCloudVersion', "2025.0.0")
+}
+ext.nettyVersion = '4.2.4.Final'
+def lombokVersion = '1.18.38'
+def junitVersion = '5.13.4'
+def junitBomVersion = "$junitVersion"
+def testcontainersVersion = '1.21.3'
+
+// Neither of these is a literal set once.
+def buildNumber = System.getenv('BUILD_NUMBER') ?: 'dev'
+def h2Version = '2.3.232'
+if (project.hasProperty('legacyH2')) {
+    h2Version = '2.2.224'
+}
+
+repositories {
+    mavenCentral()
+}
+
+dependencyManagement {
+    imports {
+        mavenBom "org.springframework.cloud:spring-cloud-dependencies:${springCloudVersion}"
+    }
+}
+
+dependencies {
+    implementation platform("org.testcontainers:testcontainers-bom:$testcontainersVersion")
+    implementation enforcedPlatform("org.junit:junit-bom:${junitBomVersion}")
+
+    implementation 'org.springframework.boot:spring-boot-starter-web'
+    implementation "com.google.guava:guava:$guavaVersion"
+    implementation "org.slf4j:slf4j-api:${slf4jVersion}"
+    implementation "io.netty:netty-codec-http:${rootProject.ext.nettyVersion}"
+    runtimeOnly "io.netty:netty-transport-native-epoll:${project.nettyVersion}:linux-x86_64"
+    implementation "com.fasterxml.jackson.core:jackson-databind:${project.property('jacksonVersion')}"
+    compileOnly group: 'org.projectlombok', name: 'lombok', version: lombokVersion
+    annotationProcessor group: 'org.projectlombok', name: 'lombok', version: "$lombokVersion"
+
+    constraints {
+        implementation "org.yaml:snakeyaml:$snakeyamlVersion"
+    }
+
+    // Left out, never written without a version.
+    implementation group: 'com.example', name: 'build-info', version: buildNumber
+    testRuntimeOnly "com.h2database:h2:$h2Version"
+
+    testImplementation 'org.junit.jupiter:junit-jupiter'
+    testImplementation 'org.testcontainers:postgresql'
+}
+
+application {
+    mainClass = 'com.example.VariablesApp'
+}

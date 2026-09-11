@@ -19,7 +19,7 @@ repositories {
     // maven { url 'https://commented.example.com' }
 }
 
-def sharedVersion = '1.2.3'
+def sharedVersion = System.getenv('SHARED_VERSION') ?: '1.2.3'
 
 dependencies {
     implementation libs.guava

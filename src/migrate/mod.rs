@@ -9,6 +9,7 @@ pub mod gradle;
 mod gradle_files;
 mod gradle_repos;
 mod gradle_tasks;
+mod gradle_vars;
 pub mod maven;
 mod maven_profiles;
 

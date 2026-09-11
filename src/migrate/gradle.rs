@@ -12,6 +12,7 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
+use super::gradle_vars::{self, Unread, Variables};
 use super::{Migration, Report, Source};
 use crate::compile::lang::Language;
 use crate::error::{IoResultExt, Result};
@@ -71,6 +72,8 @@ pub fn migrate(build_file: &Path, root: &Path) -> Result<Migration> {
     let script = strip_comments(&std::fs::read_to_string(build_file).path(build_file)?);
     let settings = read_settings(root, &mut report);
     let catalog = read_catalog(root, &mut report);
+    let kotlin_dsl = build_file.extension().is_some_and(|e| e == "kts");
+    let mut vars = Variables::read(&script, root, kotlin_dsl);
 
     let name = settings
         .root_project_name
@@ -94,15 +97,22 @@ pub fn migrate(build_file: &Path, root: &Path) -> Result<Migration> {
     let mut out = manifest::blank(&name, &version, root);
     report.migrated(format!("project.name = {name}"));
 
-    let plugins = read_plugins(&script);
+    let plugins = read_plugins(&script, &mut vars);
     read_java(&script, &mut out, &mut report);
     // Before the dependencies: `kotlin("reflect")` takes [kotlin]'s version.
     read_kotlin(&script, &plugins, &mut out, &mut report);
     read_main_class(&script, &mut out, &mut report);
     // Before the dependencies: whether anything manages versions decides
     // whether a coordinate without one can be migrated.
-    read_managed(&script, &plugins, &catalog, &mut out, &mut report);
-    read_dependencies(&script, &catalog, &mut out, &mut report);
+    read_managed(
+        &script,
+        &plugins,
+        &catalog,
+        &mut vars,
+        &mut out,
+        &mut report,
+    );
+    read_dependencies(&script, &catalog, &mut vars, &mut out, &mut report);
     // After them: `groovy` and `scala` take their library's version.
     read_library_languages(&plugins, &mut out, &mut report);
     read_jvm_args(&script, &mut out, &mut report);
@@ -112,6 +122,7 @@ pub fn migrate(build_file: &Path, root: &Path) -> Result<Migration> {
     read_shadow(&script, &plugins, &mut out, &mut report);
     super::gradle_repos::read(&script, &mut out, &mut report);
     super::gradle_tasks::read(&script, &mut out, &mut report);
+    vars.report(&mut report);
     report_the_unreadable(&script, &settings, &plugins, &mut report);
 
     Ok(Migration {
@@ -306,7 +317,13 @@ fn read_main_class(script: &str, out: &mut Manifest, report: &mut Report) {
     }
 }
 
-fn read_dependencies(script: &str, catalog: &Catalog, out: &mut Manifest, report: &mut Report) {
+fn read_dependencies(
+    script: &str,
+    catalog: &Catalog,
+    vars: &mut Variables,
+    out: &mut Manifest,
+    report: &mut Report,
+) {
     // The declaration whose `{ exclude ... }` closure is still open, and how
     // deep inside it the scan is.
     let mut closure: Option<(Target, usize, usize)> = None;
@@ -360,8 +377,9 @@ fn read_dependencies(script: &str, catalog: &Catalog, out: &mut Manifest, report
             continue;
         };
 
-        // Everything up to a trailing closure is the declaration itself.
-        let (declaration, inline_closure) = match trimmed.find('{') {
+        // Everything up to a trailing closure is the declaration itself; the
+        // braces of `"g:a:${v}"` open none.
+        let (declaration, inline_closure) = match braces(trimmed).first {
             Some(at) => (&trimmed[..at], Some(&trimmed[at..])),
             None => (trimmed, None),
         };
@@ -382,6 +400,7 @@ fn read_dependencies(script: &str, catalog: &Catalog, out: &mut Manifest, report
             kotlin.as_deref(),
             managed,
             catalog,
+            vars,
             report,
         ) else {
             continue;
@@ -421,13 +440,16 @@ fn read_dependencies(script: &str, catalog: &Catalog, out: &mut Manifest, report
 /// One dependency declaration, without its closure: a catalog reference, a
 /// `g:a:v` literal, the map notation, or `kotlin("<module>")` at `kotlin`,
 /// the `[kotlin]` version. A coordinate without a version is migrated as one
-/// when something `[managed]` holds (`managed`) can version it.
+/// when something `[managed]` holds (`managed`) can version it. A version
+/// from a variable is read through `vars`; one that cannot be read leaves
+/// the declaration out.
 fn read_declaration(
     text: &str,
     config: &str,
     kotlin: Option<&str>,
     managed: bool,
     catalog: &Catalog,
+    vars: &mut Variables,
     report: &mut Report,
 ) -> Option<Dependency> {
     if let Some((module, version)) = kotlin_notation(text) {
@@ -461,22 +483,37 @@ fn read_declaration(
         };
     }
 
-    // `implementation 'g:a:v'` / `implementation("g:a:v")`, or `'g:a'`
-    let literals = quoted(text);
-    if let Some(dep) = literals.first().and_then(|s| parse_gav(s)) {
-        return Some(dep);
+    let unread = |why: Unread, report: &mut Report| {
+        report.skipped(format!(
+            "`{trimmed}` — {why}; jrs writes no dependency without its version, so add \
+             it to jrs.toml by hand"
+        ));
+        None
+    };
+
+    // `implementation 'g:a:v'` / `implementation("g:a:v")`, `"g:a:$v"`, or `'g:a'`
+    match literal_gav(text, vars) {
+        Ok(Some((dep, names))) => {
+            vars.used_by_dependency(&names);
+            return Some(dep);
+        }
+        Ok(None) => {}
+        Err(why) => return unread(why, report),
     }
+    let literals = quoted(text);
     if let Some(dep) = literals.first().and_then(|s| parse_ga(s)) {
         return unversioned(dep, report);
     }
 
     // `implementation group: 'g', name: 'a', version: 'v'`
-    if let Some(dep) = parse_map_notation(text) {
-        return if dep.is_managed() {
-            unversioned(dep, report)
-        } else {
-            Some(dep)
-        };
+    match parse_map_notation(text, vars) {
+        Some(Ok((dep, _))) if dep.is_managed() => return unversioned(dep, report),
+        Some(Ok((dep, names))) => {
+            vars.used_by_dependency(&names);
+            return Some(dep);
+        }
+        Some(Err(why)) => return unread(why, report),
+        None => {}
     }
 
     if literals.len() == 1 {
@@ -603,10 +640,12 @@ fn parse_exclude(text: &str) -> Option<Exclusion> {
 
 /// One statement in `constraints { }`. A constraint versions the artifact
 /// wherever it turns up, which is what a `[managed]` version does; only a
-/// literal `g:a:v` with no closure (`plain`) is one jrs can read.
+/// literal `g:a:v`, perhaps from a variable, with no closure (`plain`) is one
+/// jrs can read.
 fn constraint(
     statement: &str,
     plain: bool,
+    vars: &mut Variables,
     out: &mut Manifest,
     report: &mut Report,
     pinned: &mut usize,
@@ -614,12 +653,16 @@ fn constraint(
     if !leading_word(statement).is_some_and(|w| is_configuration(&w)) {
         return;
     }
-    match quoted(statement).first().and_then(|s| parse_gav(s)) {
-        Some(d) if plain => {
+    match literal_gav(statement, vars) {
+        Ok(Some((d, names))) if plain => {
+            vars.used_by_dependency(&names);
             if super::add_managed(out, &d.group, &d.artifact, &d.version) {
                 *pinned += 1;
             }
         }
+        Err(why) => report.skipped(format!(
+            "`{statement}` — {why}; pin it in [managed] by hand"
+        )),
         _ => report.skipped(format!(
             "`{statement}` — a constraint jrs cannot read: only a literal \
              group:artifact:version is; pin it in [managed] by hand"
@@ -657,6 +700,7 @@ fn read_managed(
     script: &str,
     plugins: &[Plugin],
     catalog: &Catalog,
+    vars: &mut Variables,
     out: &mut Manifest,
     report: &mut Report,
 ) {
@@ -679,15 +723,15 @@ fn read_managed(
             ),
             Some(_) => {}
             None => report.skipped(format!(
-                "{from} — its version is set somewhere jrs does not read (settings, a \
-                 catalog, a variable), so Spring Boot's BOM was not added to [managed]"
+                "{from} — {}, so Spring Boot's BOM was not added to [managed]",
+                unread_version(boot)
             )),
         }
         super::spring_boot_parameters(out, from, report);
         super::spring_boot_application(out, from, report);
     }
 
-    let mut pinned = read_dependency_management(script, out, report);
+    let mut pinned = read_dependency_management(script, vars, out, report);
 
     let mut constraints = 0usize;
     for line in block_lines(script, "dependencies") {
@@ -695,15 +739,16 @@ fn read_managed(
         let (opens, closes) = (trimmed.matches('{').count(), trimmed.matches('}').count());
         if constraints > 0 {
             constraints = (constraints + opens).saturating_sub(closes);
-            constraint(trimmed, opens == 0, out, report, &mut pinned);
+            let plain = braces(trimmed).first.is_none();
+            constraint(trimmed, plain, vars, out, report, &mut pinned);
             continue;
         }
         if let Some(rest) = trimmed.strip_prefix("constraints")
             && rest.trim_start().starts_with('{')
         {
             // `constraints { implementation 'g:a:v' }` on one line.
-            for statement in rest.trim_start()[1..].split(['}', ';']) {
-                constraint(statement.trim(), true, out, report, &mut pinned);
+            for statement in gradle_vars::statements(rest) {
+                constraint(&statement, true, vars, out, report, &mut pinned);
             }
             constraints = opens.saturating_sub(closes);
             continue;
@@ -721,7 +766,18 @@ fn read_managed(
         } else if let Some(reference) = catalog_reference(argument) {
             catalog.get(&reference).filter(|d| !d.is_managed()).cloned()
         } else {
-            quoted(argument).first().and_then(|s| parse_gav(s))
+            match literal_gav(argument, vars) {
+                Ok(found) => found.map(|(bom, names)| {
+                    vars.used_by_dependency(&names);
+                    bom
+                }),
+                Err(why) => {
+                    report.skipped(format!(
+                        "`{trimmed}` — {why}; add the platform to [managed] as a BOM by hand"
+                    ));
+                    continue;
+                }
+            }
         };
         let Some(bom) = bom else {
             report.skipped(format!(
@@ -757,26 +813,47 @@ fn read_managed(
 /// The dependency-management plugin's `dependencyManagement { }` block: its
 /// `mavenBom` imports and `dependency` pins. Returns how many versions it
 /// pinned.
-fn read_dependency_management(script: &str, out: &mut Manifest, report: &mut Report) -> usize {
+fn read_dependency_management(
+    script: &str,
+    vars: &mut Variables,
+    out: &mut Manifest,
+    report: &mut Report,
+) -> usize {
     let mut pinned = 0;
     for line in block_lines(script, "dependencyManagement") {
         // `imports { mavenBom '...' }` is as often written on one line as on
         // three, so each statement between braces is read on its own.
-        for statement in line.split(['{', '}', ';']).map(str::trim) {
+        for statement in gradle_vars::statements(line) {
+            let statement = statement.as_str();
             let Some(word) = leading_word(statement) else {
                 continue;
             };
-            let literal = quoted(statement).first().and_then(|s| parse_gav(s));
+            if !matches!(word.as_str(), "mavenBom" | "dependency" | "dependencySet") {
+                continue;
+            }
+            let literal = match literal_gav(statement, vars) {
+                Ok(literal) => literal,
+                Err(why) => {
+                    report.skipped(format!(
+                        "`{statement}` — {why}; add it to [managed] by hand"
+                    ));
+                    continue;
+                }
+            };
             match (word.as_str(), literal) {
-                ("mavenBom", Some(bom)) => super::add_bom(
-                    out,
-                    &bom.group,
-                    &bom.artifact,
-                    &bom.version,
-                    &format!("`{statement}`"),
-                    report,
-                ),
-                ("dependency", Some(d)) => {
+                ("mavenBom", Some((bom, names))) => {
+                    vars.used_by_dependency(&names);
+                    super::add_bom(
+                        out,
+                        &bom.group,
+                        &bom.artifact,
+                        &bom.version,
+                        &format!("`{statement}`"),
+                        report,
+                    );
+                }
+                ("dependency", Some((d, names))) => {
+                    vars.used_by_dependency(&names);
                     if super::add_managed(out, &d.group, &d.artifact, &d.version) {
                         pinned += 1;
                     }
@@ -1232,7 +1309,6 @@ fn report_the_unreadable(
             "allprojects",
             "`allprojects { }` — per-project configuration",
         ),
-        ("ext {", "`ext { }` — script variables jrs cannot evaluate"),
         (
             "sourceSets",
             "`sourceSets { }` — use project.source-dir instead",
@@ -1266,55 +1342,180 @@ fn report_the_unreadable(
 
 // ---- JVM languages (JVM_LANGUAGES.md §10) -----------------------------------
 
-/// One entry of the `plugins { }` block.
+/// One plugin the build applies.
 struct Plugin {
     id: String,
-    /// The version written beside the id, when it is a literal.
+    /// The version written beside the id, or on the `buildscript { }`
+    /// classpath, when jrs could read it.
     version: Option<String>,
+    /// Why a version written there could not be read.
+    unread: Option<Unread>,
+}
+
+impl Plugin {
+    fn new(id: String) -> Plugin {
+        Plugin {
+            id,
+            version: None,
+            unread: None,
+        }
+    }
 }
 
 /// `id 'x' version 'v'`, `id("x") version "v"`, `kotlin("jvm") version "v"`,
-/// and the Kotlin DSL's bare `java` or `groovy`.
-fn read_plugins(script: &str) -> Vec<Plugin> {
-    block_lines(script, "plugins")
+/// and the Kotlin DSL's bare `java` or `groovy`; then the older `apply
+/// plugin: 'x'`, at the version its `buildscript { }` classpath names.
+fn read_plugins(script: &str, vars: &mut Variables) -> Vec<Plugin> {
+    let mut plugins: Vec<Plugin> = block_lines(script, "plugins")
         .into_iter()
-        .filter_map(read_plugin)
-        .collect()
+        .filter_map(|line| read_plugin(line, vars))
+        .collect();
+    for id in applied_plugins(script) {
+        if !plugins.iter().any(|p| p.id == id) {
+            plugins.push(Plugin::new(id));
+        }
+    }
+    read_classpath(script, &mut plugins, vars);
+    plugins
 }
 
-fn read_plugin(line: &str) -> Option<Plugin> {
+fn read_plugin(line: &str, vars: &mut Variables) -> Option<Plugin> {
     let trimmed = line.trim();
     // `kotlin("jvm")` is Gradle's shorthand for `id("org.jetbrains.kotlin.jvm")`.
     if let Some(args) = trimmed.strip_prefix("kotlin(") {
         let (name, rest) = first_literal(args)?;
-        return Some(Plugin {
-            id: format!("org.jetbrains.kotlin.{name}"),
-            version: plugin_version(rest),
-        });
+        return Some(versioned_plugin(
+            format!("org.jetbrains.kotlin.{name}"),
+            rest,
+            vars,
+        ));
     }
     let bare = !trimmed.is_empty()
         && trimmed
             .chars()
             .all(|c| c.is_alphanumeric() || matches!(c, '-' | '_' | '.' | '`'));
     if bare {
-        return Some(Plugin {
-            id: trimmed.trim_matches('`').to_string(),
-            version: None,
-        });
+        return Some(Plugin::new(trimmed.trim_matches('`').to_string()));
     }
     let (id, rest) = first_literal(trimmed)?;
-    Some(Plugin {
-        id,
-        version: plugin_version(rest),
-    })
+    Some(versioned_plugin(id, rest, vars))
 }
 
-/// `version "2.2.0"` or `.version("2.2.0")` after a plugin's id. A version
-/// from a variable or a catalog is not one jrs can read.
-fn plugin_version(rest: &str) -> Option<String> {
+/// Plugin `id` at the version `rest` names after it: `version "2.2.0"` or
+/// `.version("2.2.0")`, a literal or a variable.
+fn versioned_plugin(id: String, rest: &str, vars: &mut Variables) -> Plugin {
     let rest = rest.trim_start_matches([')', ' ', '\t', '.']);
-    let (version, _) = first_literal(rest.strip_prefix("version")?)?;
-    (!version.contains('$')).then_some(version)
+    let Some(written) = rest.strip_prefix("version") else {
+        return Plugin::new(id);
+    };
+    let written = written.trim_start();
+    let expression = gradle_vars::leading_value(written.strip_prefix('(').unwrap_or(written));
+    if expression.is_empty() {
+        return Plugin::new(id);
+    }
+    match vars.evaluate(&expression) {
+        Ok((version, names)) => {
+            vars.used_by_plugin(&names, &id);
+            Plugin {
+                id,
+                version: Some(version),
+                unread: None,
+            }
+        }
+        Err(why) => Plugin {
+            id,
+            version: None,
+            unread: Some(why),
+        },
+    }
+}
+
+/// Where a plugin's version went unread, for the report.
+fn unread_version(plugin: &Plugin) -> String {
+    plugin.unread.as_ref().map_or_else(
+        || "its version is set somewhere jrs does not read (settings, a catalog)".to_string(),
+        |why| format!("its version could not be read: {why}"),
+    )
+}
+
+/// The plugins `apply plugin: 'x'` or `apply(plugin = "x")` applies at the top
+/// level of the script.
+fn applied_plugins(script: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut depth = 0isize;
+    for line in script.lines() {
+        let trimmed = line.trim();
+        let compact: String = trimmed.chars().filter(|c| !c.is_whitespace()).collect();
+        let applies = compact.starts_with("applyplugin:") || compact.starts_with("apply(plugin=");
+        if depth == 0
+            && applies
+            && let Some((id, _)) = first_literal(trimmed)
+        {
+            // The Kotlin plugin's id from before it had a dotted one.
+            out.push(if id == "kotlin" {
+                "org.jetbrains.kotlin.jvm".to_string()
+            } else {
+                id
+            });
+        }
+        depth += braces(line).depth;
+    }
+    out
+}
+
+/// The plugins a `buildscript { }` classpath carries, by the artifact that
+/// carries them: `group`, `artifact`, plugin id.
+const CLASSPATH_PLUGINS: &[(&str, &str, &str)] = &[
+    (
+        "org.springframework.boot",
+        "spring-boot-gradle-plugin",
+        "org.springframework.boot",
+    ),
+    (
+        "org.jetbrains.kotlin",
+        "kotlin-gradle-plugin",
+        "org.jetbrains.kotlin.jvm",
+    ),
+];
+
+/// A plugin applied without a version takes the one its artifact has on the
+/// `buildscript { }` classpath, as builds that `apply plugin:` write it —
+/// usually from a variable in the same block.
+fn read_classpath(script: &str, plugins: &mut [Plugin], vars: &mut Variables) {
+    for line in blocks_where(script, |header| header.starts_with("buildscript")) {
+        let trimmed = line.trim();
+        if leading_word(trimmed).as_deref() != Some("classpath") {
+            continue;
+        }
+        let Some((_, literal)) = gradle_vars::literals(trimmed).into_iter().next() else {
+            continue;
+        };
+        let mut parts = literal.split(':');
+        let (Some(group), Some(artifact)) = (parts.next(), parts.next()) else {
+            continue;
+        };
+        let Some((.., id)) = CLASSPATH_PLUGINS
+            .iter()
+            .find(|(g, a, _)| *g == group && *a == artifact)
+        else {
+            continue;
+        };
+        let Some(plugin) = plugins
+            .iter_mut()
+            .find(|p| p.id == *id && p.version.is_none())
+        else {
+            continue;
+        };
+        match literal_gav(trimmed, vars) {
+            Ok(Some((dep, names))) => {
+                vars.used_by_plugin(&names, id);
+                plugin.version = Some(dep.version);
+                plugin.unread = None;
+            }
+            Ok(None) => {}
+            Err(why) => plugin.unread = Some(why),
+        }
+    }
 }
 
 /// The plugins that turn a language on.
@@ -1347,8 +1548,8 @@ fn read_kotlin(script: &str, plugins: &[Plugin], out: &mut Manifest, report: &mu
                     super::enable_language(out, Language::Kotlin, version, &from, report);
                 }
                 None => report.skipped(format!(
-                    "{from} — its version is set somewhere jrs does not read (settings, a \
-                     catalog, a variable); no [kotlin] table was written"
+                    "{from} — {}; no [kotlin] table was written",
+                    unread_version(plugin)
                 )),
             }
         } else if let Some(name) = kotlin_compiler_plugin(&plugin.id) {
@@ -1881,20 +2082,59 @@ fn parse_ga(text: &str) -> Option<Dependency> {
     }
 }
 
-/// `implementation group: 'g', name: 'a', version: 'v'` (and `classifier:`).
-/// Without `version:`, the version is left to `[managed]`.
-fn parse_map_notation(line: &str) -> Option<Dependency> {
-    let field = |key: &str| -> Option<String> {
-        let at = line.find(&format!("{key}:"))?;
-        quoted(&line[at..]).into_iter().next()
+/// The first string literal in `text` as a `g:a:v` coordinate, with the
+/// variables in it replaced by their values, and the variables it named.
+/// `Ok(None)` when it is no coordinate; an error names a variable jrs could
+/// not read.
+fn literal_gav(
+    text: &str,
+    vars: &Variables,
+) -> std::result::Result<Option<(Dependency, Vec<String>)>, Unread> {
+    let Some((quote, literal)) = gradle_vars::literals(text).into_iter().next() else {
+        return Ok(None);
     };
-    let mut dep = Dependency::new(
-        field("group")?,
-        field("name")?,
-        field("version").unwrap_or_default(),
-    );
-    dep.classifier = field("classifier");
-    Some(dep)
+    if !literal.contains(':') {
+        return Ok(None);
+    }
+    let (coordinate, names) = if quote == '"' && literal.contains('$') {
+        vars.interpolate(&literal)?
+    } else {
+        (literal, Vec::new())
+    };
+    Ok(parse_gav(&coordinate).map(|dep| (dep, names)))
+}
+
+/// `implementation group: 'g', name: 'a', version: 'v'` (and `classifier:`),
+/// or the Kotlin DSL's `implementation(group = "g", name = "a", version = "v")`,
+/// each value a literal or a variable, and the variables it named. `None`
+/// when `line` is neither. Without a version, the version is left to
+/// `[managed]`; one that cannot be read is an error, never an empty version.
+fn parse_map_notation(
+    line: &str,
+    vars: &Variables,
+) -> Option<std::result::Result<(Dependency, Vec<String>), Unread>> {
+    let group = gradle_vars::map_field(line, "group")?;
+    let artifact = gradle_vars::map_field(line, "name")?;
+    let mut names = Vec::new();
+    let mut read = |expression: &str| {
+        vars.evaluate(expression).map(|(value, used)| {
+            names.extend(used);
+            value
+        })
+    };
+    let dep = (|| {
+        let (group, artifact) = (read(&group)?, read(&artifact)?);
+        let version = match gradle_vars::map_field(line, "version") {
+            Some(version) => read(&version)?,
+            None => String::new(),
+        };
+        let mut dep = Dependency::new(group, artifact, version);
+        dep.classifier = gradle_vars::map_field(line, "classifier")
+            .map(|c| read(&c))
+            .transpose()?;
+        Ok(dep)
+    })();
+    Some(dep.map(|dep| (dep, names)))
 }
 
 /// `JavaVersion.VERSION_21`, `21`, `'1.8'`, `JavaVersion.VERSION_1_8`.
@@ -2549,14 +2789,118 @@ junit = "org.junit.jupiter:junit-jupiter:5.10.2"
         assert!(parse_gav("com.example:thing:${version}").is_none());
 
         let dir = Dir::new("interpolated");
-        let migration =
-            dir.migrate("def v = '1.0'\ndependencies {\n  implementation \"g:a:$v\"\n}\n");
+        let migration = dir.migrate(
+            "def v = System.getenv('V')\ndependencies {\n  implementation \"g:a:$v\"\n  \
+             implementation 'g:b:$v'\n}\n",
+        );
         assert!(migration.manifest.dependencies.is_empty());
         let skipped = migration.report.not_migrated.join("\n");
         assert!(
-            skipped.contains("interpolated from a variable"),
+            skipped.contains("`implementation \"g:a:$v\"` — `v` is `System.getenv('V')`"),
             "{skipped}"
         );
+        assert!(
+            skipped.contains("`g:b:$v` is interpolated from a variable"),
+            "a single-quoted Groovy string interpolates nothing: {skipped}"
+        );
+    }
+
+    #[test]
+    fn a_version_from_a_variable_is_written_into_the_dependency() {
+        let dir = Dir::new("version-variable");
+        dir.write("gradle.properties", "jacksonVersion=2.19.2\n");
+        let migration = dir.migrate(
+            "ext {\n  guavaVersion = '33.4.8-jre'\n}\n\
+             dependencies {\n  implementation \"com.google.guava:guava:${guavaVersion}\"\n  \
+             implementation \"com.fasterxml.jackson.core:jackson-databind:$jacksonVersion\"\n  \
+             implementation(\"com.google.guava:guava-testlib:${project.guavaVersion}\") {\n    \
+             exclude group: 'junit'\n  }\n}\n",
+        );
+        let deps: Vec<String> = migration
+            .manifest
+            .dependencies
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+        assert_eq!(
+            deps,
+            [
+                "com.google.guava:guava:33.4.8-jre",
+                "com.fasterxml.jackson.core:jackson-databind:2.19.2",
+                "com.google.guava:guava-testlib:33.4.8-jre",
+            ]
+        );
+        assert_eq!(migration.manifest.dependencies[2].exclusions.len(), 1);
+        let review = migration.report.needs_review.join("\n");
+        assert!(
+            review.contains("guavaVersion = 33.4.8-jre → 2 dependencies"),
+            "{review}"
+        );
+        assert!(
+            review.contains("jacksonVersion = 2.19.2 → 1 dependency"),
+            "{review}"
+        );
+        let skipped = migration.report.not_migrated.join("\n");
+        assert!(
+            !skipped.contains("ext"),
+            "every variable in it was used: {skipped}"
+        );
+    }
+
+    #[test]
+    fn map_notation_never_writes_an_empty_version() {
+        let dir = Dir::new("map-variable");
+        let migration = dir.migrate(
+            "def lombokVersion = '1.18.38'\n\
+             dependencies {\n  compileOnly group: 'org.projectlombok', name: 'lombok', \
+             version: lombokVersion\n  \
+             implementation group: 'com.example', name: 'unset', version: unsetVersion\n  \
+             implementation group: 'com.example', name: 'wrong', version: nope, classifier: 'x'\n}\n",
+        );
+        let m = &migration.manifest;
+        assert_eq!(m.dependencies.len(), 1, "{:?}", m.dependencies);
+        assert_eq!(
+            m.dependencies[0].to_string(),
+            "org.projectlombok:lombok:1.18.38"
+        );
+        let skipped = migration.report.not_migrated.join("\n");
+        assert!(
+            skipped.contains("`unsetVersion` is set neither"),
+            "{skipped}"
+        );
+        assert!(skipped.contains("`nope` is set neither"), "{skipped}");
+    }
+
+    #[test]
+    fn the_spring_boot_plugin_takes_its_version_from_the_buildscript_classpath() {
+        let dir = Dir::new("boot-buildscript");
+        let migration = dir.migrate(
+            "buildscript {\n  ext {\n    springBootVersion = '3.5.4'\n  }\n  \
+             dependencies {\n    \
+             classpath(\"org.springframework.boot:spring-boot-gradle-plugin:${springBootVersion}\")\n  \
+             }\n}\n\
+             apply plugin: 'java'\napply plugin: 'org.springframework.boot'\n\
+             apply plugin: 'io.spring.dependency-management'\n\
+             application { mainClass = 'x.App' }\n",
+        );
+        let managed: Vec<String> = migration
+            .manifest
+            .managed
+            .iter()
+            .map(|m| format!("{}:{}", m.key(), m.version))
+            .collect();
+        assert_eq!(
+            managed,
+            ["org.springframework.boot:spring-boot-dependencies:3.5.4"]
+        );
+        let review = migration.report.needs_review.join("\n");
+        assert!(
+            review.contains("springBootVersion = 3.5.4 → plugin `org.springframework.boot`"),
+            "{review}"
+        );
+        let skipped = migration.report.not_migrated.join("\n");
+        assert!(!skipped.contains("no plugin system"), "{skipped}");
+        assert!(!skipped.contains("ext"), "{skipped}");
     }
 
     #[test]
@@ -2662,7 +3006,7 @@ junit = "org.junit.jupiter:junit-jupiter:5.10.2"
     #[test]
     fn plugin_lines_are_read_in_every_spelling() {
         let read = |line: &str| {
-            let p = read_plugin(line).unwrap();
+            let p = read_plugin(line, &mut Variables::default()).unwrap();
             (p.id, p.version)
         };
         let some = |s: &str| Some(s.to_string());
@@ -2680,7 +3024,7 @@ junit = "org.junit.jupiter:junit-jupiter:5.10.2"
             read("kotlin(\"jvm\") version kotlinVersion"),
             ("org.jetbrains.kotlin.jvm".into(), None)
         );
-        assert!(read_plugin("alias(libs.plugins.x)").is_none());
+        assert!(read_plugin("alias(libs.plugins.x)", &mut Variables::default()).is_none());
     }
 
     #[test]

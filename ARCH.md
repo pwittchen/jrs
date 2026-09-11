@@ -112,7 +112,8 @@ src/
 │   ├── gradle.rs      build.gradle[.kts] → Manifest (pattern extraction)
 │   ├── gradle_files.rs  files() / fileTree() → local jars, literal ones only
 │   ├── gradle_repos.rs  repositories { }, content filters → groups
-│   └── gradle_tasks.rs  Gradle tasks → [tasks] and [hooks], literal ones only
+│   ├── gradle_tasks.rs  Gradle tasks → [tasks] and [hooks], literal ones only
+│   └── gradle_vars.rs   version variables: ext, def, val, gradle.properties
 ├── completions.rs     bash/zsh/fish scripts generated from the clap definition
 ├── timings.rs         --timings: the per-phase recorder, and timings.txt
 ├── model.rs           the project model `jrs metadata` prints

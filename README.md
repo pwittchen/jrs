@@ -1030,6 +1030,15 @@ blocks — what was migrated, what needs review, and what was skipped, each with
 reason. Gradle migration in particular reads the declarative subset of a build
 script by pattern rather than by running Gradle, and says so.
 
+A version kept in a Gradle variable is written into each declaration that
+uses it. That covers `ext`, `def`, the Kotlin DSL's `val` and `extra`, and
+`gradle.properties`, used as `"g:a:$v"`, `${project.v}`, `${property("v")}`,
+map notation's `version: v`, in platforms, `mavenBom`, `constraints { }` and
+Spring Boot's plugin. A review line names the variable, since the manifest no
+longer shows those versions moving together. Only a variable assigned once,
+to a literal and outside a conditional, is used. What uses any other is
+reported with the variable's name, never migrated without its version.
+
 Gradle tasks that say everything in literals become `[tasks]`: an `Exec` task
 a `run` command, a `JavaExec` over the main runtime classpath a `java` command
 over jrs's classpath, and a task with only `dependsOn` an aggregate.

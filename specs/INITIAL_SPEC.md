@@ -1845,13 +1845,32 @@ the conventional declarative subset, and is explicit about the fact:
   `tasks.shadowJar { }`, `tasks.named("shadowJar")` or
   `tasks.withType<ShadowJar>`) → `[package.relocate]` (§9.9), with a closure's
   `exclude` calls; `include`, which narrows a relocation, is reported.
+- Version variables. A variable is read when it is assigned exactly once, to
+  a string literal or to another variable that is, outside a conditional or a
+  loop: `ext { x = '1.2' }`, `set('x', '1.2')` there, and `ext.x = '1.2'` (also
+  inside `buildscript { }`), `def x = '1.2'`, the Kotlin DSL's
+  `val x = "1.2"`, `extra["x"] = "1.2"` and `val x by extra("1.2")`, and
+  `x=1.2` in the `gradle.properties` beside the build file (which
+  `val x: String by project` and `property("x")` read). Its value is written
+  wherever a coordinate uses it — `"g:a:$x"`, `"g:a:${x}"`, `${project.x}`,
+  `${rootProject.ext.x}`, `${property("x")}`, `${extra["x"]}`, map notation's
+  `version: x` (and the Kotlin DSL's `version = x`) — in a dependency,
+  `platform(...)`, `enforcedPlatform(...)`, `mavenBom`, `constraints { }`, and
+  a plugin's version: beside its id, or, for Spring Boot and Kotlin applied
+  with `apply plugin:`, on the `buildscript { }` classpath. A review line
+  names each variable and what took its value, since the manifest no longer
+  shows those versions moving together, and an `ext { }` block is reported
+  only for the variables in it nothing used.
 
 Anything jrs cannot read confidently is skipped and reported — never guessed:
 
 - Version catalogs (`libs.versions.toml`) are parsed when present, since they
   are declarative; `libs.foo.bar` references are resolved through them.
   Unresolvable aliases become a warning with the reference left in a comment.
-- Dependencies built from variables, `ext` blocks, loops or conditionals.
+- Values worked out when Gradle runs: a variable that is reassigned, set in a
+  loop or a conditional, or built by concatenation, a method call or
+  `System.getenv`, and a coordinate held whole in a variable. What uses one is
+  left out with the variable's name — never written without its version.
 - Plugins, `subprojects { }` / `allprojects { }`, and multi-project
   `settings.gradle` includes (listed, not migrated).
 - Custom tasks, except those that say everything in literals (§7.6,
