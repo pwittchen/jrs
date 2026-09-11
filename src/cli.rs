@@ -988,28 +988,25 @@ impl<'a> Session<'a> {
                 .map(|n| n.to_string_lossy().into_owned())
                 .unwrap_or_default();
             let group = agent.ga().group;
-            let file = match (agent, lib_dir) {
-                (JavaAgent::Graph(_), Some(lib_dir)) => {
-                    // `copy_libraries` prefixes a file name two groups share.
-                    let prefixed = format!("{group}.{name}");
-                    if lib_dir.join(&prefixed).is_file() {
-                        format!("lib/{prefixed}")
-                    } else {
-                        format!("lib/{name}")
-                    }
+            let file = if let (JavaAgent::Graph(_), Some(lib_dir)) = (agent, lib_dir) {
+                // `copy_libraries` prefixes a file name two groups share.
+                let prefixed = format!("{group}.{name}");
+                if lib_dir.join(&prefixed).is_file() {
+                    format!("lib/{prefixed}")
+                } else {
+                    format!("lib/{name}")
                 }
-                _ => {
-                    // As `copy_libraries` does, when two pinned agents'
-                    // files share a name.
-                    let plain = format!("agents/{name}");
-                    let file = if staged.iter().any(|(_, f)| *f == plain) {
-                        format!("agents/{group}.{name}")
-                    } else {
-                        plain
-                    };
-                    staged.push((jar, file.clone()));
-                    file
-                }
+            } else {
+                // As `copy_libraries` does, when two pinned agents'
+                // files share a name.
+                let plain = format!("agents/{name}");
+                let file = if staged.iter().any(|(_, f)| *f == plain) {
+                    format!("agents/{group}.{name}")
+                } else {
+                    plain
+                };
+                staged.push((jar, file.clone()));
+                file
             };
             launch.push(file);
         }
@@ -3054,36 +3051,9 @@ impl<'a> Session<'a> {
             match existing {
                 Some(lock) if lock.matches(manifest) && !force_update => {
                     self.ui.verbose(format!("reusing {}", lock_path.display()));
-                    let tools = manifest
-                        .languages
-                        .iter()
-                        .filter_map(|c| {
-                            Some(Tool {
-                                language: c.language,
-                                resolution: lock.tool(&c.language.tool_name())?,
-                            })
-                        })
-                        .collect();
-                    let task_tools = tasks_with_tools
-                        .iter()
-                        .filter_map(|t| Some((t.name.clone(), lock.tool(&t.tool_name())?)))
-                        .collect();
-                    let obfuscator = manifest
-                        .obfuscate
-                        .as_ref()
-                        .and_then(|_| lock.tool(obfuscate::TOOL_NAME));
-                    let agents = pinned_agents
-                        .iter()
-                        .filter_map(|(name, _)| Some((name.clone(), lock.tool(name)?)))
-                        .collect();
-                    (
-                        lock.to_resolution(),
-                        tools,
-                        task_tools,
-                        obfuscator,
-                        agents,
-                        false,
-                    )
+                    let (resolution, tools, task_tools, obfuscator, agents) =
+                        Self::from_lock(manifest, &lock, &tasks_with_tools, &pinned_agents);
+                    (resolution, tools, task_tools, obfuscator, agents, false)
                 }
                 _ => {
                     let what = Self::resolving_what(manifest, declared, &tasks_with_tools);
@@ -3153,6 +3123,39 @@ impl<'a> Session<'a> {
         let _ = self.obfuscator.set(obfuscator);
         let _ = self.agents.set(agents);
         Ok(resolution)
+    }
+
+    /// What `dependencies` resolves, read from a `jrs.lock` that still
+    /// matches the manifest: the project's graph and each tool's pinned one.
+    fn from_lock(
+        manifest: &Manifest,
+        lock: &Lockfile,
+        tasks_with_tools: &[&TaskDef],
+        pinned_agents: &[(String, Coord)],
+    ) -> ResolvedWithTools {
+        let tools = manifest
+            .languages
+            .iter()
+            .filter_map(|c| {
+                Some(Tool {
+                    language: c.language,
+                    resolution: lock.tool(&c.language.tool_name())?,
+                })
+            })
+            .collect();
+        let task_tools = tasks_with_tools
+            .iter()
+            .filter_map(|t| Some((t.name.clone(), lock.tool(&t.tool_name())?)))
+            .collect();
+        let obfuscator = manifest
+            .obfuscate
+            .as_ref()
+            .and_then(|_| lock.tool(obfuscate::TOOL_NAME));
+        let agents = pinned_agents
+            .iter()
+            .filter_map(|(name, _)| Some((name.clone(), lock.tool(name)?)))
+            .collect();
+        (lock.to_resolution(), tools, task_tools, obfuscator, agents)
     }
 
     /// Point `resolution`'s packages at their jars: the cached ones and the
@@ -3738,7 +3741,8 @@ struct Built {
 }
 
 /// The project's graph, the compilers' and the tasks' tools', the
-/// obfuscator's when it is on, and each pinned agent's, freshly resolved.
+/// obfuscator's when it is on, and each pinned agent's — freshly resolved,
+/// or read from `jrs.lock`.
 type ResolvedWithTools = (
     Resolution,
     Vec<Tool>,
