@@ -625,6 +625,25 @@ pub fn resolve_tool(roots: &[Coord], fetcher: &Fetcher, jobs: usize) -> Result<R
     resolve_tool_dependencies(&roots, fetcher, jobs)
 }
 
+/// Resolve a java agent named with a version as a graph of one: the agent
+/// alone, each of its own dependencies excluded. `-javaagent:` loads that one
+/// jar, so nothing it depends on would ever be on a classpath, and an agent
+/// meant to go there, such as the OpenTelemetry one, is shaded for exactly
+/// that reason.
+///
+/// # Errors
+///
+/// As for [`resolve`].
+pub fn resolve_agent(coord: &Coord, fetcher: &Fetcher, jobs: usize) -> Result<Resolution> {
+    let mut agent = Dependency::new(&coord.group, &coord.artifact, &coord.version);
+    agent.classifier.clone_from(&coord.classifier);
+    agent.exclusions.push(crate::manifest::Exclusion {
+        group: "*".into(),
+        artifact: "*".into(),
+    });
+    resolve_tool_dependencies(&[agent], fetcher, jobs)
+}
+
 /// [`resolve_tool`] for declared dependencies, with their exclusions: a
 /// task's `[tasks.<name>.dependencies]` (TASKS.md §8).
 ///

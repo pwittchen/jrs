@@ -127,8 +127,9 @@ impl Lockfile {
     }
 
     /// Whether this lockfile still describes `manifest`: its dependencies,
-    /// a pinned compiler for every language it turns on, and a pinned graph
-    /// for every task with dependencies of its own.
+    /// a pinned compiler for every language it turns on, a pinned graph
+    /// for every task with dependencies of its own, and a pinned jar for
+    /// every agent named with a version.
     #[must_use]
     pub fn matches(&self, manifest: &Manifest) -> bool {
         let pinned = |name: String| self.tools.iter().any(|t| t.name == name);
@@ -144,6 +145,10 @@ impl Lockfile {
                 .filter(|t| !t.dependencies.is_empty())
                 .all(|t| pinned(t.tool_name()))
             && (manifest.obfuscate.is_none() || pinned(crate::obfuscate::TOOL_NAME.to_string()))
+            && manifest
+                .pinned_agents()
+                .into_iter()
+                .all(|(name, _)| pinned(name))
     }
 
     /// Read and parse the lockfile at `path`; `Ok(None)` when there is none.
@@ -501,6 +506,11 @@ pub fn manifest_checksum(manifest: &Manifest) -> String {
             let _ = writeln!(canonical, "task {} {}", task.name, line(d));
         }
     }
+    // An agent with a version is resolved and pinned apart from the graph; one
+    // named by `group:artifact` changes no resolution, and adds nothing.
+    for (name, coord) in manifest.pinned_agents() {
+        let _ = writeln!(canonical, "agent {name} {coord}");
+    }
     format!("sha256:{}", sha256_hex(canonical.as_bytes()))
 }
 
@@ -512,6 +522,48 @@ mod tests {
     fn manifest(body: &str) -> Manifest {
         let text = format!("[project]\nname='app'\nversion='1.0.0'\n{body}");
         Manifest::parse(&text, Path::new("/p/jrs.toml"), Path::new("/p")).unwrap()
+    }
+
+    #[test]
+    fn an_agent_with_a_version_is_pinned_as_a_tool_of_its_own() {
+        // An agent from the graph changes no resolution: the lockfile stays
+        // byte for byte.
+        let graph = manifest("[run]\njava-agents = ['a:b']\n");
+        assert_eq!(manifest_checksum(&graph), manifest_checksum(&manifest("")));
+
+        let pinned = manifest("[run]\njava-agents = ['io.otel:agent:2.0']\n");
+        assert_ne!(manifest_checksum(&pinned), manifest_checksum(&graph));
+        let bumped = manifest("[run]\njava-agents = ['io.otel:agent:2.1']\n");
+        assert_ne!(
+            manifest_checksum(&bumped),
+            manifest_checksum(&pinned),
+            "a new version resolves again"
+        );
+
+        let resolution = Resolution::default();
+        let lock = Lockfile::from_resolution(&pinned, &resolution);
+        assert!(!lock.matches(&pinned), "the agent is not pinned yet");
+        let lock = lock.with_tool("run.java-agents.io.otel:agent", &resolution);
+        assert!(lock.matches(&pinned));
+        assert_eq!(lock.version, TOOLS_LOCK_VERSION);
+        let text = lock.render();
+        assert!(
+            text.contains("\n[[tool]]\nname = \"run.java-agents.io.otel:agent\"\n"),
+            "{text}"
+        );
+        assert!(
+            Lockfile::parse(&text, Path::new("jrs.lock"))
+                .unwrap()
+                .matches(&pinned)
+        );
+        // `run`'s pin does not stand in for `test`'s.
+        let both = manifest(
+            "[run]\njava-agents = ['io.otel:agent:2.0']\n\
+             [test]\njava-agents = ['io.otel:agent:2.0']\n",
+        );
+        let lock = Lockfile::from_resolution(&both, &resolution)
+            .with_tool("run.java-agents.io.otel:agent", &resolution);
+        assert!(!lock.matches(&both));
     }
 
     fn package(gav: &str, direct: bool, classpath: Classpath) -> ResolvedPackage {

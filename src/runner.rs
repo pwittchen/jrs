@@ -7,7 +7,8 @@
 use std::path::{Path, PathBuf};
 
 use crate::error::{JrsError, Result};
-use crate::resolve::coord::Ga;
+use crate::manifest::JavaAgent;
+use crate::resolve::coord::{Coord, Ga};
 use crate::resolve::{Classpath, Resolution};
 use crate::toolchain::{Environment, Toolchain, run_inherited_in};
 use crate::ui::Ui;
@@ -110,55 +111,92 @@ pub fn jvm_prefix(debug: Option<&DebugAddress>, agents: &[PathBuf]) -> Vec<Strin
         .collect()
 }
 
-/// The jars `<section>.java-agents` names, looked up in the resolved graph so
-/// that each is the version `jrs.lock` pins: on the runtime classpath for
-/// `run` (`runtime`), anywhere on the test classpath for `test`.
+/// The jars `<section>.java-agents` names, in its order. One named by
+/// `group:artifact` is looked up in the resolved graph, so that it is the
+/// version `jrs.lock` pins: on the runtime classpath for `run` (`runtime`),
+/// anywhere on the test classpath for `test`. One named with a version is the
+/// root of its own graph in `pinned`, by [`JavaAgent::tool_name`], which the
+/// caller has downloaded.
 ///
 /// # Errors
 ///
 /// [`JrsError::Manifest`] for an agent the graph does not hold, or holds
-/// only where this JVM does not look, or holds without a jar.
+/// only where this JVM does not look, or holds without a jar;
+/// [`JrsError::Build`] for a pinned agent that was not resolved or fetched.
 pub fn java_agents(
     section: &str,
-    agents: &[Ga],
+    agents: &[JavaAgent],
     resolution: &Resolution,
+    pinned: &[(String, Resolution)],
     runtime: bool,
 ) -> Result<Vec<PathBuf>> {
     let key = format!("{section}.java-agents");
+    agents
+        .iter()
+        .map(|agent| match agent {
+            JavaAgent::Graph(ga) => graph_agent(&key, ga, resolution, runtime),
+            JavaAgent::Pinned(coord) => {
+                let graph = pinned
+                    .iter()
+                    .find(|(name, _)| *name == agent.tool_name(section))
+                    .map(|(_, graph)| graph);
+                pinned_agent(&key, coord, graph)
+            }
+        })
+        .collect()
+}
+
+/// An agent named by `group:artifact`: the jar the project's graph resolved.
+fn graph_agent(key: &str, ga: &Ga, resolution: &Resolution, runtime: bool) -> Result<PathBuf> {
     let table = if runtime {
         "dependencies"
     } else {
         "dev-dependencies"
     };
-    agents
-        .iter()
-        .map(|ga| {
-            let Some(package) = resolution.get(ga) else {
-                return Err(JrsError::manifest(format!(
-                    "`{key}` names `{ga}`, which is not in the resolved dependency graph\n\n\
-                     an agent is loaded from the jar jrs resolved, so it has to be a \
-                     dependency; add it to jrs.toml:\n\n    [{table}]\n    \"{ga}\" = \"<version>\""
-                )));
-            };
-            if runtime && !matches!(package.classpath, Classpath::Compile | Classpath::Runtime) {
-                let why = match package.classpath {
-                    Classpath::Test => "is only on the test classpath",
-                    _ => "is only reached through `compile-only`, so not at run time",
-                };
-                return Err(JrsError::manifest(format!(
-                    "`{key}` names `{ga}`, which {why}\n\n\
-                     `jrs run` loads its agents from the runtime classpath: declare \
-                     `{ga}` in [dependencies]"
-                )));
-            }
-            package.jar.clone().ok_or_else(|| {
-                JrsError::manifest(format!(
-                    "`{key}` names `{ga}`, which has no jar to load (it is `{}`-packaged)",
-                    package.packaging
-                ))
-            })
-        })
-        .collect()
+    let Some(package) = resolution.get(ga) else {
+        return Err(JrsError::manifest(format!(
+            "`{key}` names `{ga}`, which is not in the resolved dependency graph\n\n\
+             an agent named without a version is loaded from the jar jrs resolved, so it \
+             has to be a dependency; add it to jrs.toml:\n\n    [{table}]\n    \
+             \"{ga}\" = \"<version>\"\n\n\
+             or, for an agent the program never calls, name it with its version, and jrs \
+             pins its jar apart from the dependencies:\n\n    \
+             java-agents = [\"{ga}:<version>\"]"
+        )));
+    };
+    if runtime && !matches!(package.classpath, Classpath::Compile | Classpath::Runtime) {
+        let why = match package.classpath {
+            Classpath::Test => "is only on the test classpath",
+            _ => "is only reached through `compile-only`, so not at run time",
+        };
+        return Err(JrsError::manifest(format!(
+            "`{key}` names `{ga}`, which {why}\n\n\
+             `jrs run` loads its agents from the runtime classpath: declare \
+             `{ga}` in [dependencies]"
+        )));
+    }
+    package.jar.clone().ok_or_else(|| {
+        JrsError::manifest(format!(
+            "`{key}` names `{ga}`, which has no jar to load (it is `{}`-packaged)",
+            package.packaging
+        ))
+    })
+}
+
+/// An agent named with a version: the root of its own pinned graph.
+fn pinned_agent(key: &str, coord: &Coord, graph: Option<&Resolution>) -> Result<PathBuf> {
+    let package = graph
+        .and_then(|g| g.packages.iter().find(|p| p.coord == *coord))
+        .ok_or_else(|| JrsError::build(format!("the agent `{coord}` was not resolved")))?;
+    if package.packaging == "pom" {
+        return Err(JrsError::manifest(format!(
+            "`{key}` names `{coord}`, which has no jar to load (it is `pom`-packaged)"
+        )));
+    }
+    package
+        .jar
+        .clone()
+        .ok_or_else(|| JrsError::build(format!("the agent `{coord}` was not downloaded")))
 }
 
 /// Build the argument list for `java <jvm-args> -cp <cp> <main-class> args...`.
@@ -350,7 +388,7 @@ mod tests {
                 Some("/c/runtime-agent-1.jar"),
             ),
         ]);
-        let ga = |s: &str| Ga::parse(s).unwrap();
+        let ga = |s: &str| JavaAgent::Graph(Ga::parse(s).unwrap());
 
         // Tests look anywhere on the test classpath, dev-dependencies included.
         assert_eq!(
@@ -358,6 +396,7 @@ mod tests {
                 "test",
                 &[ga("org.mockito:mockito-core"), ga("io.otel:agent")],
                 &r,
+                &[],
                 false
             )
             .unwrap(),
@@ -368,14 +407,14 @@ mod tests {
         );
         // `jrs run` only on the runtime classpath.
         assert_eq!(
-            java_agents("run", &[ga("io.otel:agent")], &r, true).unwrap(),
+            java_agents("run", &[ga("io.otel:agent")], &r, &[], true).unwrap(),
             vec![PathBuf::from("/c/agent-2.0.jar")]
         );
-        let err = java_agents("run", &[ga("org.mockito:mockito-core")], &r, true)
+        let err = java_agents("run", &[ga("org.mockito:mockito-core")], &r, &[], true)
             .unwrap_err()
             .to_string();
         assert!(err.contains("only on the test classpath"), "{err}");
-        let err = java_agents("run", &[ga("jakarta:api")], &r, true)
+        let err = java_agents("run", &[ga("jakarta:api")], &r, &[], true)
             .unwrap_err()
             .to_string();
         assert!(err.contains("compile-only"), "{err}");
@@ -383,7 +422,14 @@ mod tests {
         // never compile against it, and both JVMs can load it.
         for (section, runtime) in [("run", true), ("test", false)] {
             assert_eq!(
-                java_agents(section, &[ga("org.example:runtime-agent")], &r, runtime).unwrap(),
+                java_agents(
+                    section,
+                    &[ga("org.example:runtime-agent")],
+                    &r,
+                    &[],
+                    runtime
+                )
+                .unwrap(),
                 vec![PathBuf::from("/c/runtime-agent-1.jar")]
             );
         }
@@ -392,6 +438,7 @@ mod tests {
             "test",
             &[ga("io.opentelemetry:opentelemetry-javaagent")],
             &r,
+            &[],
             false,
         )
         .unwrap_err();
@@ -403,14 +450,48 @@ mod tests {
             "{err}"
         );
         assert!(err.contains("[dev-dependencies]"), "{err}");
-        let err = java_agents("run", &[ga("io.opentelemetry:x")], &r, true)
+        assert!(
+            err.contains("java-agents = [\"io.opentelemetry:opentelemetry-javaagent:<version>\"]"),
+            "the way to load it without depending on it: {err}"
+        );
+        let err = java_agents("run", &[ga("io.opentelemetry:x")], &r, &[], true)
             .unwrap_err()
             .to_string();
         assert!(err.contains("[dependencies]"), "{err}");
 
-        let err = java_agents("run", &[ga("org.example:bom")], &r, true)
+        let err = java_agents("run", &[ga("org.example:bom")], &r, &[], true)
             .unwrap_err()
             .to_string();
         assert!(err.contains("`pom`-packaged"), "{err}");
+    }
+
+    #[test]
+    fn an_agent_with_a_version_comes_from_its_own_graph() {
+        let agent = JavaAgent::Pinned(Coord::parse("io.otel:javaagent:2.10.0").unwrap());
+        let graph = graph(&[(
+            "io.otel:javaagent:2.10.0",
+            Classpath::Compile,
+            Some("/c/javaagent-2.10.0.jar"),
+        )]);
+        // Not in the project's graph, and it does not need to be.
+        let project = Resolution::default();
+        for section in ["run", "test"] {
+            let pinned = [(agent.tool_name(section), graph.clone())];
+            assert_eq!(
+                java_agents(
+                    section,
+                    std::slice::from_ref(&agent),
+                    &project,
+                    &pinned,
+                    section == "run"
+                )
+                .unwrap(),
+                vec![PathBuf::from("/c/javaagent-2.10.0.jar")]
+            );
+        }
+        // `run`'s pin is not `test`'s.
+        let pinned = [(agent.tool_name("run"), graph)];
+        let err = java_agents("test", &[agent], &project, &pinned, false).unwrap_err();
+        assert!(err.to_string().contains("was not resolved"), "{err}");
     }
 }

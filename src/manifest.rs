@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 
 use crate::compile::lang::{self, Language};
 use crate::error::{IoResultExt, JrsError, Result};
-use crate::resolve::coord::{Ga, is_range};
+use crate::resolve::coord::{Coord, Ga, is_range};
 
 pub const MANIFEST_FILE: &str = "jrs.toml";
 pub const LOCK_FILE: &str = "jrs.lock";
@@ -269,14 +269,55 @@ impl Default for JavaConfig {
 pub struct RunConfig {
     /// Placed before `-cp`: `-Xmx512m`, `-Dkey=value`, `--enable-preview`.
     pub jvm_args: Vec<String>,
-    /// Agents passed as `-javaagent:`, named by `group:artifact` and taken
-    /// from the resolved runtime classpath, so each is the pinned version.
-    pub java_agents: Vec<Ga>,
+    /// Agents passed as `-javaagent:`, each taken from the resolved runtime
+    /// classpath or pinned apart from it, in the order the manifest names them.
+    pub java_agents: Vec<JavaAgent>,
     /// Added to the environment the program inherits, in declaration order.
     pub env: Vec<(String, Template)>,
     /// The program's working directory, relative to the project root. `None`
     /// keeps the directory jrs was started in.
     pub cwd: Option<Template>,
+}
+
+/// One `java-agents` entry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum JavaAgent {
+    /// `group:artifact`: the jar the project's own graph resolved, at the
+    /// version `jrs.lock` pins for it, so the agent has to be a dependency.
+    Graph(Ga),
+    /// `group:artifact:version[:classifier]`: a jar resolved apart from the
+    /// project's graph, as a tool is, and pinned in `jrs.lock` as a `[[tool]]`
+    /// of its own. It is never on a classpath, which suits an agent the
+    /// program does not call, such as the OpenTelemetry one.
+    Pinned(Coord),
+}
+
+impl JavaAgent {
+    /// `group:artifact`, without a version.
+    #[must_use]
+    pub fn ga(&self) -> Ga {
+        match self {
+            JavaAgent::Graph(ga) => ga.clone(),
+            JavaAgent::Pinned(coord) => coord.ga(),
+        }
+    }
+
+    /// The name of the `[[tool]]` block that pins a [`JavaAgent::Pinned`]
+    /// agent of `section`: `run.java-agents.io.opentelemetry.javaagent:opentelemetry-javaagent`,
+    /// which neither a compiler's nor a task's name can be.
+    #[must_use]
+    pub fn tool_name(&self, section: &str) -> String {
+        format!("{section}.java-agents.{}", self.ga())
+    }
+}
+
+impl std::fmt::Display for JavaAgent {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            JavaAgent::Graph(ga) => write!(f, "{ga}"),
+            JavaAgent::Pinned(coord) => write!(f, "{coord}"),
+        }
+    }
 }
 
 /// `[test]`: how `jrs test` starts the test JVM.
@@ -287,8 +328,9 @@ pub struct TestConfig {
     /// jrs's default knows about.
     pub jacoco_version: Option<String>,
     /// Agents passed as `-javaagent:`, ahead of `JaCoCo`'s, taken from the
-    /// resolved test classpath (dev-dependencies included).
-    pub java_agents: Vec<Ga>,
+    /// resolved test classpath (dev-dependencies included) or pinned apart
+    /// from it.
+    pub java_agents: Vec<JavaAgent>,
     /// Added to the environment the test JVM inherits, in declaration order.
     pub env: Vec<(String, Template)>,
     /// `test.retries`: how many times a failed test is run again before it
@@ -1329,6 +1371,25 @@ impl Manifest {
         dependencies
     }
 
+    /// The agents `run.java-agents` and `test.java-agents` pin apart from the
+    /// project's graph, each with the name of its `[[tool]]` block: `run`'s
+    /// first, in the order the manifest names them.
+    #[must_use]
+    pub fn pinned_agents(&self) -> Vec<(String, Coord)> {
+        [
+            ("run", &self.run.java_agents),
+            ("test", &self.test.java_agents),
+        ]
+        .into_iter()
+        .flat_map(|(section, agents)| {
+            agents.iter().filter_map(move |agent| match agent {
+                JavaAgent::Pinned(coord) => Some((agent.tool_name(section), coord.clone())),
+                JavaAgent::Graph(_) => None,
+            })
+        })
+        .collect()
+    }
+
     // ---- resolved paths ---------------------------------------------------
 
     #[must_use]
@@ -1705,7 +1766,7 @@ fn inline_env(env: &[(String, Template)]) -> String {
 }
 
 /// The `java-agents` and `env` lines `[run]` and `[test]` share.
-fn render_jvm_extras(s: &mut String, agents: &[Ga], env: &[(String, Template)]) {
+fn render_jvm_extras(s: &mut String, agents: &[JavaAgent], env: &[(String, Template)]) {
     if !agents.is_empty() {
         let names: Vec<String> = agents.iter().map(ToString::to_string).collect();
         let _ = writeln!(s, "java-agents = {}", quote_list(&names));
@@ -2088,28 +2149,46 @@ fn refuse_task_placeholders(template: &Template, key: &str) -> Result<()> {
     Ok(())
 }
 
-/// `run.java-agents` or `test.java-agents`: `group:artifact` coordinates,
-/// without a version, since the version is the one the graph resolved.
-fn parse_java_agents(t: &toml::Table, section: &str) -> Result<Vec<Ga>> {
+/// `run.java-agents` or `test.java-agents`: a `group:artifact` names a
+/// dependency, whose version is the one the graph resolved; a
+/// `group:artifact:version[:classifier]` names a jar pinned apart from it.
+fn parse_java_agents(t: &toml::Table, section: &str) -> Result<Vec<JavaAgent>> {
     let key = format!("{section}.java-agents");
-    let mut agents: Vec<Ga> = Vec::new();
+    let mut agents: Vec<JavaAgent> = Vec::new();
     for raw in string_array(t, "java-agents", section)? {
         let well_formed = |s: &str| !s.is_empty() && !s.contains(char::is_whitespace);
-        let ga = match raw.split(':').collect::<Vec<_>>().as_slice() {
-            [g, a] if well_formed(g) && well_formed(a) => Ga::new(*g, *a),
-            _ => {
-                return Err(JrsError::manifest(format!(
-                    "`{key}`: `{raw}` is not a `group:artifact` coordinate\n\n\
-                     name the agent's dependency without a version, as in \
-                     `java-agents = [\"org.mockito:mockito-core\"]`; the version is the \
-                     one jrs.lock pins"
-                )));
-            }
-        };
-        if agents.contains(&ga) {
-            return Err(JrsError::manifest(format!("`{key}` names `{raw}` twice")));
+        let parts: Vec<&str> = raw.split(':').collect();
+        if !(2..=4).contains(&parts.len()) || !parts.iter().all(|p| well_formed(p)) {
+            return Err(JrsError::manifest(format!(
+                "`{key}`: `{raw}` is not a `group:artifact` coordinate\n\n\
+                 name a dependency's agent without a version, as in \
+                 `java-agents = [\"org.mockito:mockito-core\"]`, and the version is the one \
+                 jrs.lock pins; name one the program does not depend on with its version, \
+                 as in `java-agents = [\"io.opentelemetry.javaagent:opentelemetry-javaagent:2.10.0\"]`"
+            )));
         }
-        agents.push(ga);
+        let agent = match parts.as_slice() {
+            [g, a] => JavaAgent::Graph(Ga::new(*g, *a)),
+            [g, a, v, rest @ ..] => {
+                if is_range(v) {
+                    return Err(JrsError::manifest(format!(
+                        "`{key}`: `{raw}` has the range `{v}`; an agent is pinned at an exact \
+                         version, like every dependency"
+                    )));
+                }
+                JavaAgent::Pinned(
+                    Coord::new(*g, *a, *v).with_classifier(rest.first().map(ToString::to_string)),
+                )
+            }
+            _ => unreachable!("two to four parts"),
+        };
+        if agents.iter().any(|a| a.ga() == agent.ga()) {
+            return Err(JrsError::manifest(format!(
+                "`{key}` names `{}` twice",
+                agent.ga()
+            )));
+        }
+        agents.push(agent);
     }
     Ok(agents)
 }
@@ -4674,7 +4753,7 @@ post-package = ["sh"]
         assert!(m.warnings.is_empty(), "{:?}", m.warnings);
         assert_eq!(
             m.run.java_agents,
-            vec![Ga::new("io.opentelemetry", "otel-agent")]
+            vec![JavaAgent::Graph(Ga::new("io.opentelemetry", "otel-agent"))]
         );
         let names: Vec<&str> = m.run.env.iter().map(|(k, _)| k.as_str()).collect();
         assert_eq!(names, ["APP_MODE", "OUT"], "declaration order is kept");
@@ -4711,13 +4790,59 @@ post-package = ["sh"]
     }
 
     #[test]
+    fn an_agent_with_a_version_is_pinned_apart_from_the_graph() {
+        let m = parse(&format!(
+            "{JVM_HEAD}[run]\njava-agents = ['io.otel:agent:2.10.0', 'org.mockito:mockito-core']\n\
+             [test]\njava-agents = ['org.jacoco:org.jacoco.agent:0.8.15:runtime']\n"
+        ))
+        .unwrap();
+        assert_eq!(
+            m.run.java_agents[0],
+            JavaAgent::Pinned(Coord::new("io.otel", "agent", "2.10.0"))
+        );
+        assert!(matches!(m.run.java_agents[1], JavaAgent::Graph(_)));
+        assert_eq!(
+            m.pinned_agents(),
+            vec![
+                (
+                    "run.java-agents.io.otel:agent".to_string(),
+                    Coord::new("io.otel", "agent", "2.10.0")
+                ),
+                (
+                    "test.java-agents.org.jacoco:org.jacoco.agent:runtime".to_string(),
+                    Coord::new("org.jacoco", "org.jacoco.agent", "0.8.15")
+                        .with_classifier(Some("runtime".into()))
+                ),
+            ],
+            "run's first; a graph agent has no pin of its own"
+        );
+
+        let text = m.render(None);
+        assert!(
+            text.contains("java-agents = [\"io.otel:agent:2.10.0\", \"org.mockito:mockito-core\"]"),
+            "{text}"
+        );
+        assert!(
+            text.contains("java-agents = [\"org.jacoco:org.jacoco.agent:0.8.15:runtime\"]"),
+            "{text}"
+        );
+        let again = parse(&text).unwrap();
+        assert_eq!(again.run, m.run);
+        assert_eq!(again.test, m.test);
+
+        let err = parse(&format!("{JVM_HEAD}[run]\njava-agents = ['a:b:[1,2)']\n")).unwrap_err();
+        assert!(err.to_string().contains("the range `[1,2)`"), "{err}");
+        // With a version or without, it is the one agent.
+        let err = parse(&format!(
+            "{JVM_HEAD}[run]\njava-agents = ['a:b', 'a:b:1']\n"
+        ))
+        .unwrap_err();
+        assert!(err.to_string().contains("names `a:b` twice"), "{err}");
+    }
+
+    #[test]
     fn agents_are_named_by_group_and_artifact_once() {
-        for bad in [
-            "mockito-core",
-            "org.mockito:mockito-core:5.14.2",
-            "org.mockito:",
-            " a:b",
-        ] {
+        for bad in ["mockito-core", "a:b:1:c:d", "a::1", "org.mockito:", " a:b"] {
             let err = parse(&format!("{JVM_HEAD}[test]\njava-agents = ['{bad}']\n")).unwrap_err();
             assert_eq!(err.exit_code(), 2);
             let msg = err.to_string();

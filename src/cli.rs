@@ -25,8 +25,8 @@ use crate::error::{IoResultExt, JrsError, Result, exit};
 use crate::image;
 use crate::lockfile::Lockfile;
 use crate::manifest::{
-    self, Builtin, Dependency, Hook, LanguageConfig, MANIFEST_FILE, Manifest, Repository, TaskDef,
-    TaskRef,
+    self, Builtin, Dependency, Hook, JavaAgent, LanguageConfig, MANIFEST_FILE, Manifest,
+    Repository, TaskDef, TaskRef,
 };
 use crate::migrate;
 use crate::model;
@@ -677,6 +677,10 @@ struct Session<'a> {
     /// pinned with the project's, and downloaded then or when `--obfuscate`
     /// runs. `Some(None)` means the project does not obfuscate.
     obfuscator: OnceCell<Option<Resolution>>,
+    /// Each java agent named with a version, by its `[[tool]]` name, as a
+    /// graph of one: resolved and pinned with the project's, and downloaded
+    /// then or when a JVM or an image first loads it.
+    agents: OnceCell<Vec<(String, Resolution)>>,
     /// The classpaths of the task graphs downloaded so far, by task name.
     task_classpaths: RefCell<HashMap<String, Vec<PathBuf>>>,
     built: OnceCell<Built>,
@@ -714,6 +718,7 @@ impl<'a> Session<'a> {
             tools: OnceCell::new(),
             task_tools: OnceCell::new(),
             obfuscator: OnceCell::new(),
+            agents: OnceCell::new(),
             task_classpaths: RefCell::new(HashMap::new()),
             built: OnceCell::new(),
             ran: RefCell::new(HashSet::new()),
@@ -844,7 +849,7 @@ impl<'a> Session<'a> {
 
         let mut classpath = vec![self.project().classes_dir()];
         classpath.extend(built.resolution.runtime_classpath());
-        let mut agents = runner::java_agents(
+        let mut agents = self.java_agents(
             "run",
             &self.manifest.run.java_agents,
             &built.resolution,
@@ -949,43 +954,66 @@ impl<'a> Session<'a> {
         );
     }
 
-    /// `run.java-agents` as the image's launchers name them: `lib/<file>`,
-    /// relative to the application directory, where the portable layout put
-    /// each jar.
-    fn image_agents(&self, lib_dir: Option<&Path>) -> Result<Vec<String>> {
+    /// `run.java-agents` as the image's launchers name them, relative to the
+    /// application directory: `lib/<file>` for an agent from the graph, where
+    /// the portable layout put its jar, and `agents/<file>` for a pinned one,
+    /// which the image stages there — with those jars.
+    fn image_agents(&self, lib_dir: Option<&Path>) -> Result<ImageAgents> {
         let wanted = &self.manifest.run.java_agents;
         if wanted.is_empty() {
-            return Ok(Vec::new());
+            return Ok((Vec::new(), Vec::new()));
         }
-        let Some(lib_dir) = lib_dir else {
-            return Err(JrsError::manifest(
-                "`run.java-agents` cannot go into an image or a distribution of a fat \
-                 jar: an agent loads from a jar of its own, and the fat jar has \
-                 unpacked it\n\n\
-                 leave out --fat, and the portable layout is used, with each agent in \
-                 its lib/",
-            ));
-        };
-        let resolution = self.resolved()?;
-        let jars = runner::java_agents("run", wanted, &resolution, true)?;
-        Ok(wanted
-            .iter()
-            .zip(jars)
-            .map(|(ga, jar)| {
-                let name = jar
-                    .file_name()
-                    .map(|n| n.to_string_lossy().into_owned())
-                    .unwrap_or_default();
-                // `copy_libraries` prefixes a file name two groups share.
-                let prefixed = format!("{}.{name}", ga.group);
-                let file = if lib_dir.join(&prefixed).is_file() {
-                    prefixed
-                } else {
-                    name
-                };
-                format!("lib/{file}")
+        if lib_dir.is_none()
+            && let Some(ga) = wanted.iter().find_map(|a| match a {
+                JavaAgent::Graph(ga) => Some(ga),
+                JavaAgent::Pinned(_) => None,
             })
-            .collect())
+        {
+            return Err(JrsError::manifest(format!(
+                "`run.java-agents` names `{ga}`, which cannot go into an image or a \
+                 distribution of a fat jar: an agent from the dependency graph loads from a \
+                 jar of its own, and the fat jar has unpacked it\n\n\
+                 leave out --fat, and the portable layout is used, with each agent in its \
+                 lib/; or name the agent with its version, as in `\"{ga}:<version>\"`, and \
+                 jrs pins its jar apart from the graph and ships it in agents/"
+            )));
+        }
+        let resolution = self.resolved()?;
+        let jars = self.java_agents("run", wanted, &resolution, true)?;
+        let mut launch = Vec::new();
+        let mut staged: Vec<(PathBuf, String)> = Vec::new();
+        for (agent, jar) in wanted.iter().zip(jars) {
+            let name = jar
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            let group = agent.ga().group;
+            let file = match (agent, lib_dir) {
+                (JavaAgent::Graph(_), Some(lib_dir)) => {
+                    // `copy_libraries` prefixes a file name two groups share.
+                    let prefixed = format!("{group}.{name}");
+                    if lib_dir.join(&prefixed).is_file() {
+                        format!("lib/{prefixed}")
+                    } else {
+                        format!("lib/{name}")
+                    }
+                }
+                _ => {
+                    // As `copy_libraries` does, when two pinned agents'
+                    // files share a name.
+                    let plain = format!("agents/{name}");
+                    let file = if staged.iter().any(|(_, f)| *f == plain) {
+                        format!("agents/{group}.{name}")
+                    } else {
+                        plain
+                    };
+                    staged.push((jar, file.clone()));
+                    file
+                }
+            };
+            launch.push(file);
+        }
+        Ok((launch, staged))
     }
 
     fn package_command(&self, args: &PackageArgs) -> Result<i32> {
@@ -1168,7 +1196,7 @@ impl<'a> Session<'a> {
     ) -> Result<Vec<(&'static str, String)>> {
         let toolchain = self.toolchain()?;
         let project = self.project();
-        let agents = self.image_agents(lib_dir)?;
+        let (agents, agent_jars) = self.image_agents(lib_dir)?;
         let app = image::App {
             name: &self.manifest.name,
             version: &self.manifest.version,
@@ -1177,6 +1205,7 @@ impl<'a> Session<'a> {
             lib_dir,
             jvm_args: &self.manifest.run.jvm_args,
             java_agents: &agents,
+            agent_jars: &agent_jars,
         };
 
         self.ui.phase("Analysing", "module dependencies with jdeps");
@@ -1300,7 +1329,7 @@ impl<'a> Session<'a> {
         }
 
         if args.dist {
-            let agents = self.image_agents(lib_dir)?;
+            let (agents, agent_jars) = self.image_agents(lib_dir)?;
             let app = image::App {
                 name: &self.manifest.name,
                 version: &self.manifest.version,
@@ -1309,6 +1338,7 @@ impl<'a> Session<'a> {
                 lib_dir,
                 jvm_args: &self.manifest.run.jvm_args,
                 java_agents: &agents,
+                agent_jars: &agent_jars,
             };
             let zip = target.join(format!("{base}.zip"));
             self.ui.phase(
@@ -1579,10 +1609,11 @@ impl<'a> Session<'a> {
     }
 
     /// What goes ahead of the test JVM's other arguments: the debugger's
-    /// agent under `--debug`, then `test.java-agents` from the test classpath.
+    /// agent under `--debug`, then `test.java-agents`, from the test
+    /// classpath or pinned apart from it.
     fn test_jvm_prefix(&self, resolution: &Resolution, args: &TestArgs) -> Result<Vec<String>> {
         let agents =
-            runner::java_agents("test", &self.manifest.test.java_agents, resolution, false)?;
+            self.java_agents("test", &self.manifest.test.java_agents, resolution, false)?;
         Ok(runner::jvm_prefix(args.debug.as_ref(), &agents))
     }
 
@@ -2999,14 +3030,17 @@ impl<'a> Session<'a> {
             .iter()
             .filter(|t| !t.dependencies.is_empty())
             .collect();
+        let pinned_agents = manifest.pinned_agents();
         if declared == 0
             && manifest.languages.is_empty()
             && tasks_with_tools.is_empty()
             && manifest.obfuscate.is_none()
+            && pinned_agents.is_empty()
         {
             let _ = self.tools.set(Vec::new());
             let _ = self.task_tools.set(Vec::new());
             let _ = self.obfuscator.set(None);
+            let _ = self.agents.set(Vec::new());
             return Ok(Resolution::default());
         }
 
@@ -3016,39 +3050,51 @@ impl<'a> Session<'a> {
         let lock_path = manifest.lock_path();
         let existing = Lockfile::load(&lock_path)?;
 
-        let (mut resolution, mut tools, mut task_tools, mut obfuscator, fresh) = match existing {
-            Some(lock) if lock.matches(manifest) && !force_update => {
-                self.ui.verbose(format!("reusing {}", lock_path.display()));
-                let tools = manifest
-                    .languages
-                    .iter()
-                    .filter_map(|c| {
-                        Some(Tool {
-                            language: c.language,
-                            resolution: lock.tool(&c.language.tool_name())?,
+        let (mut resolution, mut tools, mut task_tools, mut obfuscator, mut agents, fresh) =
+            match existing {
+                Some(lock) if lock.matches(manifest) && !force_update => {
+                    self.ui.verbose(format!("reusing {}", lock_path.display()));
+                    let tools = manifest
+                        .languages
+                        .iter()
+                        .filter_map(|c| {
+                            Some(Tool {
+                                language: c.language,
+                                resolution: lock.tool(&c.language.tool_name())?,
+                            })
                         })
-                    })
-                    .collect();
-                let task_tools = tasks_with_tools
-                    .iter()
-                    .filter_map(|t| Some((t.name.clone(), lock.tool(&t.tool_name())?)))
-                    .collect();
-                let obfuscator = manifest
-                    .obfuscate
-                    .as_ref()
-                    .and_then(|_| lock.tool(obfuscate::TOOL_NAME));
-                (lock.to_resolution(), tools, task_tools, obfuscator, false)
-            }
-            _ => {
-                let what = Self::resolving_what(manifest, declared, &tasks_with_tools);
-                self.ui.phase("Resolving", &what);
-                let scope = self.ui.spinner("Resolving", &what);
-                let resolved = self.resolve_with_tools(&fetcher);
-                scope.finish();
-                let (resolution, tools, task_tools, obfuscator) = resolved?;
-                (resolution, tools, task_tools, obfuscator, true)
-            }
-        };
+                        .collect();
+                    let task_tools = tasks_with_tools
+                        .iter()
+                        .filter_map(|t| Some((t.name.clone(), lock.tool(&t.tool_name())?)))
+                        .collect();
+                    let obfuscator = manifest
+                        .obfuscate
+                        .as_ref()
+                        .and_then(|_| lock.tool(obfuscate::TOOL_NAME));
+                    let agents = pinned_agents
+                        .iter()
+                        .filter_map(|(name, _)| Some((name.clone(), lock.tool(name)?)))
+                        .collect();
+                    (
+                        lock.to_resolution(),
+                        tools,
+                        task_tools,
+                        obfuscator,
+                        agents,
+                        false,
+                    )
+                }
+                _ => {
+                    let what = Self::resolving_what(manifest, declared, &tasks_with_tools);
+                    self.ui.phase("Resolving", &what);
+                    let scope = self.ui.spinner("Resolving", &what);
+                    let resolved = self.resolve_with_tools(&fetcher);
+                    scope.finish();
+                    let (resolution, tools, task_tools, obfuscator, agents) = resolved?;
+                    (resolution, tools, task_tools, obfuscator, agents, true)
+                }
+            };
 
         self.timings.since(
             if fresh {
@@ -3063,8 +3109,8 @@ impl<'a> Session<'a> {
 
         self.fetch_tools(&mut tools, &fetcher)?;
         // A fresh graph is downloaded now, so that jrs.lock pins its jars'
-        // checksums; one read from jrs.lock waits until its task runs, or until
-        // `--obfuscate` reaches the obfuscator.
+        // checksums; one read from jrs.lock waits until its task runs, until
+        // `--obfuscate` reaches the obfuscator, or until a JVM loads the agent.
         if fresh {
             for (name, graph) in &mut task_tools {
                 let classpath = self.fetch_task_tool(name, graph, &fetcher)?;
@@ -3075,6 +3121,9 @@ impl<'a> Session<'a> {
             if let Some(graph) = &mut obfuscator {
                 self.fetch_obfuscator(graph, &fetcher)?;
             }
+            for (name, graph) in &mut agents {
+                self.fetch_agent(name, graph, &fetcher)?;
+            }
         }
 
         if fresh {
@@ -3084,6 +3133,7 @@ impl<'a> Session<'a> {
                 &tools,
                 &task_tools,
                 obfuscator.as_ref(),
+                &agents,
             )?;
         }
         // So that `jrs cache prune` knows this project still wants these
@@ -3101,6 +3151,7 @@ impl<'a> Session<'a> {
         let _ = self.tools.set(tools);
         let _ = self.task_tools.set(task_tools);
         let _ = self.obfuscator.set(obfuscator);
+        let _ = self.agents.set(agents);
         Ok(resolution)
     }
 
@@ -3151,11 +3202,16 @@ impl<'a> Session<'a> {
             let plural = if names.len() > 1 { "s" } else { "" };
             let _ = write!(what, " and the tools of task{plural} {}", names.join(", "));
         }
+        let agents = manifest.pinned_agents().len();
+        if agents > 0 {
+            let plural = if agents > 1 { "s" } else { "" };
+            let _ = write!(what, " and {agents} pinned java agent{plural}");
+        }
         what
     }
 
-    /// Pin a freshly resolved graph in `jrs.lock`, with the compilers' and
-    /// the tasks' tool graphs beside it.
+    /// Pin a freshly resolved graph in `jrs.lock`, with the compilers', the
+    /// tasks', the obfuscator's and the pinned agents' graphs beside it.
     fn write_lock(
         &self,
         lock_path: &Path,
@@ -3163,6 +3219,7 @@ impl<'a> Session<'a> {
         tools: &[Tool],
         task_tools: &[(String, Resolution)],
         obfuscator: Option<&Resolution>,
+        agents: &[(String, Resolution)],
     ) -> Result<()> {
         let mut lock = Lockfile::from_resolution(&self.manifest, resolution);
         for tool in tools {
@@ -3175,6 +3232,9 @@ impl<'a> Session<'a> {
         }
         if let Some(graph) = obfuscator {
             lock = lock.with_tool(obfuscate::TOOL_NAME, graph);
+        }
+        for (name, graph) in agents {
+            lock = lock.with_tool(name, graph);
         }
         lock.write(lock_path)?;
         self.ui.verbose(format!("wrote {}", lock_path.display()));
@@ -3276,6 +3336,61 @@ impl<'a> Session<'a> {
         Ok(graph.runtime_classpath())
     }
 
+    /// Download a pinned java agent's graph of one, as the obfuscator's is.
+    fn fetch_agent(&self, name: &str, graph: &mut Resolution, fetcher: &Fetcher) -> Result<()> {
+        let started = Instant::now();
+        resolve::locate_cached(graph, fetcher);
+        let missing = graph
+            .packages
+            .iter()
+            .filter(|p| p.jar.is_none() && p.packaging != "pom")
+            .count();
+        if missing > 0 && !self.offline {
+            let artifact = graph
+                .roots
+                .first()
+                .map_or_else(String::new, |r| r.artifact.clone());
+            self.ui
+                .phase("Downloading", format!("{artifact} (java agent)"));
+            let scope = self.ui.downloads(missing);
+            let result = resolve::fetch_jars(graph, fetcher, self.jobs);
+            scope.finish();
+            result?;
+        } else {
+            resolve::fetch_jars(graph, fetcher, self.jobs)?;
+        }
+        self.timings.since("downloads (java agents)", started);
+        for warning in &graph.warnings {
+            self.ui.verbose(format!("{name}: {warning}"));
+        }
+        Ok(())
+    }
+
+    /// The jars `<section>.java-agents` names, in its order: from the
+    /// project's graph, or pinned apart from it and downloaded now if this
+    /// invocation has not yet (`runner::java_agents`).
+    fn java_agents(
+        &self,
+        section: &str,
+        agents: &[JavaAgent],
+        resolution: &Resolution,
+        runtime: bool,
+    ) -> Result<Vec<PathBuf>> {
+        let mut pinned = Vec::new();
+        if agents.iter().any(|a| matches!(a, JavaAgent::Pinned(_))) {
+            self.resolved()?;
+            let fetcher = self.fetcher()?;
+            for (name, graph) in self.agents.get().into_iter().flatten() {
+                if agents.iter().any(|a| a.tool_name(section) == *name) {
+                    let mut graph = graph.clone();
+                    self.fetch_agent(name, &mut graph, &fetcher)?;
+                    pinned.push((name.clone(), graph));
+                }
+            }
+        }
+        runner::java_agents(section, agents, resolution, &pinned, runtime)
+    }
+
     /// `ProGuard`'s classpath, downloaded if this invocation has not yet, or an
     /// error naming the missing `[obfuscate]` table.
     fn obfuscator_classpath(&self) -> Result<Vec<PathBuf>> {
@@ -3359,7 +3474,11 @@ impl<'a> Session<'a> {
             )?),
             None => None,
         };
-        Ok((resolution, tools, task_tools, obfuscator))
+        let mut agents = Vec::new();
+        for (name, coord) in self.manifest.pinned_agents() {
+            agents.push((name, resolve::resolve_agent(&coord, fetcher, self.jobs)?));
+        }
+        Ok((resolution, tools, task_tools, obfuscator, agents))
     }
 
     /// `jrs tree --task <name>`: a task's own dependency graph.
@@ -3618,14 +3737,20 @@ struct Built {
     classes: usize,
 }
 
-/// The project's graph, the compilers' and the tasks' tools', and the
-/// obfuscator's when it is on, freshly resolved.
+/// The project's graph, the compilers' and the tasks' tools', the
+/// obfuscator's when it is on, and each pinned agent's, freshly resolved.
 type ResolvedWithTools = (
     Resolution,
     Vec<Tool>,
     Vec<(String, Resolution)>,
     Option<Resolution>,
+    Vec<(String, Resolution)>,
 );
+
+/// `run.java-agents` as an image's launchers name them, relative to the
+/// application directory, and the pinned agents' jars with where they are
+/// staged.
+type ImageAgents = (Vec<String>, Vec<(PathBuf, String)>);
 
 /// A language's compiler, as the graph jrs resolved for it.
 #[derive(Clone)]

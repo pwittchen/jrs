@@ -905,12 +905,12 @@ fn translate_java_agent(section: &str, arg: &str, out: &mut Manifest, report: &m
     if !(declared && arg.to_ascii_lowercase().contains("mockito")) {
         report.skipped(format!(
             "`{arg}` in the {section} JVM's arguments — a path jrs cannot carry over; name \
-             the agent by `group:artifact` in `{section}.java-agents`, and declare it as a \
-             dependency"
+             the agent in `{section}.java-agents` by `group:artifact:version`, and jrs pins \
+             its jar"
         ));
         return;
     }
-    let mockito = Ga::new("org.mockito", "mockito-core");
+    let mockito = crate::manifest::JavaAgent::Graph(Ga::new("org.mockito", "mockito-core"));
     let agents = if section == "run" {
         &mut out.run.java_agents
     } else {
@@ -2303,7 +2303,10 @@ application {
         assert_eq!(env(&m.test.env), [("TZ".to_string(), "UTC".to_string())]);
         assert_eq!(
             m.test.java_agents,
-            vec![Ga::new("org.mockito", "mockito-core")]
+            vec![crate::manifest::JavaAgent::Graph(Ga::new(
+                "org.mockito",
+                "mockito-core"
+            ))]
         );
         assert_eq!(
             m.test.jvm_args,

@@ -187,14 +187,20 @@ pub struct App<'a> {
     pub lib_dir: Option<&'a Path>,
     /// `[run] jvm-args`, baked into the launchers.
     pub jvm_args: &'a [String],
-    /// `[run] java-agents`, as `lib/<file>` relative to the application
-    /// directory, loaded with `-javaagent:` ahead of `jvm_args`.
+    /// `[run] java-agents`, as `lib/<file>` or `agents/<file>` relative to
+    /// the application directory, loaded with `-javaagent:` ahead of
+    /// `jvm_args`.
     pub java_agents: &'a [String],
+    /// The agents pinned apart from the project's graph, which no `lib/`
+    /// holds: each jar, and the `agents/<file>` it is staged as. A fat jar
+    /// can carry these, since nothing unpacked them.
+    pub agent_jars: &'a [(PathBuf, String)],
 }
 
 impl App<'_> {
-    /// Every jar the application runs with: its own, then `lib/`'s, sorted —
-    /// what [`modules`] wants to see.
+    /// Every jar the application runs with: its own, then `lib/`'s, sorted,
+    /// then the pinned agents' — what [`modules`] wants to see. An agent runs
+    /// in the image's runtime too, and needs `java.instrument` at the least.
     ///
     /// # Errors
     ///
@@ -204,6 +210,7 @@ impl App<'_> {
         if let Some(lib) = self.lib_dir {
             jars.extend(project::find_by_extension(lib, "jar")?);
         }
+        jars.extend(self.agent_jars.iter().map(|(jar, _)| jar.clone()));
         Ok(jars)
     }
 
@@ -221,13 +228,20 @@ impl App<'_> {
     }
 
     /// Copy the jar and, when there is one, `lib/` into `dir`, keeping the
-    /// relative `Class-Path` valid.
+    /// relative `Class-Path` valid, then each pinned agent into `agents/`.
     pub(crate) fn stage(&self, dir: &Path) -> Result<()> {
         std::fs::create_dir_all(dir).path(dir)?;
         let jar = dir.join(self.jar_name()?);
         std::fs::copy(self.jar, &jar).path(&jar)?;
         if let Some(lib) = self.lib_dir {
             project::copy_tree(lib, &dir.join("lib"))?;
+        }
+        for (source, relative) in self.agent_jars {
+            let staged = dir.join(relative);
+            if let Some(parent) = staged.parent() {
+                std::fs::create_dir_all(parent).path(parent)?;
+            }
+            std::fs::copy(source, &staged).path(&staged)?;
         }
         Ok(())
     }
@@ -871,6 +885,7 @@ mod tests {
             lib_dir: None,
             jvm_args: &[],
             java_agents: &[],
+            agent_jars: &[],
         };
         let err = jpackage(
             &tc,
@@ -902,6 +917,7 @@ mod tests {
             lib_dir: Some(&lib),
             jvm_args: &[],
             java_agents: &[],
+            agent_jars: &[],
         };
         assert_eq!(
             app.jars().unwrap(),
@@ -1028,6 +1044,7 @@ mod tests {
             lib_dir: Some(&f.lib),
             jvm_args: &[],
             java_agents: &[],
+            agent_jars: &[],
         };
         let all = modules(
             &tc,
@@ -1064,6 +1081,7 @@ mod tests {
             lib_dir: Some(&f.lib),
             jvm_args: &jvm_args,
             java_agents: &[],
+            agent_jars: &[],
         };
         let mods = modules(&tc, &app.jars().unwrap(), tc.version, &[], &ui).unwrap();
         let output = f.tree.root.join("image");
@@ -1137,6 +1155,7 @@ mod tests {
             lib_dir: Some(&f.lib),
             jvm_args: &jvm_args,
             java_agents: &[],
+            agent_jars: &[],
         };
         let mods = modules(&tc, &app.jars().unwrap(), tc.version, &[], &ui).unwrap();
         let dest = f.tree.root.join("installers");

@@ -259,7 +259,10 @@ A table turns the language on. See [Kotlin, Scala and Groovy](#kotlin-scala-and-
 ```toml
 [run]
 jvm-args = ["-Xmx512m", "--enable-preview"]   # for `jrs run`, before -cp
-java-agents = ["com.example:my-agent"]       # -javaagent:, from the resolved graph
+java-agents = [
+  "com.example:my-agent",                    # -javaagent:, from the resolved graph
+  "io.opentelemetry.javaagent:opentelemetry-javaagent:2.10.0",   # pinned apart from it
+]
 env = { APP_MODE = "dev", DATA = "{target}/data" }
 cwd = "work"                                 # relative to the project root
 
@@ -290,19 +293,26 @@ Automatic-Module-Name = "com.example.app"
 itself. `jdeps` cannot see modules that are only reached by reflection or
 `ServiceLoader`, such as the TLS providers in `jdk.crypto.ec`.
 
-`java-agents` names agents by `group:artifact`, never by path: `jrs.toml` is
-committed, and the jar lives in the machine's cache. Each one is looked up in
-the resolved graph, so it is the version `jrs.lock` pins, and it has to be a
-dependency. `test.java-agents` looks on the test classpath, dev-dependencies
-included, and `run.java-agents` on the runtime one. An agent the graph does
-not hold there is a manifest error that says where to declare it. Agents go
+`java-agents` names agents by coordinate, never by path: `jrs.toml` is
+committed, and the jar lives in the machine's cache. A `group:artifact` is
+looked up in the resolved graph, so it is the version `jrs.lock` pins, and it
+has to be a dependency. `test.java-agents` looks on the test classpath,
+dev-dependencies included, and `run.java-agents` on the runtime one. An agent
+the graph does not hold there is a manifest error that says where to declare
+it. An agent the program never calls, such as the OpenTelemetry one, is named
+with its version instead, `group:artifact:version` (a classifier may follow).
+jrs resolves that jar alone, apart from the graph, as it does a compiler, pins
+it in `jrs.lock` as a `[[tool]]` named `run.java-agents.<group>:<artifact>`
+(or `test.…`), and keeps it off every classpath. Agents go
 to the JVM as `-javaagent:` ahead of every other argument, and ahead of
 JaCoCo's agent under `--coverage`. Mockito 5 on JDK 21 and later needs exactly
 `test.java-agents = ["org.mockito:mockito-core"]`; without it, Mockito
 attaches itself at run time and the JVM warns. `run.java-agents` also goes
 into the launchers of a `--jlink` or `--jpackage` image and of a `--dist`
-archive, which load it from their `lib/`. An image or a distribution of a
-`--fat` jar cannot carry one, and says so.
+archive, which load an agent from the graph from their `lib/` and a pinned
+one from their `agents/`. An image or a distribution of a `--fat` jar can
+carry only pinned agents, since the fat jar has unpacked the others, and it
+says so.
 
 `env` adds environment variables, and `run.cwd` sets the program's working
 directory, relative to the project root; without it the program runs where

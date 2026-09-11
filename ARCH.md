@@ -570,6 +570,7 @@ internal dependency:
                                                               user's jars win
  java [-agentlib:jdwp=…]              --debug
       [-javaagent:<jar>…]             test.java-agents, from the resolved graph
+                                      or pinned apart from it
       [-javaagent:jacoco…]            --coverage
       [jvm-args] -cp … ConsoleLauncher [execute]
       --scan-class-path target/test-classes   (or --select-method,
@@ -697,7 +698,12 @@ it composes with the merge rules above instead of redoing them. ProGuard is
 resolved as an isolated tool graph and pinned in `jrs.lock` as the
 `obfuscator` `[[tool]]` whenever `[obfuscate]` is present — like a compiler, so
 the lockfile is stable whether or not the flag is passed — and downloaded when
-`--obfuscate` first reaches it. jrs writes a ProGuard config file
+`--obfuscate` first reaches it. (A java agent named with a version goes the
+same way: `resolve::resolve_agent` resolves the jar alone, every dependency of
+it excluded, it is pinned as the `run.java-agents.<group>:<artifact>` or
+`test.…` `[[tool]]`, and `Session::java_agents` downloads it when a JVM or an
+image first loads it; images stage it in `agents/`, which a fat jar can
+carry.) jrs writes a ProGuard config file
 (`target/.jrs/obfuscate.pro`) and runs `java -cp <graph> proguard.ProGuard
 @obfuscate.pro`; the launcher leaves that trailing `@file` for ProGuard because
 it follows the main class. The config keeps the entry point and every

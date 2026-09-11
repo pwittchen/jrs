@@ -12,17 +12,7 @@ decision (see the last section) — it needs a spec change before it needs code.
 
 ---
 
-## 1. Tests
-
-- **Java agents outside the graph.** `test.java-agents` and `run.java-agents`
-  load the jar the resolved graph pinned, so an agent has to be a dependency.
-  One the program never calls, such as the OpenTelemetry agent, belongs off
-  the classpath: it would be resolved as a tool, the way JaCoCo is, and
-  pinned in `jrs.lock`. That would also let a `--fat` image carry a run
-  agent, which today it refuses, since the fat jar has unpacked the agent's
-  jar.
-
-## 2. Editors and tooling
+## 1. Editors and tooling
 
 - **Checks and formatting.** Gradle has the Checkstyle, PMD, SpotBugs and
   Spotless plugins. In jrs these are tasks, and a task can depend on a pinned
@@ -32,7 +22,7 @@ decision (see the last section) — it needs a spec change before it needs code.
   it is a `javac` plugin, so it waits on the annotation-processor path (see the
   last section).
 
-## 3. Benchmarks against Maven and Gradle
+## 2. Benchmarks against Maven and Gradle
 
 The M5 benchmark (`benches/resolution.rs`) measures jrs against itself and the
 network floor. It does not say how jrs compares to the tools people would
@@ -67,7 +57,7 @@ and testing the same projects, with the results written up in a report.
   a tool that is not installed, as `require_jdk!` does. It adds no crate to jrs.
   A manually triggered CI workflow can regenerate the report on a fixed runner.
 
-## 4. Needs a spec decision first
+## 3. Needs a spec decision first
 
 These cross a line drawn in SPEC §1.2 or §13 (or the dependency list). They are
 listed so the discussion has a home, not because they are planned.

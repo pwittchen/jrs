@@ -350,6 +350,7 @@ mod tests {
             lib_dir: lib,
             jvm_args,
             java_agents: &[],
+            agent_jars: &[],
         }
     }
 

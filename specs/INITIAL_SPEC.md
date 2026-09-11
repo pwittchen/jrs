@@ -206,12 +206,12 @@ post-package = ["checksum"]
 | `java.javadoc-args` | no | `[]` | Appended verbatim to `jrs doc`'s `javadoc` (§7.4). |
 | `java.jdk` | no | — | JDK feature version to build with (§7.1). |
 | `run.jvm-args` | no | `[]` | `java` flags for `jrs run`, before `-cp`. |
-| `run.java-agents` | no | `[]` | `group:artifact` of agents on the runtime classpath, passed as `-javaagent:<jar>` ahead of `run.jvm-args`, from the jars `jrs.lock` pins; baked into `--jlink` / `--jpackage` / `--dist` launchers (§9.4, §9.6). |
+| `run.java-agents` | no | `[]` | Agents passed as `-javaagent:<jar>` ahead of `run.jvm-args`, from the jars `jrs.lock` pins: `group:artifact` for one on the runtime classpath, `group:artifact:version[:classifier]` for one resolved alone, apart from the graph, and pinned as a `[[tool]]` (§4.4); baked into `--jlink` / `--jpackage` / `--dist` launchers (§9.4, §9.6). |
 | `run.env` | no | `{}` | Environment variables for the program, name → string. A task's placeholders (§7.6), except `{jar}` and `{classpath-argfile}`; `JRS_*` names are refused. |
 | `run.cwd` | no | jrs's own | The program's working directory, relative to the root; placeholders as `run.env`, but no classpath. |
 | `test.jvm-args` | no | `[]` | `java` flags for the test JVM. |
 | `test.jacoco-version` | no | jrs's default | JaCoCo release for `jrs test --coverage` (§10.2). |
-| `test.java-agents` | no | `[]` | As `run.java-agents`, looked up on the test classpath (dev-dependencies included), ahead of JaCoCo's agent (§10.2). |
+| `test.java-agents` | no | `[]` | As `run.java-agents`, a `group:artifact` looked up on the test classpath (dev-dependencies included), ahead of JaCoCo's agent (§10.2). |
 | `test.env` | no | `{}` | As `run.env`, for the test JVM. |
 | `test.retries` | no | `0` | Run a failed test again up to this many times (§10.2). One that passes on a retry is reported as flaky, not as passed. `jrs test --retries <n>` overrides it. |
 | `test.forks` | no | `1` | Test JVMs a run's classes are split among, run at once (§10.2): Gradle's `maxParallelForks`, surefire's `<forkCount>`. `jrs test --forks <n>` overrides it. |
@@ -270,7 +270,12 @@ rewrites it. The implied runtime libraries are ordinary `[[package]]` entries,
 and `manifest-checksum` covers them and each language's version. A task with
 `[tasks.<name>.dependencies]` pins its graph the same way, in a `[[tool]]`
 block named `tasks.<name>` (§7.6), and `manifest-checksum` covers those
-dependencies too.
+dependencies too. So does a java agent named with a version in
+`run.java-agents` or `test.java-agents`: it is resolved alone, each of its own
+dependencies excluded, since `-javaagent:` loads one jar, and pinned in a
+`[[tool]]` block named `run.java-agents.<group>:<artifact>` (or `test.…`),
+one per section. An agent named by `group:artifact` comes from the project's
+graph and adds nothing, so its lockfile stays byte for byte.
 
 A package whose version `[managed]` decided (§8.9) says `managed = true`. The
 line is written only then, and `manifest-checksum` gains `[managed]`'s entries
@@ -1415,10 +1420,14 @@ ships the same jar.
 
 `run.java-agents` go into both, ahead of `run.jvm-args`: the launchers pass
 `-javaagent:` with the agent's jar under `app/lib/`, and jpackage gets
-`-javaagent:$APPDIR/lib/<file>`, which its launcher expands. An image of the
-fat jar has no agent jar left to point at, so `run.java-agents` with `--fat`
-is a manifest error. `run.env` and `run.cwd` belong to `jrs run` and do not go
-into an image.
+`-javaagent:$APPDIR/lib/<file>`, which its launcher expands. A pinned agent
+(§4.4) is in no `lib/`: it is staged in `app/agents/` (`$APPDIR/agents/`), and
+`jdeps` reads it with the application's jars, so the runtime has
+`java.instrument` and whatever else the agent needs. An image of the fat jar
+has no graph agent's jar left to point at, so an agent named by
+`group:artifact` with `--fat` is a manifest error; a pinned one goes in as
+it does beside a thin jar. `run.env` and `run.cwd` belong to `jrs run` and do
+not go into an image.
 
 ### 9.5 Sources and Javadoc jars (`--sources`, `--javadoc`)
 
@@ -1442,7 +1451,7 @@ launchers `bin/<name>` (sh) and `bin/<name>.bat`, then zipped into
 `target/<name>-<version>.zip` under a top-level `<name>-<version>/`. A launcher
 finds the distribution from its own location and runs `$JAVA_HOME/bin/java`
 when `JAVA_HOME` is set, the `java` on `PATH` otherwise, with `$JAVA_OPTS`,
-`run.java-agents` (from `lib/`, as in §9.4), `run.jvm-args`, then `-jar <jar>` and the program's arguments; it says which it
+`run.java-agents` (from `lib/` or `agents/`, as in §9.4), `run.jvm-args`, then `-jar <jar>` and the program's arguments; it says which it
 looked for when there is none. The zip is deterministic like the jars: entries
 sorted, the fixed 1980 timestamp, mode `0755` for `bin/<name>` and `0644` for
 everything else. Zip only, since tar.gz would need a crate. `--dist` requires
@@ -1604,11 +1613,13 @@ files, and all it touches is names.
   all. `--filter` still replaces it, and a Java-only project keeps the
   launcher's default.
 - `test.jvm-args` go before `-cp`.
-- `test.java-agents` are looked up in the resolved graph, anywhere on the test
-  classpath, and go ahead of JaCoCo's agent as `-javaagent:<jar>`; under
-  `--debug`, the JDWP agent goes first of all. An agent the graph does not
-  hold is a manifest error that says to add it as a dependency. `test.env` is
-  added to the environment the test JVM inherits.
+- `test.java-agents` named by `group:artifact` are looked up in the resolved
+  graph, anywhere on the test classpath; one named with a version is its own
+  pinned jar (§4.4), on no classpath. They go ahead of JaCoCo's agent as
+  `-javaagent:<jar>`; under `--debug`, the JDWP agent goes first of all. An
+  agent the graph does not hold is a manifest error that says to add it as a
+  dependency or to name it with its version. `test.env` is added to the
+  environment the test JVM inherits.
 - Coverage (`jrs test --coverage`) uses JaCoCo, resolved as an internal
   dependency like the launcher:
   - The agent (`org.jacoco.agent`, classifier `runtime`) goes on the test JVM

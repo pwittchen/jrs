@@ -1320,6 +1320,92 @@ fn a_jlink_image_launches_with_the_run_agents() {
     );
 }
 
+/// The marker agent named with a version: not a dependency, so on no
+/// classpath, and pinned in jrs.lock as a tool of its own.
+const PINNED_AGENT_TABLES: &str = r#"[run]
+java-agents = ["org.example.agents:marker-agent:1.0"]
+
+[test]
+java-agents = ["org.example.agents:marker-agent:1.0"]
+
+[dev-dependencies]
+"org.junit.platform:junit-platform-console-standalone" = "1.10.2"
+"#;
+
+#[test]
+fn an_agent_named_with_a_version_is_pinned_apart_from_the_graph() {
+    let toolchain = require_jdk!();
+    let scratch = Scratch::new("agents-pinned");
+    let app = agent_project(&scratch, &toolchain, PINNED_AGENT_TABLES);
+
+    let (code, stdout, stderr) = app.jrs(&["-v", "run"]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stdout.starts_with("marker 1.0|"), "{stdout}");
+    let java = stderr
+        .lines()
+        .find(|l| l.contains("com.example.App") && l.contains(" -cp "))
+        .unwrap_or_else(|| panic!("no java command line in:\n{stderr}"));
+    let cp = java.find(" -cp ").unwrap();
+    assert!(java[..cp].contains("marker-agent-1.0.jar"), "{java}");
+    assert!(
+        !java[cp..].contains("marker-agent"),
+        "the agent is not on the classpath: {java}"
+    );
+
+    let lock = std::fs::read_to_string(app.root.join("jrs.lock")).unwrap();
+    for section in ["run", "test"] {
+        assert!(
+            lock.contains(&format!(
+                "\n[[tool]]\nname = \"{section}.java-agents.org.example.agents:marker-agent\"\n"
+            )),
+            "{lock}"
+        );
+    }
+    assert!(
+        !lock.contains("\n[[package]]\ngroup = \"org.example.agents\""),
+        "not in the project's graph: {lock}"
+    );
+
+    let (code, stdout, stderr) = app.jrs(&["test"]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stdout.contains("agent=marker 1.0"), "{stdout}");
+}
+
+#[cfg(unix)]
+#[test]
+fn a_fat_image_and_distribution_carry_a_pinned_run_agent() {
+    let toolchain = require_jdk!();
+    let scratch = Scratch::new("agents-pinned-fat");
+    let app = agent_project(&scratch, &toolchain, PINNED_AGENT_TABLES);
+
+    let (code, _, stderr) = app.jrs(&["package", "--fat", "--jlink", "--dist"]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(
+        app.root
+            .join("target/image/app/agents/marker-agent-1.0.jar")
+            .is_file()
+    );
+    let output = std::process::Command::new(app.root.join("target/image/bin/agents"))
+        .env_remove("GREETING")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.starts_with("marker 1.0|null|"), "{stdout}");
+
+    let dist = app.root.join("target/dist/agents-1.0.0");
+    assert!(dist.join("agents/marker-agent-1.0.jar").is_file());
+    let launcher = std::fs::read_to_string(dist.join("bin/agents")).unwrap();
+    assert!(
+        launcher.contains("agents/marker-agent-1.0.jar"),
+        "{launcher}"
+    );
+}
+
 // ---- runtime-only dependencies and local jars ------------------------------
 //
 // These resolve, so they drive the jrs binary with a cache and a config of
