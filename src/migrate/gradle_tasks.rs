@@ -466,7 +466,7 @@ fn task_of_type(ty: &str) -> Option<&'static str> {
 
 /// The Gradle task a configuring statement names, and what follows it:
 /// `compileJava.dependsOn x` → `compileJava`, `.dependsOn x`;
-/// `tasks.named("test")` → `test`, ``.
+/// `tasks.named("test")` → `test`, and nothing.
 fn configured(head: &str) -> Option<(String, &str)> {
     let s = head.trim();
     let s = s.strip_prefix("project.").unwrap_or(s);
@@ -730,17 +730,55 @@ fn translate(gradle: &str, header: Header, block: Option<&str>) -> Result<Declar
         read_body(block, &mut body)?;
     }
     let kind = header.kind.unwrap_or_else(|| "DefaultTask".to_string());
+    let (argv, implied) = command(&kind, &body)?;
+    if let Some((var, _)) = body
+        .env
+        .iter()
+        .find(|(k, _)| k.to_ascii_uppercase().starts_with("JRS_") || k.contains('='))
+    {
+        return Err(format!(
+            "`{var}` is not an environment variable jrs lets a task set"
+        ));
+    }
+    let review = review_notes(&name, &body);
+
+    Ok(Declared {
+        gradle: gradle.to_string(),
+        kind,
+        def: TaskDef {
+            name,
+            description: body.description,
+            action: argv.map(Action::Run),
+            args: Vec::new(),
+            depends_on: Vec::new(),
+            env: body
+                .env
+                .iter()
+                .map(|(k, v)| (k.clone(), Template::literal(v)))
+                .collect(),
+            cwd: body.working_dir.as_deref().map(Template::literal),
+            inputs: literals(&body.inputs),
+            outputs: literals(&body.outputs),
+            source_outputs: Vec::new(),
+            resource_outputs: Vec::new(),
+        },
+        depends_on: body.depends_on,
+        implied,
+        review,
+    })
+}
+
+fn literals(values: &[String]) -> Vec<Template> {
+    values.iter().map(|v| Template::literal(v)).collect()
+}
+
+/// The command a task of type `kind` runs, if it runs one, and the built-in
+/// phases it needs whatever it declares.
+fn command(kind: &str, body: &Body) -> Result<(Option<Vec<Template>>, Vec<Builtin>), String> {
     let java_exec = body.main_class.is_some() || body.main_classpath || !body.jvm_args.is_empty();
     let exec = !body.command_line.is_empty() || body.executable.is_some();
-    let literals = |values: &[String]| {
-        values
-            .iter()
-            .map(|v| Template::literal(v))
-            .collect::<Vec<_>>()
-    };
-
     let mut implied = Vec::new();
-    let argv = match kind.as_str() {
+    let argv = match kind {
         "Exec" if java_exec => {
             return Err("it sets `JavaExec` properties on an `Exec` task".to_string());
         }
@@ -797,16 +835,11 @@ fn translate(gradle: &str, header: Header, block: Option<&str>) -> Result<Declar
             ));
         }
     };
-    if let Some((var, _)) = body
-        .env
-        .iter()
-        .find(|(k, _)| k.to_ascii_uppercase().starts_with("JRS_") || k.contains('='))
-    {
-        return Err(format!(
-            "`{var}` is not an environment variable jrs lets a task set"
-        ));
-    }
+    Ok((argv, implied))
+}
 
+/// What the user should check by hand once the task is migrated.
+fn review_notes(name: &str, body: &Body) -> Vec<String> {
     let mut review: Vec<String> = body
         .unread_io
         .iter()
@@ -832,31 +865,7 @@ fn translate(gradle: &str, header: Header, block: Option<&str>) -> Result<Declar
              target/ (`{{target}}` in a task, `{{jar}}` for the jar)"
         ));
     }
-
-    Ok(Declared {
-        gradle: gradle.to_string(),
-        kind,
-        def: TaskDef {
-            name,
-            description: body.description,
-            action: argv.map(Action::Run),
-            args: Vec::new(),
-            depends_on: Vec::new(),
-            env: body
-                .env
-                .iter()
-                .map(|(k, v)| (k.clone(), Template::literal(v)))
-                .collect(),
-            cwd: body.working_dir.as_deref().map(Template::literal),
-            inputs: literals(&body.inputs),
-            outputs: literals(&body.outputs),
-            source_outputs: Vec::new(),
-            resource_outputs: Vec::new(),
-        },
-        depends_on: body.depends_on,
-        implied,
-        review,
-    })
+    review
 }
 
 // ---- the environment of Gradle's `run` and `test` --------------------------
@@ -1041,67 +1050,13 @@ struct Tie {
 /// every task and every tie that could not be.
 pub(super) fn read(script: &str, out: &mut Manifest, report: &mut Report) {
     let top = statements(script);
-    let mut declared: Vec<Declared> = Vec::new();
-    let mut failed: Vec<(String, String)> = Vec::new();
-
-    for stmt in &top {
-        let Some((gradle, header)) = declaration(&stmt.head) else {
-            continue;
-        };
-        match header.and_then(|h| translate(&gradle, h, stmt.block.as_deref())) {
-            Ok(d) if declared.iter().any(|o| o.def.name == d.def.name) => failed.push((
-                gradle,
-                format!("its name would be `{}`, which another task has", d.def.name),
-            )),
-            Ok(d) => declared.push(d),
-            Err(why) => failed.push((gradle, why)),
-        }
-    }
+    let (mut declared, mut failed) = read_declarations(&top);
     let custom: Vec<String> = declared
         .iter()
         .map(|d| d.gradle.clone())
         .chain(failed.iter().map(|(g, _)| g.clone()))
         .collect();
-
-    let mut ties = Vec::new();
-    let mut reconfigured = Vec::new();
-    for stmt in top.iter().filter(|s| declaration(&s.head).is_none()) {
-        let Some((target, rest)) = configured(&stmt.head) else {
-            continue;
-        };
-        let is_custom = custom.contains(&target);
-        if !is_custom && !GRADLE_TASKS.contains(&target.as_str()) {
-            continue;
-        }
-        let mut found: Vec<(Relation, String, String)> = Vec::new();
-        if let Some((tied, arg)) = relation(rest) {
-            found.push((tied, arg.to_string(), stmt.head.clone()));
-        } else if is_custom && !rest.is_empty() {
-            reconfigured.push((target.clone(), stmt.head.clone()));
-        }
-        for inner in stmt.block.as_deref().map(statements).unwrap_or_default() {
-            match relation(&inner.head) {
-                Some((tied, arg)) if inner.block.is_none() => found.push((
-                    tied,
-                    arg.to_string(),
-                    format!("{} {{ {} }}", stmt.head, inner.head),
-                )),
-                _ if is_custom => reconfigured.push((target.clone(), stmt.head.clone())),
-                _ => {}
-            }
-        }
-        for (relation, arg, text) in found {
-            match task_refs(&arg) {
-                Ok(refs) => ties.push(Tie {
-                    target: target.clone(),
-                    relation,
-                    refs,
-                    text,
-                }),
-                Err(why) => report.skipped(format!("`{text}` — {why}")),
-            }
-        }
-    }
+    let (ties, reconfigured) = read_ties(&top, &custom, report);
 
     let mut fail = |declared: &mut Vec<Declared>, gradle: &str, why: String| {
         if let Some(i) = declared.iter().position(|d| d.gradle == gradle) {
@@ -1165,11 +1120,102 @@ pub(super) fn read(script: &str, out: &mut Manifest, report: &mut Report) {
         report.skipped(format!("task `{gradle}` — {why}"));
     }
 
+    link_depends_on(&mut declared, report);
+    apply_hooks(&mut declared, hooked, &custom, out, report);
+    out.tasks = declared.into_iter().map(|d| d.def).collect();
+
+    // What the translation cannot rule out, `task::check` can: a manifest jrs
+    // would refuse to load is never written.
+    if let Err(e) = crate::task::check(out) {
+        report.skipped(format!(
+            "[hooks] — {e}; left out, so hook the tasks by hand"
+        ));
+        out.hooks = Hooks::default();
+        if let Err(e) = crate::task::check(out) {
+            report.skipped(format!("[tasks] — {e}; left out"));
+            out.tasks.clear();
+        }
+    }
+}
+
+/// The script's task declarations, translated, and those that could not be,
+/// with why.
+fn read_declarations(top: &[Stmt]) -> (Vec<Declared>, Vec<(String, String)>) {
+    let mut declared: Vec<Declared> = Vec::new();
+    let mut failed: Vec<(String, String)> = Vec::new();
+    for stmt in top {
+        let Some((gradle, header)) = declaration(&stmt.head) else {
+            continue;
+        };
+        match header.and_then(|h| translate(&gradle, h, stmt.block.as_deref())) {
+            Ok(d) if declared.iter().any(|o| o.def.name == d.def.name) => failed.push((
+                gradle,
+                format!("its name would be `{}`, which another task has", d.def.name),
+            )),
+            Ok(d) => declared.push(d),
+            Err(why) => failed.push((gradle, why)),
+        }
+    }
+    (declared, failed)
+}
+
+/// The ties written apart from the declarations, and the `custom` tasks
+/// configured again after theirs, with the statement that does it.
+fn read_ties(
+    top: &[Stmt],
+    custom: &[String],
+    report: &mut Report,
+) -> (Vec<Tie>, Vec<(String, String)>) {
+    let mut ties = Vec::new();
+    let mut reconfigured = Vec::new();
+    for stmt in top.iter().filter(|s| declaration(&s.head).is_none()) {
+        let Some((target, rest)) = configured(&stmt.head) else {
+            continue;
+        };
+        let is_custom = custom.contains(&target);
+        if !is_custom && !GRADLE_TASKS.contains(&target.as_str()) {
+            continue;
+        }
+        let mut found: Vec<(Relation, String, String)> = Vec::new();
+        if let Some((rel, arg)) = relation(rest) {
+            found.push((rel, arg.to_string(), stmt.head.clone()));
+        } else if is_custom && !rest.is_empty() {
+            reconfigured.push((target.clone(), stmt.head.clone()));
+        }
+        for inner in stmt.block.as_deref().map(statements).unwrap_or_default() {
+            match relation(&inner.head) {
+                Some((rel, arg)) if inner.block.is_none() => found.push((
+                    rel,
+                    arg.to_string(),
+                    format!("{} {{ {} }}", stmt.head, inner.head),
+                )),
+                _ if is_custom => reconfigured.push((target.clone(), stmt.head.clone())),
+                _ => {}
+            }
+        }
+        for (relation, arg, text) in found {
+            match task_refs(&arg) {
+                Ok(refs) => ties.push(Tie {
+                    target: target.clone(),
+                    relation,
+                    refs,
+                    text,
+                }),
+                Err(why) => report.skipped(format!("`{text}` — {why}")),
+            }
+        }
+    }
+    (ties, reconfigured)
+}
+
+/// Turn each task's Gradle `dependsOn` names into jrs references, now that
+/// every task's fate is known, and report it migrated.
+fn link_depends_on(declared: &mut [Declared], report: &mut Report) {
     let names: Vec<(String, String)> = declared
         .iter()
         .map(|d| (d.gradle.clone(), d.def.name.clone()))
         .collect();
-    for d in &mut declared {
+    for d in declared.iter_mut() {
         let mut refs: Vec<TaskRef> = d.implied.iter().map(|b| TaskRef::Builtin(*b)).collect();
         for r in &d.depends_on {
             let resolved: Vec<TaskRef> = match names.iter().find(|(g, _)| g == r) {
@@ -1195,7 +1241,17 @@ pub(super) fn read(script: &str, out: &mut Manifest, report: &mut Report) {
             report.review(line);
         }
     }
+}
 
+/// Add the `hooked` tasks to `out.hooks`, reporting those that were not
+/// migrated or would do nothing there.
+fn apply_hooks(
+    declared: &mut [Declared],
+    hooked: Vec<(Hook, String, String)>,
+    custom: &[String],
+    out: &mut Manifest,
+    report: &mut Report,
+) {
     for (hook, gradle, text) in hooked {
         let Some(d) = declared.iter_mut().find(|d| d.gradle == gradle) else {
             let why = if custom.contains(&gradle) {
@@ -1240,20 +1296,6 @@ pub(super) fn read(script: &str, out: &mut Manifest, report: &mut Report) {
         }
         out.hooks.add(hook, &name);
         report.migrated(format!("`{text}` → hooks.{hook} = [\"{name}\"]"));
-    }
-    out.tasks = declared.into_iter().map(|d| d.def).collect();
-
-    // What the translation cannot rule out, `task::check` can: a manifest jrs
-    // would refuse to load is never written.
-    if let Err(e) = crate::task::check(out) {
-        report.skipped(format!(
-            "[hooks] — {e}; left out, so hook the tasks by hand"
-        ));
-        out.hooks = Hooks::default();
-        if let Err(e) = crate::task::check(out) {
-            report.skipped(format!("[tasks] — {e}; left out"));
-            out.tasks.clear();
-        }
     }
 }
 
