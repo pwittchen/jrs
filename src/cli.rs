@@ -472,7 +472,7 @@ pub struct PackageArgs {
     /// which needs a `GraalVM` JDK.
     #[arg(long)]
     pub native_image: bool,
-    /// Obfuscate the packaged jar with ProGuard, which needs an `[obfuscate]`
+    /// Obfuscate the packaged jar with `ProGuard`, which needs an `[obfuscate]`
     /// table in jrs.toml. Renames classes, methods and fields and strips debug
     /// information, leaving behaviour untouched.
     #[arg(long)]
@@ -672,7 +672,7 @@ struct Session<'a> {
     /// and pinned with the project's, and downloaded then, or when the task
     /// first runs.
     task_tools: OnceCell<Vec<(String, Resolution)>>,
-    /// ProGuard's graph when `[obfuscate]` turns obfuscation on, resolved and
+    /// `ProGuard`'s graph when `[obfuscate]` turns obfuscation on, resolved and
     /// pinned with the project's, and downloaded then or when `--obfuscate`
     /// runs. `Some(None)` means the project does not obfuscate.
     obfuscator: OnceCell<Option<Resolution>>,
@@ -1331,42 +1331,52 @@ impl<'a> Session<'a> {
         }
 
         if args.obfuscate {
-            // Present: `package` checked it before the build (see `package`).
-            let config = self
-                .manifest
-                .obfuscate
-                .as_ref()
-                .expect("--obfuscate requires [obfuscate]");
-            let toolchain = self.toolchain()?;
-            let tool_classpath = self.obfuscator_classpath()?;
-            // The JDK's modules are always library jars; the dependency jars are
-            // too unless a fat jar already holds their classes.
-            let mut library_jars = obfuscate::jdk_library_jars(&toolchain);
-            if !args.fat {
-                library_jars.extend(built.resolution.runtime_classpath());
-            }
-            let obfuscation = Obfuscation {
-                jar,
-                tool_classpath: &tool_classpath,
-                library_jars: &library_jars,
-                main_class: self.manifest.main_class.as_deref(),
-                keep: &config.keep,
-                extra_args: &config.proguard_args,
-            };
-            self.ui.phase(
-                "Obfuscating",
-                format!("{} with ProGuard {}", jar.display(), config.version),
-            );
-            let started = Instant::now();
-            let scope = self.ui.spinner("Obfuscating", "with ProGuard");
-            let result =
-                obfuscate::build(&toolchain.java, &obfuscation, &project.work_dir(), self.ui);
-            scope.finish();
-            self.timings.since("obfuscate", started);
-            let bytes = result?;
+            let bytes = self.obfuscate_jar(args, jar, built)?;
             rows.push(("obfuscated", row(jar, bytes)));
         }
         Ok(rows)
+    }
+
+    /// `--obfuscate`: rewrite the jar just written in place with `ProGuard`,
+    /// and return the obfuscated jar's size in bytes.
+    fn obfuscate_jar(&self, args: &PackageArgs, jar: &Path, built: &Built) -> Result<u64> {
+        // Present: `package` checked it before the build (see `package`).
+        let config = self
+            .manifest
+            .obfuscate
+            .as_ref()
+            .expect("--obfuscate requires [obfuscate]");
+        let toolchain = self.toolchain()?;
+        let tool_classpath = self.obfuscator_classpath()?;
+        // The JDK's modules are always library jars; the dependency jars are
+        // too unless a fat jar already holds their classes.
+        let mut library_jars = obfuscate::jdk_library_jars(&toolchain);
+        if !args.fat {
+            library_jars.extend(built.resolution.runtime_classpath());
+        }
+        let obfuscation = Obfuscation {
+            jar,
+            tool_classpath: &tool_classpath,
+            library_jars: &library_jars,
+            main_class: self.manifest.main_class.as_deref(),
+            keep: &config.keep,
+            extra_args: &config.proguard_args,
+        };
+        self.ui.phase(
+            "Obfuscating",
+            format!("{} with ProGuard {}", jar.display(), config.version),
+        );
+        let started = Instant::now();
+        let scope = self.ui.spinner("Obfuscating", "with ProGuard");
+        let result = obfuscate::build(
+            &toolchain.java,
+            &obfuscation,
+            &self.project().work_dir(),
+            self.ui,
+        );
+        scope.finish();
+        self.timings.since("obfuscate", started);
+        result
     }
 
     fn test_command(&self, args: &TestArgs) -> Result<i32> {
@@ -3030,24 +3040,7 @@ impl<'a> Session<'a> {
             resolving,
         );
 
-        let downloading = Instant::now();
-        resolve::locate_cached(&mut resolution, &fetcher);
-        resolve::attach_local(&mut resolution, &manifest.root)?;
-        let missing = resolution
-            .packages
-            .iter()
-            .filter(|p| p.jar.is_none() && p.packaging != "pom")
-            .count();
-        if missing > 0 && !self.offline {
-            self.ui.phase("Downloading", format!("{missing} artifacts"));
-            let scope = self.ui.downloads(missing);
-            let result = resolve::fetch_jars(&mut resolution, &fetcher, self.jobs);
-            scope.finish();
-            result?;
-        } else {
-            resolve::fetch_jars(&mut resolution, &fetcher, self.jobs)?;
-        }
-        self.timings.since("downloads", downloading);
+        self.download(&mut resolution, &fetcher)?;
 
         self.fetch_tools(&mut tools, &fetcher)?;
         // A fresh graph is downloaded now, so that jrs.lock pins its jars'
@@ -3090,6 +3083,31 @@ impl<'a> Session<'a> {
         let _ = self.task_tools.set(task_tools);
         let _ = self.obfuscator.set(obfuscator);
         Ok(resolution)
+    }
+
+    /// Point `resolution`'s packages at their jars: the cached ones and the
+    /// local ones as they are, the rest downloaded — under a `Downloading`
+    /// line when there is anything to fetch and jrs is online.
+    fn download(&self, resolution: &mut Resolution, fetcher: &Fetcher) -> Result<()> {
+        let downloading = Instant::now();
+        resolve::locate_cached(resolution, fetcher);
+        resolve::attach_local(resolution, &self.manifest.root)?;
+        let missing = resolution
+            .packages
+            .iter()
+            .filter(|p| p.jar.is_none() && p.packaging != "pom")
+            .count();
+        if missing > 0 && !self.offline {
+            self.ui.phase("Downloading", format!("{missing} artifacts"));
+            let scope = self.ui.downloads(missing);
+            let result = resolve::fetch_jars(resolution, fetcher, self.jobs);
+            scope.finish();
+            result?;
+        } else {
+            resolve::fetch_jars(resolution, fetcher, self.jobs)?;
+        }
+        self.timings.since("downloads", downloading);
+        Ok(())
     }
 
     /// What the `Resolving` line names: the declared dependencies, and the
@@ -3210,7 +3228,7 @@ impl<'a> Session<'a> {
         Ok(classpath)
     }
 
-    /// Download ProGuard's graph, as a task tool's is, and return its classpath.
+    /// Download `ProGuard`'s graph, as a task tool's is, and return its classpath.
     fn fetch_obfuscator(&self, graph: &mut Resolution, fetcher: &Fetcher) -> Result<Vec<PathBuf>> {
         let started = Instant::now();
         resolve::locate_cached(graph, fetcher);
@@ -3239,7 +3257,7 @@ impl<'a> Session<'a> {
         Ok(graph.runtime_classpath())
     }
 
-    /// ProGuard's classpath, downloaded if this invocation has not yet, or an
+    /// `ProGuard`'s classpath, downloaded if this invocation has not yet, or an
     /// error naming the missing `[obfuscate]` table.
     fn obfuscator_classpath(&self) -> Result<Vec<PathBuf>> {
         self.resolved()?;

@@ -1,16 +1,16 @@
 //! Obfuscation: `jrs package --obfuscate` (SPEC §9.8).
 //!
-//! ProGuard is resolved from Maven Central as an isolated tool graph, pinned in
+//! `ProGuard` is resolved from Maven Central as an isolated tool graph, pinned in
 //! `jrs.lock` beside the compilers (`JVM_LANGUAGES.md` §5.2), and run on the
 //! project's JDK. jrs shells out to it and never rewrites class files itself —
 //! a driver here as everywhere. Obfuscation runs after `package`, over the jar
 //! `package` assembled, so it composes with the fat-jar merge rules
 //! (`package.rs`) instead of redoing them.
 //!
-//! The whole invocation goes in `target/.jrs/obfuscate.pro`, in ProGuard's own
+//! The whole invocation goes in `target/.jrs/obfuscate.pro`, in `ProGuard`'s own
 //! configuration format, and jrs runs `java -cp <graph> proguard.ProGuard
 //! @obfuscate.pro`. The `java` launcher stops expanding `@argfiles` at the main
-//! class, so the trailing `@obfuscate.pro` reaches ProGuard verbatim (SPEC
+//! class, so the trailing `@obfuscate.pro` reaches `ProGuard` verbatim (SPEC
 //! §5.3, and the same reason `javac`'s sources may follow the main class).
 //!
 //! What survives, by keeping the names it names: the entry point (`-keep` on
@@ -20,6 +20,7 @@
 //! (`-dontshrink -dontoptimize`), so the program behaves — and times — as the
 //! plain jar does; only the names change.
 
+use std::fmt::Write as _;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 
@@ -29,14 +30,14 @@ use crate::resolve::coord::Coord;
 use crate::toolchain::{Toolchain, run_captured};
 use crate::ui::{Stream, Ui};
 
-/// ProGuard's coordinate and entry point. `proguard-base` is not
+/// `ProGuard`'s coordinate and entry point. `proguard-base` is not
 /// self-contained (it pulls `proguard-core` and the Kotlin metadata reader), so
 /// it is resolved as a graph, not fetched as a lone jar.
 pub const GROUP: &str = "com.guardsquare";
 pub const ARTIFACT: &str = "proguard-base";
 pub const MAIN_CLASS: &str = "proguard.ProGuard";
 
-/// The name ProGuard's pinned graph goes by in `jrs.lock`'s `[[tool]]` blocks
+/// The name `ProGuard`'s pinned graph goes by in `jrs.lock`'s `[[tool]]` blocks
 /// and in `jrs tree --tool`.
 pub const TOOL_NAME: &str = "obfuscator";
 
@@ -49,11 +50,11 @@ pub fn coord(version: &str) -> Coord {
 /// What to obfuscate, and the names to leave alone while doing it.
 #[derive(Debug, Clone, Copy)]
 pub struct Obfuscation<'a> {
-    /// The assembled jar: ProGuard's input, and where the result lands.
+    /// The assembled jar: `ProGuard`'s input, and where the result lands.
     pub jar: &'a Path,
-    /// ProGuard's own graph, resolved apart from the project's.
+    /// `ProGuard`'s own graph, resolved apart from the project's.
     pub tool_classpath: &'a [PathBuf],
-    /// The classes ProGuard may read but not obfuscate: the JDK's modules, and
+    /// The classes `ProGuard` may read but not obfuscate: the JDK's modules, and
     /// the dependency jars that live outside the jar (a thin or portable jar).
     /// A `.jmod` gets the module filter; a plain jar is taken whole.
     pub library_jars: &'a [PathBuf],
@@ -67,10 +68,10 @@ pub struct Obfuscation<'a> {
 }
 
 /// The `.jmod` entry filter: a module archive holds its classes under
-/// `classes/`, with bundled jars and a `module-info` ProGuard must not read.
+/// `classes/`, with bundled jars and a `module-info` `ProGuard` must not read.
 const JMOD_FILTER: &str = "!**.jar;!module-info.class";
 
-/// The JDK's modules as ProGuard library jars: every `.jmod` under the
+/// The JDK's modules as `ProGuard` library jars: every `.jmod` under the
 /// toolchain's `jmods/`, sorted for a deterministic configuration. Empty when
 /// the JDK has no `jmods/` (a caller can add its own with `proguard-args`).
 #[must_use]
@@ -124,7 +125,7 @@ pub fn service_classes(jar: &Path) -> Result<Vec<String>> {
     Ok(names)
 }
 
-/// One classpath entry in ProGuard's syntax: quoted when it has whitespace, and
+/// One classpath entry in `ProGuard`'s syntax: quoted when it has whitespace, and
 /// a `.jmod` carrying the module filter.
 fn entry(path: &Path) -> String {
     let text = path.display().to_string();
@@ -140,15 +141,15 @@ fn entry(path: &Path) -> String {
     }
 }
 
-/// The ProGuard configuration for `obf`, writing to `outjar`. `services` is the
+/// The `ProGuard` configuration for `obf`, writing to `outjar`. `services` is the
 /// provider list [`service_classes`] read from the jar.
 #[must_use]
 pub fn config(obf: &Obfuscation, services: &[String], outjar: &Path) -> String {
     let mut s = String::new();
-    s.push_str(&format!("-injars {}\n", entry(obf.jar)));
-    s.push_str(&format!("-outjars {}\n", entry(outjar)));
+    let _ = writeln!(s, "-injars {}", entry(obf.jar));
+    let _ = writeln!(s, "-outjars {}", entry(outjar));
     for lib in obf.library_jars {
-        s.push_str(&format!("-libraryjars {}\n", entry(lib)));
+        let _ = writeln!(s, "-libraryjars {}", entry(lib));
     }
     // Rename and strip debug information, but change nothing else: keeping the
     // code and its order is what leaves behaviour and run timing untouched.
@@ -160,17 +161,16 @@ pub fn config(obf: &Obfuscation, services: &[String], outjar: &Path) -> String {
     s.push_str("-keepattributes *Annotation*,Signature,EnclosingMethod,InnerClasses\n");
     s.push_str("-dontnote\n");
     if let Some(main) = obf.main_class {
-        s.push_str(&format!(
-            "-keep public class {main} {{\n    public static void main(java.lang.String[]);\n}}\n"
-        ));
+        let _ = writeln!(
+            s,
+            "-keep public class {main} {{\n    public static void main(java.lang.String[]);\n}}"
+        );
     }
     for provider in services {
         // Keep the provider's name (so its services file still resolves) and its
         // constructors (so ServiceLoader can instantiate it); its other members
         // are still fair game.
-        s.push_str(&format!(
-            "-keep class {provider} {{\n    <init>(...);\n}}\n"
-        ));
+        let _ = writeln!(s, "-keep class {provider} {{\n    <init>(...);\n}}");
     }
     if !services.is_empty() {
         // Belt and braces: were a kept name ever to change, rewrite the file to
@@ -178,7 +178,7 @@ pub fn config(obf: &Obfuscation, services: &[String], outjar: &Path) -> String {
         s.push_str("-adaptresourcefilecontents META-INF/services/**\n");
     }
     for name in obf.keep {
-        s.push_str(&format!("-keep class {name}\n"));
+        let _ = writeln!(s, "-keep class {name}");
     }
     for arg in obf.extra_args {
         s.push_str(arg);
@@ -187,16 +187,16 @@ pub fn config(obf: &Obfuscation, services: &[String], outjar: &Path) -> String {
     s
 }
 
-/// Obfuscate `obf.jar` in place with ProGuard, and return the obfuscated jar's
+/// Obfuscate `obf.jar` in place with `ProGuard`, and return the obfuscated jar's
 /// size in bytes.
 ///
-/// ProGuard writes a fresh jar in `work_dir`, which then replaces the input, so
+/// `ProGuard` writes a fresh jar in `work_dir`, which then replaces the input, so
 /// an interrupted run leaves the plain jar intact. The `java` launcher and the
-/// ProGuard configuration both live in `work_dir` (`target/.jrs/`).
+/// `ProGuard` configuration both live in `work_dir` (`target/.jrs/`).
 ///
 /// # Errors
 ///
-/// [`JrsError::Build`] if the jar cannot be read, ProGuard cannot be started or
+/// [`JrsError::Build`] if the jar cannot be read, `ProGuard` cannot be started or
 /// fails, or it leaves no output; [`JrsError::Io`] if a work file cannot be
 /// written or the result cannot be moved into place.
 pub fn build(java: &Path, obf: &Obfuscation, work_dir: &Path, ui: &Ui) -> Result<u64> {

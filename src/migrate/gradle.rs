@@ -1460,8 +1460,8 @@ fn read_library_languages(plugins: &[Plugin], out: &mut Manifest, report: &mut R
     super::drop_implied_libraries(out, report);
 }
 
-/// The Guardsquare ProGuard plugin (`com.guardsquare.proguard`) → `[obfuscate]`.
-/// The plugin's own version is the ProGuard release, so it pins `version`; the
+/// The Guardsquare `ProGuard` plugin (`com.guardsquare.proguard`) → `[obfuscate]`.
+/// The plugin's own version is the `ProGuard` release, so it pins `version`; the
 /// keep rules and options live in a `proguard { }` task jrs cannot read, so
 /// they are flagged for `keep` / `proguard-args`.
 fn read_proguard(plugins: &[Plugin], out: &mut Manifest, report: &mut Report) {

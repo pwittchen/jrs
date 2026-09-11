@@ -461,7 +461,7 @@ fn read_jar_manifest(pom: &Pom, out: &mut Manifest, report: &mut Report) {
 }
 
 /// `proguard-maven-plugin` → `[obfuscate]`. Its `<proguardVersion>` pins
-/// ProGuard, and its `<options>` pass through verbatim; jrs adds its own keeps
+/// `ProGuard`, and its `<options>` pass through verbatim; jrs adds its own keeps
 /// for the entry point and the `ServiceLoader` providers. Without a pinned
 /// version there is nothing reproducible to write, so that is flagged instead.
 fn read_proguard(pom: &Pom, out: &mut Manifest, report: &mut Report) {

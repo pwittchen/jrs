@@ -408,17 +408,17 @@ pub struct PackageConfig {
 /// `[obfuscate]`: the table's presence turns obfuscation on (SPEC §7.7,
 /// ROADMAP). It is opt-in and set only from the manifest; `jrs package
 /// --obfuscate` runs it, and the plain jar is unaffected. Its `version` pins
-/// ProGuard, resolved as an isolated tool graph like a compiler's.
+/// `ProGuard`, resolved as an isolated tool graph like a compiler's.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ObfuscateConfig {
-    /// The ProGuard release, exact: an unpinned obfuscator is not reproducible,
+    /// The `ProGuard` release, exact: an unpinned obfuscator is not reproducible,
     /// as an unpinned compiler is not.
     pub version: String,
     /// Fully-qualified class names whose names must survive, for reflection or
     /// a framework that looks them up by name. The entry point and every
     /// `ServiceLoader` provider are kept without being listed here.
     pub keep: Vec<String>,
-    /// Passed through verbatim to ProGuard, after jrs's own configuration.
+    /// Passed through verbatim to `ProGuard`, after jrs's own configuration.
     pub proguard_args: Vec<String>,
 }
 
