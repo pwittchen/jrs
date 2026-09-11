@@ -92,6 +92,24 @@ prebuilt binaries do not.
 
 ### Prebuilt binaries
 
+On macOS or Linux:
+
+```
+curl -fsSL https://getjrs.dev/install.sh | sh
+```
+
+The script picks the build for the machine, checks it against the release's
+`SHA256SUMS` and installs `jrs` into `~/.local/bin`, which must be on your
+`PATH`. A release and a directory other than the latest and `~/.local/bin` go
+after `sh -s --`:
+
+```
+curl -fsSL https://getjrs.dev/install.sh | sh -s -- --version 0.5.0 --to ~/bin
+```
+
+or come from the environment as `JRS_INSTALL_VERSION` and `JRS_INSTALL_DIR`. The
+script is [`website/install.sh`](website/install.sh).
+
 Every tagged [release](https://github.com/pwittchen/jrs/releases) ships a binary
 for each of these platforms:
 
@@ -104,7 +122,7 @@ for each of these platforms:
 | Windows, x86_64 | `x86_64-pc-windows-msvc` |
 
 The Linux binaries are statically linked and run on any distribution. To install
-the latest release into `~/.local/bin` on macOS or Linux:
+the latest release into `~/.local/bin` by hand, without the script:
 
 ```
 TARGET=aarch64-apple-darwin

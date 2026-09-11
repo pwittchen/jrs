@@ -41,7 +41,10 @@ bump the version by hand — tagging is the release process.
 `master` that touch `website/` or `logo.png`. `rust.yml` also calls it after
 `release`, with the version commit and `secrets: inherit`, since that commit is
 pushed with the workflow token and triggers nothing itself — so the site's
-version stays current.
+version stays current. The site also serves `website/install.sh` as
+`getjrs.dev/install.sh`, the `curl | sh` installer for the release binaries; it
+fetches `releases/latest/download/jrs-<target>.tar.gz` and `SHA256SUMS`, so the
+asset names in `dist` must stay unversioned.
 
 Single tests and single suites:
 

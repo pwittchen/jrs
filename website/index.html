@@ -191,34 +191,20 @@ version = "2.4.20"
           </button>
         </div>
 
-        <div class="panel" role="tabpanel" id="panel-macos" aria-labelledby="tab-macos" data-install>
-          <label class="target">
-            <span>Processor</span>
-            <select data-target>
-              <option value="aarch64-apple-darwin">Apple Silicon</option>
-              <option value="x86_64-apple-darwin">Intel</option>
-            </select>
-          </label>
+        <div class="panel" role="tabpanel" id="panel-macos" aria-labelledby="tab-macos">
           <div class="shell">
-            <pre><code data-install-command></code></pre>
+            <pre><code>curl -fsSL https://getjrs.dev/install.sh | sh</code></pre>
             <button class="copy" type="button">Copy</button>
           </div>
-          <p class="note">Installs into <code>~/.local/bin</code>, which must be on your <code>PATH</code>.</p>
+          <p class="note">Picks the Apple Silicon or Intel build and installs it into <code>~/.local/bin</code>. Add <code>-s -- --to &lt;dir&gt;</code> after <code>sh</code> to install elsewhere.</p>
         </div>
 
-        <div class="panel" role="tabpanel" id="panel-linux" aria-labelledby="tab-linux" data-install hidden>
-          <label class="target">
-            <span>Architecture</span>
-            <select data-target>
-              <option value="x86_64-unknown-linux-musl">x86_64</option>
-              <option value="aarch64-unknown-linux-musl">ARM64</option>
-            </select>
-          </label>
+        <div class="panel" role="tabpanel" id="panel-linux" aria-labelledby="tab-linux" hidden>
           <div class="shell">
-            <pre><code data-install-command></code></pre>
+            <pre><code>curl -fsSL https://getjrs.dev/install.sh | sh</code></pre>
             <button class="copy" type="button">Copy</button>
           </div>
-          <p class="note">Installs into <code>~/.local/bin</code>, which must be on your <code>PATH</code>. The binaries are static and run on any distribution.</p>
+          <p class="note">Picks the x86_64 or ARM64 build and installs it into <code>~/.local/bin</code>. The binaries are static and run on any distribution.</p>
         </div>
 
         <div class="panel" role="tabpanel" id="panel-windows" aria-labelledby="tab-windows" hidden>
@@ -240,7 +226,7 @@ cargo install --path .</code></pre>
           <p class="note">Needs a Rust toolchain with edition 2024 support. The binary lands in <code>~/.cargo/bin</code>.</p>
         </div>
 
-        <p class="note">Each <a href="https://github.com/pwittchen/jrs/releases">release</a> also ships a <code>SHA256SUMS</code> file for verifying the downloads.</p>
+        <p class="note">Each <a href="https://github.com/pwittchen/jrs/releases">release</a> also ships a <code>SHA256SUMS</code> file for verifying the downloads, which <a href="install.sh">the install script</a> checks for you.</p>
 
         <h3>Then</h3>
         <div class="shell">

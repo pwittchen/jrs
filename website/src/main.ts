@@ -237,29 +237,6 @@ function setupTabs() {
   if (tab) select(tab);
 }
 
-function setupInstall() {
-  const ua = navigator.userAgent;
-  for (const panel of $$<HTMLElement>("[data-install]")) {
-    const target = panel.querySelector<HTMLSelectElement>("[data-target]");
-    const code = panel.querySelector<HTMLElement>("[data-install-command]");
-    if (!target || !code) continue;
-
-    if (panel.id === "panel-linux" && /aarch64|arm64/i.test(ua)) {
-      target.value = "aarch64-unknown-linux-musl";
-    }
-
-    const render = () => {
-      code.textContent = [
-        `TARGET=${target.value}`,
-        "mkdir -p ~/.local/bin",
-        'curl -fsSL "https://github.com/pwittchen/jrs/releases/latest/download/jrs-$TARGET.tar.gz" | tar -xz -C ~/.local/bin jrs',
-      ].join("\n");
-    };
-    target.addEventListener("change", render);
-    render();
-  }
-}
-
 function setupCopy() {
   for (const button of $$<HTMLButtonElement>(".copy")) {
     button.addEventListener("click", async () => {
@@ -277,5 +254,4 @@ function setupCopy() {
 
 setupTerminal();
 setupTabs();
-setupInstall();
 setupCopy();
