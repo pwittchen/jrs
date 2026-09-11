@@ -563,12 +563,6 @@ h3 {
 
 /* ---- status & footer --------------------------------------------------- */
 
-/* Right under the hero, so it takes the hero's bottom padding as its top and
-   leaves room above the demo, which has none of its own. */
-.status {
-  padding-block: 0 2rem;
-}
-
 .status p {
   max-width: 68ch;
   margin: 0 0 1rem;
