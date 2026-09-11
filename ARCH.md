@@ -102,6 +102,7 @@ src/
 ├── dist.rs            --dist: launch scripts, the staged directory, the zip
 ├── native_image.rs    --native-image: GraalVM's native-image, by argfile
 ├── obfuscate.rs       --obfuscate: ProGuard over the assembled jar, by config file
+├── relocate.rs        [package.relocate]: a fat jar's packages moved, constant pools rewritten
 ├── runner.rs          `jrs run`: the user's program gets the terminal
 ├── task.rs            [tasks] and [hooks]: plan, cycles, placeholders, freshness
 ├── migrate/
@@ -674,6 +675,18 @@ same way — sorted, fixed timestamp, fixed modes, `0755` only for the POSIX
 launcher — and `javadoc` runs with `-notimestamp`, so the sources, Javadoc and
 distribution archives are byte-identical across builds as well.
 
+`[package.relocate]` lives in `relocate.rs` and applies to the fat jar only,
+as it is written: an entry's name is relocated when it is planned, so a moved
+class that collides with another is reported like any duplicate, and each
+class's constant pool and each registry's class names are relocated when the
+entry is written. Every name a class file holds is a `CONSTANT_Utf8` entry
+that the rest of the file refers to by index, so rewriting those entries'
+contents — never their number or order — relocates the class while the bytes
+after the pool are copied through. A name is recognised at the start of an
+entry or after a descriptor's `L`, and only in or under the relocated package.
+The main class moves with its package. `jrs run` and `jrs test` run the
+unrelocated classpath.
+
 `--dist` and `--native-image` live in `dist.rs` and `native_image.rs`. The
 launchers reuse `image.rs`'s quoting; `native-image` is found beside `javac`,
 and its absence means the JDK is not GraalVM, which is reported before the
@@ -928,6 +941,7 @@ design regression, not a style nit.
 | Nearest-wins, breadth-first by level, ties on declaration order; no ranges | `resolve/mod.rs`, `manifest.rs` |
 | Atomic, checksum-verified cache writes | `resolve/cache.rs`, `resolve/repo.rs` |
 | Fat-jar merge rules: `META-INF/services/*`, Groovy extension modules and Spring's registries merged, never overwritten; the project's copy first | `package.rs` |
+| Relocation rewrites only a class's `CONSTANT_Utf8` entries, never their number or order; a class it cannot read fails the jar | `relocate.rs` |
 | Toolchain output passed through verbatim | `compile/`, `test.rs`, `image.rs` |
 | `jrs.lock` holds no absolute paths; `manifest-checksum` triggers re-resolution | `lockfile.rs` |
 | Resolution reads `effective_dependencies()`, never `dependencies` alone | `manifest.rs`, `resolve/mod.rs` |

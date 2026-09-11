@@ -109,6 +109,7 @@ pub fn migrate(build_file: &Path, root: &Path) -> Result<Migration> {
     super::gradle_tasks::read_jvm_environment(&script, &mut out, &mut report);
     read_jar_manifest(&script, &mut out, &mut report);
     read_proguard(&plugins, &mut out, &mut report);
+    read_shadow(&script, &plugins, &mut out, &mut report);
     super::gradle_repos::read(&script, &mut out, &mut report);
     super::gradle_tasks::read(&script, &mut out, &mut report);
     report_the_unreadable(&script, &settings, &plugins, &mut report);
@@ -1254,7 +1255,8 @@ fn report_the_unreadable(
                 | "org.springframework.boot"
                 | "io.spring.dependency-management"
                 | "com.guardsquare.proguard"
-        ) || language_plugin(id).is_some()
+        ) || SHADOW_PLUGINS.contains(&id)
+            || language_plugin(id).is_some()
             || kotlin_compiler_plugin(id).is_some();
         if !understood {
             report.skipped(format!("plugin `{id}` — jrs has no plugin system"));
@@ -1489,6 +1491,126 @@ fn read_proguard(plugins: &[Plugin], out: &mut Manifest, report: &mut Report) {
                 .to_string(),
         ),
     }
+}
+
+/// The Shadow plugin's ids: John Engelman's original, the `GradleUp` fork it
+/// moved to, and the interim fork between them.
+const SHADOW_PLUGINS: &[&str] = &[
+    "com.github.johnrengelman.shadow",
+    "com.gradleup.shadow",
+    "io.github.goooler.shadow",
+];
+
+/// The Shadow plugin → `jrs package --fat`, and its `shadowJar` task's
+/// `relocate` calls → `[package.relocate]`. A `relocate` closure's `exclude`
+/// calls come along; `include` narrows a relocation in a way jrs does not, so
+/// it is flagged.
+fn read_shadow(script: &str, plugins: &[Plugin], out: &mut Manifest, report: &mut Report) {
+    let Some(plugin) = plugins
+        .iter()
+        .find(|p| SHADOW_PLUGINS.contains(&p.id.as_str()))
+    else {
+        return;
+    };
+    let before = out.package.relocate.len();
+    let lines = blocks_where(script, is_shadow_block);
+    let mut i = 0;
+    while i < lines.len() {
+        let line = lines[i].trim();
+        i += 1;
+        let Some(call) = line
+            .strip_prefix("relocate")
+            .filter(|rest| rest.starts_with(['(', ' ', '\t']))
+        else {
+            continue;
+        };
+        // `relocate 'a', 'b'` or `relocate("a", "b")`, perhaps opening a
+        // closure that runs on over the lines below. A `{` in a string
+        // (`"${prefix}.guava"`) opens nothing.
+        let (head, mut closure) = match braces(call).first {
+            Some(at) => (&call[..at], call[at + 1..].to_string()),
+            None => (call, String::new()),
+        };
+        let mut depth = braces(call).depth;
+        while depth > 0 && i < lines.len() {
+            let next = lines[i];
+            i += 1;
+            depth += braces(next).depth;
+            closure.push('\n');
+            closure.push_str(next);
+        }
+        let literals = quoted(head);
+        let [pattern, shaded, ..] = literals.as_slice() else {
+            report.skipped(format!(
+                "shadowJar `{line}` — its packages are not string literals"
+            ));
+            continue;
+        };
+        let mut excludes = Vec::new();
+        for statement in closure.split(['\n', ';', '}']).map(str::trim) {
+            if statement.starts_with("exclude") {
+                excludes.extend(quoted(statement));
+            } else if statement.starts_with("include") {
+                report.review(format!(
+                    "shadowJar — the relocation of `{pattern}` has `include`; jrs relocates \
+                     the whole package, less its `exclude` list"
+                ));
+            }
+        }
+        super::add_relocation(out, report, "shadowJar", pattern, shaded, &excludes);
+    }
+    let relocated = if out.package.relocate.len() > before {
+        ", with the relocations above"
+    } else {
+        ""
+    };
+    report.review(format!(
+        "plugin `{}` — `jrs package --fat` builds the shadow jar{relocated}",
+        plugin.id
+    ));
+}
+
+/// The braces on a line outside its string literals: where the first one
+/// opens, and how far the line leaves the nesting from where it found it.
+struct Braces {
+    first: Option<usize>,
+    depth: isize,
+}
+
+fn braces(line: &str) -> Braces {
+    let mut out = Braces {
+        first: None,
+        depth: 0,
+    };
+    let mut quote = None;
+    for (at, c) in line.char_indices() {
+        match (quote, c) {
+            (None, '\'' | '"') => quote = Some(c),
+            (Some(open), _) if c == open => quote = None,
+            (None, '{') => {
+                out.first.get_or_insert(at);
+                out.depth += 1;
+            }
+            (None, '}') => out.depth -= 1,
+            _ => {}
+        }
+    }
+    out
+}
+
+fn is_shadow_block(header: &str) -> bool {
+    let compact: String = header.chars().filter(|c| !c.is_whitespace()).collect();
+    [
+        "shadowJar{",
+        "tasks.shadowJar{",
+        "tasks.named('shadowJar')",
+        "tasks.named(\"shadowJar\")",
+        "tasks.named<ShadowJar>(\"shadowJar\")",
+        "tasks.withType(ShadowJar)",
+        "tasks.withType<ShadowJar>",
+    ]
+    .iter()
+    .any(|start| compact.starts_with(start))
 }
 
 /// The `kotlin { }` extension's lines, opening lines included: `kotlin {
@@ -1914,9 +2036,49 @@ application {
     #[test]
     fn unknown_plugins_are_reported() {
         let dir = Dir::new("unsupported");
-        let skipped = dir.migrate(GROOVY).report.not_migrated.join("\n");
-        assert!(skipped.contains("shadow"), "{skipped}");
+        let script = GROOVY.replace("com.github.johnrengelman.shadow", "com.diffplug.spotless");
+        let skipped = dir.migrate(&script).report.not_migrated.join("\n");
+        assert!(skipped.contains("spotless"), "{skipped}");
         assert!(!skipped.contains("id 'java'"), "{skipped}");
+    }
+
+    #[test]
+    fn shadow_jar_relocations_are_translated() {
+        let dir = Dir::new("shadow");
+        let migration = dir.migrate(&format!(
+            "{GROOVY}\nshadowJar {{\n    mergeServiceFiles()\n    \
+             relocate 'com.google.common', 'com.example.shaded.guava'\n    \
+             relocate('org.slf4j', 'com.example.shaded.slf4j') {{ exclude 'org.slf4j.impl.*' }}\n    \
+             relocate('org.apache', \"${{prefix}}.apache\") {{\n        \
+             include 'org.apache.commons.**'\n    }}\n}}\n"
+        ));
+        let relocate = &migration.manifest.package.relocate;
+        assert_eq!(
+            relocate
+                .iter()
+                .map(|r| (r.from.as_str(), r.to.as_str(), r.exclude.clone()))
+                .collect::<Vec<_>>(),
+            [
+                ("com.google.common", "com.example.shaded.guava", vec![]),
+                (
+                    "org.slf4j",
+                    "com.example.shaded.slf4j",
+                    vec!["org.slf4j.impl.*".to_string()]
+                ),
+            ]
+        );
+        let review = migration.report.needs_review.join("\n");
+        assert!(
+            review.contains("plugin `com.github.johnrengelman.shadow` — `jrs package --fat`"),
+            "{review}"
+        );
+        assert!(review.contains("`org.apache` has `include`"), "{review}");
+        let skipped = migration.report.not_migrated.join("\n");
+        assert!(
+            !skipped.contains("plugin `com.github.johnrengelman.shadow`"),
+            "{skipped}"
+        );
+        assert!(skipped.contains("${prefix}.apache"), "{skipped}");
     }
 
     #[test]

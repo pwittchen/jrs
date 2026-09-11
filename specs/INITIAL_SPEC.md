@@ -219,6 +219,7 @@ post-package = ["checksum"]
 | `package.add-modules` | no | `[]` | Modules a runtime image needs beyond what `jdeps` finds (§9.4). |
 | `package.manifest.*` | no | `{}` | Extra `MANIFEST.MF` main attributes, written after jrs's own in declaration order (§9.1). Values may use `{project.name}` and `{project.version}`; `Main-Class`, `Class-Path`, `Created-By`, `Manifest-Version` and `Name` are jrs's and refused. |
 | `package.native-image-args` | no | `[]` | Passed through verbatim to `native-image` by `--native-image` (§9.7). |
+| `package.relocate.*` | no | `{}` | Package → the name a fat jar moves it to, or `{ to, exclude }` with `exclude` the classes and `<package>.*` packages under it that stay put (§9.9). `jrs package --fat` applies it. |
 | `obfuscate.*` | no | — | The table turns obfuscation on (§9.8): `version` (required, exact — the ProGuard release), `keep` (class names whose names must survive), `proguard-args` (passed to ProGuard verbatim). Opt-in; `jrs package --obfuscate` runs it. |
 | `kotlin.*`, `scala.*`, `groovy.*` | no | — | The table turns the language on (§7.7): `version` (required, exact), `source-dir` / `test-dir` (`src/main/<lang>` / `src/test/<lang>`), `kotlinc-args` / `scalac-args` / `groovyc-args`, `compiler-jvm-args`. |
 | `dependencies.*` | no | `{}` | Key is `group:artifact` or `group:artifact:classifier`; value is a version, or a table with `version` and optionally `classifier`, `exclusions` (`group:artifact` patterns, `*` allowed), and `compile-only` or `runtime-only`. A table without `version`, `{}` at its shortest, takes the version `[managed]` gives it (§8.9). A table with `path` instead is a local jar: the key is a name, the path is relative to the project root, and only `compile-only` / `runtime-only` go with it (§8.8). |
@@ -1373,7 +1374,9 @@ dependency without a version; a project that relies on it can say so with
     (`module-info.class`, and under `META-INF/versions/<n>/`): the merged jar
     is none of those modules, and `kotlin-stdlib` and `kotlinx-coroutines`, for
     two, both ship one.
-  - Duplicate classes: first wins, with a warning naming both sources.
+  - Duplicate classes: first wins, with a warning naming both sources. A
+    package can instead be moved out of the way with `[package.relocate]`
+    (§9.9).
 - Requires `project.main-class`; error out clearly if it is missing.
 
 ### 9.3 Portable layout (`jrs package --portable`)
@@ -1488,6 +1491,58 @@ removed or reordered — only names change and debug information is stripped, an
 the program behaves and times as the plain jar does. The JDK's modules are the
 library path; the dependency jars join it unless a `--fat` jar already holds
 their classes.
+
+### 9.9 Relocation (`[package.relocate]`)
+
+`[package.relocate]` maps a package to a new name, and `jrs package --fat`
+moves it — the package and every package under it — throughout the fat jar:
+its classes and resources move to the new name, and every reference to them,
+from the project's classes and from every dependency's, is rewritten to match.
+This is Maven Shade's relocation, for a jar that will share a classpath with
+someone else's copy of a library: an agent, a plugin, a job submitted to a
+cluster. The thin and portable jars leave their dependencies outside, so
+relocation does not apply to them, and `jrs package` without `--fat` warns when
+the table is present. `jrs run` and `jrs test` run the unrelocated classpath.
+
+```toml
+[package.relocate]
+"com.google.common" = "com.example.shaded.guava"
+"org.slf4j" = { to = "com.example.shaded.slf4j", exclude = ["org.slf4j.impl.*", "org.slf4j.Marker"] }
+```
+
+- `from` and `to` are package names, dot-separated Java identifiers in ASCII;
+  neither may be in `java.*`, and they may not be the same. `exclude` names the
+  classes (their nested classes with them) and the packages, written
+  `<package>.*` (their subpackages with them), under `from` that stay where
+  they are. Where two relocations overlap, the more specific `from` wins.
+- A class is relocated by rewriting its constant pool and nothing else. Every
+  name a class file holds — its own, its superclass's, a descriptor, a generic
+  signature, an annotation's type, a string constant — is a `CONSTANT_Utf8`
+  entry, and every other structure refers to those entries by index. Only the
+  entries' contents change, never their number or order, so every index stays
+  valid and the bytes after the pool are copied through untouched.
+- Within an entry, a name is recognised where one can start: at the start (an
+  internal name, a class name in a string constant, a resource path with or
+  without its leading `/`), or after the `L` that opens a class type in a
+  descriptor or signature. It matches when it lies in or under the package:
+  `com.google.common` covers `com.google.common.base.Strings`, but neither
+  `com.google.commonx.Foo` nor a class named `com.google.common`.
+- Entries move with their package, under `META-INF/versions/<n>/` as well. A
+  `META-INF/services/` file follows the interface it is named for, and the
+  class names in it, in Spring's registries and in Groovy's extension-module
+  descriptors are relocated once they are merged (§9.2). `Main-Class` moves
+  with its package.
+- A relocated class that lands on an existing name is a duplicate class
+  (§9.2): first wins, with a warning. A `.class` entry relocation cannot read —
+  a bad magic number, a constant-pool tag no JVM defines, a name that would
+  outgrow the 65535 bytes an entry holds — fails the build rather than ship a
+  jar the JVM would reject.
+- Not rewritten: a class name inside a longer string constant, any other
+  resource's contents, and Kotlin's packed `@Metadata` strings. Shade has the
+  same limits.
+
+Relocation needs no tool and no crate: it is the one place jrs rewrites class
+files, and all it touches is names.
 
 ---
 
@@ -1688,6 +1743,7 @@ parent chains and `<dependencyManagement>` already work.
 | `<repositories>` | `[repositories]` |
 | `maven-jar-plugin` → `<mainClass>`, `maven-shade-plugin`'s transformer, `spring-boot-maven-plugin`'s `<mainClass>` or `start-class`; for Spring Boot, else the `@SpringBootApplication` class | `project.main-class` |
 | `maven-jar-plugin` → `<archive><manifestEntries>` | `[package.manifest]`; `${project.version}` and `${project.artifactId}` become placeholders, any other property is reported |
+| `maven-shade-plugin` → `<relocations>`, in the plugin's configuration or an execution's | `[package.relocate]` (§9.9): `<pattern>` → `<shadedPattern>`, `<excludes>` as classes and `x.*` packages (`x.**` too). `<includes>`, a `<rawString>` relocation and any other wildcard are reported; a review line says `jrs package --fat` builds the shaded jar |
 | `exec-maven-plugin` executions | `[tasks]` and `[hooks]`: `exec` → a `run` task, `java` → `java @{classpath-argfile} <main>`, or a `main` task over the plugin's `<dependencies>` with `includePluginDependencies`; the `<phase>` → the hook at the same point ([TASKS.md §12](TASKS.md#12-open-questions) item 5). With no execution, its `<mainClass>` → `project.main-class` |
 | `<profiles>` a plain `mvn` build activates: each whose `<activation>` holds with no `-P` and no `-D` — its conditions all negated properties (`!skipDocs`) — else the `<activeByDefault>` ones | merged into their POM before anything is read, as Maven injects them, the profile dominant: properties by name, dependencies and repositories by key, plugins by key with `<configuration>` merged element by element, executions by `<id>`. A default profile gets a review line when another profile could activate on some machine and turn it off |
 | `maven-surefire-plugin` `<argLine>`, `<systemPropertyVariables>` | `test.jvm-args` |
@@ -1770,6 +1826,12 @@ the conventional declarative subset, and is explicit about the fact:
   migration does by reading the main sources. `bootJar`'s nested layout is not
   reproduced: `jrs package --fat` builds a flat jar with Spring's registries
   merged (§9.2), and a review line says so.
+- The Shadow plugin (`com.github.johnrengelman.shadow`, `com.gradleup.shadow`,
+  `io.github.goooler.shadow`). `shadowJar` is `jrs package --fat`, and a review
+  line says so. Its `relocate` calls with literal packages (in `shadowJar { }`,
+  `tasks.shadowJar { }`, `tasks.named("shadowJar")` or
+  `tasks.withType<ShadowJar>`) → `[package.relocate]` (§9.9), with a closure's
+  `exclude` calls; `include`, which narrows a relocation, is reported.
 
 Anything jrs cannot read confidently is skipped and reported — never guessed:
 
@@ -1975,8 +2037,11 @@ still the interesting part; the **decision** lines record what was settled on.
    it records no absolute paths, so it is machine-independent.
 5. **Fat-jar shading.** Package relocation (Maven Shade-style) is a real need
    for dependency conflicts but a large chunk of work. Out of scope for v1?
-   **Decision:** out of scope. Duplicate classes are reported by name, with
-   both sources, rather than relocated.
+   **Decision:** out of scope for v1, where duplicate classes were reported by
+   name, with both sources, rather than relocated. Since added as
+   `[package.relocate]` (§9.9), once it turned out to need no crate: a class is
+   relocated by rewriting its constant pool's names in place, which leaves
+   every index, and so the rest of the class file, as it was.
 6. **Nearest-wins vs. highest-wins** for version conflicts. Maven does
    nearest, Gradle does highest. Nearest is specified above; highest surprises
    users less in practice. Worth revisiting once real projects exercise it.

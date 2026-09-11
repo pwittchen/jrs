@@ -94,6 +94,42 @@ fn the_gradle_proguard_fixture_translates_exactly() {
     );
 }
 
+/// `maven-shade-plugin` → `[package.relocate]`: each relocation, its
+/// exclusions in jrs's form, and a note that `jrs package --fat` builds the
+/// shaded jar.
+#[test]
+fn the_maven_shade_fixture_translates_exactly() {
+    let (migration, dir) = migrate_fixture("maven-shade");
+    assert_eq!(migration.source, Source::Maven);
+    assert_eq!(migration.manifest.render(None), expected(&dir));
+    assert!(
+        migration.report.not_migrated.is_empty(),
+        "{:?}",
+        migration.report.not_migrated
+    );
+    let review = migration.report.needs_review.join("\n");
+    assert!(review.contains("`jrs package --fat`"), "{review}");
+}
+
+/// The Shadow plugin in the Kotlin DSL: `tasks.shadowJar`'s `relocate` calls,
+/// a closure's `exclude` calls with them, and the plugin itself understood.
+#[test]
+fn the_gradle_shadow_fixture_translates_exactly() {
+    let (migration, dir) = migrate_fixture("gradle-shadow");
+    assert_eq!(migration.source, Source::Gradle);
+    assert_eq!(migration.manifest.render(None), expected(&dir));
+    assert!(
+        migration.report.not_migrated.is_empty(),
+        "{:?}",
+        migration.report.not_migrated
+    );
+    let review = migration.report.needs_review.join("\n");
+    assert!(
+        review.contains("plugin `com.gradleup.shadow` — `jrs package --fat`"),
+        "{review}"
+    );
+}
+
 /// start.spring.io's Gradle builds, in both DSLs, taken unchanged: the Boot
 /// plugins become Boot's BOM in [managed], the starters stay versionless, and
 /// the @SpringBootApplication class is the main class.

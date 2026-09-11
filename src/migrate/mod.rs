@@ -80,6 +80,62 @@ impl Report {
     }
 }
 
+/// A shading plugin's relocation → `[package.relocate]`, checked as the parser
+/// checks it. `excludes` are Shade's patterns, dotted or slashed: a class, or a
+/// package as `x.*` or `x.**`; any other wildcard is flagged, since jrs matches
+/// no globs. `from` names the plugin in the report.
+fn add_relocation(
+    out: &mut Manifest,
+    report: &mut Report,
+    from: &str,
+    pattern: &str,
+    shaded: &str,
+    excludes: &[String],
+) {
+    let pattern = pattern.trim().trim_end_matches('.');
+    let shaded = shaded.trim().trim_end_matches('.');
+    if out.package.relocate.iter().any(|r| r.from == pattern) {
+        report.skipped(format!(
+            "{from} — `{pattern}` is relocated more than once; the first is kept"
+        ));
+        return;
+    }
+    let mut exclude = Vec::new();
+    for raw in excludes {
+        let dotted = raw.trim().replace('/', ".");
+        let normalized = match dotted
+            .strip_suffix(".**")
+            .or_else(|| dotted.strip_suffix(".*"))
+        {
+            Some(package) => format!("{package}.*"),
+            None => dotted.clone(),
+        };
+        if normalized.trim_end_matches(".*").contains(['*', '?']) {
+            report.review(format!(
+                "{from} — the relocation of `{pattern}` excludes `{raw}`, a pattern jrs cannot \
+                 match; name a class, or a package as `<package>.*`"
+            ));
+            continue;
+        }
+        exclude.push(normalized);
+    }
+    match crate::manifest::relocation(pattern, shaded, exclude) {
+        Ok(relocation) => {
+            let excluding = if relocation.exclude.is_empty() {
+                String::new()
+            } else {
+                format!(", excluding {}", relocation.exclude.join(", "))
+            };
+            report.migrated(format!(
+                "package.relocate.\"{}\" = {}{excluding}",
+                relocation.from, relocation.to
+            ));
+            out.package.relocate.push(relocation);
+        }
+        Err(e) => report.skipped(format!("{from} relocation — {e}")),
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Migration {
     pub source: Source,

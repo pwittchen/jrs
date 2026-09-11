@@ -63,6 +63,7 @@ pub fn migrate(pom_path: &Path, root: &Path) -> Result<Migration> {
     read_main_class(pom, &effective, &mut out, &mut report);
     read_jar_manifest(pom, &mut out, &mut report);
     read_proguard(pom, &mut out, &mut report);
+    read_shade(pom, &mut out, &mut report);
     // Before the dependencies: a BOM there versions the ones that name none.
     read_managed(&effective, boot_parent.as_deref(), &mut out, &mut report);
     read_dependencies(&effective, pom, &mut out, &mut report);
@@ -496,6 +497,71 @@ fn read_proguard(pom: &Pom, out: &mut Manifest, report: &mut Report) {
              then run `jrs package --obfuscate` (it has no <proguardVersion>)"
                 .to_string(),
         ),
+    }
+}
+
+/// `maven-shade-plugin`'s `<relocations>` → `[package.relocate]`, from the
+/// plugin's configuration and its executions', where its transformers are
+/// read too. `<includes>` narrow a relocation in a way jrs does not, and
+/// `<rawString>` relocates by regular expression, so both are flagged.
+fn read_shade(pom: &Pom, out: &mut Manifest, report: &mut Report) {
+    let Some(p) = plugin(pom, "maven-shade-plugin") else {
+        return;
+    };
+    let mut configurations: Vec<&Element> = p
+        .executions
+        .iter()
+        .filter_map(|e| e.child("configuration"))
+        .collect();
+    configurations.extend(p.configuration.as_ref());
+    let before = out.package.relocate.len();
+    for relocation in configurations
+        .iter()
+        .flat_map(|c| c.list("relocations", "relocation"))
+    {
+        let Some(pattern) = relocation.text_of("pattern") else {
+            report.skipped("maven-shade-plugin — a <relocation> without a <pattern>".to_string());
+            continue;
+        };
+        let Some(shaded) = relocation.text_of("shadedPattern") else {
+            report.skipped(format!(
+                "maven-shade-plugin — the relocation of `{pattern}` has no <shadedPattern>"
+            ));
+            continue;
+        };
+        if relocation.text_of("rawString") == Some("true") {
+            report.skipped(format!(
+                "maven-shade-plugin — the relocation of `{pattern}` is a <rawString> regular \
+                 expression"
+            ));
+            continue;
+        }
+        if relocation.child("includes").is_some() {
+            report.review(format!(
+                "maven-shade-plugin — the relocation of `{pattern}` has <includes>; jrs \
+                 relocates the whole package, less its `exclude` list"
+            ));
+        }
+        let excludes: Vec<String> = relocation
+            .list("excludes", "exclude")
+            .iter()
+            .map(|e| e.text.clone())
+            .collect();
+        super::add_relocation(
+            out,
+            report,
+            "maven-shade-plugin",
+            pattern,
+            shaded,
+            &excludes,
+        );
+    }
+    if out.package.relocate.len() > before {
+        report.review(
+            "maven-shade-plugin — the relocations apply to `jrs package --fat`, which builds \
+             the shaded jar"
+                .to_string(),
+        );
     }
 }
 
@@ -1959,6 +2025,50 @@ mod tests {
             migration.manifest.main_class.as_deref(),
             Some("com.example.Boot")
         );
+    }
+
+    #[test]
+    fn shade_relocations_that_do_not_translate_are_flagged() {
+        let dir = Dir::new("shade-flagged");
+        let migration = dir.migrate(
+            "<project><groupId>g</groupId><artifactId>a</artifactId><version>1</version>\
+             <build><plugins><plugin><artifactId>maven-shade-plugin</artifactId>\
+             <configuration><relocations>\
+             <relocation><pattern>org.a</pattern><shadedPattern>x.a</shadedPattern>\
+             <includes><include>org.a.Api</include></includes>\
+             <excludes><exclude>org.a.*.Impl</exclude><exclude>org/a/internal/**</exclude>\
+             </excludes></relocation>\
+             <relocation><pattern>org.b</pattern></relocation>\
+             <relocation><pattern>org.c</pattern><shadedPattern>x.c</shadedPattern>\
+             <rawString>true</rawString></relocation>\
+             <relocation><pattern>org.a</pattern><shadedPattern>y.a</shadedPattern></relocation>\
+             <relocation><pattern>${shade.from}</pattern><shadedPattern>x.d</shadedPattern>\
+             </relocation>\
+             </relocations></configuration></plugin></plugins></build></project>",
+        );
+        assert_eq!(
+            migration.manifest.package.relocate,
+            [manifest::Relocation {
+                from: "org.a".into(),
+                to: "x.a".into(),
+                exclude: vec!["org.a.internal.*".into()],
+            }]
+        );
+        let review = migration.report.needs_review.join("\n");
+        assert!(review.contains("<includes>"), "{review}");
+        assert!(review.contains("excludes `org.a.*.Impl`"), "{review}");
+        assert!(review.contains("`jrs package --fat`"), "{review}");
+        let skipped = migration.report.not_migrated.join("\n");
+        assert!(
+            skipped.contains("`org.b` has no <shadedPattern>"),
+            "{skipped}"
+        );
+        assert!(skipped.contains("<rawString>"), "{skipped}");
+        assert!(
+            skipped.contains("`org.a` is relocated more than once"),
+            "{skipped}"
+        );
+        assert!(skipped.contains("is not a package name"), "{skipped}");
     }
 
     #[test]

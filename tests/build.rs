@@ -641,6 +641,7 @@ fn a_project_compiles_against_a_resolved_dependency() {
     package::write_fat_jar(
         &project.classes_dir(),
         &classpath,
+        &jrs::relocate::Relocator::default(),
         &fat,
         &JarManifest {
             main_class: Some("com.example.App".into()),
@@ -2965,6 +2966,83 @@ fn a_fat_jar_keeps_the_projects_services_and_its_dependencys() {
             "app-1.0.0/bin/app",
             "app-1.0.0/bin/app.bat"
         ]
+    );
+}
+
+/// Calls the dependency, loads it by name and lists every `Runnable` service,
+/// so a relocated fat jar shows each kind of reference under its new name.
+const RELOCATED_APP_JAVA: &str = "package com.example;\n\n\
+    import java.util.ServiceLoader;\nimport java.util.stream.Collectors;\n\
+    import org.example.Shouter;\n\n\
+    public class App {\n    public static void main(String[] args) throws Exception {\n        \
+    String providers = ServiceLoader.load(Runnable.class).stream()\n            \
+    .map(p -> p.type().getName()).sorted().collect(Collectors.joining(\",\"));\n        \
+    System.out.println(Shouter.shout(\"hi\") + \" \" + Class.forName(\"org.example.Shouter\").getName()\n            \
+    + \" \" + providers);\n    }\n}\n";
+
+/// `[package.relocate]`: the fat jar moves the dependency's package, and the
+/// program that calls it, loads it by name and finds its service runs from the
+/// jar under the new name. `jrs run` and the thin jar are untouched.
+#[test]
+fn a_relocated_fat_jar_runs_under_the_new_names() {
+    let toolchain = require_jdk!();
+    let scratch = Scratch::new("package-relocate");
+    let app = shipping_app(&scratch, &toolchain);
+    let manifest = app.root.join("jrs.toml");
+    let text = std::fs::read_to_string(&manifest).unwrap();
+    std::fs::write(
+        &manifest,
+        format!("{text}\n[package.relocate]\n\"org.example\" = \"com.example.shaded\"\n"),
+    )
+    .unwrap();
+    scratch.write("app/src/main/java/com/example/App.java", RELOCATED_APP_JAVA);
+
+    let (code, stdout, stderr) = app.jrs(&["run"]);
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(
+        stdout.trim(),
+        "HI! org.example.Shouter com.example.AppTask,org.example.LibTask"
+    );
+
+    let (code, _, stderr) = app.jrs(&["package"]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(
+        stderr.contains("[package.relocate] applies to a fat jar"),
+        "{stderr}"
+    );
+
+    let (code, _, stderr) = app.jrs(&["package", "--fat"]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stderr.contains("1 package relocated"), "{stderr}");
+    let jar = app.root.join("target/app-1.0.0.jar");
+    let names = zip_names(&jar);
+    assert!(
+        names
+            .iter()
+            .any(|n| n == "com/example/shaded/Shouter.class"),
+        "{names:?}"
+    );
+    assert!(!names.iter().any(|n| n.starts_with("org/")), "{names:?}");
+    assert_eq!(
+        zip_text(&jar, "META-INF/services/java.lang.Runnable"),
+        "com.example.AppTask\ncom.example.shaded.LibTask\n"
+    );
+    let out = run_ok(
+        std::process::Command::new(&toolchain.java)
+            .arg("-jar")
+            .arg(&jar),
+    );
+    assert_eq!(
+        out.trim(),
+        "HI! com.example.shaded.Shouter com.example.AppTask,com.example.shaded.LibTask"
+    );
+
+    let first = std::fs::read(&jar).unwrap();
+    let (code, _, stderr) = app.jrs(&["package", "--fat"]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(
+        std::fs::read(&jar).unwrap() == first,
+        "the relocated jar changed"
     );
 }
 

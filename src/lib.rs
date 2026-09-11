@@ -24,6 +24,7 @@ pub mod native_image;
 pub mod obfuscate;
 pub mod package;
 pub mod project;
+pub mod relocate;
 pub mod resolve;
 pub mod runner;
 pub mod task;

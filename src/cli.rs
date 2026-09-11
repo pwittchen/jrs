@@ -34,6 +34,7 @@ use crate::native_image::{self, NativeImage};
 use crate::obfuscate::{self, Obfuscation};
 use crate::package::{self, JarManifest};
 use crate::project::{self, Project, Snapshot, Sources, Unit};
+use crate::relocate::Relocator;
 use crate::resolve::cache::{Cache, Prune};
 use crate::resolve::coord::{Coord, Ga};
 use crate::resolve::metadata;
@@ -1041,15 +1042,33 @@ impl<'a> Session<'a> {
         let portable = args.portable || ((images || args.dist) && !args.fat);
         let lib_dir = project.target_dir().join("lib");
 
+        let relocations = &self.manifest.package.relocate;
+        if !args.fat && !relocations.is_empty() {
+            self.ui.warn(
+                "[package.relocate] applies to a fat jar, and this jar leaves its dependencies \
+                 outside it, unrelocated; `jrs package --fat` builds one",
+            );
+        }
+
         let packaging = Instant::now();
         let outcome = if args.fat {
+            let relocated = match relocations.len() {
+                0 => String::new(),
+                1 => ", 1 package relocated".to_string(),
+                n => format!(", {n} packages relocated"),
+            };
             self.ui.phase(
                 "Packaging",
-                format!("{} (fat, {} dependencies)", output.display(), runtime.len()),
+                format!(
+                    "{} (fat, {} dependencies{relocated})",
+                    output.display(),
+                    runtime.len()
+                ),
             );
             package::write_fat_jar(
                 &project.classes_dir(),
                 &runtime,
+                &Relocator::new(relocations),
                 &output,
                 &JarManifest {
                     main_class: self.manifest.main_class.clone(),

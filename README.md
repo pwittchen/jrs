@@ -49,7 +49,8 @@ your own requirements before adopting it for production builds.
   reports, and JaCoCo coverage with minimums;
   Spock, Kotest, ScalaTest and MUnit through their JUnit Platform engines
 - Packaging to a plain jar, a portable jar with its `lib/`, a self-contained fat
-  jar (Spring's registries merged), a zipped distribution with launch scripts,
+  jar (Spring's registries merged, packages relocated on request, as Maven
+  Shade does), a zipped distribution with launch scripts,
   a `jlink` runtime image, a `jpackage` installer or a GraalVM native
   executable, plus sources and Javadoc jars and jar manifest attributes of
   your own
@@ -279,6 +280,10 @@ native-image-args = ["--no-fallback"]        # for --native-image
 Implementation-Title = "{project.name}"
 Implementation-Version = "{project.version}"
 Automatic-Module-Name = "com.example.app"
+
+[package.relocate]                           # for --fat: move a package, references and all
+"com.google.common" = "com.example.shaded.guava"
+"org.slf4j" = { to = "com.example.shaded.slf4j", exclude = ["org.slf4j.impl.*"] }
 ```
 
 `add-modules` names JDK modules an image needs beyond the ones `jdeps` finds
@@ -320,6 +325,20 @@ reads it.
 `native-image-args` is passed through verbatim to `native-image` by
 `jrs package --native-image`: `--no-fallback`, `--initialize-at-build-time`,
 resource and reflection configuration.
+
+`[package.relocate]` moves packages inside a fat jar, as Maven Shade's
+relocation does, so the jar carries a private copy of a library that cannot
+clash with another copy on the same classpath — for an agent, a plugin, or a job
+submitted to a cluster. `jrs package --fat` renames the package and every
+package under it, moves its classes and resources, and rewrites every reference
+to them: in the project's classes, in every dependency's, in
+`META-INF/services/` files and in Spring's registries. `exclude` keeps classes,
+or packages written `<package>.*`, where they are. Only the fat jar is
+relocated; `jrs run`, `jrs test` and the thin and portable jars use the
+dependencies as they are, and `jrs package` without `--fat` warns that the
+table does not apply. jrs rewrites the names in each class's constant pool and
+nothing else, so no tool is downloaded for it. A class name in the middle of a
+longer string, or inside any other resource, is left as it is.
 
 ### `[obfuscate]`
 
@@ -542,7 +561,8 @@ A fat jar merges what several jars register instead of letting one copy
 overwrite the rest: `META-INF/services/*` files, Groovy extension modules, and
 Spring's `spring.factories` (key by key), `META-INF/spring/*.imports`,
 `spring.handlers`, `spring.schemas` and `spring.tooling`. The project's own copy
-comes first.
+comes first. A duplicate class is reported by name, with both jars; with
+`[package.relocate]`, the fat jar can move a package out of the way instead.
 
 `jrs add` and `jrs remove` edit `jrs.toml` in place, keeping its comments and
 order. An edit that jrs cannot make safely is refused, with a message saying to
@@ -985,6 +1005,11 @@ carries over — from the Maven plugin's `<proguardVersion>` or the Gradle
 plugin's own version — and the Maven `<options>` pass through to
 `proguard-args`. The Gradle `proguard { }` task's keep rules are reported to
 move into `keep` / `proguard-args` by hand.
+
+`maven-shade-plugin`'s `<relocations>` and the Shadow plugin's `relocate` calls
+become `[package.relocate]`, exclusions included, and the shaded jar itself is
+`jrs package --fat`. A Shade `<includes>`, a `<rawString>` relocation and a
+wildcard jrs cannot match are reported.
 
 Scopes keep their meaning. Maven's `provided` and Gradle's `compileOnly` become
 `compile-only`, and `runtime` and `runtimeOnly` become `runtime-only`. Gradle's

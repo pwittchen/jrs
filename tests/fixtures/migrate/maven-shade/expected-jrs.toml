@@ -1,0 +1,15 @@
+[project]
+name = "shaded-app"
+version = "1.0.0"
+main-class = "com.example.Main"
+
+[java]
+source = 17
+
+[package.relocate]
+"com.google.common" = "com.example.shaded.guava"
+"org.slf4j" = { to = "com.example.shaded.slf4j", exclude = ["org.slf4j.impl.*", "org.slf4j.Marker"] }
+
+[dependencies]
+"com.google.guava:guava" = "33.0.0-jre"
+"org.slf4j:slf4j-api" = "2.0.13"

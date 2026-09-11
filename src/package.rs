@@ -29,6 +29,7 @@ use zip::write::SimpleFileOptions;
 
 use crate::error::{IoResultExt, JrsError, Result};
 use crate::project;
+use crate::relocate::Relocator;
 
 /// The epoch every entry is stamped with, so repeated builds match byte for byte.
 /// 1980-01-01 is the earliest a zip timestamp can express.
@@ -206,8 +207,16 @@ pub fn write_thin_jar(
     manifest: &JarManifest,
 ) -> Result<PackageOutcome> {
     let mut plan: BTreeMap<String, Entry> = BTreeMap::new();
-    collect_directory(classes_dir, &mut plan)?;
-    write_jar(output, manifest, &plan, no_archives(), Vec::new())
+    let unrelocated = Relocator::default();
+    collect_directory(classes_dir, &mut plan, &unrelocated)?;
+    write_jar(
+        output,
+        manifest,
+        &plan,
+        no_archives(),
+        Vec::new(),
+        &unrelocated,
+    )
 }
 
 /// A fat jar: this project's classes plus every runtime dependency, unpacked.
@@ -221,14 +230,22 @@ pub fn write_thin_jar(
 /// `META-INF/groovy/org.codehaus.groovy.runtime.ExtensionModule`, so no module's
 /// extension methods are lost to first-wins (SPEC §9.2).
 ///
+/// `relocator` moves the packages `[package.relocate]` names (SPEC §9.9): an
+/// entry's name is relocated as it is planned, so a relocated class that
+/// collides with another is reported like any duplicate, and every class's
+/// constant pool and every registry's class names are relocated as they are
+/// written. The main class moves with its package.
+///
 /// # Errors
 ///
 /// `JrsError::Manifest` if `manifest` has no main class; `JrsError::Build` if
-/// a dependency is not a readable jar or the zip writer fails; `JrsError::Io`
-/// if a file cannot be read or the jar cannot be written.
+/// a dependency is not a readable jar, a class cannot be relocated or the zip
+/// writer fails; `JrsError::Io` if a file cannot be read or the jar cannot be
+/// written.
 pub fn write_fat_jar(
     classes_dir: &Path,
     dependency_jars: &[PathBuf],
+    relocator: &Relocator,
     output: &Path,
     manifest: &JarManifest,
 ) -> Result<PackageOutcome> {
@@ -243,7 +260,7 @@ pub fn write_fat_jar(
     let mut warnings = Vec::new();
 
     // The project's own classes go in first, so they win every conflict.
-    collect_directory(classes_dir, &mut plan)?;
+    collect_directory(classes_dir, &mut plan, relocator)?;
 
     // Its extension-module descriptors are not copied but merged, ahead of any
     // dependency's. Both names sort in this order, as the walk found them.
@@ -291,6 +308,7 @@ pub fn write_fat_jar(
                 module_entries.push((index, i));
                 continue;
             }
+            let name = relocator.entry_name(&name);
             if let Some(kind) = merge_kind(&name) {
                 match plan.get_mut(&name) {
                     Some(Entry::Merged(_, sources)) => sources.push(Source::Jar(index, i)),
@@ -332,7 +350,14 @@ pub fn write_fat_jar(
         );
     }
 
-    write_jar(output, manifest, &plan, archives, warnings)
+    let manifest = JarManifest {
+        main_class: manifest
+            .main_class
+            .as_deref()
+            .map(|main| relocator.class_name(main)),
+        ..manifest.clone()
+    };
+    write_jar(output, &manifest, &plan, archives, warnings, relocator)
 }
 
 /// A sources jar: each of `files` at its path relative to the root that holds
@@ -371,6 +396,7 @@ pub fn write_sources_jar(
         &plan,
         no_archives(),
         Vec::new(),
+        &Relocator::default(),
     )
 }
 
@@ -419,7 +445,13 @@ impl Entry {
     }
 }
 
-fn collect_directory(dir: &Path, plan: &mut BTreeMap<String, Entry>) -> Result<()> {
+/// Every file under `dir`, by its jar entry name — relocated by `relocator`,
+/// except a Groovy extension-module descriptor, which Groovy finds by path.
+fn collect_directory(
+    dir: &Path,
+    plan: &mut BTreeMap<String, Entry>,
+    relocator: &Relocator,
+) -> Result<()> {
     for path in project::find_all(dir)? {
         let relative = path.strip_prefix(dir).unwrap_or(&path);
         let name = relative
@@ -431,6 +463,11 @@ fn collect_directory(dir: &Path, plan: &mut BTreeMap<String, Entry>) -> Result<(
             // jrs writes its own; a stray one in the source tree does not win.
             continue;
         }
+        let name = if is_extension_module(&name) {
+            name
+        } else {
+            relocator.entry_name(&name)
+        };
         plan.insert(name, Entry::File(path));
     }
     Ok(())
@@ -468,6 +505,15 @@ fn is_dropped(name: &str) -> bool {
             || upper.ends_with(".EC");
     }
     false
+}
+
+/// A class file, by its entry name: what relocation rewrites.
+#[allow(
+    clippy::case_sensitive_file_extension_comparisons,
+    reason = "jar entry names are case-sensitive; `Foo.CLASS` is not a class"
+)]
+fn is_class(name: &str) -> bool {
+    name.ends_with(".class")
 }
 
 fn is_service_file(name: &str) -> bool {
@@ -686,6 +732,7 @@ fn write_jar<R: Read + Seek>(
     plan: &BTreeMap<String, Entry>,
     mut archives: Vec<zip::ZipArchive<R>>,
     warnings: Vec<String>,
+    relocator: &Relocator,
 ) -> Result<PackageOutcome> {
     if let Some(parent) = output.parent() {
         std::fs::create_dir_all(parent).path(parent)?;
@@ -709,14 +756,28 @@ fn write_jar<R: Read + Seek>(
             .map_err(|e| JrsError::build(format!("{}: {e}", output.display())))?;
         match entry {
             Entry::File(path) => {
-                let bytes = std::fs::read(path).path(path)?;
+                let mut bytes = std::fs::read(path).path(path)?;
+                if is_class(name) {
+                    bytes = relocator.class_file(bytes).map_err(|why| {
+                        JrsError::build(format!("{}: cannot relocate: {why}", path.display()))
+                    })?;
+                }
                 writer.write_all(&bytes).path(output)?;
             }
             Entry::Jar(archive, index) => {
                 let mut source = archives[*archive]
                     .by_index(*index)
                     .map_err(|e| JrsError::build(format!("{}: {e}", output.display())))?;
-                std::io::copy(&mut source, &mut writer).path(output)?;
+                if relocator.is_empty() || !is_class(name) {
+                    std::io::copy(&mut source, &mut writer).path(output)?;
+                } else {
+                    let mut bytes = Vec::new();
+                    source.read_to_end(&mut bytes).path(output)?;
+                    let bytes = relocator.class_file(bytes).map_err(|why| {
+                        JrsError::build(format!("{name}: cannot relocate: {why}"))
+                    })?;
+                    writer.write_all(&bytes).path(output)?;
+                }
             }
             Entry::Merged(kind, sources) => {
                 let mut copies = Vec::with_capacity(sources.len());
@@ -733,7 +794,9 @@ fn write_jar<R: Read + Seek>(
                         }
                     });
                 }
-                writer.write_all(&merge(*kind, &copies)).path(output)?;
+                writer
+                    .write_all(&relocator.text(merge(*kind, &copies)))
+                    .path(output)?;
             }
             Entry::ExtensionModules(files, sources) => {
                 let mut merged = ExtensionModule::default();
@@ -749,7 +812,9 @@ fn write_jar<R: Read + Seek>(
                     source.read_to_end(&mut bytes).path(output)?;
                     merged.add(&String::from_utf8_lossy(&bytes));
                 }
-                writer.write_all(merged.render().as_bytes()).path(output)?;
+                writer
+                    .write_all(&relocator.text(merged.render().into_bytes()))
+                    .path(output)?;
             }
         }
         entries += 1;
@@ -958,6 +1023,7 @@ mod tests {
         write_fat_jar(
             &tree.root.join("classes"),
             &[dep],
+            &Relocator::default(),
             &out,
             &JarManifest {
                 main_class: Some("com.example.Main".into()),
@@ -1000,6 +1066,7 @@ mod tests {
         write_fat_jar(
             &tree.root.join("classes"),
             &[first, second],
+            &Relocator::default(),
             &out,
             &JarManifest {
                 main_class: Some("Main".into()),
@@ -1031,6 +1098,7 @@ mod tests {
         write_fat_jar(
             &tree.root.join("classes"),
             &[first, second],
+            &Relocator::default(),
             &out,
             &JarManifest {
                 main_class: Some("Main".into()),
@@ -1084,6 +1152,7 @@ mod tests {
         write_fat_jar(
             &tree.root.join("classes"),
             &[dep],
+            &Relocator::default(),
             &out,
             &JarManifest {
                 main_class: Some("Main".into()),
@@ -1113,6 +1182,7 @@ mod tests {
         let result = write_fat_jar(
             &tree.root.join("classes"),
             &[first, second],
+            &Relocator::default(),
             &out,
             &JarManifest {
                 main_class: Some("Main".into()),
@@ -1146,6 +1216,7 @@ mod tests {
         write_fat_jar(
             &tree.root.join("classes"),
             &[dep],
+            &Relocator::default(),
             &out,
             &JarManifest {
                 main_class: Some("Main".into()),
@@ -1248,6 +1319,7 @@ mod tests {
         write_fat_jar(
             &tree.root.join("classes"),
             jars,
+            &Relocator::default(),
             out,
             &JarManifest {
                 main_class: Some("Main".into()),
@@ -1710,6 +1782,169 @@ mod tests {
         );
     }
 
+    /// A class file by hand, its constant pool holding `names`: enough for
+    /// relocation, which reads and rewrites nothing else.
+    fn class_file(names: &[&str]) -> Vec<u8> {
+        let mut bytes = vec![0xCA, 0xFE, 0xBA, 0xBE, 0, 0, 0, 61];
+        bytes.extend_from_slice(&u16::try_from(names.len() + 1).unwrap().to_be_bytes());
+        for name in names {
+            bytes.push(1);
+            bytes.extend_from_slice(&u16::try_from(name.len()).unwrap().to_be_bytes());
+            bytes.extend_from_slice(name.as_bytes());
+        }
+        bytes.extend_from_slice(b"the rest of the class");
+        bytes
+    }
+
+    fn relocating(from: &str, to: &str) -> Relocator {
+        Relocator::new(&[crate::manifest::Relocation {
+            from: from.into(),
+            to: to.into(),
+            exclude: Vec::new(),
+        }])
+    }
+
+    fn relocated_fat_jar(tree: &Tree, jars: &[PathBuf], out: &Path, main: &str) {
+        write_fat_jar(
+            &tree.root.join("classes"),
+            jars,
+            &relocating("org.dep", "com.example.shaded"),
+            out,
+            &JarManifest {
+                main_class: Some(main.into()),
+                ..JarManifest::default()
+            },
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn a_relocated_fat_jar_moves_the_package_and_rewrites_its_references() {
+        let tree = Tree::new("relocate");
+        tree.write(
+            "classes/com/example/Main.class",
+            &class_file(&["com/example/Main", "(Lorg/dep/Thing;)V"]),
+        );
+        tree.write(
+            "classes/META-INF/services/org.dep.Spi",
+            b"com.example.MySpi\n",
+        );
+        let dep = tree.jar(
+            "dep.jar",
+            &[
+                (
+                    "org/dep/Thing.class",
+                    &class_file(&["org/dep/Thing", "org.dep.Thing"]) as &[u8],
+                ),
+                (
+                    "META-INF/versions/11/org/dep/Thing.class",
+                    &class_file(&["org/dep/Thing"]),
+                ),
+                ("org/dep/messages.properties", b"k=v"),
+                ("META-INF/services/org.dep.Spi", b"org.dep.DefaultSpi\n"),
+                ("META-INF/services/java.lang.Runnable", b"org.dep.Task\n"),
+            ],
+        );
+
+        let out = tree.root.join("fat.jar");
+        relocated_fat_jar(&tree, &[dep], &out, "com.example.Main");
+        let contents = read_jar(&out);
+        assert_eq!(
+            contents["com/example/Main.class"],
+            class_file(&["com/example/Main", "(Lcom/example/shaded/Thing;)V"])
+        );
+        assert_eq!(
+            contents["com/example/shaded/Thing.class"],
+            class_file(&["com/example/shaded/Thing", "com.example.shaded.Thing"])
+        );
+        assert_eq!(
+            contents["META-INF/versions/11/com/example/shaded/Thing.class"],
+            class_file(&["com/example/shaded/Thing"])
+        );
+        assert_eq!(contents["com/example/shaded/messages.properties"], b"k=v");
+        // The service file follows its interface, and the project's copy still
+        // heads the merge.
+        assert_eq!(
+            text(&contents, "META-INF/services/com.example.shaded.Spi"),
+            "com.example.MySpi\ncom.example.shaded.DefaultSpi\n"
+        );
+        assert_eq!(
+            text(&contents, "META-INF/services/java.lang.Runnable"),
+            "com.example.shaded.Task\n"
+        );
+        assert!(
+            !contents
+                .keys()
+                .any(|k| k.contains("org/dep") || k.contains("org.dep")),
+            "{:?}",
+            contents.keys()
+        );
+    }
+
+    #[test]
+    fn a_main_class_in_a_relocated_package_moves_with_it() {
+        let tree = Tree::new("relocate-main");
+        tree.write("classes/org/dep/Main.class", &class_file(&["org/dep/Main"]));
+        let out = tree.root.join("fat.jar");
+        relocated_fat_jar(&tree, &[], &out, "org.dep.Main");
+        let contents = read_jar(&out);
+        let manifest = text(&contents, "META-INF/MANIFEST.MF");
+        assert!(
+            manifest.contains("Main-Class: com.example.shaded.Main\n"),
+            "{manifest}"
+        );
+        assert!(contents.contains_key("com/example/shaded/Main.class"));
+    }
+
+    #[test]
+    fn a_relocated_fat_jar_is_byte_identical_across_builds() {
+        let tree = Tree::new("relocate-deterministic");
+        tree.write(
+            "classes/com/example/Main.class",
+            &class_file(&["Lorg/dep/Thing;"]),
+        );
+        let dep = tree.jar(
+            "dep.jar",
+            &[(
+                "org/dep/Thing.class",
+                &class_file(&["org/dep/Thing"]) as &[u8],
+            )],
+        );
+        let one = tree.root.join("one.jar");
+        let two = tree.root.join("two.jar");
+        for out in [&one, &two] {
+            relocated_fat_jar(&tree, std::slice::from_ref(&dep), out, "com.example.Main");
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert_eq!(std::fs::read(&one).unwrap(), std::fs::read(&two).unwrap());
+    }
+
+    #[test]
+    fn a_class_relocation_cannot_read_fails_the_jar() {
+        let tree = Tree::new("relocate-broken");
+        std::fs::create_dir_all(tree.root.join("classes")).unwrap();
+        let dep = tree.jar(
+            "dep.jar",
+            &[("org/dep/Broken.class", b"not a class" as &[u8])],
+        );
+        let err = write_fat_jar(
+            &tree.root.join("classes"),
+            &[dep],
+            &relocating("org.dep", "com.example.shaded"),
+            &tree.root.join("fat.jar"),
+            &JarManifest {
+                main_class: Some("Main".into()),
+                ..JarManifest::default()
+            },
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            err.contains("com/example/shaded/Broken.class: cannot relocate"),
+            "{err}"
+        );
+    }
+
     #[test]
     fn a_fat_jar_without_a_main_class_is_refused() {
         let tree = Tree::new("fat-no-main");
@@ -1717,6 +1952,7 @@ mod tests {
         let err = write_fat_jar(
             &tree.root.join("classes"),
             &[],
+            &Relocator::default(),
             &tree.root.join("fat.jar"),
             &JarManifest::default(),
         )

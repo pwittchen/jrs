@@ -403,6 +403,20 @@ pub struct PackageConfig {
     pub manifest: Vec<(String, Template)>,
     /// Passed through verbatim to `native-image` by `--native-image`.
     pub native_image_args: Vec<String>,
+    /// `[package.relocate]`: the packages a fat jar moves, in declaration
+    /// order (SPEC §9.9).
+    pub relocate: Vec<Relocation>,
+}
+
+/// One `[package.relocate]` entry: a package, and every package under it,
+/// moved to `to` throughout the fat jar, references included.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Relocation {
+    pub from: String,
+    pub to: String,
+    /// Classes (`org.slf4j.Marker`, nested classes included) and packages
+    /// (`org.slf4j.impl.*`, subpackages included) under `from` that stay put.
+    pub exclude: Vec<String>,
 }
 
 /// `[obfuscate]`: the table's presence turns obfuscation on (SPEC §7.7,
@@ -931,7 +945,7 @@ const TEST_KEYS: &[&str] = &[
     "forks",
     "coverage-minimum",
 ];
-const PACKAGE_KEYS: &[&str] = &["add-modules", "manifest", "native-image-args"];
+const PACKAGE_KEYS: &[&str] = &["add-modules", "manifest", "native-image-args", "relocate"];
 const DEPENDENCY_KEYS: &[&str] = &[
     "version",
     "classifier",
@@ -1179,6 +1193,7 @@ impl Manifest {
                 add_modules: string_array(t, "add-modules", "package")?,
                 manifest: parse_jar_attributes(t)?,
                 native_image_args: string_array(t, "native-image-args", "package")?,
+                relocate: parse_relocations(t, &mut warnings)?,
             },
         };
         let obfuscate = match section(&table, "obfuscate", OBFUSCATE_KEYS, &mut warnings)? {
@@ -1542,6 +1557,22 @@ impl Manifest {
             let _ = writeln!(s, "\n[package.manifest]");
             for (name, value) in &self.package.manifest {
                 let _ = writeln!(s, "{name} = {}", quote(&value.raw));
+            }
+        }
+        if !self.package.relocate.is_empty() {
+            let _ = writeln!(s, "\n[package.relocate]");
+            for r in &self.package.relocate {
+                if r.exclude.is_empty() {
+                    let _ = writeln!(s, "{} = {}", quote(&r.from), quote(&r.to));
+                } else {
+                    let _ = writeln!(
+                        s,
+                        "{} = {{ to = {}, exclude = {} }}",
+                        quote(&r.from),
+                        quote(&r.to),
+                        quote_list(&r.exclude)
+                    );
+                }
             }
         }
         if let Some(obf) = &self.obfuscate {
@@ -2589,6 +2620,109 @@ fn parse_jar_attributes(t: &toml::Table) -> Result<Vec<(String, Template)>> {
     Ok(out)
 }
 
+/// `[package.relocate]`: package names to the names they move to, in
+/// declaration order (SPEC §9.9). A value is the new name, or a table with
+/// `to` and `exclude` — the classes (`org.slf4j.Marker`) and packages
+/// (`org.slf4j.impl.*`) under the package that stay where they are.
+fn parse_relocations(t: &toml::Table, warnings: &mut Vec<String>) -> Result<Vec<Relocation>> {
+    let Some(value) = t.get("relocate") else {
+        return Ok(Vec::new());
+    };
+    let table = value.as_table().ok_or_else(|| {
+        JrsError::manifest(
+            "`package.relocate` must be a table of packages to the names they move to, e.g.\n\n    \
+             [package.relocate]\n    \"com.google.common\" = \"com.example.shaded.guava\"",
+        )
+    })?;
+    let mut out = Vec::new();
+    for (from, value) in table {
+        let key = format!("package.relocate.\"{from}\"");
+        let (to, exclude) = match value {
+            toml::Value::String(to) => (to.clone(), Vec::new()),
+            toml::Value::Table(long) => {
+                warn_unknown(long, &["to", "exclude"], &format!("{key}."), warnings);
+                let to = long
+                    .get("to")
+                    .and_then(toml::Value::as_str)
+                    .ok_or_else(|| {
+                        JrsError::manifest(format!("`{key}` needs `to`, the package to move it to"))
+                    })?;
+                (to.to_string(), string_array(long, "exclude", &key)?)
+            }
+            _ => {
+                return Err(JrsError::manifest(format!(
+                    "`{key}` must be the package to move it to, or a table with `to` and \
+                     `exclude`"
+                )));
+            }
+        };
+        out.push(relocation(from, &to, exclude)?);
+    }
+    Ok(out)
+}
+
+/// One `[package.relocate]` entry, checked as the parser checks it: `from`
+/// and `to` are package names outside `java.*` and not the same, and each
+/// exclusion is a class or `<package>.*` under `from`. `jrs migrate` uses it
+/// to decide what a shading plugin's relocations can become.
+///
+/// # Errors
+///
+/// [`JrsError::Manifest`], naming `package.relocate."<from>"`, for any of those.
+pub fn relocation(from: &str, to: &str, exclude: Vec<String>) -> Result<Relocation> {
+    let key = format!("package.relocate.\"{from}\"");
+    validate_package_name(from, &key)?;
+    validate_package_name(to, &key)?;
+    for name in [from, to] {
+        if name == "java" || name.starts_with("java.") {
+            return Err(JrsError::manifest(format!(
+                "`{key}`: `java.*` belongs to the JDK; its classes are never in the jar, \
+                 and no class can be defined there"
+            )));
+        }
+    }
+    if to == from {
+        return Err(JrsError::manifest(format!(
+            "`{key}` relocates the package to itself"
+        )));
+    }
+    for excluded in &exclude {
+        validate_package_name(excluded.strip_suffix(".*").unwrap_or(excluded), &key)?;
+        if !excluded.starts_with(&format!("{from}.")) {
+            return Err(JrsError::manifest(format!(
+                "`{key}.exclude`: `{excluded}` is not in `{from}`, so there is nothing to \
+                 exclude it from; name a class, or a package as `{from}.<name>.*`"
+            )));
+        }
+    }
+    Ok(Relocation {
+        from: from.to_string(),
+        to: to.to_string(),
+        exclude,
+    })
+}
+
+/// A dotted Java name, ASCII only: the names relocation rewrites are matched
+/// byte for byte in class files, jar entries and registry files alike.
+fn validate_package_name(name: &str, key: &str) -> Result<()> {
+    let ok = !name.is_empty()
+        && name.split('.').all(|segment| {
+            segment
+                .chars()
+                .next()
+                .is_some_and(|c| c.is_ascii_alphabetic() || c == '_' || c == '$')
+                && segment
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$')
+        });
+    if !ok {
+        return Err(JrsError::manifest(format!(
+            "`{key}`: `{name}` is not a package name: dot-separated Java identifiers, in ASCII"
+        )));
+    }
+    Ok(())
+}
+
 /// One `[package.manifest]` attribute, checked as the parser checks it — a
 /// name the jar specification allows, not one jrs writes itself, and a
 /// one-line value whose only placeholders are `{project.name}` and
@@ -3274,6 +3408,85 @@ version = "1"
         assert!(text.contains("\n[package.manifest]\nZ-Last-Alphabetically = \"first\"\n"));
         let again = parse(&text).unwrap();
         assert_eq!(again.package, m.package);
+    }
+
+    #[test]
+    fn relocations_keep_declaration_order_and_render_back() {
+        let m = parse(&format!(
+            "{DEMO}[package.relocate]\n\"org.slf4j\" = {{ to = \"com.example.shaded.slf4j\", \
+             exclude = [\"org.slf4j.impl.*\", \"org.slf4j.Marker\"] }}\n\
+             \"com.google.common\" = \"com.example.shaded.guava\"\n"
+        ))
+        .unwrap();
+        assert!(m.warnings.is_empty(), "{:?}", m.warnings);
+        assert_eq!(
+            m.package.relocate,
+            [
+                Relocation {
+                    from: "org.slf4j".into(),
+                    to: "com.example.shaded.slf4j".into(),
+                    exclude: vec!["org.slf4j.impl.*".into(), "org.slf4j.Marker".into()],
+                },
+                Relocation {
+                    from: "com.google.common".into(),
+                    to: "com.example.shaded.guava".into(),
+                    exclude: Vec::new(),
+                },
+            ]
+        );
+        let text = m.render(None);
+        assert!(
+            text.contains(
+                "\n[package.relocate]\n\"org.slf4j\" = { to = \"com.example.shaded.slf4j\", \
+                 exclude = [\"org.slf4j.impl.*\", \"org.slf4j.Marker\"] }\n\
+                 \"com.google.common\" = \"com.example.shaded.guava\"\n"
+            ),
+            "{text}"
+        );
+        assert_eq!(parse(&text).unwrap().package, m.package);
+    }
+
+    #[test]
+    fn a_relocation_moves_a_package_somewhere_it_can_go() {
+        for (entry, expected) in [
+            ("\"com..x\" = \"y\"", "`com..x` is not a package name"),
+            ("\"com.x\" = \"1y\"", "`1y` is not a package name"),
+            ("\"com.x\" = \"shaded.é\"", "in ASCII"),
+            ("\"java.util\" = \"shaded.util\"", "belongs to the JDK"),
+            ("\"com.x\" = \"java.x\"", "belongs to the JDK"),
+            ("\"com.x\" = \"com.x\"", "to itself"),
+            ("\"com.x\" = 3", "must be the package"),
+            ("\"com.x\" = { exclude = [] }", "needs `to`"),
+            (
+                "\"com.x\" = { to = \"y\", exclude = [\"org.other.*\"] }",
+                "`org.other.*` is not in `com.x`",
+            ),
+            (
+                "\"com.x\" = { to = \"y\", exclude = \"com.x.A\" }",
+                "array of strings",
+            ),
+        ] {
+            let err = parse(&format!("{DEMO}[package.relocate]\n{entry}\n"))
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains(expected), "{entry}: {err}");
+            assert!(err.contains("package.relocate.\""), "{entry}: {err}");
+        }
+    }
+
+    #[test]
+    fn an_unknown_relocation_key_warns() {
+        let m = parse(&format!(
+            "{DEMO}[package.relocate]\n\"com.x\" = {{ to = \"y\", includes = [\"com.x.A\"] }}\n"
+        ))
+        .unwrap();
+        assert!(
+            m.warnings
+                .iter()
+                .any(|w| w.contains("package.relocate.\"com.x\".includes")),
+            "{:?}",
+            m.warnings
+        );
     }
 
     #[test]

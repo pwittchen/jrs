@@ -2,8 +2,10 @@
 //!
 //! `ProGuard` is resolved from Maven Central as an isolated tool graph, pinned in
 //! `jrs.lock` beside the compilers (`JVM_LANGUAGES.md` §5.2), and run on the
-//! project's JDK. jrs shells out to it and never rewrites class files itself —
-//! a driver here as everywhere. Obfuscation runs after `package`, over the jar
+//! project's JDK. jrs shells out to it and renames nothing itself — renaming
+//! a program's members is a compiler's job, and jrs is its driver (relocation,
+//! `relocate.rs`, only rewrites constant-pool names). Obfuscation runs after
+//! `package`, over the jar
 //! `package` assembled, so it composes with the fat-jar merge rules
 //! (`package.rs`) instead of redoing them.
 //!

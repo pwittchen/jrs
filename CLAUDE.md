@@ -167,6 +167,11 @@ regression, not a style nit.
   `META-INF/spring/*.imports` as a union of lines, `spring.handlers`/`schemas`/
   `tooling` concatenated — since an overwrite there loses auto-configuration
   without an error. The project's own copy always comes first.
+- **Relocation rewrites names, nothing else** (`relocate.rs`, `[package.relocate]`,
+  fat jar only). A class is relocated by rewriting its constant pool's
+  `CONSTANT_Utf8` entries in place — never their number or order — so every index
+  stays valid and the rest of the class file is copied through. A class it cannot
+  read fails the jar rather than shipping unrelocated.
 - **Toolchain output is passed through verbatim.** `javac` and the JUnit launcher have
   good diagnostics; jrs never reformats them, it only tears the live region down first.
 - **`jrs.lock` records no absolute paths.** Cache paths are recomputed on load; the
