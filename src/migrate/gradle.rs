@@ -685,41 +685,7 @@ fn read_managed(
         super::spring_boot_application(out, from, report);
     }
 
-    let mut pinned = 0;
-    for line in block_lines(script, "dependencyManagement") {
-        // `imports { mavenBom '...' }` is as often written on one line as on
-        // three, so each statement between braces is read on its own.
-        for statement in line.split(['{', '}', ';']).map(str::trim) {
-            let Some(word) = leading_word(statement) else {
-                continue;
-            };
-            let literal = quoted(statement).first().and_then(|s| parse_gav(s));
-            match (word.as_str(), literal) {
-                ("mavenBom", Some(bom)) => super::add_bom(
-                    out,
-                    &bom.group,
-                    &bom.artifact,
-                    &bom.version,
-                    &format!("`{statement}`"),
-                    report,
-                ),
-                ("dependency", Some(d)) => {
-                    if super::add_managed(out, &d.group, &d.artifact, &d.version) {
-                        pinned += 1;
-                    }
-                }
-                ("mavenBom" | "dependency", None) => report.skipped(format!(
-                    "`{statement}` — not a literal group:artifact:version, which jrs can \
-                     read without running Gradle; add it to [managed] by hand"
-                )),
-                ("dependencySet", _) => report.skipped(format!(
-                    "`{statement}` — dependency sets are not read; pin each version in \
-                     [managed]"
-                )),
-                _ => {}
-            }
-        }
-    }
+    let mut pinned = read_dependency_management(script, out, report);
 
     let mut constraints = 0usize;
     for line in block_lines(script, "dependencies") {
@@ -784,6 +750,48 @@ fn read_managed(
              constraints"
         ));
     }
+}
+
+/// The dependency-management plugin's `dependencyManagement { }` block: its
+/// `mavenBom` imports and `dependency` pins. Returns how many versions it
+/// pinned.
+fn read_dependency_management(script: &str, out: &mut Manifest, report: &mut Report) -> usize {
+    let mut pinned = 0;
+    for line in block_lines(script, "dependencyManagement") {
+        // `imports { mavenBom '...' }` is as often written on one line as on
+        // three, so each statement between braces is read on its own.
+        for statement in line.split(['{', '}', ';']).map(str::trim) {
+            let Some(word) = leading_word(statement) else {
+                continue;
+            };
+            let literal = quoted(statement).first().and_then(|s| parse_gav(s));
+            match (word.as_str(), literal) {
+                ("mavenBom", Some(bom)) => super::add_bom(
+                    out,
+                    &bom.group,
+                    &bom.artifact,
+                    &bom.version,
+                    &format!("`{statement}`"),
+                    report,
+                ),
+                ("dependency", Some(d)) => {
+                    if super::add_managed(out, &d.group, &d.artifact, &d.version) {
+                        pinned += 1;
+                    }
+                }
+                ("mavenBom" | "dependency", None) => report.skipped(format!(
+                    "`{statement}` — not a literal group:artifact:version, which jrs can \
+                     read without running Gradle; add it to [managed] by hand"
+                )),
+                ("dependencySet", _) => report.skipped(format!(
+                    "`{statement}` — dependency sets are not read; pin each version in \
+                     [managed]"
+                )),
+                _ => {}
+            }
+        }
+    }
+    pinned
 }
 
 /// `applicationDefaultJvmArgs` for `jrs run`; the test task's `jvmArgs` and

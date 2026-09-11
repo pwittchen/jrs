@@ -578,11 +578,7 @@ pub fn prepare(task: &TaskDef, ctx: &Context<'_>, extra_args: &[String]) -> Resu
         })?)
     };
     if let Some(classpath) = tool_classpath {
-        if let Some(dir) = tool_argfile.parent() {
-            std::fs::create_dir_all(dir).path(dir)?;
-        }
-        let text = render_argfile(&["-cp".to_string(), join(classpath)], &[]);
-        std::fs::write(&tool_argfile, text).path(&tool_argfile)?;
+        write_classpath_argfile(&tool_argfile, classpath)?;
     }
     let search_path = task_path(ctx);
     let launch = launch(
@@ -607,11 +603,7 @@ pub fn prepare(task: &TaskDef, ctx: &Context<'_>, extra_args: &[String]) -> Resu
     let outputs = resolve_paths(expand_list(&task.outputs, &mut value)?);
 
     if wants_argfile && let Some(classpaths) = ctx.classpaths {
-        if let Some(dir) = argfile.parent() {
-            std::fs::create_dir_all(dir).path(dir)?;
-        }
-        let text = render_argfile(&["-cp".to_string(), join(&classpaths.compile)], &[]);
-        std::fs::write(&argfile, text).path(&argfile)?;
+        write_classpath_argfile(&argfile, &classpaths.compile)?;
     }
 
     let env = environment(task, ctx, &search_path, &own_env);
@@ -637,6 +629,15 @@ pub fn prepare(task: &TaskDef, ctx: &Context<'_>, extra_args: &[String]) -> Resu
         fingerprint,
         fingerprint_path: tasks_dir(manifest).join(format!("{}.fingerprint", task.name)),
     })
+}
+
+/// Write `-cp <classpath>` to the argfile at `path`, creating its directory.
+fn write_classpath_argfile(path: &Path, classpath: &[PathBuf]) -> Result<()> {
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir).path(dir)?;
+    }
+    let text = render_argfile(&["-cp".to_string(), Toolchain::classpath(classpath)], &[]);
+    std::fs::write(path, text).path(path)
 }
 
 /// The process a task's action starts: its command, its `args`, then

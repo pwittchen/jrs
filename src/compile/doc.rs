@@ -4,8 +4,8 @@
 //!
 //! Each tool reads what its language's compiler reads. Scaladoc 2 and
 //! Groovydoc read the sources, the Java ones included, and document both;
-//! Scala 3's scaladoc reads the TASTy in the compiled classes, so the build
-//! runs before it and Java sources, which have no TASTy, are left out.
+//! Scala 3's scaladoc reads the `TASTy` in the compiled classes, so the build
+//! runs before it and Java sources, which have no `TASTy`, are left out.
 //!
 //! What running them by hand found, and what jrs does about it:
 //!
@@ -44,7 +44,7 @@ pub struct ForeignDoc {
     /// `<lang>.compiler-jvm-args`, for the tool's JVM as for the compiler's.
     pub jvm_args: Vec<String>,
     /// The sources documented. Scala 3's scaladoc reaches them through the
-    /// classes' TASTy, so for it they are the Scala sources alone.
+    /// classes' `TASTy`, so for it they are the Scala sources alone.
     pub sources: Vec<PathBuf>,
     /// Every root the sources can be under: Groovydoc's `-sourcepath`.
     pub roots: Vec<PathBuf>,

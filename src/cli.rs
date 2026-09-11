@@ -1847,7 +1847,7 @@ impl<'a> Session<'a> {
 
     /// Document a Scala or Groovy unit with its language's own tool, into
     /// `target/doc` as `javadoc` would. Scala 3's scaladoc reads the compiled
-    /// classes' TASTy, so the build runs first and the Java sources, which
+    /// classes' `TASTy`, so the build runs first and the Java sources, which
     /// have none, are left out; Scaladoc 2 and Groovydoc read every source.
     fn foreign_doc(
         &self,
@@ -2884,22 +2884,7 @@ impl<'a> Session<'a> {
                 (lock.to_resolution(), tools, task_tools, false)
             }
             _ => {
-                let mut what = format!("{declared} declared dependencies");
-                if !manifest.languages.is_empty() {
-                    let names: Vec<&str> = manifest
-                        .languages
-                        .iter()
-                        .map(|c| c.language.name())
-                        .collect();
-                    let plural = if names.len() > 1 { "s" } else { "" };
-                    let _ = write!(what, " and the {} compiler{plural}", names.join(" and "));
-                }
-                if !tasks_with_tools.is_empty() {
-                    let names: Vec<&str> =
-                        tasks_with_tools.iter().map(|t| t.name.as_str()).collect();
-                    let plural = if names.len() > 1 { "s" } else { "" };
-                    let _ = write!(what, " and the tools of task{plural} {}", names.join(", "));
-                }
+                let what = Self::resolving_what(manifest, declared, &tasks_with_tools);
                 self.ui.phase("Resolving", &what);
                 let scope = self.ui.spinner("Resolving", &what);
                 let resolved = self.resolve_with_tools(&fetcher);
@@ -2950,17 +2935,7 @@ impl<'a> Session<'a> {
         }
 
         if fresh {
-            let mut lock = Lockfile::from_resolution(manifest, &resolution);
-            for tool in &tools {
-                lock = lock.with_tool(&tool.language.tool_name(), &tool.resolution);
-            }
-            for (name, graph) in &task_tools {
-                if let Some(def) = manifest.task(name) {
-                    lock = lock.with_tool(&def.tool_name(), graph);
-                }
-            }
-            lock.write(&lock_path)?;
-            self.ui.verbose(format!("wrote {}", lock_path.display()));
+            self.write_lock(&lock_path, &resolution, &tools, &task_tools)?;
         }
         // So that `jrs cache prune` knows this project still wants these
         // artifacts. Bookkeeping: a cache that cannot record it still builds.
@@ -2977,6 +2952,54 @@ impl<'a> Session<'a> {
         let _ = self.tools.set(tools);
         let _ = self.task_tools.set(task_tools);
         Ok(resolution)
+    }
+
+    /// What the `Resolving` line names: the declared dependencies, and the
+    /// compilers and task tools resolved beside them.
+    fn resolving_what(
+        manifest: &Manifest,
+        declared: usize,
+        tasks_with_tools: &[&TaskDef],
+    ) -> String {
+        let mut what = format!("{declared} declared dependencies");
+        if !manifest.languages.is_empty() {
+            let names: Vec<&str> = manifest
+                .languages
+                .iter()
+                .map(|c| c.language.name())
+                .collect();
+            let plural = if names.len() > 1 { "s" } else { "" };
+            let _ = write!(what, " and the {} compiler{plural}", names.join(" and "));
+        }
+        if !tasks_with_tools.is_empty() {
+            let names: Vec<&str> = tasks_with_tools.iter().map(|t| t.name.as_str()).collect();
+            let plural = if names.len() > 1 { "s" } else { "" };
+            let _ = write!(what, " and the tools of task{plural} {}", names.join(", "));
+        }
+        what
+    }
+
+    /// Pin a freshly resolved graph in `jrs.lock`, with the compilers' and
+    /// the tasks' tool graphs beside it.
+    fn write_lock(
+        &self,
+        lock_path: &Path,
+        resolution: &Resolution,
+        tools: &[Tool],
+        task_tools: &[(String, Resolution)],
+    ) -> Result<()> {
+        let mut lock = Lockfile::from_resolution(&self.manifest, resolution);
+        for tool in tools {
+            lock = lock.with_tool(&tool.language.tool_name(), &tool.resolution);
+        }
+        for (name, graph) in task_tools {
+            if let Some(def) = self.manifest.task(name) {
+                lock = lock.with_tool(&def.tool_name(), graph);
+            }
+        }
+        lock.write(lock_path)?;
+        self.ui.verbose(format!("wrote {}", lock_path.display()));
+        Ok(())
     }
 
     /// Download one task's tool graph, as the compilers' are, and return its

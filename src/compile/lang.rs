@@ -193,7 +193,7 @@ impl Language {
 
     /// The tool that documents this language's sources, at the compiler's
     /// version. Scaladoc 2 is in the compiler; Scala 3's is an artifact of
-    /// its own that reads the compiled classes' TASTy, and Groovydoc is a
+    /// its own that reads the compiled classes' `TASTy`, and Groovydoc is a
     /// small graph beside Groovy. Kotlin has none: Dokka is a plugin host with
     /// a configuration of its own (`JVM_LANGUAGES.md` §14.4).
     ///

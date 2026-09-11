@@ -413,12 +413,11 @@ impl Tracker {
     ///
     /// `JrsError::Io` if the classes cannot be read or the index written.
     pub(super) fn record_all(&self, unit: &CompileUnit) -> Result<()> {
-        match self.record(unit)? {
-            Some(index) => index.save(unit),
-            None => {
-                forget(unit);
-                Ok(())
-            }
+        if let Some(index) = self.record(unit)? {
+            index.save(unit)
+        } else {
+            forget(unit);
+            Ok(())
         }
     }
 
@@ -487,20 +486,19 @@ impl Tracker {
             let candidates = named
                 .get(OsStr::new(source_file))
                 .map_or(&[][..], Vec::as_slice);
-            let owner = match candidates {
-                [one] => *one,
-                _ => {
-                    let package = info.name.rsplit_once('/').map_or("", |(p, _)| p);
-                    let expected = Path::new(package).join(source_file);
-                    let matching: Vec<usize> = candidates
-                        .iter()
-                        .copied()
-                        .filter(|&i| self.current[i].path.ends_with(&expected))
-                        .collect();
-                    match matching[..] {
-                        [one] => one,
-                        _ => return Ok(None),
-                    }
+            let owner = if let [one] = candidates {
+                *one
+            } else {
+                let package = info.name.rsplit_once('/').map_or("", |(p, _)| p);
+                let expected = Path::new(package).join(source_file);
+                let matching: Vec<usize> = candidates
+                    .iter()
+                    .copied()
+                    .filter(|&i| self.current[i].path.ends_with(&expected))
+                    .collect();
+                match matching[..] {
+                    [one] => one,
+                    _ => return Ok(None),
                 }
             };
             unit_classes.insert(info.name.clone());
@@ -567,25 +565,22 @@ fn sweep(unit: &CompileUnit, index: &Index, dirty: &BTreeSet<usize>) -> Result<(
 /// is safe: a top-level class appeared or went away, or a constant changed.
 fn compare(old: &[Class], new: &[Class], api: &mut BTreeSet<String>) -> bool {
     for before in old {
-        match new.iter().find(|c| c.name == before.name) {
-            Some(after) => {
-                if after.constants != before.constants
-                    || (after.kind != before.kind
-                        && Kind::TopLevel == after.kind.max_visibility(before.kind))
-                {
-                    return false;
-                }
-                if after.api != before.api || after.kind != before.kind {
-                    api.insert(before.name.clone());
-                }
+        if let Some(after) = new.iter().find(|c| c.name == before.name) {
+            if after.constants != before.constants
+                || (after.kind != before.kind
+                    && Kind::TopLevel == after.kind.max_visibility(before.kind))
+            {
+                return false;
             }
-            None => {
-                if before.kind == Kind::TopLevel || before.constants != "-" {
-                    return false;
-                }
-                if before.kind != Kind::Hidden {
-                    api.insert(before.name.clone());
-                }
+            if after.api != before.api || after.kind != before.kind {
+                api.insert(before.name.clone());
+            }
+        } else {
+            if before.kind == Kind::TopLevel || before.constants != "-" {
+                return false;
+            }
+            if before.kind != Kind::Hidden {
+                api.insert(before.name.clone());
             }
         }
     }

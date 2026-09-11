@@ -55,6 +55,10 @@ const COMPILER_SERVICES: [&str; 2] = [
 ///
 /// [`crate::JrsError::Io`] if the tree or a file in it cannot be read. A class
 /// file that cannot be parsed is not an error: it counts by its bytes.
+#[allow(
+    clippy::case_sensitive_file_extension_comparisons,
+    reason = "the compilers write and look up `.class` and `.tasty` exactly; `Foo.CLASS` is not a class"
+)]
 pub fn api_digest(dir: &Path) -> Result<String> {
     let mut entries = Vec::new();
     let mut compiler_code = false;
@@ -532,6 +536,11 @@ impl<'a> Class<'a> {
 
     /// Render an `attributes` table, keeping what is API and reading past
     /// the rest. An attribute jrs does not know makes the class opaque.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one short arm per class-file attribute; the list of what counts as API \
+                  reads best in one piece"
+    )]
     fn attributes(
         &self,
         r: &mut Reader<'a>,

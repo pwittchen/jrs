@@ -2133,67 +2133,9 @@ fn parse_dependency_table(value: Option<&toml::Value>, section: &str) -> Result<
         let (group, artifact, key_classifier) = split_coordinate(key, section)?;
         let mut dep = Dependency::new(group, artifact, "");
         dep.classifier = key_classifier;
-        let name = |k: &str| format!("`{section}.\"{key}\".{k}`");
         match value {
             toml::Value::String(v) => dep.version.clone_from(v),
-            toml::Value::Table(t) => {
-                for k in t.keys() {
-                    if !DEPENDENCY_KEYS.contains(&k.as_str()) {
-                        return Err(JrsError::manifest(format!(
-                            "`{section}.\"{key}\"`: unknown key `{k}` (expected `version`, \
-                             `classifier`, `exclusions`, `compile-only`, `runtime-only` \
-                             or `path`)"
-                        )));
-                    }
-                }
-                // No `version` at all leaves it to `[managed]`, which is
-                // checked once the whole manifest is read.
-                dep.version = match t.get("version") {
-                    None => String::new(),
-                    Some(toml::Value::String(v)) if !v.trim().is_empty() => v.clone(),
-                    Some(toml::Value::String(_)) => {
-                        return Err(JrsError::manifest(format!(
-                            "`{section}.\"{key}\"` has an empty version; leave `version` out \
-                             to take it from [managed]"
-                        )));
-                    }
-                    Some(_) => {
-                        return Err(JrsError::manifest(format!(
-                            "{} must be a version string",
-                            name("version")
-                        )));
-                    }
-                };
-                if let Some(c) = optional_string(t, "classifier", &format!("{section}.\"{key}\""))?
-                {
-                    if dep.classifier.as_ref().is_some_and(|k| *k != c) {
-                        return Err(JrsError::manifest(format!(
-                            "{} says `{c}`, but the key names another classifier",
-                            name("classifier")
-                        )));
-                    }
-                    dep.classifier = Some(c).filter(|c| !c.is_empty());
-                }
-                for pattern in string_array(t, "exclusions", &format!("{section}.\"{key}\""))? {
-                    let (g, a) = pattern
-                        .split_once(':')
-                        .filter(|(g, a)| !g.is_empty() && !a.is_empty() && !a.contains(':'))
-                        .ok_or_else(|| {
-                            JrsError::manifest(format!(
-                                "{}: `{pattern}` is not a `group:artifact` pattern \
-                                 (`*` may stand for either half)",
-                                name("exclusions")
-                            ))
-                        })?;
-                    dep.exclusions.push(Exclusion {
-                        group: g.to_string(),
-                        artifact: a.to_string(),
-                    });
-                }
-                dep.compile_only = bool_key(t, "compile-only", &name("compile-only"))?;
-                dep.runtime_only = bool_key(t, "runtime-only", &name("runtime-only"))?;
-                check_one_classpath(&dep, section)?;
-            }
+            toml::Value::Table(t) => parse_dependency_keys(&mut dep, t, section, key)?,
             _ => {
                 return Err(JrsError::manifest(format!(
                     "`{section}.\"{key}\"` must be a version string or a table \
@@ -2216,6 +2158,72 @@ fn parse_dependency_table(value: Option<&toml::Value>, section: &str) -> Result<
         out.push(dep);
     }
     Ok(out)
+}
+
+/// The keys of a dependency written as a table: its version, classifier,
+/// exclusions and classpath.
+fn parse_dependency_keys(
+    dep: &mut Dependency,
+    t: &toml::Table,
+    section: &str,
+    key: &str,
+) -> Result<()> {
+    let name = |k: &str| format!("`{section}.\"{key}\".{k}`");
+    for k in t.keys() {
+        if !DEPENDENCY_KEYS.contains(&k.as_str()) {
+            return Err(JrsError::manifest(format!(
+                "`{section}.\"{key}\"`: unknown key `{k}` (expected `version`, \
+                 `classifier`, `exclusions`, `compile-only`, `runtime-only` or `path`)"
+            )));
+        }
+    }
+    // No `version` at all leaves it to `[managed]`, which is
+    // checked once the whole manifest is read.
+    dep.version = match t.get("version") {
+        None => String::new(),
+        Some(toml::Value::String(v)) if !v.trim().is_empty() => v.clone(),
+        Some(toml::Value::String(_)) => {
+            return Err(JrsError::manifest(format!(
+                "`{section}.\"{key}\"` has an empty version; leave `version` out \
+                 to take it from [managed]"
+            )));
+        }
+        Some(_) => {
+            return Err(JrsError::manifest(format!(
+                "{} must be a version string",
+                name("version")
+            )));
+        }
+    };
+    if let Some(c) = optional_string(t, "classifier", &format!("{section}.\"{key}\""))? {
+        if dep.classifier.as_ref().is_some_and(|k| *k != c) {
+            return Err(JrsError::manifest(format!(
+                "{} says `{c}`, but the key names another classifier",
+                name("classifier")
+            )));
+        }
+        dep.classifier = Some(c).filter(|c| !c.is_empty());
+    }
+    for pattern in string_array(t, "exclusions", &format!("{section}.\"{key}\""))? {
+        let (g, a) = pattern
+            .split_once(':')
+            .filter(|(g, a)| !g.is_empty() && !a.is_empty() && !a.contains(':'))
+            .ok_or_else(|| {
+                JrsError::manifest(format!(
+                    "{}: `{pattern}` is not a `group:artifact` pattern \
+                     (`*` may stand for either half)",
+                    name("exclusions")
+                ))
+            })?;
+        dep.exclusions.push(Exclusion {
+            group: g.to_string(),
+            artifact: a.to_string(),
+        });
+    }
+    dep.compile_only = bool_key(t, "compile-only", &name("compile-only"))?;
+    dep.runtime_only = bool_key(t, "runtime-only", &name("runtime-only"))?;
+    check_one_classpath(dep, section)?;
+    Ok(())
 }
 
 /// `[managed]`: `"group:artifact" = "version"` pins a version wherever the
