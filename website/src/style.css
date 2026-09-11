@@ -392,6 +392,10 @@ h3 {
 }
 
 .tabs button {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  white-space: nowrap;
   font: inherit;
   font-size: 0.9rem;
   color: var(--muted);

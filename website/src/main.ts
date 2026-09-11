@@ -227,28 +227,37 @@ function setupTabs() {
       next.focus();
     });
   });
-  if (/Windows/.test(navigator.userAgent)) select(tabs[1]!);
+  const ua = navigator.userAgent;
+  const detected = /Windows/.test(ua)
+    ? "tab-windows"
+    : /Linux/.test(ua) && !/Android/.test(ua)
+      ? "tab-linux"
+      : null;
+  const tab = detected && tabs.find((t) => t.id === detected);
+  if (tab) select(tab);
 }
 
 function setupInstall() {
-  const target = $<HTMLSelectElement>("[data-target]");
-  const code = $<HTMLElement>("[data-unix-install]");
-  if (!target || !code) return;
-
   const ua = navigator.userAgent;
-  if (/Linux/.test(ua) && !/Android/.test(ua)) {
-    target.value = /aarch64|arm64/i.test(ua) ? "aarch64-unknown-linux-musl" : "x86_64-unknown-linux-musl";
-  }
+  for (const panel of $$<HTMLElement>("[data-install]")) {
+    const target = panel.querySelector<HTMLSelectElement>("[data-target]");
+    const code = panel.querySelector<HTMLElement>("[data-install-command]");
+    if (!target || !code) continue;
 
-  const render = () => {
-    code.textContent = [
-      `TARGET=${target.value}`,
-      "mkdir -p ~/.local/bin",
-      'curl -fsSL "https://github.com/pwittchen/jrs/releases/latest/download/jrs-$TARGET.tar.gz" | tar -xz -C ~/.local/bin jrs',
-    ].join("\n");
-  };
-  target.addEventListener("change", render);
-  render();
+    if (panel.id === "panel-linux" && /aarch64|arm64/i.test(ua)) {
+      target.value = "aarch64-unknown-linux-musl";
+    }
+
+    const render = () => {
+      code.textContent = [
+        `TARGET=${target.value}`,
+        "mkdir -p ~/.local/bin",
+        'curl -fsSL "https://github.com/pwittchen/jrs/releases/latest/download/jrs-$TARGET.tar.gz" | tar -xz -C ~/.local/bin jrs',
+      ].join("\n");
+    };
+    target.addEventListener("change", render);
+    render();
+  }
 }
 
 function setupCopy() {
