@@ -332,7 +332,7 @@ jrs <command> [options]
 | `jrs outdated` | List declared dependencies and `[managed]` entries with newer releases, from `maven-metadata.xml`. |
 | `jrs add` / `jrs remove` | Edit `[dependencies]` / `[dev-dependencies]` in place, then re-resolve (§4.5). `jrs add` leaves the version out of what `[managed]` covers (§8.9). |
 | `jrs cache path` / `jrs cache prune` | Show or prune the shared cache (§8.6). |
-| `jrs init [--lib] [--lang java\|kotlin\|scala\|groovy]` | Scaffold `jrs.toml`, a starter class and a starter test: JUnit 5 for Java and Kotlin, MUnit for Scala, and for Groovy Java code with Spock specs (§7.7). |
+| `jrs init [--lib] [--lang java\|kotlin\|scala\|groovy]` | Scaffold `jrs.toml`, a starter class and a starter test: JUnit 5 for Java and Kotlin, MUnit for Scala, and for Groovy Java code with Spock specs (§7.7). `--check` adds a `check` task running PMD's `quickstart` rules as a tool (§7.6), in the `post-compile` hook; it is refused for Kotlin and Scala, whose starters have no Java sources. |
 | `jrs migrate` | Generate `jrs.toml` from an existing `pom.xml` or Gradle build (§11). |
 | `jrs completions <shell>` | Print a bash, zsh or fish completion script. |
 | `jrs task <name> [-- args...]` | Run a user-defined task and whatever it depends on (§7.6). |
@@ -900,7 +900,9 @@ block named `tasks.<name>` (§4.4). They are downloaded with everything else
 when the graph is resolved afresh, so that the lockfile pins their checksums,
 and otherwise when the task first runs. `jrs tree --task <name>` prints the
 graph, and `jrs cache prune` and `jrs verify` see it as they see the
-compilers'.
+compilers'. Checkers are tools like any other, so there is no lint plugin:
+`jrs init --check` scaffolds a `check` task whose `main` is PMD's CLI over the
+main Java sources, run by `post-compile`.
 
 **Hooks.** Each value is a list of task names; a hook cannot hold a command
 inline, so anything it runs can be run alone with `jrs task`.

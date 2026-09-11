@@ -12,17 +12,7 @@ decision (see the last section) — it needs a spec change before it needs code.
 
 ---
 
-## 1. Editors and tooling
-
-- **Checks and formatting.** Gradle has the Checkstyle, PMD, SpotBugs and
-  Spotless plugins. In jrs these are tasks, and a task can depend on a pinned
-  Java tool ([TASKS.md §8](specs/TASKS.md#8-tool-dependencies)), so none of
-  them needs installing. What is left is a starting point: `jrs init` could
-  offer a `check` task and a `post-compile` hook. Error Prone is the exception:
-  it is a `javac` plugin, so it waits on the annotation-processor path (see the
-  last section).
-
-## 2. Benchmarks against Maven and Gradle
+## 1. Benchmarks against Maven and Gradle
 
 The M5 benchmark (`benches/resolution.rs`) measures jrs against itself and the
 network floor. It does not say how jrs compares to the tools people would
@@ -57,7 +47,7 @@ and testing the same projects, with the results written up in a report.
   a tool that is not installed, as `require_jdk!` does. It adds no crate to jrs.
   A manually triggered CI workflow can regenerate the report on a fixed runner.
 
-## 3. Needs a spec decision first
+## 2. Needs a spec decision first
 
 These cross a line drawn in SPEC §1.2 or §13 (or the dependency list). They are
 listed so the discussion has a home, not because they are planned.

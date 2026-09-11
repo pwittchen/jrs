@@ -25,8 +25,8 @@ use crate::error::{IoResultExt, JrsError, Result, exit};
 use crate::image;
 use crate::lockfile::Lockfile;
 use crate::manifest::{
-    self, Builtin, Dependency, Hook, JavaAgent, LanguageConfig, MANIFEST_FILE, Manifest,
-    Repository, TaskDef, TaskRef,
+    self, Action, Builtin, Dependency, Hook, JavaAgent, LanguageConfig, MANIFEST_FILE, Manifest,
+    Repository, TaskDef, TaskRef, Template,
 };
 use crate::migrate;
 use crate::model;
@@ -319,6 +319,10 @@ pub enum Command {
         /// The language of the starter code and its test.
         #[arg(long, value_name = "LANG", default_value = "java")]
         lang: LangArg,
+        /// Add a `check` task running PMD's quickstart rules over the Java
+        /// sources, and a `post-compile` hook that runs it on every build.
+        #[arg(long)]
+        check: bool,
         /// Where to scaffold. Defaults to the current directory.
         #[arg(value_name = "PATH")]
         path: Option<PathBuf>,
@@ -572,9 +576,17 @@ fn dispatch(cli: &Cli, ui: &Ui) -> Result<i32> {
             name,
             lib,
             lang,
+            check,
             path,
         } => {
-            return init(ui, name.as_deref(), *lib, (*lang).into(), path.as_deref());
+            return init(
+                ui,
+                name.as_deref(),
+                *lib,
+                (*lang).into(),
+                *check,
+                path.as_deref(),
+            );
         }
         Command::Migrate {
             from,
@@ -4461,14 +4473,61 @@ fn starter(language: Language, lib: bool) -> Starter {
     }
 }
 
+/// PMD, the checker `jrs init --check` scaffolds. Its `quickstart` rules are
+/// PMD's own starting point, and every Java starter passes them.
+const STARTER_PMD: &str = "7.27.0";
+
+/// `jrs init --check`: a `check` task running PMD over the main Java sources
+/// from a graph of its own (TASKS.md §8), so nothing needs installing.
+fn check_task() -> Result<TaskDef> {
+    let args = [
+        "check",
+        "--no-progress",
+        "--rulesets",
+        "rulesets/java/quickstart.xml",
+        "--dir",
+        "src/main/java",
+        "--cache",
+        "{target}/pmd.cache",
+    ]
+    .iter()
+    .map(|raw| Template::parse(raw).map_err(JrsError::manifest))
+    .collect::<Result<_>>()?;
+    let pmd = |artifact| Dependency::new("net.sourceforge.pmd", artifact, STARTER_PMD);
+    Ok(TaskDef {
+        name: "check".to_string(),
+        description: Some("Check the Java sources with PMD's quickstart rules".to_string()),
+        action: Some(Action::Main("net.sourceforge.pmd.cli.PmdCli".to_string())),
+        args,
+        depends_on: Vec::new(),
+        env: Vec::new(),
+        cwd: None,
+        inputs: Vec::new(),
+        outputs: Vec::new(),
+        source_outputs: Vec::new(),
+        resource_outputs: Vec::new(),
+        dependencies: vec![pmd("pmd-cli"), pmd("pmd-java")],
+    })
+}
+
 fn init(
     ui: &Ui,
     name: Option<&str>,
     lib: bool,
     language: Language,
+    check: bool,
     path: Option<&Path>,
 ) -> Result<i32> {
     ui.banner();
+
+    // Groovy's starter keeps its main code in Java; Kotlin's and Scala's have
+    // no Java sources for PMD to read.
+    if check && matches!(language, Language::Kotlin | Language::Scala) {
+        return Err(JrsError::usage(format!(
+            "`--check` scaffolds PMD, which checks Java sources, and the {language} starter \
+             has none"
+        )));
+    }
 
     let root = path.map_or_else(|| PathBuf::from("."), Path::to_path_buf);
     std::fs::create_dir_all(&root).path(&root)?;
@@ -4510,6 +4569,10 @@ fn init(
         });
     }
     manifest.dev_dependencies = starter.dev_dependencies;
+    if check {
+        manifest.tasks.push(check_task()?);
+        manifest.hooks.add(Hook::PostCompile, "check");
+    }
     std::fs::write(&manifest_path, manifest.render(None)).path(&manifest_path)?;
     ui.phase("Created", manifest_path.display());
 
@@ -4649,6 +4712,7 @@ mod tests {
             vec!["jrs", "init", "--lib"],
             vec!["jrs", "init", "--lang", "kotlin"],
             vec!["jrs", "init", "--lib", "--lang", "groovy"],
+            vec!["jrs", "init", "--check", "demo"],
             vec!["jrs", "tree", "--tool", "kotlin-compiler"],
             vec!["jrs", "tree", "--tool", "scala-compiler", "--depth", "2"],
             vec!["jrs", "migrate"],
@@ -4732,7 +4796,7 @@ mod tests {
                 std::process::id()
             ));
             let _ = std::fs::remove_dir_all(&root);
-            init(&ui, Some("app"), lib, language, Some(&root)).unwrap();
+            init(&ui, Some("app"), lib, language, false, Some(&root)).unwrap();
 
             let manifest = Manifest::load(root.join(MANIFEST_FILE)).unwrap();
             assert!(manifest.warnings.is_empty(), "{:?}", manifest.warnings);
@@ -4764,6 +4828,62 @@ mod tests {
             } else if language == Language::Kotlin {
                 assert_eq!(manifest.main_class.as_deref(), Some("com.example.MainKt"));
             }
+            let _ = std::fs::remove_dir_all(&root);
+        }
+    }
+
+    #[test]
+    fn init_check_hooks_a_pmd_task_into_post_compile() {
+        let ui = Ui::new(UiOptions {
+            quiet: true,
+            progress: When::Never,
+            color: When::Never,
+            charset: CharsetChoice::Ascii,
+            ..UiOptions::default()
+        });
+        let scratch = |what: &str| {
+            let root =
+                std::env::temp_dir().join(format!("jrs-init-check-{what}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&root);
+            root
+        };
+        for (language, lib) in [
+            (Language::Java, false),
+            (Language::Java, true),
+            (Language::Groovy, false),
+        ] {
+            let root = scratch(&format!("{}-{lib}", language.key()));
+            init(&ui, Some("app"), lib, language, true, Some(&root)).unwrap();
+
+            let manifest = Manifest::load(root.join(MANIFEST_FILE)).unwrap();
+            assert!(manifest.warnings.is_empty(), "{:?}", manifest.warnings);
+            let check = manifest.tasks.iter().find(|t| t.name == "check").unwrap();
+            assert_eq!(
+                check.action,
+                Some(Action::Main("net.sourceforge.pmd.cli.PmdCli".to_string()))
+            );
+            let tools: Vec<String> = check
+                .dependencies
+                .iter()
+                .map(|d| d.key().to_string())
+                .collect();
+            assert_eq!(
+                tools,
+                [
+                    "net.sourceforge.pmd:pmd-cli",
+                    "net.sourceforge.pmd:pmd-java"
+                ]
+            );
+            assert_eq!(manifest.hooks.tasks(Hook::PostCompile), ["check"]);
+            // The tool's graph is its own: none of PMD joins the project's.
+            assert!(manifest.dependencies.is_empty());
+            let _ = std::fs::remove_dir_all(&root);
+        }
+        for language in [Language::Kotlin, Language::Scala] {
+            let root = scratch(language.key());
+            let err = init(&ui, Some("app"), false, language, true, Some(&root)).unwrap_err();
+            assert!(err.to_string().contains("--check"), "{err}");
+            assert!(!root.join(MANIFEST_FILE).exists());
             let _ = std::fs::remove_dir_all(&root);
         }
     }

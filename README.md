@@ -160,7 +160,9 @@ class and its test. Both templates declare JUnit 5 as a dev-dependency, so the
 first build downloads it. `jrs init --lang kotlin` scaffolds the same in
 Kotlin, `--lang scala` in Scala with MUnit tests, and `--lang groovy` Java
 code with Spock specs; see
-[Kotlin, Scala and Groovy](#kotlin-scala-and-groovy).
+[Kotlin, Scala and Groovy](#kotlin-scala-and-groovy). `jrs init --check` also
+adds a `check` task that runs PMD over the Java sources after every compile;
+see [Tasks and hooks](#tasks-and-hooks).
 
 A whole project is one manifest and a source tree:
 
@@ -517,7 +519,7 @@ for any repository.
 | `jrs add <group:artifact[:version[:classifier]]>... [--dev] [--compile-only \| --runtime-only]` | Add dependencies to `jrs.toml`, at their newest release unless given a version; what `[managed]` covers goes in without one. |
 | `jrs remove <group:artifact \| name>... [--dev]` | Remove dependencies from `jrs.toml`; a local jar goes by its name. |
 | `jrs cache path` / `jrs cache prune` | Print where the cache is, or remove what no project uses. See [Dependency cache](#dependency-cache). |
-| `jrs init [--lib] [--lang <java\|kotlin\|scala\|groovy>] [--name <name>] [path]` | Scaffold `jrs.toml`, a starter class and its test. |
+| `jrs init [--lib] [--lang <java\|kotlin\|scala\|groovy>] [--check] [--name <name>] [path]` | Scaffold `jrs.toml`, a starter class and its test; `--check` adds a PMD `check` task in the `post-compile` hook. |
 | `jrs migrate` | Generate `jrs.toml` from an existing `pom.xml` or Gradle build. |
 | `jrs completions <bash\|zsh\|fish>` | Print a shell completion script. See [Shell completions](#shell-completions). |
 | `jrs task <name> [--watch] [-- args...]` | Run a task from `jrs.toml`, and whatever it depends on. See [Tasks and hooks](#tasks-and-hooks). |
@@ -904,6 +906,26 @@ named `tasks.format`, the way it pins the compilers, and `jrs tree --task
 format` shows it. The jars are downloaded when the graph is resolved afresh,
 or else when the task first runs, and reach `java` through an argfile. A
 `script` task can take `dependencies` too, as its classpath.
+
+Checks are tasks too, so Checkstyle, PMD or SpotBugs need neither a plugin nor
+an install. `jrs init --check` starts a project with one: a `check` task that
+runs PMD's `quickstart` rules over `src/main/java`, hooked into `post-compile`,
+so a violation fails the build after PMD's report. `jrs task check` runs it
+alone. The ruleset, or the tool, is yours to change in `jrs.toml`:
+
+```toml
+[tasks.check]
+description = "Check the Java sources with PMD's quickstart rules"
+main = "net.sourceforge.pmd.cli.PmdCli"
+args = ["check", "--no-progress", "--rulesets", "rulesets/java/quickstart.xml", "--dir", "src/main/java", "--cache", "{target}/pmd.cache"]
+
+[tasks.check.dependencies]
+"net.sourceforge.pmd:pmd-cli" = "7.27.0"
+"net.sourceforge.pmd:pmd-java" = "7.27.0"
+
+[hooks]
+post-compile = ["check"]
+```
 
 A task with no action, like `release`, only runs its `depends-on`. That list
 names other tasks, or `build`, `test`, `package` and `doc`, which run as their

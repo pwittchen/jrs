@@ -266,6 +266,38 @@ fn write_project(root: &Path, files: &[(&str, &str)]) {
     }
 }
 
+// ---- jrs init --check (SPEC §7.6) --------------------------------------------
+
+/// The `check` task `jrs init --check` scaffolds runs the real PMD from a graph
+/// of its own: the starter passes it, and a violation fails the build.
+#[test]
+fn init_check_runs_pmd_after_every_compile() {
+    let scratch = Scratch::new("network-init-check");
+    let root = scratch.join("app");
+    let (code, _, stderr) = jrs(&root, &["init", "--check", root.to_str().unwrap()]);
+    assert_eq!(code, 0, "{stderr}");
+
+    let (code, _, stderr) = jrs(&root, &["build"]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stderr.contains("Task check (post-compile)"), "{stderr}");
+
+    write_project(
+        &root,
+        &[(
+            "src/main/java/com/example/Quiet.java",
+            "package com.example;\n\nclass Quiet {\n    void nap() {\n        try {\n            \
+             Thread.sleep(1);\n        } catch (InterruptedException e) {\n        }\n    }\n}\n",
+        )],
+    );
+    let (code, stdout, stderr) = jrs(&root, &["build"]);
+    assert_eq!(code, 1, "{stderr}");
+    assert!(
+        format!("{stdout}{stderr}").contains("EmptyCatchBlock"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("task `check` failed"), "{stderr}");
+}
+
 // ---- Spring Boot from start.spring.io (SPEC §11.3) --------------------------
 
 /// A start.spring.io Gradle build, migrated, then built, tested and packaged
