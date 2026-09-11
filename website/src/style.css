@@ -569,6 +569,11 @@ h3 {
   color: var(--muted);
 }
 
+.status .experimental {
+  color: var(--accent);
+  font-weight: 600;
+}
+
 .foot {
   display: flex;
   flex-wrap: wrap;
