@@ -1,0 +1,163 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- exec-maven-plugin executions as tasks and hooks, what <dependencyManagement>
+     versions as [managed], and a system-scoped jar kept in the project. The
+     jar under lib/ is created by the test, as an empty file. -->
+<project xmlns="http://maven.apache.org/POM/4.0.0">
+  <modelVersion>4.0.0</modelVersion>
+
+  <groupId>com.example</groupId>
+  <artifactId>exec-app</artifactId>
+  <version>2.1.0</version>
+
+  <properties>
+    <maven.compiler.release>21</maven.compiler.release>
+    <cloud.version>2025.0.0</cloud.version>
+    <grammar.dir>${project.basedir}/src/main/grammar</grammar.dir>
+  </properties>
+
+  <dependencyManagement>
+    <dependencies>
+      <dependency>
+        <groupId>org.springframework.cloud</groupId>
+        <artifactId>spring-cloud-dependencies</artifactId>
+        <version>${cloud.version}</version>
+        <type>pom</type>
+        <scope>import</scope>
+      </dependency>
+      <!-- used below: its version is written out -->
+      <dependency>
+        <groupId>org.slf4j</groupId>
+        <artifactId>slf4j-api</artifactId>
+        <version>2.0.17</version>
+      </dependency>
+      <!-- used by nothing declared: Maven holds the transitive graph to it -->
+      <dependency>
+        <groupId>com.fasterxml.jackson.core</groupId>
+        <artifactId>jackson-databind</artifactId>
+        <version>2.19.0</version>
+      </dependency>
+    </dependencies>
+  </dependencyManagement>
+
+  <dependencies>
+    <!-- versioned by the imported BOM -->
+    <dependency>
+      <groupId>org.springframework.cloud</groupId>
+      <artifactId>spring-cloud-starter-config</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>org.slf4j</groupId>
+      <artifactId>slf4j-api</artifactId>
+    </dependency>
+    <!-- a jar kept in the project -->
+    <dependency>
+      <groupId>com.example</groupId>
+      <artifactId>legacy-native</artifactId>
+      <version>1.0</version>
+      <scope>system</scope>
+      <systemPath>${project.basedir}/lib/native.jar</systemPath>
+    </dependency>
+    <!-- a jar on one machine -->
+    <dependency>
+      <groupId>com.sun</groupId>
+      <artifactId>tools</artifactId>
+      <version>1.8</version>
+      <scope>system</scope>
+      <systemPath>${java.home}/../lib/tools.jar</systemPath>
+    </dependency>
+  </dependencies>
+
+  <build>
+    <plugins>
+      <plugin>
+        <groupId>org.codehaus.mojo</groupId>
+        <artifactId>exec-maven-plugin</artifactId>
+        <version>3.5.0</version>
+        <dependencies>
+          <dependency>
+            <groupId>com.example.tools</groupId>
+            <artifactId>codegen</artifactId>
+            <version>1.4.0</version>
+          </dependency>
+        </dependencies>
+        <executions>
+          <!-- a generator from the plugin's own dependencies, before javac -->
+          <execution>
+            <id>generate-parser</id>
+            <phase>generate-sources</phase>
+            <goals>
+              <goal>java</goal>
+            </goals>
+            <configuration>
+              <mainClass>com.example.tools.Codegen</mainClass>
+              <includePluginDependencies>true</includePluginDependencies>
+              <includeProjectDependencies>false</includeProjectDependencies>
+              <arguments>
+                <argument>${grammar.dir}</argument>
+                <argument>${project.build.directory}/generated-sources/parser</argument>
+              </arguments>
+            </configuration>
+          </execution>
+          <!-- a program after the jar is written -->
+          <execution>
+            <id>printVersion</id>
+            <phase>package</phase>
+            <goals>
+              <goal>exec</goal>
+            </goals>
+            <configuration>
+              <executable>echo</executable>
+              <arguments>
+                <argument>${project.artifactId}</argument>
+                <argument>${project.version}</argument>
+              </arguments>
+              <environmentVariables>
+                <STAGE>release</STAGE>
+              </environmentVariables>
+            </configuration>
+          </execution>
+          <!-- no phase: run from the command line, on the project's classpath -->
+          <execution>
+            <id>seed</id>
+            <goals>
+              <goal>java</goal>
+            </goals>
+            <configuration>
+              <mainClass>com.example.Seed</mainClass>
+              <systemProperties>
+                <systemProperty>
+                  <key>db.url</key>
+                  <value>jdbc:h2:mem:dev</value>
+                </systemProperty>
+              </systemProperties>
+              <commandlineArgs>fixtures/dev.sql --verbose</commandlineArgs>
+            </configuration>
+          </execution>
+          <!-- nothing in jrs runs at deploy -->
+          <execution>
+            <id>publish-docs</id>
+            <phase>deploy</phase>
+            <goals>
+              <goal>exec</goal>
+            </goals>
+            <configuration>
+              <executable>scripts/publish.sh</executable>
+            </configuration>
+          </execution>
+          <!-- a background process -->
+          <execution>
+            <id>start-db</id>
+            <phase>process-test-classes</phase>
+            <goals>
+              <goal>exec</goal>
+            </goals>
+            <configuration>
+              <executable>docker</executable>
+              <async>true</async>
+            </configuration>
+          </execution>
+        </executions>
+      </plugin>
+    </plugins>
+  </build>
+</project>

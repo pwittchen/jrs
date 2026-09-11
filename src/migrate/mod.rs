@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 
 use crate::compile::lang::Language;
 use crate::error::{IoResultExt, JrsError, Result};
-use crate::manifest::{Dependency, LanguageConfig, MANIFEST_FILE, Manifest};
+use crate::manifest::{Dependency, LanguageConfig, MANIFEST_FILE, Managed, Manifest};
 use crate::resolve::coord::is_range;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -383,6 +383,158 @@ fn drop_implied_libraries(out: &mut Manifest, report: &mut Report) {
             ));
         }
     }
+}
+
+// ---- [managed] and Spring Boot (SPEC §8.9) ---------------------------------
+
+/// Where Spring Boot's plugins, starters and BOM live.
+const SPRING_BOOT_GROUP: &str = "org.springframework.boot";
+
+/// Import a BOM through `[managed]`, unless it is there already.
+fn add_bom(
+    out: &mut Manifest,
+    group: &str,
+    artifact: &str,
+    version: &str,
+    from: &str,
+    report: &mut Report,
+) {
+    if out
+        .managed
+        .iter()
+        .any(|m| m.group == group && m.artifact == artifact)
+    {
+        return;
+    }
+    out.managed.push(Managed::bom(group, artifact, version));
+    report.migrated(format!(
+        "[managed] {group}:{artifact} = {version}, a BOM (from {from})"
+    ));
+}
+
+/// Pin a version through `[managed]`, unless something there pins it already.
+fn add_managed(out: &mut Manifest, group: &str, artifact: &str, version: &str) -> bool {
+    if out
+        .managed
+        .iter()
+        .any(|m| m.group == group && m.artifact == artifact)
+    {
+        return false;
+    }
+    out.managed.push(Managed::new(group, artifact, version));
+    true
+}
+
+/// The BOM Spring Boot's plugins import, at Boot's version: what versions
+/// every starter the build leaves unversioned.
+fn spring_boot_bom(out: &mut Manifest, version: &str, from: &str, report: &mut Report) {
+    add_bom(
+        out,
+        SPRING_BOOT_GROUP,
+        "spring-boot-dependencies",
+        version,
+        from,
+        report,
+    );
+}
+
+/// Boot's Gradle plugin and its Maven parent both compile with `-parameters`,
+/// and Spring reads parameter names at run time (`@PathVariable`, `@Value`
+/// on a constructor), so it goes into `java.javac-args`.
+fn spring_boot_parameters(out: &mut Manifest, from: &str, report: &mut Report) {
+    if out.java.javac_args.iter().any(|a| a == "-parameters") {
+        return;
+    }
+    out.java.javac_args.push("-parameters".to_string());
+    report.migrated(format!(
+        "java.javac-args += -parameters (from {from}, which compiles with it so that \
+         Spring can read parameter names)"
+    ));
+}
+
+/// Boot's plugins make the `@SpringBootApplication` class the jar's main
+/// class when the build names none; so does migration, by reading the main
+/// sources. It also says how the runnable jar is built without Boot.
+fn spring_boot_application(out: &mut Manifest, from: &str, report: &mut Report) {
+    report.review(format!(
+        "{from} — `jrs package --fat` builds the runnable jar: one flat jar with Spring's \
+         registries merged, not Boot's nested layout and launcher"
+    ));
+    if out.main_class.is_some() {
+        return;
+    }
+    let mut roots = vec![out.source_dir.clone()];
+    roots.extend(out.languages.iter().map(|c| c.source_dir.clone()));
+    let mut found = Vec::new();
+    for root in roots {
+        for file in source_files(&out.root.join(root)) {
+            let Ok(text) = std::fs::read_to_string(&file) else {
+                continue;
+            };
+            if !text.contains("@SpringBootApplication") {
+                continue;
+            }
+            let Some(stem) = file.file_stem().map(|s| s.to_string_lossy().into_owned()) else {
+                continue;
+            };
+            let package = text
+                .lines()
+                .map(str::trim)
+                .find_map(|l| l.strip_prefix("package "))
+                .map(|p| p.trim_end_matches(';').trim().to_string())
+                .filter(|p| !p.is_empty());
+            let mut class = match package {
+                Some(p) => format!("{p}.{stem}"),
+                None => stem,
+            };
+            // Kotlin's top-level `main` compiles into `<File>Kt`.
+            if file.extension().is_some_and(|e| e == "kt") {
+                class.push_str("Kt");
+            }
+            found.push(class);
+        }
+    }
+    match found.as_slice() {
+        [] => report.review(
+            "no @SpringBootApplication class was found under the main sources; set \
+             project.main-class for `jrs run` and `jrs package --fat`",
+        ),
+        [one] => {
+            report.migrated(format!(
+                "project.main-class = {one} (the @SpringBootApplication class)"
+            ));
+            out.main_class = Some(one.clone());
+        }
+        [first, ..] => {
+            report.review(format!(
+                "project.main-class = {first} — the first of {} @SpringBootApplication \
+                 classes; check it is the one to run",
+                found.len()
+            ));
+            out.main_class = Some(first.clone());
+        }
+    }
+}
+
+/// The `.java`, `.kt`, `.groovy` and `.scala` files under `dir`, sorted.
+fn source_files(dir: &Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return out;
+    };
+    let mut entries: Vec<PathBuf> = entries.filter_map(|e| e.ok().map(|e| e.path())).collect();
+    entries.sort();
+    for path in entries {
+        if path.is_dir() {
+            out.extend(source_files(&path));
+        } else if path
+            .extension()
+            .is_some_and(|e| matches!(e.to_str(), Some("java" | "kt" | "groovy" | "scala")))
+        {
+            out.push(path);
+        }
+    }
+    out
 }
 
 #[cfg(test)]

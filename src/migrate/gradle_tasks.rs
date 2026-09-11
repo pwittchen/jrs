@@ -646,7 +646,8 @@ fn is_main_runtime_classpath(rest: &str) -> bool {
 }
 
 /// `generateBuildInfo` → `generate-build-info`, `HTMLReport` → `html-report`.
-fn task_name(gradle: &str) -> Result<String, String> {
+/// Maven's execution ids go through it too.
+pub(super) fn task_name(gradle: &str) -> Result<String, String> {
     let chars: Vec<char> = gradle.chars().collect();
     let mut out = String::new();
     for (i, &c) in chars.iter().enumerate() {
@@ -761,6 +762,7 @@ fn translate(gradle: &str, header: Header, block: Option<&str>) -> Result<Declar
             outputs: literals(&body.outputs),
             source_outputs: Vec::new(),
             resource_outputs: Vec::new(),
+            dependencies: Vec::new(),
         },
         depends_on: body.depends_on,
         implied,

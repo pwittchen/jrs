@@ -44,11 +44,103 @@ fn the_maven_extras_fixture_translates_exactly() {
     let (migration, dir) = migrate_fixture("maven-extras");
     assert_eq!(migration.manifest.render(None), expected(&dir));
 
-    let skipped = migration.report.not_migrated.join("\n");
-    assert!(skipped.contains("legacy-native"), "{skipped}");
-    assert!(skipped.contains("system"), "{skipped}");
+    assert!(
+        migration.report.not_migrated.is_empty(),
+        "{:?}",
+        migration.report.not_migrated
+    );
     let review = migration.report.needs_review.join("\n");
+    assert!(
+        review.contains("legacy-native` = lib/native.jar, compile-only"),
+        "{review}"
+    );
     assert!(review.contains("annotation processors"), "{review}");
+}
+
+/// start.spring.io's Gradle builds, in both DSLs, taken unchanged: the Boot
+/// plugins become Boot's BOM in [managed], the starters stay versionless, and
+/// the @SpringBootApplication class is the main class.
+#[test]
+fn the_spring_boot_gradle_fixtures_translate_exactly() {
+    for name in ["spring-boot-gradle", "spring-boot-kts"] {
+        let (migration, dir) = migrate_fixture(name);
+        assert_eq!(migration.source, Source::Gradle);
+        assert_eq!(migration.manifest.render(None), expected(&dir), "{name}");
+        assert!(
+            migration.report.not_migrated.is_empty(),
+            "{name}: {:?}",
+            migration.report.not_migrated
+        );
+        let migrated = migration.report.migrated.join("\n");
+        assert!(
+            migrated.contains("spring-boot-dependencies = 4.1.1, a BOM"),
+            "{migrated}"
+        );
+        assert!(
+            migrated.contains("(the @SpringBootApplication class)"),
+            "{migrated}"
+        );
+        let review = migration.report.needs_review.join("\n");
+        assert!(review.contains("`jrs package --fat`"), "{review}");
+    }
+}
+
+/// start.spring.io's Maven build: the starter parent stands for Boot's BOM.
+#[test]
+fn the_spring_boot_maven_fixture_translates_exactly() {
+    let (migration, dir) = migrate_fixture("spring-boot-maven");
+    assert_eq!(migration.manifest.render(None), expected(&dir));
+    assert!(
+        migration.report.not_migrated.is_empty(),
+        "{:?}",
+        migration.report.not_migrated
+    );
+    let migrated = migration.report.migrated.join("\n");
+    assert!(
+        migrated.contains("(from <parent> spring-boot-starter-parent)"),
+        "{migrated}"
+    );
+    assert!(migrated.contains("from java.version"), "{migrated}");
+}
+
+/// exec-maven-plugin executions as tasks and hooks, `<dependencyManagement>`
+/// as [managed], and a system-scoped jar as a local one. The jar is made here,
+/// as an empty file, since nothing binary is committed.
+#[test]
+fn the_maven_exec_fixture_translates_exactly() {
+    let scratch = Scratch::new("migrate-maven-exec");
+    let dir = scratch.join("project");
+    copy_dir(&fixtures().join("migrate/maven-exec"), &dir);
+    scratch.write("project/lib/native.jar", "");
+
+    let migration = migrate::plan(&dir, None).unwrap();
+    assert_eq!(migration.manifest.render(None), expected(&dir));
+    let parsed =
+        Manifest::parse(&migration.render_manifest(), &dir.join("jrs.toml"), &dir).unwrap();
+    assert!(parsed.warnings.is_empty(), "{:?}", parsed.warnings);
+
+    let migrated = migration.report.migrated.join("\n");
+    assert!(
+        migrated.contains("`generate-parser` → [tasks.generate-parser], run by hooks.pre-compile"),
+        "{migrated}"
+    );
+    assert!(
+        migrated.contains("1 version from <dependencyManagement>"),
+        "{migrated}"
+    );
+    let review = migration.report.needs_review.join("\n");
+    assert!(
+        review.contains("[tasks.generate-parser] — if it generates sources"),
+        "{review}"
+    );
+    assert!(!review.contains("not there yet"), "{review}");
+    let skipped = migration.report.not_migrated.join("\n");
+    assert!(
+        skipped.contains("`publish-docs` — its phase `deploy`"),
+        "{skipped}"
+    );
+    assert!(skipped.contains("`start-db` — <async>"), "{skipped}");
+    assert!(skipped.contains("com.sun:tools"), "{skipped}");
 }
 
 /// The Kotlin DSL, with exclusion closures, `isTransitive = false`, a classified
@@ -284,6 +376,10 @@ fn every_expected_manifest_is_a_manifest_jrs_can_read() {
         "gradle-tasks",
         "gradle-env",
         "gradle-jar",
+        "spring-boot-gradle",
+        "spring-boot-kts",
+        "spring-boot-maven",
+        "maven-exec",
     ] {
         let (migration, dir) = migrate_fixture(name);
         let text = migration.render_manifest();

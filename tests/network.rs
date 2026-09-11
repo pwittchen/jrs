@@ -13,7 +13,7 @@ mod common;
 
 use std::path::Path;
 
-use common::Scratch;
+use common::{Scratch, copy_dir, fixtures};
 use jrs::compile::{self, CompileUnit};
 use jrs::manifest::Manifest;
 use jrs::project::Project;
@@ -264,6 +264,76 @@ fn write_project(root: &Path, files: &[(&str, &str)]) {
         std::fs::create_dir_all(file.parent().unwrap()).unwrap();
         std::fs::write(file, contents).unwrap();
     }
+}
+
+// ---- Spring Boot from start.spring.io (SPEC §11.3) --------------------------
+
+/// A start.spring.io Gradle build, migrated, then built, tested and packaged
+/// by jrs, and its flat fat jar run up to a started application context: the
+/// proof that Boot's versions come through `[managed]` and that its nested
+/// `bootJar` layout is not needed.
+#[test]
+fn a_spring_boot_project_from_gradle_migrates_builds_and_starts() {
+    let toolchain = require_jdk!();
+    let scratch = Scratch::new("net-spring-boot");
+    let root = scratch.join("demo");
+    copy_dir(&fixtures().join("migrate/spring-boot-gradle"), &root);
+    std::fs::remove_file(root.join("expected-jrs.toml")).unwrap();
+
+    let path = root.display().to_string();
+    let (code, _, stderr) = jrs(&root, &["migrate", "--path", &path]);
+    assert_eq!(code, 0, "{stderr}");
+    let (code, _, stderr) = jrs(&root, &["test"]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stderr.contains("1 passed"), "{stderr}");
+    let (code, tree, stderr) = jrs(&root, &["tree", "--depth", "1"]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(
+        tree.contains("org.springframework.boot:spring-boot-starter-webmvc:4.1.1 (managed)"),
+        "{tree}"
+    );
+    let (code, _, stderr) = jrs(&root, &["package", "--fat"]);
+    assert_eq!(code, 0, "{stderr}");
+
+    // Boot logs to stdout; the line it writes once the context is up says so.
+    let mut child = std::process::Command::new(&toolchain.java)
+        .arg("-jar")
+        .arg(root.join("target/demo-0.0.1-SNAPSHOT.jar"))
+        .arg("--server.port=0")
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::inherit())
+        .spawn()
+        .unwrap();
+    let stdout = child.stdout.take().unwrap();
+    let (lines, received) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        use std::io::BufRead;
+        for line in std::io::BufReader::new(stdout)
+            .lines()
+            .map_while(Result::ok)
+        {
+            if lines.send(line).is_err() {
+                break;
+            }
+        }
+    });
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+    let mut seen = Vec::new();
+    let started = loop {
+        let left = deadline.saturating_duration_since(std::time::Instant::now());
+        match received.recv_timeout(left) {
+            Ok(line) if line.contains("Started DemoApplication") => break true,
+            Ok(line) => seen.push(line),
+            Err(_) => break false,
+        }
+    };
+    let _ = child.kill();
+    let _ = child.wait();
+    assert!(
+        started,
+        "the application never started:\n{}",
+        seen.join("\n")
+    );
 }
 
 /// Test, run, package fat, link, and package fat again from clean: the jars

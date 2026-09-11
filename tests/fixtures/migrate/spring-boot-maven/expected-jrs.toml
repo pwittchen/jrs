@@ -1,0 +1,17 @@
+[project]
+name = "demo"
+version = "0.0.1-SNAPSHOT"
+main-class = "com.example.demo.DemoApplication"
+
+[java]
+source = 17
+javac-args = ["-parameters"]
+
+[managed]
+"org.springframework.boot:spring-boot-dependencies" = { version = "4.1.1", bom = true }
+
+[dependencies]
+"org.springframework.boot:spring-boot-starter-webmvc" = {}
+
+[dev-dependencies]
+"org.springframework.boot:spring-boot-starter-webmvc-test" = {}

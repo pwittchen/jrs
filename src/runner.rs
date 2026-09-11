@@ -322,6 +322,7 @@ mod tests {
                     jar: jar.map(PathBuf::from),
                     checksum: None,
                     mediated: false,
+                    managed: false,
                 })
                 .collect(),
             ..Resolution::default()

@@ -14,11 +14,16 @@ use super::{
 };
 use crate::compile::lang::Language;
 use crate::error::{IoResultExt, JrsError, Result};
-use crate::manifest::{self, Dependency, Exclusion, Manifest, Repository};
-use crate::resolve::coord::{Scope, is_range};
-use crate::resolve::pom::{self, Effective, Element, PluginInfo, Pom};
+use crate::manifest::{
+    self, Action, Builtin, Dependency, Exclusion, Hook, Manifest, Repository, TaskDef, TaskRef,
+    Template,
+};
+use crate::resolve::coord::{Ga, Scope, is_range};
+use crate::resolve::pom::{self, Effective, Element, PluginInfo, Pom, PomDependency};
 
 /// Plugins jrs knows how to read something out of. Anything else is reported.
+/// `exec-maven-plugin` reports what it cannot translate execution by
+/// execution.
 const UNDERSTOOD_PLUGINS: &[&str] = &[
     "maven-compiler-plugin",
     "maven-jar-plugin",
@@ -27,6 +32,8 @@ const UNDERSTOOD_PLUGINS: &[&str] = &[
     "kotlin-maven-plugin",
     "scala-maven-plugin",
     "gmavenplus-plugin",
+    "spring-boot-maven-plugin",
+    "exec-maven-plugin",
 ];
 
 /// Translate the POM at `pom_path`, and the parents beside it on disk.
@@ -38,7 +45,7 @@ const UNDERSTOOD_PLUGINS: &[&str] = &[
 /// [`JrsError::Resolve`] if the project's groupId or version cannot be worked out.
 pub fn migrate(pom_path: &Path, root: &Path) -> Result<Migration> {
     let mut report = Report::default();
-    let chain = read_chain(pom_path, &mut report)?;
+    let (chain, boot_parent) = read_chain(pom_path, &mut report)?;
     let effective = pom::effective(&chain)?;
     let pom = &chain[0];
 
@@ -47,9 +54,14 @@ pub fn migrate(pom_path: &Path, root: &Path) -> Result<Migration> {
     report.migrated(format!("project.version = {}", out.version));
 
     read_java_settings(&effective, pom, &mut out, &mut report);
-    read_main_class(pom, &mut out, &mut report);
+    if boot_parent.is_some() {
+        read_boot_java_version(&effective, &mut out, &mut report);
+    }
+    read_main_class(pom, &effective, &mut out, &mut report);
     read_jar_manifest(pom, &mut out, &mut report);
-    read_dependencies(&effective, &mut out, &mut report);
+    // Before the dependencies: a BOM there versions the ones that name none.
+    read_managed(&effective, boot_parent.as_deref(), &mut out, &mut report);
+    read_dependencies(&effective, pom, &mut out, &mut report);
     // The layout depends on which languages are on, and Scala's and Groovy's
     // versions on the dependencies.
     read_languages(&chain, pom, &effective, &mut out, &mut report);
@@ -57,6 +69,8 @@ pub fn migrate(pom_path: &Path, root: &Path) -> Result<Migration> {
     read_annotation_processors(&effective, pom, &mut out, &mut report);
     read_test_settings(&effective, pom, &mut out, &mut report);
     read_repositories(&effective, &mut out, &mut report);
+    read_exec(pom, &effective, &mut out, &mut report);
+    read_spring_boot(pom, boot_parent.as_deref(), &mut out, &mut report);
     read_the_rest(pom, &mut report);
 
     Ok(Migration {
@@ -68,8 +82,13 @@ pub fn migrate(pom_path: &Path, root: &Path) -> Result<Migration> {
 }
 
 /// Read the POM and follow `<parent>` through `relativePath` while the files
-/// exist on disk.
-fn read_chain(pom_path: &Path, report: &mut Report) -> Result<Vec<Pom>> {
+/// exist on disk. Returns the chain, and the version of Spring Boot's
+/// `spring-boot-starter-parent` when that is the parent that is not on disk:
+/// its managed versions are Boot's BOM, which `[managed]` can import.
+fn read_chain(pom_path: &Path, report: &mut Report) -> Result<(Vec<Pom>, Option<String>)> {
+    let is_boot = |parent: &pom::ParentRef| {
+        parent.group == super::SPRING_BOOT_GROUP && parent.artifact == "spring-boot-starter-parent"
+    };
     let mut chain = Vec::new();
     let mut current = pom_path.to_path_buf();
     loop {
@@ -84,6 +103,13 @@ fn read_chain(pom_path: &Path, report: &mut Report) -> Result<Vec<Pom>> {
 
         let Some(parent) = parent else { break };
         let relative = parent.relative_path.as_deref().unwrap_or("../pom.xml");
+        let mut candidate = dir.join(relative);
+        if candidate.is_dir() {
+            candidate = candidate.join("pom.xml");
+        }
+        if is_boot(&parent) && (relative.is_empty() || !candidate.is_file()) {
+            return Ok((chain, Some(parent.version)));
+        }
         if relative.is_empty() {
             report.skipped(format!(
                 "<parent> {}:{}:{} — resolved from a repository, which migration \
@@ -91,10 +117,6 @@ fn read_chain(pom_path: &Path, report: &mut Report) -> Result<Vec<Pom>> {
                 parent.group, parent.artifact, parent.version
             ));
             break;
-        }
-        let mut candidate = dir.join(relative);
-        if candidate.is_dir() {
-            candidate = candidate.join("pom.xml");
         }
         if !candidate.is_file() {
             report.skipped(format!(
@@ -114,7 +136,105 @@ fn read_chain(pom_path: &Path, report: &mut Report) -> Result<Vec<Pom>> {
             break;
         }
     }
-    Ok(chain)
+    Ok((chain, None))
+}
+
+/// spring-boot-starter-parent compiles for `${java.version}`.
+fn read_boot_java_version(effective: &Effective, out: &mut Manifest, report: &mut Report) {
+    if out.java.source.is_some() {
+        return;
+    }
+    if let Some(n) = effective
+        .properties
+        .get("java.version")
+        .and_then(|v| parse_release(v))
+    {
+        out.java.source = Some(n);
+        report.migrated(format!(
+            "java.source = {n} (from java.version, which spring-boot-starter-parent \
+             compiles for)"
+        ));
+    }
+}
+
+/// What Maven versions through `<dependencyManagement>`, into `[managed]`
+/// (SPEC §8.9): each `<scope>import</scope>` BOM, then the Spring Boot BOM a
+/// spring-boot-starter-parent stands for (a POM's own imports win over its
+/// parent's), then every plain entry no declared dependency uses, since Maven
+/// holds the rest of the graph to those. A declared dependency gets its
+/// managed version written out, in `read_dependencies`.
+fn read_managed(
+    effective: &Effective,
+    boot_parent: Option<&str>,
+    out: &mut Manifest,
+    report: &mut Report,
+) {
+    for import in &effective.imports {
+        if import.version.contains("${") {
+            report.skipped(format!(
+                "<dependencyManagement> import {import} — the version did not interpolate"
+            ));
+            continue;
+        }
+        super::add_bom(
+            out,
+            &import.group,
+            &import.artifact,
+            &import.version,
+            "<dependencyManagement> <scope>import</scope>",
+            report,
+        );
+    }
+    if let Some(version) = boot_parent {
+        super::spring_boot_bom(out, version, "<parent> spring-boot-starter-parent", report);
+        report.review(format!(
+            "<parent> spring-boot-starter-parent {version} — its managed versions are the \
+             BOM now in [managed]; its plugin configuration and resource filtering were \
+             not applied"
+        ));
+    }
+    let declared: Vec<Ga> = effective
+        .dependencies
+        .iter()
+        .map(PomDependency::ga)
+        .collect();
+    let mut pinned = 0;
+    for (ga, managed) in &effective.managed {
+        let Some(version) = &managed.version else {
+            continue;
+        };
+        if declared.contains(ga) {
+            continue;
+        }
+        if version.contains("${") || is_range(version) {
+            report.skipped(format!(
+                "<dependencyManagement> {ga} — version `{version}` is not one exact version"
+            ));
+            continue;
+        }
+        if super::add_managed(out, &ga.group, &ga.artifact, version) {
+            pinned += 1;
+        }
+    }
+    if pinned > 0 {
+        let s = if pinned == 1 { "" } else { "s" };
+        report.migrated(format!(
+            "[managed] — {pinned} version{s} from <dependencyManagement> that no declared \
+             dependency uses; Maven holds the rest of the graph to them"
+        ));
+    }
+}
+
+/// `spring-boot-starter-parent` compiles with `-parameters`; it and
+/// `spring-boot-maven-plugin` make the `@SpringBootApplication` class the
+/// main class when nothing names one.
+fn read_spring_boot(pom: &Pom, boot_parent: Option<&str>, out: &mut Manifest, report: &mut Report) {
+    if boot_parent.is_some() {
+        super::spring_boot_parameters(out, "<parent> spring-boot-starter-parent", report);
+    }
+    if boot_parent.is_some() || plugin(pom, "spring-boot-maven-plugin").is_some() {
+        super::spring_boot_application(out, "spring-boot-maven-plugin", report);
+    }
 }
 
 fn read_java_settings(effective: &Effective, pom: &Pom, out: &mut Manifest, report: &mut Report) {
@@ -253,7 +373,13 @@ fn read_layout(pom: &Pom, out: &mut Manifest, report: &mut Report) {
     }
 }
 
-fn read_main_class(pom: &Pom, out: &mut Manifest, report: &mut Report) {
+fn read_main_class(pom: &Pom, effective: &Effective, out: &mut Manifest, report: &mut Report) {
+    // Spring Boot's plugin, and the `start-class` property its parent passes it.
+    let from_boot = plugin(pom, "spring-boot-maven-plugin")
+        .and_then(|p| p.configuration.as_ref())
+        .and_then(|c| c.text_of("mainClass"))
+        .or_else(|| effective.properties.get("start-class").map(String::as_str))
+        .filter(|m| !m.contains("${"));
     let from_jar_plugin = plugin(pom, "maven-jar-plugin")
         .and_then(|p| p.configuration.as_ref())
         .and_then(|c| c.path(&["archive", "manifest"]))
@@ -275,7 +401,7 @@ fn read_main_class(pom: &Pom, out: &mut Manifest, report: &mut Report) {
             .find_map(|t| t.text_of("mainClass"))
     });
 
-    if let Some(main) = from_jar_plugin.or(from_shade) {
+    if let Some(main) = from_jar_plugin.or(from_shade).or(from_boot) {
         out.main_class = Some(main.to_string());
         report.migrated(format!("project.main-class = {main}"));
     }
@@ -320,7 +446,10 @@ fn read_jar_manifest(pom: &Pom, out: &mut Manifest, report: &mut Report) {
     }
 }
 
-fn read_dependencies(effective: &Effective, out: &mut Manifest, report: &mut Report) {
+fn read_dependencies(effective: &Effective, pom: &Pom, out: &mut Manifest, report: &mut Report) {
+    // A BOM in [managed] versions what `<dependencyManagement>` did not;
+    // whether it covers each one is known once it is read, at resolution.
+    let bom = out.managed.iter().any(|m| m.bom);
     for raw in &effective.dependencies {
         let managed = effective.manage(raw);
         let key = format!("{}:{}", managed.group, managed.artifact);
@@ -352,7 +481,13 @@ fn read_dependencies(effective: &Effective, out: &mut Manifest, report: &mut Rep
             Scope::Compile | Scope::Runtime => (&mut out.dependencies, false),
             Scope::Provided => (&mut out.dependencies, true),
             Scope::Test => (&mut out.dev_dependencies, false),
-            Scope::System | Scope::Import => {
+            Scope::System => {
+                if let Some(jar) = system_jar(pom, effective, &managed, &out.root, report) {
+                    out.dependencies.push(jar);
+                }
+                continue;
+            }
+            Scope::Import => {
                 report.skipped(format!(
                     "{key} — <scope>{}</scope> has no equivalent in jrs.toml",
                     scope.as_str()
@@ -361,17 +496,21 @@ fn read_dependencies(effective: &Effective, out: &mut Manifest, report: &mut Rep
             }
         };
 
-        let Some(version) = managed.version.clone() else {
-            report.skipped(format!(
-                "{key} — no version, and none found in <dependencyManagement>"
-            ));
-            continue;
+        let version = match managed.version.clone() {
+            Some(version) => version,
+            None if bom => String::new(),
+            None => {
+                report.skipped(format!(
+                    "{key} — no version, and none found in <dependencyManagement>"
+                ));
+                continue;
+            }
         };
         if version.contains("${") {
             report.skipped(format!("{key} — version `{version}` did not interpolate"));
             continue;
         }
-        let version = if is_range(&version) {
+        let version = if !version.is_empty() && is_range(&version) {
             let clamped = lower_bound(&version);
             report.review(format!(
                 "{key} — the range `{version}` was clamped to {clamped}"
@@ -404,6 +543,9 @@ fn read_dependencies(effective: &Effective, out: &mut Manifest, report: &mut Rep
         }
 
         let mut notes = vec![scope.as_str().to_string()];
+        if dep.is_managed() {
+            notes.push("its version from [managed]".to_string());
+        }
         if compile_only {
             notes.push("as compile-only".to_string());
         }
@@ -416,6 +558,473 @@ fn read_dependencies(effective: &Effective, out: &mut Manifest, report: &mut Rep
         report.migrated(format!("{} ({})", dep.key(), notes.join(", ")));
         target.push(dep);
     }
+}
+
+/// `<scope>system</scope>` with a `<systemPath>` inside the project becomes a
+/// local jar (SPEC §8.8). Maven puts a system jar on the compile and test
+/// classpaths and never packages it, which is what `compile-only` is.
+fn system_jar(
+    pom: &Pom,
+    effective: &Effective,
+    dep: &PomDependency,
+    root: &Path,
+    report: &mut Report,
+) -> Option<Dependency> {
+    let key = format!("{}:{}", dep.group, dep.artifact);
+    let text = |e: &Element, name: &str| {
+        e.text_of(name)
+            .map(|t| pom::interpolate(t, &effective.properties))
+    };
+    let raw = pom
+        .root
+        .child("dependencies")
+        .into_iter()
+        .flat_map(|d| d.children_named("dependency"))
+        .find(|d| {
+            text(d, "groupId").as_deref() == Some(dep.group.as_str())
+                && text(d, "artifactId").as_deref() == Some(dep.artifact.as_str())
+        })
+        .and_then(|d| d.text_of("systemPath"))
+        .map(|p| p.trim().replace('\\', "/"));
+    let Some(raw) = raw else {
+        report.skipped(format!(
+            "{key} — <scope>system</scope> without a <systemPath> in this POM"
+        ));
+        return None;
+    };
+    let inside = ["${project.basedir}/", "${basedir}/"]
+        .iter()
+        .find_map(|prefix| raw.strip_prefix(prefix))
+        .map(|rest| pom::interpolate(rest, &effective.properties));
+    let Some(path) = inside else {
+        report.skipped(format!(
+            "{key} — <scope>system</scope> at `{raw}`, which is not under \
+             ${{project.basedir}}; a local jar is a file inside the project"
+        ));
+        return None;
+    };
+    let named = dep
+        .artifact
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'));
+    if path.is_empty() || path.contains("${") || path.split('/').any(|c| c == "..") || !named {
+        report.skipped(format!(
+            "{key} — <scope>system</scope> at `{raw}`, which jrs cannot name as a local jar"
+        ));
+        return None;
+    }
+    let missing = if root.join(&path).is_file() {
+        ""
+    } else {
+        "; the file is not there yet, and a build needs it"
+    };
+    report.review(format!(
+        "{key} — <scope>system</scope> became the local jar `{}` = {path}, compile-only: \
+         Maven puts a system jar on the compile and test classpaths but never packages \
+         it; drop `compile-only` if the program needs it at run time{missing}",
+        dep.artifact
+    ));
+    let mut jar = Dependency::local(&dep.artifact, path);
+    jar.compile_only = true;
+    Some(jar)
+}
+
+// ---- exec-maven-plugin (TASKS.md §12) --------------------------------------
+
+/// The hook that fires where a Maven phase would run an execution: before
+/// compilation for the source-generating phases, after it for `compile` and
+/// `process-classes` (a plugin bound to a phase runs after the phase's own
+/// work), and so on. A phase with no such point is not here.
+fn hook_for_phase(phase: &str) -> Option<Hook> {
+    Some(match phase {
+        "validate" | "initialize" | "generate-sources" | "process-sources"
+        | "generate-resources" | "process-resources" => Hook::PreCompile,
+        "compile" | "process-classes" => Hook::PostCompile,
+        "generate-test-sources"
+        | "process-test-sources"
+        | "generate-test-resources"
+        | "process-test-resources"
+        | "test-compile"
+        | "process-test-classes" => Hook::PreTest,
+        "test" => Hook::PostTest,
+        "package" => Hook::PostPackage,
+        _ => return None,
+    })
+}
+
+/// A POM value as a task template: `${project.basedir}`,
+/// `${project.build.directory}`, `${project.build.outputDirectory}`,
+/// `${project.version}` and `${project.artifactId}` become placeholders, any
+/// other property its value, and a property with none makes it unreadable.
+fn exec_template(raw: &str, effective: &Effective) -> std::result::Result<Template, String> {
+    Template::parse(&exec_text(raw.trim(), effective, 0)?)
+}
+
+/// `raw` as a template's text, its braces escaped and its properties
+/// resolved. A property whose value names another is followed, a few levels
+/// deep: `${grammar.dir}` set to `${project.basedir}/src/main/grammar`.
+fn exec_text(
+    raw: &str,
+    effective: &Effective,
+    depth: usize,
+) -> std::result::Result<String, String> {
+    let escaped = Template::literal(raw).raw;
+    let mut out = String::new();
+    let mut rest = escaped.as_str();
+    while let Some(at) = rest.find("${{") {
+        out.push_str(&rest[..at]);
+        let after = &rest[at + 3..];
+        let end = after
+            .find("}}")
+            .ok_or_else(|| format!("`{raw}` has an unclosed `${{`"))?;
+        let name = &after[..end];
+        let value = match name {
+            "project.basedir" | "basedir" => "{root}".to_string(),
+            "project.build.directory" => "{target}".to_string(),
+            "project.build.outputDirectory" => "{classes}".to_string(),
+            "project.version" | "version" => "{project.version}".to_string(),
+            "project.artifactId" => "{project.name}".to_string(),
+            other => match effective.properties.get(other) {
+                Some(v) if depth < 8 => exec_text(v, effective, depth + 1)?,
+                _ => return Err(format!("`${{{other}}}` is a property jrs cannot evaluate")),
+            },
+        };
+        out.push_str(&value);
+        rest = &after[end + 2..];
+    }
+    out.push_str(rest);
+    Ok(out)
+}
+
+/// One translated execution.
+struct ExecTask {
+    def: TaskDef,
+    hook: Option<Hook>,
+    notes: Vec<String>,
+}
+
+/// `exec-maven-plugin`: each `<execution>` becomes a task, and its `<phase>`
+/// the hook that fires it. `exec` is a `run` of its executable; `java` runs
+/// its main class on the project's classpath, or on the plugin's own
+/// `<dependencies>` as the task's, when the execution asks for those. An
+/// execution jrs cannot translate whole is reported, whole: half a task would
+/// run and do the wrong thing. A plugin with no execution is what `mvn
+/// exec:java` runs: its main class is the program's.
+fn read_exec(pom: &Pom, effective: &Effective, out: &mut Manifest, report: &mut Report) {
+    let Some(plugin) = plugin(pom, "exec-maven-plugin") else {
+        return;
+    };
+    if plugin.executions.is_empty() {
+        let main = plugin
+            .configuration
+            .as_ref()
+            .and_then(|c| c.text_of("mainClass"))
+            .filter(|m| !m.contains("${"));
+        match main {
+            Some(main) if out.main_class.is_none() => {
+                out.main_class = Some(main.to_string());
+                report.migrated(format!(
+                    "project.main-class = {main} (from exec-maven-plugin, which `mvn \
+                     exec:java` runs)"
+                ));
+            }
+            Some(_) => {}
+            None => report.skipped(
+                "plugin exec-maven-plugin — no <execution> and no <mainClass>; what `mvn \
+                 exec:exec` runs from the command line can be a task",
+            ),
+        }
+        return;
+    }
+    for execution in &plugin.executions {
+        let id = execution.text_of("id").unwrap_or("default");
+        let goals: Vec<String> = execution
+            .list("goals", "goal")
+            .iter()
+            .map(|g| g.text.trim().to_string())
+            .filter(|g| !g.is_empty())
+            .collect();
+        if goals.is_empty() {
+            report.skipped(format!(
+                "exec-maven-plugin execution `{id}` — it names no <goal>"
+            ));
+            continue;
+        }
+        for goal in &goals {
+            let what = if goals.len() > 1 {
+                format!("`{id}` ({goal})")
+            } else {
+                format!("`{id}`")
+            };
+            match exec_task(
+                id,
+                goal,
+                goals.len() > 1,
+                execution,
+                plugin,
+                pom,
+                effective,
+                out,
+            ) {
+                Ok(task) => {
+                    let name = task.def.name.clone();
+                    let hooked = task
+                        .hook
+                        .map(|h| format!(", run by hooks.{h}"))
+                        .unwrap_or_default();
+                    report.migrated(format!(
+                        "exec-maven-plugin execution {what} → [tasks.{name}]{hooked}"
+                    ));
+                    for note in task.notes {
+                        report.review(format!("[tasks.{name}] — {note}"));
+                    }
+                    out.tasks.push(task.def);
+                    if let Some(hook) = task.hook {
+                        out.hooks.add(hook, &name);
+                    }
+                }
+                Err(why) => {
+                    report.skipped(format!("exec-maven-plugin execution {what} — {why}"));
+                }
+            }
+        }
+    }
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "one execution, read against its plugin, the POM around it and the \
+              manifest its task joins"
+)]
+#[allow(
+    clippy::too_many_lines,
+    reason = "the two goals share every key but their action; split, each half would \
+              take all of it"
+)]
+fn exec_task(
+    id: &str,
+    goal: &str,
+    several_goals: bool,
+    execution: &Element,
+    plugin: &PluginInfo,
+    pom: &Pom,
+    effective: &Effective,
+    out: &Manifest,
+) -> std::result::Result<ExecTask, String> {
+    // The execution's own configuration wins over the plugin's, key by key.
+    let configs: Vec<&Element> = execution
+        .child("configuration")
+        .into_iter()
+        .chain(plugin.configuration.as_ref())
+        .collect();
+    let get = |name: &str| configs.iter().find_map(|c| c.child(name));
+    let text = |name: &str| {
+        get(name)
+            .map(|e| e.text.trim().to_string())
+            .filter(|t| !t.is_empty())
+    };
+    let template = |raw: &str| exec_template(raw, effective);
+
+    if text("skip").as_deref() == Some("true") {
+        return Err("it is skipped (`<skip>true</skip>`)".to_string());
+    }
+    for key in ["async", "outputFile", "executableDependency", "modulepath"] {
+        if get(key).is_some() {
+            return Err(format!("<{key}> has no equivalent in a jrs task"));
+        }
+    }
+    if let Some(scope) = text("classpathScope")
+        && !matches!(scope.as_str(), "runtime" | "compile")
+    {
+        return Err(format!(
+            "<classpathScope>{scope}</classpathScope>: a task gets the main classpath only"
+        ));
+    }
+    let hook =
+        match execution.text_of("phase") {
+            None => None,
+            Some(phase) => Some(hook_for_phase(phase).ok_or_else(|| {
+                format!("its phase `{phase}` has no point in jrs's build to run at")
+            })?),
+        };
+
+    let base = if id == "default" || id.starts_with("default-") {
+        "exec".to_string()
+    } else {
+        super::gradle_tasks::task_name(id)?
+    };
+    let base = if several_goals {
+        format!("{base}-{goal}")
+    } else {
+        base
+    };
+    let mut name = base.clone();
+    let mut n = 2;
+    while out.task(&name).is_some() {
+        name = format!("{base}-{n}");
+        n += 1;
+    }
+
+    let mut arguments = Vec::new();
+    if let Some(list) = get("arguments") {
+        for argument in &list.children {
+            match argument.name.as_str() {
+                "argument" => arguments.push(template(&argument.text)?),
+                // `exec`'s stand-in for the project's classpath.
+                "classpath" if goal == "exec" => {
+                    arguments.push(Template::parse("{runtime-classpath}")?);
+                }
+                other => return Err(format!("<{other}> in <arguments> is not read")),
+            }
+        }
+    }
+    if let Some(line) = text("commandlineArgs") {
+        for argument in split_arguments(&line) {
+            arguments.push(template(&argument)?);
+        }
+    }
+    let mut env = Vec::new();
+    if let Some(vars) = get("environmentVariables") {
+        for var in &vars.children {
+            if var.name.to_ascii_uppercase().starts_with("JRS_") {
+                return Err(format!("its environment variable `{}` is jrs's", var.name));
+            }
+            env.push((var.name.clone(), template(&var.text)?));
+        }
+    }
+    let cwd = text("workingDirectory").map(|d| template(&d)).transpose()?;
+
+    let mut notes = Vec::new();
+    let mut depends_on = Vec::new();
+    let mut dependencies = Vec::new();
+    let action = match goal {
+        "exec" => {
+            let executable = text("executable").ok_or("it names no <executable>")?;
+            let mut argv = vec![template(&executable)?];
+            argv.append(&mut arguments);
+            Action::Run(argv)
+        }
+        "java" => {
+            let main = text("mainClass").ok_or("it names no <mainClass>")?;
+            let main = pom::interpolate(&main, &effective.properties);
+            if main.contains("${") {
+                return Err(format!("its <mainClass> `{main}` did not interpolate"));
+            }
+            let mut flags = Vec::new();
+            if let Some(properties) = get("systemProperties") {
+                for property in properties.children_named("systemProperty") {
+                    let key = property
+                        .text_of("key")
+                        .ok_or("a <systemProperty> has no <key>")?;
+                    let value = property.text_of("value").unwrap_or_default();
+                    flags.push(template(&format!("-D{key}={value}"))?);
+                }
+            }
+            let own = text("includePluginDependencies").as_deref() == Some("true");
+            let project = text("includeProjectDependencies").as_deref() != Some("false");
+            if own {
+                dependencies = plugin_dependencies(pom, effective)?;
+            }
+            if !dependencies.is_empty() {
+                if !flags.is_empty() {
+                    return Err(
+                        "<systemProperties> with the plugin's own dependencies: a `main` \
+                         task takes no JVM flags"
+                            .to_string(),
+                    );
+                }
+                if project {
+                    notes.push(
+                        "exec:java put the project's classpath on it too; the task runs \
+                         on the plugin's dependencies alone"
+                            .to_string(),
+                    );
+                }
+                Action::Main(main)
+            } else if project {
+                // Only a `pre-compile` task runs before the classes exist; one
+                // run on its own needs them built first.
+                if hook.is_none() {
+                    depends_on.push(TaskRef::Builtin(Builtin::Build));
+                }
+                let mut argv = vec![Template::literal("java")];
+                argv.extend(flags);
+                argv.push(Template::parse("@{classpath-argfile}")?);
+                argv.push(Template::literal(&main));
+                argv.append(&mut arguments);
+                Action::Run(argv)
+            } else {
+                return Err(
+                    "it runs with neither the project's dependencies nor the plugin's".into(),
+                );
+            }
+        }
+        other => return Err(format!("its goal `{other}` is not `exec` or `java`")),
+    };
+    // `main` takes its arguments as `args`; `run` has them in its vector.
+    let args = if matches!(action, Action::Main(_)) {
+        arguments
+    } else {
+        Vec::new()
+    };
+    if hook == Some(Hook::PreCompile) {
+        notes.push(
+            "if it generates sources, list their directory (under target/) in its \
+             `source-outputs`, so the build compiles them"
+                .to_string(),
+        );
+    }
+    Ok(ExecTask {
+        def: TaskDef {
+            name,
+            description: None,
+            action: Some(action),
+            args,
+            depends_on,
+            env,
+            cwd,
+            inputs: Vec::new(),
+            outputs: Vec::new(),
+            source_outputs: Vec::new(),
+            resource_outputs: Vec::new(),
+            dependencies,
+        },
+        hook,
+        notes,
+    })
+}
+
+/// exec-maven-plugin's own `<dependencies>`, which `includePluginDependencies`
+/// puts on an `exec:java` classpath: a task's dependencies (TASKS.md §8).
+fn plugin_dependencies(
+    pom: &Pom,
+    effective: &Effective,
+) -> std::result::Result<Vec<Dependency>, String> {
+    let Some(element) = pom.root.path(&["build", "plugins"]).and_then(|p| {
+        p.children_named("plugin")
+            .find(|p| p.text_of("artifactId") == Some("exec-maven-plugin"))
+    }) else {
+        return Ok(Vec::new());
+    };
+    element
+        .list("dependencies", "dependency")
+        .iter()
+        .map(|d| {
+            let field = |name: &str| {
+                d.text_of(name)
+                    .map(|t| pom::interpolate(t, &effective.properties))
+                    .filter(|t| !t.contains("${"))
+            };
+            match (field("groupId"), field("artifactId"), field("version")) {
+                (Some(g), Some(a), Some(v)) if !is_range(&v) => Ok(Dependency::new(g, a, v)),
+                (g, a, _) => Err(format!(
+                    "its plugin dependency {}:{} has no exact version jrs can read",
+                    g.unwrap_or_default(),
+                    a.unwrap_or_default()
+                )),
+            }
+        })
+        .collect()
 }
 
 /// `maven-surefire-plugin`'s `<argLine>` and `<systemPropertyVariables>` are
@@ -1104,14 +1713,50 @@ mod tests {
     fn a_parent_that_is_not_on_disk_is_reported_not_guessed() {
         let dir = Dir::new("remote-parent");
         let migration = dir.migrate(
-            "<project><parent><groupId>org.springframework.boot</groupId>\
-             <artifactId>spring-boot-starter-parent</artifactId><version>3.2.0</version>\
+            "<project><parent><groupId>com.example</groupId>\
+             <artifactId>corporate-parent</artifactId><version>3.2.0</version>\
              <relativePath/></parent><artifactId>app</artifactId>\
              <version>1.0.0</version></project>",
         );
         let skipped = migration.report.not_migrated.join("\n");
-        assert!(skipped.contains("spring-boot-starter-parent"), "{skipped}");
+        assert!(skipped.contains("corporate-parent"), "{skipped}");
         assert!(skipped.contains("repository"), "{skipped}");
+    }
+
+    #[test]
+    fn spring_boots_starter_parent_becomes_its_bom() {
+        let dir = Dir::new("boot-parent");
+        dir.write(
+            "src/main/java/com/example/App.java",
+            "package com.example;\n\n@SpringBootApplication\npublic class App {}\n",
+        );
+        let migration = dir.migrate(
+            "<project><parent><groupId>org.springframework.boot</groupId>\
+             <artifactId>spring-boot-starter-parent</artifactId><version>3.2.0</version>\
+             <relativePath/></parent><groupId>g</groupId><artifactId>app</artifactId>\
+             <version>1.0.0</version><properties><java.version>21</java.version></properties>\
+             <dependencies><dependency><groupId>org.springframework.boot</groupId>\
+             <artifactId>spring-boot-starter-web</artifactId></dependency></dependencies>\
+             </project>",
+        );
+        let m = &migration.manifest;
+        assert_eq!(
+            m.managed,
+            vec![manifest::Managed::bom(
+                "org.springframework.boot",
+                "spring-boot-dependencies",
+                "3.2.0"
+            )]
+        );
+        assert!(m.dependencies[0].is_managed());
+        assert_eq!(m.java.source, Some(21));
+        assert_eq!(m.java.javac_args, vec!["-parameters"]);
+        assert_eq!(m.main_class.as_deref(), Some("com.example.App"));
+        assert!(
+            migration.report.not_migrated.is_empty(),
+            "{:?}",
+            migration.report.not_migrated
+        );
     }
 
     #[test]

@@ -33,7 +33,8 @@ your own requirements before adopting it for production builds.
 - Dependency resolution against Maven Central and additional repositories, with
   transitive dependencies and nearest-wins version mediation, classifiers,
   exclusions, compile-only and runtime-only dependencies, local jar files,
-  repositories confined to the groups they serve, and SNAPSHOT versions
+  repositories confined to the groups they serve, SNAPSHOT versions, and
+  versions managed in one place, BOMs such as Spring Boot's included
 - Checksum-verified downloads into a shared local cache, plus an `--offline`
   mode and cache pruning
 - A committed `jrs.lock` for reproducible resolution
@@ -53,7 +54,8 @@ your own requirements before adopting it for production builds.
   your own
 - Running the project's main class directly, and rebuilding on every change
 - User-defined tasks and lifecycle hooks, for code generators, post-packaging
-  steps and chores, run with the project's JDK and classpath
+  steps and chores, run with the project's JDK and classpath, or with Java
+  tools from Maven Central resolved and pinned as a task's own dependencies
 - API docs with Javadoc, Scaladoc or Groovydoc, dependency trees with `--why`,
   outdated-dependency reports, and `jrs add` / `jrs remove`
 - Parallel resolution, download and compilation, and tests that recompile only
@@ -61,7 +63,7 @@ your own requirements before adopting it for production builds.
 - Progress output that adapts to the terminal: spinners, live download bars and
   a build summary, with ASCII and no-colour fallbacks
 - One-shot migration from Maven (`pom.xml`) and Gradle (`build.gradle`,
-  `build.gradle.kts`)
+  `build.gradle.kts`), Spring Boot builds included
 - Shell completions for bash, zsh and fish
 - Per-phase build timings, a JSON project model for editors (`jrs metadata`),
   sources jars for go-to-definition (`jrs fetch --sources`), and a minimum jrs
@@ -374,6 +376,32 @@ fails the build until `jrs update` pins it again. A missing jar is an error
 that names its path. `jrs tree` shows it as `ojdbc = libs/ojdbc11.jar`,
 `jrs remove ojdbc` removes it, and `jrs outdated` skips it.
 
+### `[managed]`
+
+Versions kept in one place, which is what Maven's `<dependencyManagement>` and
+Gradle's `platform()` and `constraints { }` are for:
+
+```toml
+[managed]
+"org.springframework.boot:spring-boot-dependencies" = { version = "4.1.1", bom = true }
+"com.fasterxml.jackson.core:jackson-databind" = "2.19.0"
+
+[dependencies]
+"org.springframework.boot:spring-boot-starter-webmvc" = {}   # versioned by the BOM
+```
+
+A managed version holds an artifact to that version wherever the graph
+reaches it, ahead of nearest-wins mediation, but it adds nothing to a
+classpath: an artifact nothing depends on stays out. `bom = true` imports a
+BOM's own managed versions instead. A dependency may then leave its version
+out, as `{}` or as a long form without `version`, and upgrading the BOM
+upgrades it. A version written in `[dependencies]` still wins for that
+dependency. The table's own entries come before any BOM's, and an earlier BOM
+before a later one; a managed version covers every classifier of its
+`group:artifact`. `jrs tree` marks a managed version `(managed)`,
+`jrs outdated` checks every entry, BOMs included, and `jrs add` leaves the
+version out of what `[managed]` covers.
+
 ### `[repositories]`
 
 Additional repositories, tried in declaration order. Maven Central is implicit
@@ -420,12 +448,12 @@ for any repository.
 | `jrs package --native-image` | Also build a native executable in `target/native` with GraalVM's `native-image`. |
 | `jrs doc` | Generate API docs into `target/doc`: Javadoc, or Scaladoc / Groovydoc for Scala and Groovy code. |
 | `jrs clean` | Remove `target/`. |
-| `jrs tree [--depth <n>] [--why <artifact>] [--tool <name>]` | Print the resolved dependency graph, every path that leads to one artifact, or a compiler's own graph (`kotlin-compiler`, `scala-compiler`, `groovy-compiler`). |
+| `jrs tree [--depth <n>] [--why <artifact>] [--tool <name>] [--task <name>]` | Print the resolved dependency graph, every path that leads to one artifact, a compiler's own graph (`kotlin-compiler`, `scala-compiler`, `groovy-compiler`), or a task's. |
 | `jrs classpath [--test \| --runtime]` | Print the resolved classpath, for editors and `java -cp "$(jrs classpath)"`. |
 | `jrs update` | Re-resolve and rewrite `jrs.lock`. |
 | `jrs verify` | Re-hash the cached dependency jars against the checksums in `jrs.lock`. |
-| `jrs outdated` | List declared dependencies that have newer releases. |
-| `jrs add <group:artifact[:version[:classifier]]>... [--dev] [--compile-only \| --runtime-only]` | Add dependencies to `jrs.toml`, at their newest release unless given a version. |
+| `jrs outdated` | List declared dependencies and `[managed]` versions that have newer releases. |
+| `jrs add <group:artifact[:version[:classifier]]>... [--dev] [--compile-only \| --runtime-only]` | Add dependencies to `jrs.toml`, at their newest release unless given a version; what `[managed]` covers goes in without one. |
 | `jrs remove <group:artifact \| name>... [--dev]` | Remove dependencies from `jrs.toml`; a local jar goes by its name. |
 | `jrs cache path` / `jrs cache prune` | Print where the cache is, or remove what no project uses. See [Dependency cache](#dependency-cache). |
 | `jrs init [--lib] [--lang <java\|kotlin\|scala\|groovy>] [--name <name>] [path]` | Scaffold `jrs.toml`, a starter class and its test. |
@@ -503,7 +531,8 @@ language, the output directories, the compile, runtime and test classpaths
 the tasks. It resolves the dependencies but never compiles. `--no-deps` skips
 resolution. [SPEC §5.4](specs/INITIAL_SPEC.md#54-the-project-model-jrs-metadata-and-jrs-fetch)
 has the full schema. `jrs fetch` downloads everything a build needs without
-building, which warms a CI cache for `--offline` runs. `jrs fetch --sources`
+building, the tools of its tasks included, which warms a CI cache for
+`--offline` runs. `jrs fetch --sources`
 also downloads each dependency's `-sources.jar`, and `jrs metadata` then lists
 it next to the jar, so an editor can go to a library's definitions. A library
 that publishes no sources jar is only a warning.
@@ -781,6 +810,27 @@ Each task has one action:
   different shell on each platform.
 - **`script`** is a `.java` file run with the project's JDK, no compile step
   needed. It is the portable way to write build logic.
+- **`main`** is a class run from the task's own dependencies, so a Java tool
+  from Maven Central needs no installing:
+
+```toml
+[tasks.format]
+description = "Format App.java in place"
+main = "com.google.googlejavaformat.java.Main"
+args = ["--replace", "src/main/java/com/example/App.java"]
+
+[tasks.format.dependencies]
+"com.google.googlejavaformat:google-java-format" = "1.22.0"
+```
+
+A task's dependencies take the `[dependencies]` forms, without `compile-only`,
+`runtime-only`, local jars or `[managed]` versions. They are resolved as a
+graph of the task's own, which never meets the project's, so a formatter's
+Guava does not mediate against yours. `jrs.lock` pins it as a `[[tool]]` block
+named `tasks.format`, the way it pins the compilers, and `jrs tree --task
+format` shows it. The jars are downloaded when the graph is resolved afresh,
+or else when the task first runs, and reach `java` through an argfile. A
+`script` task can take `dependencies` too, as its classpath.
 
 A task with no action, like `release`, only runs its `depends-on`. That list
 names other tasks, or `build`, `test`, `package` and `doc`, which run as their
@@ -889,8 +939,23 @@ reported: in jrs they are the `jrs package --sources` and `--javadoc` flags.
 Scopes keep their meaning. Maven's `provided` and Gradle's `compileOnly` become
 `compile-only`, and `runtime` and `runtimeOnly` become `runtime-only`. Gradle's
 `files(...)` and `fileTree(...)` become local jars, with a `fileTree` expanded
-to the jars it holds when you migrate. A repository's `content { includeGroup }`
-or `exclusiveContent` filter becomes its `groups`.
+to the jars it holds when you migrate, and so does a Maven `system` jar under
+`${project.basedir}`, compile-only as Maven has it. A repository's
+`content { includeGroup }` or `exclusiveContent` filter becomes its `groups`.
+
+Managed versions become `[managed]`: Gradle's `platform()`,
+`enforcedPlatform()`, `constraints { }` and `dependencyManagement { }`, and
+Maven's imported BOMs and `<dependencyManagement>`. A Spring Boot build, as
+start.spring.io generates it, migrates whole. The Boot plugin with
+`io.spring.dependency-management`, or Maven's `spring-boot-starter-parent`,
+becomes Boot's BOM, so the starters stay versionless. `-parameters`, which
+Boot compiles with, goes into `javac-args`, and the `@SpringBootApplication`
+class becomes the main class. `jrs package --fat` then builds the runnable
+jar, a flat one with Spring's registries merged.
+
+Maven's `exec-maven-plugin` executions become tasks, and their `<phase>` a
+hook: `exec` a `run` command, and `java` a `java` command over jrs's
+classpath, or a `main` task over the plugin's own `<dependencies>`.
 
 Kotlin, Scala and Groovy builds migrate too. The Kotlin Gradle plugin,
 `id 'groovy'` and `id 'scala'`, and Maven's `kotlin-maven-plugin`,

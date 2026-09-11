@@ -130,9 +130,17 @@ jvm-args = ["-Dmode=test"]           # `java` flags for the test JVM
 [kotlin]                             # optional: Kotlin alongside Java (§7.7)
 version = "2.4.20"                   # the compiler, and the implied kotlin-stdlib
 
+[managed]
+# a version for wherever an artifact turns up in the graph (§8.9)
+"com.fasterxml.jackson.core:jackson-databind" = "2.17.2"
+# a BOM: its <dependencyManagement> versions apply the same way
+"org.springframework.boot:spring-boot-dependencies" = { version = "3.3.4", bom = true }
+
 [dependencies]
 # short form: version string
 "com.google.guava:guava" = "33.0.0-jre"
+# no version: [managed] gives it one
+"org.springframework.boot:spring-boot-starter-web" = {}
 # long form: table
 "org.apache.commons:commons-lang3" = { version = "3.14.0" }
 "jakarta.servlet:jakarta.servlet-api" = { version = "6.0.0", compile-only = true }
@@ -164,6 +172,14 @@ source-outputs = ["{target}/generated/sources"]   # compiled with the main sourc
 [tasks.checksum]
 script = "build/Checksum.java"
 args = ["{jar}"]
+
+[tasks.format]
+# a Java tool from Maven Central, resolved and pinned as the task's own graph
+main = "com.google.googlejavaformat.java.Main"
+args = ["--replace", "src/main/java/com/example/Main.java"]
+
+[tasks.format.dependencies]
+"com.google.googlejavaformat:google-java-format" = "1.22.0"
 
 [hooks]
 pre-compile = ["build-info"]
@@ -203,10 +219,11 @@ post-package = ["checksum"]
 | `package.manifest.*` | no | `{}` | Extra `MANIFEST.MF` main attributes, written after jrs's own in declaration order (§9.1). Values may use `{project.name}` and `{project.version}`; `Main-Class`, `Class-Path`, `Created-By`, `Manifest-Version` and `Name` are jrs's and refused. |
 | `package.native-image-args` | no | `[]` | Passed through verbatim to `native-image` by `--native-image` (§9.7). |
 | `kotlin.*`, `scala.*`, `groovy.*` | no | — | The table turns the language on (§7.7): `version` (required, exact), `source-dir` / `test-dir` (`src/main/<lang>` / `src/test/<lang>`), `kotlinc-args` / `scalac-args` / `groovyc-args`, `compiler-jvm-args`. |
-| `dependencies.*` | no | `{}` | Key is `group:artifact` or `group:artifact:classifier`; value is a version, or a table with `version` and optionally `classifier`, `exclusions` (`group:artifact` patterns, `*` allowed), and `compile-only` or `runtime-only`. A table with `path` instead is a local jar: the key is a name, the path is relative to the project root, and only `compile-only` / `runtime-only` go with it (§8.8). |
+| `dependencies.*` | no | `{}` | Key is `group:artifact` or `group:artifact:classifier`; value is a version, or a table with `version` and optionally `classifier`, `exclusions` (`group:artifact` patterns, `*` allowed), and `compile-only` or `runtime-only`. A table without `version`, `{}` at its shortest, takes the version `[managed]` gives it (§8.9). A table with `path` instead is a local jar: the key is a name, the path is relative to the project root, and only `compile-only` / `runtime-only` go with it (§8.8). |
 | `dev-dependencies.*` | no | `{}` | Test classpath only; never packaged. Same forms, without `compile-only` or `runtime-only`. |
+| `managed.*` | no | `{}` | `group:artifact` → a version the artifact is held to wherever it turns up in the graph, or `{ version, bom = true }`, a BOM whose managed versions apply the same way (§8.9). |
 | `repositories.*` | no | Central | Name → base URL, or `{ url, groups }` to confine the repository to those groups (§8.7). |
-| `tasks.<name>.*` | no | `{}` | A user-defined task: one action (`run`, `shell` or `script`) or none, plus `description`, `args`, `depends-on`, `env`, `cwd`, `inputs`, `outputs`, `source-outputs`, `resource-outputs` (§7.6). |
+| `tasks.<name>.*` | no | `{}` | A user-defined task: one action (`run`, `shell`, `script` or `main`) or none, plus `description`, `args`, `depends-on`, `env`, `cwd`, `inputs`, `outputs`, `source-outputs`, `resource-outputs`, and `[tasks.<name>.dependencies]` for a `main` or `script` (§7.6). |
 | `hooks.*` | no | `{}` | Lifecycle point (`pre-compile`, `post-compile`, `pre-test`, `post-test`, `post-package`, `pre-run`) → list of task names (§7.6). |
 
 ### 4.3 Validation
@@ -247,7 +264,15 @@ reproducible (§7.7). The file says `version = 2` only when it has `[[tool]]`
 blocks, so a Java project's lockfile stays byte-identical, and a jrs that
 predates tools refuses a version 2 file rather than drop the pins when it
 rewrites it. The implied runtime libraries are ordinary `[[package]]` entries,
-and `manifest-checksum` covers them and each language's version.
+and `manifest-checksum` covers them and each language's version. A task with
+`[tasks.<name>.dependencies]` pins its graph the same way, in a `[[tool]]`
+block named `tasks.<name>` (§7.6), and `manifest-checksum` covers those
+dependencies too.
+
+A package whose version `[managed]` decided (§8.9) says `managed = true`. The
+line is written only then, and `manifest-checksum` gains `[managed]`'s entries
+only when there are some, so a manifest without the table keeps its lockfile
+byte for byte.
 
 A `[[package]]`'s `classpath` is `compile`, `provided`, `runtime` or `test`
 (§8.2). A local jar (§8.8) is a `[[local]]` block after the packages: its
@@ -291,12 +316,12 @@ jrs <command> [options]
 | `jrs package --native-image` | Also a GraalVM native executable in `target/native` (§9.7). |
 | `jrs doc` | Generate Javadoc into `target/doc` (§7.4). |
 | `jrs clean` | Remove `target/`. |
-| `jrs tree [--depth n] [--why artifact] [--tool name]` | Print the resolved dependency graph, `n` levels deep, inverted from one artifact to the manifest, or a compiler's own graph (§7.7). |
+| `jrs tree [--depth n] [--why artifact] [--tool name] [--task name]` | Print the resolved dependency graph, `n` levels deep, inverted from one artifact to the manifest, a compiler's own graph (§7.7), or a task's (§7.6). |
 | `jrs classpath [--test \| --runtime]` | Print the resolved classpath to stdout. |
 | `jrs update` | Re-resolve and rewrite `jrs.lock`; re-check every cached snapshot. |
 | `jrs verify` | Re-hash the cached jars against the checksums in `jrs.lock`; exit `1` on a mismatch. |
-| `jrs outdated` | List declared dependencies with newer releases, from `maven-metadata.xml`. |
-| `jrs add` / `jrs remove` | Edit `[dependencies]` / `[dev-dependencies]` in place, then re-resolve (§4.5). |
+| `jrs outdated` | List declared dependencies and `[managed]` entries with newer releases, from `maven-metadata.xml`. |
+| `jrs add` / `jrs remove` | Edit `[dependencies]` / `[dev-dependencies]` in place, then re-resolve (§4.5). `jrs add` leaves the version out of what `[managed]` covers (§8.9). |
 | `jrs cache path` / `jrs cache prune` | Show or prune the shared cache (§8.6). |
 | `jrs init [--lib] [--lang java\|kotlin\|scala\|groovy]` | Scaffold `jrs.toml`, a starter class and a starter test: JUnit 5 for Java and Kotlin, MUnit for Scala, and for Groovy Java code with Spock specs (§7.7). |
 | `jrs migrate` | Generate `jrs.toml` from an existing `pom.xml` or Gradle build (§11). |
@@ -306,7 +331,7 @@ jrs <command> [options]
 | `jrs task --list` | List the tasks, their descriptions and the hooks that run them, to stdout. |
 | `--timings` on `build`, `test`, `run`, `package` | Report the wall time of each phase after the summary, with a copy in `target/.jrs/timings.txt` (§5.3.9). |
 | `jrs metadata [--no-deps]` | Print the project model as versioned JSON on stdout, for editors and tools; resolves but never compiles (§5.4). |
-| `jrs fetch [--sources]` | Resolve and download the dependencies, the compilers and the test launcher into the cache without building; `--sources` adds each dependency's `-sources.jar` (§5.4). |
+| `jrs fetch [--sources]` | Resolve and download the dependencies, the compilers, the tasks' tools and the test launcher into the cache without building; `--sources` adds each dependency's `-sources.jar` (§5.4). |
 
 `--debug[=[host:]port]` on `run` and `test` puts
 `-agentlib:jdwp=transport=dt_socket,server=y,suspend=y,address=<port>` ahead of
@@ -586,8 +611,9 @@ within a version.
   at its main artifact's sources.
 
 `jrs fetch` resolves and downloads everything a build and a test run need —
-the dependencies, the compilers (§7.7) and the JUnit launcher when there is a
-JUnit to derive it from — without building, so a CI job can warm the cache and
+the dependencies, the compilers (§7.7), each task's own tools (§7.6) and the
+JUnit launcher when there is a JUnit to derive it from — without building, so
+a CI job can warm the cache and
 run `--offline` after it. `--sources` also downloads the `-sources.jar`
 (classifier `sources`) of every dependency, under the usual `Downloading` line
 and bars, which is what an editor needs for go-to-definition. They are cached
@@ -842,13 +868,30 @@ cannot be removed, replaced or reordered, and no user code runs inside jrs.
   portable; `jrs task --list` marks it `(sh)`.
 - `script` — a `.java` file, run by the project's JDK in source-launcher mode
   (`java <file> <args…>`). Portable, since it needs only the JDK jrs found.
+- `main` — a class from the task's own dependencies, run by the project's JDK
+  as `java @target/.jrs/tasks/<name>.tool.args <class> <args…>`, the argfile
+  holding `-cp` and their classpath.
 
 A task with no action only runs its `depends-on`; one with neither is a
 manifest error. `args` follow the action: appended to `run`, passed to the
-`script`, and a `shell` string's positional parameters (`$1`…). `depends-on` names
+`script` or the `main` class, and a `shell` string's positional parameters
+(`$1`…). `depends-on` names
 tasks or the built-ins `build`, `test`, `package` and `doc`. `env` adds
 variables, `cwd` is relative to the root. Task names match `[a-z][a-z0-9-]*`
 and may not be a built-in command's name.
+
+**Tool dependencies.** `[tasks.<name>.dependencies]` takes the
+`[dependencies]` value forms (§4.2), without `compile-only`, `runtime-only`,
+local jars or a version left to `[managed]`. It is the classpath of a `main`
+action, and of a `script`, which gets the same argfile ahead of its file; on
+any other task it is a manifest error, as is a `main` without it. The
+dependencies are resolved as a graph of their own that never meets the
+project's, as a compiler's is (§7.7), and pinned in `jrs.lock` as a `[[tool]]`
+block named `tasks.<name>` (§4.4). They are downloaded with everything else
+when the graph is resolved afresh, so that the lockfile pins their checksums,
+and otherwise when the task first runs. `jrs tree --task <name>` prints the
+graph, and `jrs cache prune` and `jrs verify` see it as they see the
+compilers'.
 
 **Hooks.** Each value is a list of task names; a hook cannot hold a command
 inline, so anything it runs can be run alone with `jrs task`.
@@ -892,7 +935,8 @@ warn. These are errors:
 - `{jar}` in a task reachable from any hook but `post-package`, unless the task
   depends on `package`.
 
-Tasks do not feed `manifest-checksum`: adding one does not re-resolve.
+Tasks do not feed `manifest-checksum`, so adding one does not re-resolve;
+their `dependencies` do, since those are resolved.
 
 **Placeholders.** `run`, `args`, `cwd`, `env` values, `inputs`, `outputs` and
 the `*-outputs` lists are expanded before the process starts. `{{` and `}}` are
@@ -927,8 +971,9 @@ except the `JRS_` names it may not set.
 skipped. Entries are files or directories relative to the root, a directory
 meaning everything under it, walked as sources are; there are no globs. The
 fingerprint covers the expanded action (argv or shell string, `args`, `cwd`,
-`env`), the JDK version, each input's path, size and mtime, and the value of
-every classpath placeholder the task uses, with each jar's size and mtime. It
+`env`), the JDK version, each input's path, size and mtime, the value of
+every classpath placeholder the task uses, with each jar's size and mtime, and
+the size and mtime of each jar of the task's own dependencies. It
 is written to `target/.jrs/tasks/<name>.fingerprint` after a successful run and
 deleted on failure. A task is fresh when the fingerprint matches and every
 output exists: it prints `Fresh <name> (task)` and does not run. `jrs clean`
@@ -1069,7 +1114,9 @@ every published version, which `jrs outdated` and `jrs add` read.
 1. Seed a work queue with the manifest's direct dependencies.
 2. For each coordinate: fetch the POM (cache first), parse it.
 3. Interpolate `${...}` properties; walk `<parent>` chains and apply
-   `<dependencyManagement>` to fill in missing versions.
+   `<dependencyManagement>` to fill in missing versions. Then a version the
+   manifest's `[managed]` holds an artifact to (§8.9) replaces whatever the
+   POM asked for, wherever in the graph the artifact turns up.
 4. Collect `<dependencies>` with scope in {`compile`, `runtime`} — skip
    `provided`, `system`, `test`, and any `<optional>true</optional>` entry.
    Honour `<exclusions>`, and the manifest's own. A `<type>` of `jar`,
@@ -1080,7 +1127,10 @@ every published version, which `jrs outdated` and `jrs add` read.
 5. Enqueue unseen coordinates; repeat until the queue drains.
 6. **Conflict mediation: nearest-wins** (Maven semantics) — the version at the
    shallowest depth from the root wins; ties broken by declaration order.
-   Emit a warning naming both versions when they differ.
+   Emit a warning naming both versions when they differ. A managed version is
+   settled before mediation (step 3), so every path to a managed artifact
+   asks for the same version and there is nothing to mediate; as in Maven, a
+   version the manifest declares still wins for its own dependency, at depth 1.
    Every package also lands on one of four classpaths:
    - compile: needed at runtime too
    - provided: a `compile-only` dependency, and whatever only it brings in
@@ -1223,6 +1273,40 @@ not a record that follows the file. `jrs update` pins the new bytes, and so does
 any other change that re-resolves (a changed dependency table, `jrs add`). A
 missing jar, or a directory, is a manifest error, exit `2`. `jrs outdated`
 skips local jars, and `jrs verify` re-hashes them against their pins.
+
+### 8.9 Managed versions
+
+`[managed]` keeps versions for the whole graph in one place, which is what
+Maven's `<dependencyManagement>` and Gradle's `platform()` and
+`constraints { }` are for:
+
+- `"group:artifact" = "version"` holds the artifact to that version wherever
+  resolution reaches it, in place of the version any POM asks for (§8.2 step
+  3). It puts nothing on a classpath: an artifact nothing depends on stays out.
+- `"group:artifact" = { version = "...", bom = true }` imports a BOM: that
+  POM's `<dependencyManagement>`, its own imports folded in, applies the same
+  way. The BOM itself is not in the graph, and not in `jrs.lock`.
+- The table's own entries come first, then each BOM in declaration order, and
+  the first to name an artifact wins, as the first import does in Maven. A key
+  names no classifier: a managed version covers every classifier of its
+  `group:artifact`. A version is exact; a range is a manifest error.
+- A dependency in either table may leave its version out, as `{}` or a long
+  form without `version`, and take it from here. With no BOM in the table, a
+  dependency it does not name is a manifest error, exit `2`. With one, whether
+  it covers the dependency is only known once the BOM is read, so a dependency
+  nothing covers fails resolution, exit `1`, naming it.
+- A version written in `[dependencies]` still wins for its own dependency. The
+  implied runtime libraries (§7.7) are written at their compiler's version, so
+  they win too.
+- The compilers' and the tasks' tool graphs (§7.6, §7.7) are resolved
+  without it.
+
+`[managed]` feeds `manifest-checksum` (§4.4). `jrs tree` marks a package at its
+managed version `(managed)`, `jrs outdated` checks every entry, a BOM like any
+other, and `jrs add` leaves the version out of whatever `[managed]` covers. A
+jrs older than the table warns that it does not know it and refuses a
+dependency without a version; a project that relies on it can say so with
+`project.jrs-version` (§4.3).
 
 ---
 
@@ -1546,19 +1630,29 @@ parent chains and `<dependencyManagement>` already work.
 | `<dependencies>` scope `runtime` | `[dependencies]`, as `runtime-only` |
 | `<dependencies>` scope `test` | `[dev-dependencies]` |
 | `<repositories>` | `[repositories]` |
-| `maven-jar-plugin` → `<mainClass>`, or `maven-shade-plugin`'s transformer | `project.main-class` |
+| `<dependencies>` scope `system`, with a `<systemPath>` under `${project.basedir}` | a local jar (§8.8), `compile-only`, as Maven never packages it; a review line says so |
+| `<dependencyManagement>` `<scope>import</scope>` | `[managed]` BOMs (§8.9); a dependency that gets no version from the POMs on disk is then written without one |
+| `<dependencyManagement>` entries no declared dependency uses | `[managed]` versions; a declared dependency gets its managed version written out |
+| `<parent>` `spring-boot-starter-parent`, not on disk | `[managed]` Boot's BOM, `spring-boot-dependencies` at the parent's version; `java.version` → `java.source`; `-parameters` in `java.javac-args` |
+| `<repositories>` | `[repositories]` |
+| `maven-jar-plugin` → `<mainClass>`, `maven-shade-plugin`'s transformer, `spring-boot-maven-plugin`'s `<mainClass>` or `start-class`; for Spring Boot, else the `@SpringBootApplication` class | `project.main-class` |
 | `maven-jar-plugin` → `<archive><manifestEntries>` | `[package.manifest]`; `${project.version}` and `${project.artifactId}` become placeholders, any other property is reported |
+| `exec-maven-plugin` executions | `[tasks]` and `[hooks]`: `exec` → a `run` task, `java` → `java @{classpath-argfile} <main>`, or a `main` task over the plugin's `<dependencies>` with `includePluginDependencies`; the `<phase>` → the hook at the same point ([TASKS.md §12](TASKS.md#12-open-questions) item 5). With no execution, its `<mainClass>` → `project.main-class` |
 
 Reported, not translated:
 
 - `<modules>` — multi-module builds are out of scope (§1.2). jrs migrates the
   module it was pointed at and lists the others so they can be migrated
   individually.
-- `provided`/`system` scopes, `<optional>`, `<classifier>`, `<type>` other
-  than `jar`.
+- A parent in a repository, other than `spring-boot-starter-parent`.
+- A `system` scope outside the project, `<optional>`, and a `<type>` that
+  does not go on a classpath.
 - Any plugin other than `maven-compiler-plugin`, `maven-jar-plugin`,
-  `maven-surefire-plugin`, `maven-shade-plugin` and the language plugins of
-  §11.6 — each is named in the report as unmigrated.
+  `maven-surefire-plugin`, `maven-shade-plugin`, `spring-boot-maven-plugin`,
+  `exec-maven-plugin` and the language plugins of §11.6 — each is named in
+  the report as unmigrated. An `exec-maven-plugin` execution jrs cannot
+  translate whole (another phase, `<async>`, a property it cannot evaluate)
+  is named on its own.
 - Profiles: only the default-active ones are read; the rest are listed.
 
 ### 11.3 Gradle (`build.gradle`, `build.gradle.kts`)
@@ -1599,6 +1693,21 @@ the conventional declarative subset, and is explicit about the fact:
   the attributes jrs writes are reported, as are `withSourcesJar()` and
   `withJavadocJar()`, which are the `jrs package --sources` / `--javadoc`
   flags rather than manifest keys.
+- Managed versions (§8.9). `platform('g:a:v')` and `enforcedPlatform(...)`,
+  also through a catalog, and `dependencyManagement { imports { mavenBom
+  'g:a:v' } }` → `[managed]` BOMs; `dependencyManagement { dependencies {
+  dependency 'g:a:v' } }` and `constraints { implementation 'g:a:v' }` →
+  `[managed]` versions. With anything there, a dependency without a version
+  (`implementation 'g:a'`, a catalog entry with none) is migrated without one.
+- Spring Boot. The `org.springframework.boot` plugin at a literal version,
+  with `io.spring.dependency-management` or
+  `platform(SpringBootPlugin.BOM_COORDINATES)`, → `[managed]` Boot's BOM,
+  `spring-boot-dependencies` at that version. The plugin compiles with
+  `-parameters`, which goes into `java.javac-args`, and makes the
+  `@SpringBootApplication` class the main class when none is named, which
+  migration does by reading the main sources. `bootJar`'s nested layout is not
+  reproduced: `jrs package --fat` builds a flat jar with Spring's registries
+  merged (§9.2), and a review line says so.
 
 Anything jrs cannot read confidently is skipped and reported — never guessed:
 
@@ -1718,12 +1827,12 @@ produces something runnable.
   `jrs task`, `jrs task --list` (T1)
 - ☑ up-to-date checks, generated sources and resources, `jrs task --watch`
   and task inputs in watch mode (T2)
+- ☑ tool dependencies: a `main` action and `[tasks.<name>.dependencies]`,
+  Java tools from Maven Central resolved as a graph of the task's own and
+  pinned in `jrs.lock`, and `jrs tree --task` (T3)
 - Added after M1–M6 had landed; the design, and the argument for narrowing
-  §1.2, is in [TASKS.md](TASKS.md). §7.6 is the condensed contract.
-- Tool dependencies (T3) are deferred: a `main` action running Java tools
-  resolved from Maven Central as their own graph, pinned in `jrs.lock`. They
-  change the lockfile format and the resolver's inputs, so they wait until
-  T1 and T2 have seen real use (§13.12).
+  §1.2, is in [TASKS.md](TASKS.md). §7.6 is the condensed contract. T3 waited
+  until T1 and T2 had seen use, since it changes the lockfile's inputs.
 
 ### M8 — JVM languages
 - ☑ multi-step compile units, multi-root sources, and compilers as isolated

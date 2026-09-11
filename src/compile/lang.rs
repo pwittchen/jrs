@@ -938,6 +938,7 @@ mod tests {
                     jar: None,
                     checksum: None,
                     mediated: false,
+                    managed: false,
                 })
                 .collect(),
             ..Resolution::default()

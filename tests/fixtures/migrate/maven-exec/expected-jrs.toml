@@ -1,0 +1,34 @@
+[project]
+name = "exec-app"
+version = "2.1.0"
+
+[java]
+source = 21
+
+[managed]
+"org.springframework.cloud:spring-cloud-dependencies" = { version = "2025.0.0", bom = true }
+"com.fasterxml.jackson.core:jackson-databind" = "2.19.0"
+
+[dependencies]
+"org.springframework.cloud:spring-cloud-starter-config" = {}
+"org.slf4j:slf4j-api" = "2.0.17"
+"legacy-native" = { path = "lib/native.jar", compile-only = true }
+
+[tasks.generate-parser]
+main = "com.example.tools.Codegen"
+args = ["{root}/src/main/grammar", "{target}/generated-sources/parser"]
+
+[tasks.generate-parser.dependencies]
+"com.example.tools:codegen" = "1.4.0"
+
+[tasks.print-version]
+run = ["echo", "{project.name}", "{project.version}"]
+env = { "STAGE" = "release" }
+
+[tasks.seed]
+run = ["java", "-Ddb.url=jdbc:h2:mem:dev", "@{classpath-argfile}", "com.example.Seed", "fixtures/dev.sql", "--verbose"]
+depends-on = ["build"]
+
+[hooks]
+pre-compile = ["generate-parser"]
+post-package = ["print-version"]

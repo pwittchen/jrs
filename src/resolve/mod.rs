@@ -134,6 +134,9 @@ pub struct ResolvedPackage {
     /// True when mediation picked this version over another one that was asked
     /// for somewhere else in the graph.
     pub mediated: bool,
+    /// True when the version is the one `[managed]` names, directly or through
+    /// a BOM (SPEC §8.9).
+    pub managed: bool,
 }
 
 impl ResolvedPackage {
@@ -278,7 +281,7 @@ pub fn resolve(manifest: &Manifest, fetcher: &Fetcher, jobs: usize) -> Result<Re
     // direct dependencies, declared last.
     let dependencies = manifest.effective_dependencies();
     for dep in dependencies.iter().chain(&manifest.dev_dependencies) {
-        if !dep.is_local() && is_range(&dep.version) {
+        if !dep.is_local() && !dep.is_managed() && is_range(&dep.version) {
             return Err(JrsError::resolve(format!(
                 "`{}` asks for the version range `{}`\n\n\
                  jrs resolves exact versions only; pick one, or run `jrs migrate` \
@@ -298,11 +301,20 @@ pub fn resolve(manifest: &Manifest, fetcher: &Fetcher, jobs: usize) -> Result<Re
         effective: Mutex::new(HashMap::new()),
         warnings: Mutex::new(Vec::new()),
     };
+    // Before the walk: a versionless dependency takes its version from here,
+    // and every package the walk meets is held to it.
+    let managed = managed_versions_with(manifest, &ctx)?;
+    let dependencies = with_managed_versions(dependencies, &managed, "dependencies")?;
+    let dev_dependencies = with_managed_versions(
+        manifest.dev_dependencies.clone(),
+        &managed,
+        "dev-dependencies",
+    )?;
 
     let mut selected: HashMap<Ga, Selected> = HashMap::new();
     let mut edges: HashMap<Ga, Vec<Ga>> = HashMap::new();
     let mut packaging: HashMap<Ga, String> = HashMap::new();
-    let mut level: Vec<Pending> = seed(&dependencies, &manifest.dev_dependencies);
+    let mut level: Vec<Pending> = seed(&dependencies, &dev_dependencies);
 
     let root_ga =
         |d: &Dependency| Ga::new(&d.group, &d.artifact).with_classifier(d.classifier.clone());
@@ -311,8 +323,7 @@ pub fn resolve(manifest: &Manifest, fetcher: &Fetcher, jobs: usize) -> Result<Re
         .filter(|d| !d.is_local())
         .map(root_ga)
         .collect();
-    let test_roots: Vec<Ga> = manifest
-        .dev_dependencies
+    let test_roots: Vec<Ga> = dev_dependencies
         .iter()
         .filter(|d| !d.is_local())
         .map(root_ga)
@@ -389,7 +400,8 @@ pub fn resolve(manifest: &Manifest, fetcher: &Fetcher, jobs: usize) -> Result<Re
             packaging.insert(parent_ga.clone(), kind);
             for dep in &eff.dependencies {
                 let dep = eff.manage(dep);
-                let Some((child, pom_only)) = admissible(&dep, parent, &eff, &ctx)? else {
+                let Some((child, pom_only)) = admissible(&dep, parent, &eff, &managed, &ctx)?
+                else {
                     continue;
                 };
                 next.push(Pending {
@@ -451,6 +463,7 @@ pub fn resolve(manifest: &Manifest, fetcher: &Fetcher, jobs: usize) -> Result<Re
                 d
             },
             packaging: packaging.remove(&ga).unwrap_or_else(|| "jar".to_string()),
+            managed: managed.get(&ga.group, &ga.artifact) == Some(s.coord.version.as_str()),
             coord: s.coord,
             classpath: s.classpath,
             depth: s.depth,
@@ -502,18 +515,106 @@ fn local_jars(manifest: &Manifest) -> Vec<LocalJar> {
         .collect()
 }
 
+/// The versions `[managed]` decides (SPEC §8.9): its own entries first, then
+/// each BOM's `<dependencyManagement>` in declaration order, the first to name
+/// an artifact winning. They apply to every classifier of `group:artifact`.
+#[derive(Debug, Clone, Default)]
+pub struct ManagedVersions {
+    versions: HashMap<(String, String), String>,
+}
+
+impl ManagedVersions {
+    /// The version `group:artifact` is held to, if it is managed.
+    #[must_use]
+    pub fn get(&self, group: &str, artifact: &str) -> Option<&str> {
+        self.versions
+            .get(&(group.to_string(), artifact.to_string()))
+            .map(String::as_str)
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.versions.is_empty()
+    }
+}
+
+/// Read `[managed]`, fetching each BOM it names, for `jrs add` to tell whether
+/// a dependency can go in without a version. Resolution reads it itself.
+///
+/// # Errors
+///
+/// [`JrsError::Resolve`] when a BOM cannot be fetched or parsed.
+pub fn managed_versions(manifest: &Manifest, fetcher: &Fetcher) -> Result<ManagedVersions> {
+    let ctx = Context {
+        fetcher,
+        effective: Mutex::new(HashMap::new()),
+        warnings: Mutex::new(Vec::new()),
+    };
+    managed_versions_with(manifest, &ctx)
+}
+
+fn managed_versions_with(manifest: &Manifest, ctx: &Context) -> Result<ManagedVersions> {
+    let mut versions: HashMap<(String, String), String> = HashMap::new();
+    for m in manifest.managed.iter().filter(|m| !m.bom) {
+        versions
+            .entry((m.group.clone(), m.artifact.clone()))
+            .or_insert_with(|| m.version.clone());
+    }
+    for m in manifest.managed.iter().filter(|m| m.bom) {
+        let coord = Coord::new(&m.group, &m.artifact, &m.version);
+        let bom = ctx.effective(&coord).map_err(|e| {
+            JrsError::resolve(format!(
+                "the BOM `{coord}` in [managed] could not be read\n\n{e}"
+            ))
+        })?;
+        for (ga, entry) in &bom.managed {
+            let Some(version) = &entry.version else {
+                continue;
+            };
+            if version.contains("${") || is_range(version) {
+                continue;
+            }
+            versions
+                .entry((ga.group.clone(), ga.artifact.clone()))
+                .or_insert_with(|| version.clone());
+        }
+    }
+    Ok(ManagedVersions { versions })
+}
+
+/// Give each versionless dependency in `section` its managed version.
+fn with_managed_versions(
+    mut dependencies: Vec<Dependency>,
+    managed: &ManagedVersions,
+    section: &str,
+) -> Result<Vec<Dependency>> {
+    for d in dependencies.iter_mut().filter(|d| d.is_managed()) {
+        let version = managed.get(&d.group, &d.artifact).ok_or_else(|| {
+            JrsError::resolve(format!(
+                "`{}` in [{section}] has no version, and neither [managed] nor a BOM it \
+                 names manages it\n\ngive it a version, or add it to [managed]:\n\n    \
+                 [managed]\n    \"{}:{}\" = \"<version>\"",
+                d.key(),
+                d.group,
+                d.artifact
+            ))
+        })?;
+        d.version = version.to_string();
+    }
+    Ok(dependencies)
+}
+
 /// Resolve a tool — a compiler — as a graph of its own, never merged into the
 /// project's: the Kotlin compiler's `kotlinx-coroutines` must not mediate
 /// against the project's (`JVM_LANGUAGES.md` §5.1). It is an ordinary
-/// resolution of a manifest that declares `roots` and nothing else, and the
-/// isolated tool graph TASKS.md §8 proposes for task dependencies too.
+/// resolution of a manifest that declares `roots` and nothing else; a task's
+/// own dependencies (TASKS.md §8) go through [`resolve_tool_dependencies`].
 ///
 /// # Errors
 ///
 /// As for [`resolve`].
 pub fn resolve_tool(roots: &[Coord], fetcher: &Fetcher, jobs: usize) -> Result<Resolution> {
-    let mut manifest = crate::manifest::blank("tool", "0", std::path::Path::new("."));
-    manifest.dependencies = roots
+    let roots: Vec<Dependency> = roots
         .iter()
         .map(|c| {
             let mut d = Dependency::new(&c.group, &c.artifact, &c.version);
@@ -521,6 +622,22 @@ pub fn resolve_tool(roots: &[Coord], fetcher: &Fetcher, jobs: usize) -> Result<R
             d
         })
         .collect();
+    resolve_tool_dependencies(&roots, fetcher, jobs)
+}
+
+/// [`resolve_tool`] for declared dependencies, with their exclusions: a
+/// task's `[tasks.<name>.dependencies]` (TASKS.md §8).
+///
+/// # Errors
+///
+/// As for [`resolve`].
+pub fn resolve_tool_dependencies(
+    dependencies: &[Dependency],
+    fetcher: &Fetcher,
+    jobs: usize,
+) -> Result<Resolution> {
+    let mut manifest = crate::manifest::blank("tool", "0", std::path::Path::new("."));
+    manifest.dependencies = dependencies.to_vec();
     resolve(&manifest, fetcher, jobs)
 }
 
@@ -558,11 +675,13 @@ fn seed(dependencies: &[Dependency], dev_dependencies: &[Dependency]) -> Vec<Pen
 }
 
 /// Decide whether a child dependency is walked at all (SPEC §8.2 step 4), and
-/// if so as which coordinate, and whether it is a POM with no jar.
+/// if so as which coordinate, and whether it is a POM with no jar. A version
+/// `[managed]` holds the artifact to replaces the one the POM asks for.
 fn admissible(
     dep: &PomDependency,
     parent: &Pending,
     eff: &Effective,
+    managed: &ManagedVersions,
     ctx: &Context,
 ) -> Result<Option<(Coord, bool)>> {
     if dep.optional || !dep.scope().is_transitive() {
@@ -592,6 +711,12 @@ fn admissible(
     let ga = dep.ga();
     if parent.exclusions.iter().any(|e| ga.excluded_by(e)) {
         return Ok(None);
+    }
+    if let Some(version) = managed.get(&ga.group, &ga.artifact) {
+        return Ok(Some((
+            Coord::new(&ga.group, &ga.artifact, version).with_classifier(classifier),
+            pom_only,
+        )));
     }
     let Some(version) = &dep.version else {
         ctx.warn(format!(
@@ -1337,6 +1462,112 @@ mod tests {
             "{:?}",
             names(&r)
         );
+    }
+
+    #[test]
+    fn a_managed_version_beats_what_the_graph_asks_for() {
+        let repo = Repo::new("managed");
+        repo.publish(
+            "g:a:1.0",
+            &dep(&format!(
+                "{}{}",
+                d("g:shared:1.0", ""),
+                "<dependency><groupId>g</groupId><artifactId>ranged</artifactId>\
+                 <version>[1.0,2.0)</version></dependency>"
+            )),
+        );
+        repo.publish("g:shared:1.0", "");
+        repo.publish("g:shared:3.0", "");
+        repo.publish("g:ranged:1.5", "");
+
+        // Held to 3.0 wherever it turns up, and a range [managed] settles is
+        // no longer an error.
+        let m = repo
+            .manifest("[managed]\n'g:shared'='3.0'\n'g:ranged'='1.5'\n[dependencies]\n'g:a'='1.0'");
+        let r = resolve(&m, &repo.fetcher(), 4).unwrap();
+        let shared = r.get(&Ga::new("g", "shared")).unwrap();
+        assert_eq!(shared.coord.version, "3.0");
+        assert!(shared.managed && !shared.mediated);
+        assert_eq!(r.get(&Ga::new("g", "ranged")).unwrap().coord.version, "1.5");
+        assert!(!r.get(&Ga::new("g", "a")).unwrap().managed);
+        assert!(r.warnings.is_empty(), "{:?}", r.warnings);
+
+        // A version declared in [dependencies] still wins for that dependency.
+        let m = repo.manifest(
+            "[managed]\n'g:shared'='3.0'\n'g:ranged'='1.5'\n\
+             [dependencies]\n'g:a'='1.0'\n'g:shared'='1.0'",
+        );
+        let r = resolve(&m, &repo.fetcher(), 4).unwrap();
+        let shared = r.get(&Ga::new("g", "shared")).unwrap();
+        assert_eq!(shared.coord.version, "1.0");
+        assert!(!shared.managed);
+    }
+
+    #[test]
+    fn a_bom_in_managed_versions_what_the_manifest_leaves_out() {
+        let repo = Repo::new("managed-bom");
+        repo.publish_pom_only(
+            "g:inner-bom:1.0",
+            "<dependencyManagement><dependencies>\
+             <dependency><groupId>g</groupId><artifactId>testing</artifactId>\
+             <version>5.0</version></dependency>\
+             </dependencies></dependencyManagement>",
+        );
+        repo.publish_pom_only(
+            "g:bom:1.0",
+            "<dependencyManagement><dependencies>\
+             <dependency><groupId>g</groupId><artifactId>lib</artifactId>\
+             <version>3.0</version></dependency>\
+             <dependency><groupId>g</groupId><artifactId>shared</artifactId>\
+             <version>2.0</version></dependency>\
+             <dependency><groupId>g</groupId><artifactId>inner-bom</artifactId>\
+             <version>1.0</version><type>pom</type><scope>import</scope></dependency>\
+             </dependencies></dependencyManagement>",
+        );
+        repo.publish("g:lib:3.0", &dep(&d("g:shared:1.0", "")));
+        repo.publish("g:shared:1.0", "");
+        repo.publish("g:shared:2.0", "");
+        repo.publish("g:shared:4.0", "");
+        repo.publish("g:testing:5.0", "");
+
+        let m = repo.manifest(
+            "[managed]\n'g:bom'={version='1.0', bom=true}\n\
+             [dependencies]\n'g:lib'={}\n[dev-dependencies]\n'g:testing'={}",
+        );
+        let r = resolve(&m, &repo.fetcher(), 4).unwrap();
+        assert_eq!(
+            names(&r),
+            vec!["g:lib:3.0", "g:shared:2.0", "g:testing:5.0"],
+            "the BOM's own imports count too"
+        );
+        assert!(r.packages.iter().all(|p| p.managed));
+        assert_eq!(r.roots, vec![Ga::new("g", "lib")]);
+        assert_eq!(r.test_roots, vec![Ga::new("g", "testing")]);
+
+        // The table's own entries come before any BOM's.
+        let m = repo.manifest(
+            "[managed]\n'g:bom'={version='1.0', bom=true}\n'g:shared'='4.0'\n\
+             [dependencies]\n'g:lib'={}",
+        );
+        let r = resolve(&m, &repo.fetcher(), 4).unwrap();
+        assert_eq!(r.get(&Ga::new("g", "shared")).unwrap().coord.version, "4.0");
+
+        let m = repo
+            .manifest("[managed]\n'g:bom'={version='1.0', bom=true}\n[dependencies]\n'g:other'={}");
+        let err = resolve(&m, &repo.fetcher(), 4).unwrap_err().to_string();
+        assert!(err.contains("neither [managed] nor a BOM"), "{err}");
+
+        let m = repo.manifest("[managed]\n'g:nope'={version='1.0', bom=true}");
+        let err = resolve(&m, &repo.fetcher(), 4).unwrap_err().to_string();
+        assert!(err.contains("the BOM `g:nope:1.0`"), "{err}");
+
+        let managed = managed_versions(
+            &repo.manifest("[managed]\n'g:bom'={version='1.0', bom=true}"),
+            &repo.fetcher(),
+        )
+        .unwrap();
+        assert_eq!(managed.get("g", "lib"), Some("3.0"));
+        assert_eq!(managed.get("g", "other"), None);
     }
 
     #[test]

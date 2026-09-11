@@ -1459,6 +1459,185 @@ fn a_runtime_only_dependency_runs_and_ships_but_is_not_compiled_against() {
     );
 }
 
+/// A Java tool as a task would run one from a repository: it writes its first
+/// argument's file and says so.
+const GREETER: &str = "    public static void main(String[] args) throws Exception {\n        \
+    java.nio.file.Files.createDirectories(java.nio.file.Path.of(args[0]).getParent());\n        \
+    java.nio.file.Files.writeString(java.nio.file.Path.of(args[0]), \"greeted \" + args[1]);\n        \
+    System.out.println(\"greeter ran\");\n    }";
+
+#[test]
+fn a_task_runs_a_java_tool_resolved_as_a_graph_of_its_own() {
+    let toolchain = require_jdk!();
+    let scratch = Scratch::new("build-task-tool");
+    let fixture = FixtureRepo::new(&scratch);
+    let tool = scratch.join("greeter.jar");
+    class_jar(
+        &toolchain,
+        &scratch,
+        "org.example.tool.Greeter",
+        GREETER,
+        &tool,
+    );
+    // The tool wants lib 2.0.0 and the project lib 1.0.0: the two graphs never
+    // meet, so each gets its own.
+    let coord = jrs::resolve::coord::Coord::new("org.example", "greeter", "1.0.0");
+    fixture.publish_pom(
+        &coord,
+        "<project><groupId>org.example</groupId><artifactId>greeter</artifactId>\
+         <version>1.0.0</version><dependencies><dependency><groupId>org.example</groupId>\
+         <artifactId>lib</artifactId><version>2.0.0</version></dependency></dependencies>\
+         </project>",
+    );
+    fixture.publish_jar(&coord, &std::fs::read(&tool).unwrap());
+    scratch.write(
+        "app/jrs.toml",
+        &format!(
+            "[project]\nname = \"app\"\nversion = \"1.0.0\"\n\n\
+             [dependencies]\n\"org.example:lib\" = \"1.0.0\"\n\n\
+             [tasks.greet]\nmain = \"org.example.tool.Greeter\"\n\
+             args = [\"{{target}}/greeting.txt\"]\ninputs = [\"jrs.toml\"]\n\
+             outputs = [\"{{target}}/greeting.txt\"]\n\n\
+             [tasks.greet.dependencies]\n\"org.example:greeter\" = \"1.0.0\"\n\n{}",
+            fixture.manifest_section()
+        ),
+    );
+    scratch.write(
+        "app/src/main/java/com/example/App.java",
+        "package com.example;\n\npublic class App {}\n",
+    );
+    let root = scratch.join("app");
+
+    let (code, stdout, stderr) = jrs_isolated(&scratch, &root, &["task", "greet", "--", "jrs"]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stderr.contains("and the tools of task greet"), "{stderr}");
+    assert!(stdout.contains("greeter ran"), "{stdout}{stderr}");
+    assert_eq!(
+        std::fs::read_to_string(root.join("target/greeting.txt")).unwrap(),
+        "greeted jrs"
+    );
+
+    let lock = std::fs::read_to_string(root.join("jrs.lock")).unwrap();
+    assert!(lock.contains("version = 2\n"), "{lock}");
+    let (project, tool) = lock.split_once("\n[[tool]]\n").unwrap();
+    assert!(tool.starts_with("name = \"tasks.greet\"\n"), "{tool}");
+    assert!(
+        tool.contains("artifact = \"greeter\"") && tool.contains("version = \"2.0.0\""),
+        "{tool}"
+    );
+    assert!(
+        tool.contains("checksum = \"sha1:"),
+        "a fresh graph is pinned: {tool}"
+    );
+    assert!(project.contains("version = \"1.0.0\"") && !project.contains("greeter"));
+    let (_, classpath, _) = jrs_isolated(&scratch, &root, &["classpath"]);
+    assert!(!classpath.contains("greeter"), "{classpath}");
+
+    let (code, tree, stderr) = jrs_isolated(&scratch, &root, &["tree", "--task", "greet"]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(tree.starts_with("tasks.greet\n"), "{tree}");
+    assert!(tree.contains("org.example:greeter:1.0.0"), "{tree}");
+    assert!(tree.contains("org.example:lib:2.0.0"), "{tree}");
+    let (code, _, stderr) = jrs_isolated(&scratch, &root, &["tree", "--task", "nope"]);
+    assert_eq!(code, 2);
+    assert!(
+        stderr.contains("the tasks with dependencies are `greet`"),
+        "{stderr}"
+    );
+
+    // Nothing changed, so the task is fresh and nothing is downloaded.
+    let (code, _, stderr) = jrs_isolated(&scratch, &root, &["task", "greet", "--", "jrs"]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stderr.contains("Fresh greet (task)"), "{stderr}");
+
+    // From jrs.lock, the tool is downloaded when the task runs, not when the
+    // graph is read. (The fixture's own jars are not real zips, so this reads
+    // the graph with `classpath` rather than compiling against it.)
+    let tool_dir = scratch.join("jrs-cache/org/example/greeter");
+    std::fs::remove_dir_all(&tool_dir).unwrap();
+    let (code, _, stderr) = jrs_isolated(&scratch, &root, &["classpath"]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(!stderr.contains("(task greet)"), "{stderr}");
+    let (code, _, stderr) = jrs_isolated(&scratch, &root, &["task", "greet", "--", "again"]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(
+        stderr.contains("Downloading greeter (task greet)"),
+        "{stderr}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(root.join("target/greeting.txt")).unwrap(),
+        "greeted again"
+    );
+
+    // `jrs fetch` downloads it too, so the task runs under `--offline`.
+    std::fs::remove_dir_all(&tool_dir).unwrap();
+    let (code, _, stderr) = jrs_isolated(&scratch, &root, &["fetch"]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(
+        stderr.contains("Downloading greeter (task greet)"),
+        "{stderr}"
+    );
+    let (code, _, stderr) = jrs_isolated(
+        &scratch,
+        &root,
+        &["--offline", "task", "greet", "--", "offline"],
+    );
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(
+        std::fs::read_to_string(root.join("target/greeting.txt")).unwrap(),
+        "greeted offline"
+    );
+}
+
+#[test]
+fn a_bom_in_managed_versions_what_the_manifest_leaves_out() {
+    let scratch = Scratch::new("build-managed-bom");
+    let fixture = FixtureRepo::new(&scratch);
+    fixture.publish_pom(
+        &jrs::resolve::coord::Coord::new("org.example", "platform", "1.0.0"),
+        "<project><groupId>org.example</groupId><artifactId>platform</artifactId>\
+         <version>1.0.0</version><packaging>pom</packaging><dependencyManagement>\
+         <dependencies><dependency><groupId>org.example</groupId><artifactId>lib</artifactId>\
+         <version>1.0.0</version></dependency><dependency><groupId>org.example</groupId>\
+         <artifactId>core</artifactId><version>1.0.0</version></dependency></dependencies>\
+         </dependencyManagement></project>",
+    );
+    scratch.write(
+        "app/jrs.toml",
+        &format!(
+            "[project]\nname = \"app\"\nversion = \"1.0.0\"\n\n\
+             [managed]\n\"org.example:platform\" = {{ version = \"1.0.0\", bom = true }}\n\n\
+             [dependencies]\n\"org.example:lib\" = {{}}\n\n{}",
+            fixture.manifest_section()
+        ),
+    );
+    let root = scratch.join("app");
+
+    let (code, tree, stderr) = jrs_isolated(&scratch, &root, &["tree"]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(tree.contains("org.example:lib:1.0.0 (managed)"), "{tree}");
+    assert!(tree.contains("org.example:core:1.0.0 (managed)"), "{tree}");
+    let lock = std::fs::read_to_string(root.join("jrs.lock")).unwrap();
+    assert_eq!(lock.matches("managed = true").count(), 2, "{lock}");
+    assert!(
+        !lock.contains("platform"),
+        "a BOM is not in the graph: {lock}"
+    );
+
+    // What the BOM covers is added without a version.
+    let (code, _, stderr) = jrs_isolated(&scratch, &root, &["add", "org.example:core"]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(
+        stderr.contains("at the version [managed] gives it"),
+        "{stderr}"
+    );
+    let manifest = std::fs::read_to_string(root.join("jrs.toml")).unwrap();
+    assert!(
+        manifest.contains("\"org.example:core\" = {}\n"),
+        "{manifest}"
+    );
+}
+
 const SHOUTER: &str =
     "    public static String shout(String s) { return s.toUpperCase() + \"!\"; }";
 

@@ -71,12 +71,24 @@ pub fn launcher_coordinate(manifest: &Manifest, resolution: &Resolution) -> Resu
         "junit-jupiter-params",
     ];
 
+    // A dependency that leaves its version to `[managed]` is at whatever the
+    // resolution settled on.
+    let version_of = |d: &crate::manifest::Dependency| -> String {
+        if d.is_managed() {
+            resolution
+                .get(&Ga::new(&d.group, &d.artifact))
+                .map(|p| p.coord.version.clone())
+                .unwrap_or_default()
+        } else {
+            d.version.clone()
+        }
+    };
     if let Some(d) = manifest
         .dev_dependencies
         .iter()
         .find(|d| d.group == LAUNCHER_GROUP && d.artifact == LAUNCHER_ARTIFACT)
     {
-        return Ok(Coord::new(&d.group, &d.artifact, &d.version));
+        return Ok(Coord::new(&d.group, &d.artifact, version_of(d)));
     }
 
     if let Some(engine) = resolution
@@ -94,7 +106,8 @@ pub fn launcher_coordinate(manifest: &Manifest, resolution: &Resolution) -> Resu
         d.group == "org.junit.jupiter" && JUPITER_ARTIFACTS.contains(&d.artifact.as_str())
     });
     if let Some(jupiter) = jupiter {
-        let version = platform_version(&jupiter.version).ok_or_else(|| {
+        let jupiter_version = version_of(jupiter);
+        let version = platform_version(&jupiter_version).ok_or_else(|| {
             JrsError::test(format!(
                 "`{}` is at version {}, which is not a JUnit 5 or 6 release\n\n\
                  for JUnit 4, declare `junit:junit` instead, which jrs runs on the \
@@ -842,6 +855,7 @@ mod tests {
                     jar: None,
                     checksum: None,
                     mediated: false,
+                    managed: false,
                 })
                 .collect(),
             ..Resolution::default()

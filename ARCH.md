@@ -105,7 +105,7 @@ src/
 ├── task.rs            [tasks] and [hooks]: plan, cycles, placeholders, freshness
 ├── migrate/
 │   ├── mod.rs         detection, report, manifest emission
-│   ├── maven.rs       pom.xml → Manifest (reuses resolve::pom)
+│   ├── maven.rs       pom.xml → Manifest (reuses resolve::pom); exec-maven-plugin → [tasks]
 │   ├── gradle.rs      build.gradle[.kts] → Manifest (pattern extraction)
 │   ├── gradle_files.rs  files() / fileTree() → local jars, literal ones only
 │   ├── gradle_repos.rs  repositories { }, content filters → groups
@@ -225,6 +225,9 @@ it, it runs **at most once per invocation**.
  ├── toolchain  : OnceCell<Toolchain>       found once
  ├── resolution : OnceCell<Resolution>      the project's graph
  ├── tools      : OnceCell<Vec<Tool>>       each compiler's own graph
+ ├── task_tools : OnceCell<Vec<(String, Resolution)>>
+ │                                          each task's own dependencies' graph
+ ├── task_classpaths : RefCell<HashMap<…>>  the task graphs downloaded so far
  ├── built      : OnceCell<Built>           the result of build()
  ├── ran        : RefCell<HashSet<String>>  tasks already run or found fresh
  ├── done       : RefCell<HashSet<Builtin>> built-ins a depends-on already ran
@@ -290,7 +293,8 @@ program starts. The report is the table through `Ui::timings` and a copy in
 rows do not overlap.
 
 Two commands use the spine without building. `jrs fetch` is `dependencies()`,
-the test launcher and optionally every `-sources.jar`
+the test launcher, each task's own tools (`task_classpath`) and optionally
+every `-sources.jar`
 (`resolve::fetch_sources`). `jrs metadata` is `dependencies()` (unless
 `--no-deps`) and `toolchain()` handed to `model::metadata`, which turns them
 and the manifest into a `json::Json` document printed on stdout.
@@ -311,12 +315,15 @@ from the network:
                  │ jrs.lock exists, and its  │
                  │ manifest-checksum matches,│── yes ──► lock.to_resolution()
                  │ and not `jrs update`?     │           lock.tool(name) per language
-                 └─────────────┬─────────────┘                   │
+                 └─────────────┬─────────────┘           and per task with tools
                                │ no                              │
                                ▼                                 │
                  resolve::resolve(manifest)       ─┐             │
                  resolve::resolve_tool(compiler)   │ "Resolving" │
-                   one isolated graph per language ─┘             │
+                   one isolated graph per language │             │
+                 resolve::resolve_tool_dependencies│             │
+                   one per task with [tasks.x.     │             │
+                   dependencies], `tasks.x`       ─┘             │
                                │                                 │
                                ▼                                 ▼
                  ┌──────────────────────────────────────────────────┐
@@ -333,7 +340,9 @@ from the network:
 
 `jrs.lock` records coordinates and checksums, never absolute paths; cache paths
 are recomputed on load. It is `version = 1` byte for byte until a `[[tool]]`
-block makes it `version = 2`.
+block makes it `version = 2`. A task's graph is downloaded with the compilers'
+when it is resolved afresh, so that `jrs.lock` pins its jars; read from
+`jrs.lock`, it waits until the task runs (`Session::task_classpath`).
 
 Local jars (`name = { path = "libs/x.jar" }`, SPEC §8.8) have no coordinate, so
 they never enter the walk. `Resolution::local` holds them, `jrs.lock` writes
@@ -380,6 +389,16 @@ Version ranges are rejected with an error, never guessed at. The classpath jrs
 hands to `javac` is ordered direct dependencies first, then transitive ones,
 each sorted by coordinate, so it is deterministic.
 
+`[managed]` (SPEC §8.9) is read before the walk: `managed_versions_with`
+takes the table's own versions, then each BOM's effective `<dependencyManagement>`
+(its own imports folded in), the first to name an artifact winning. A
+versionless root gets its version there, or resolution fails naming it. In the
+walk, `admissible` gives a child the managed version in place of the one its
+POM asks for, so two paths to it agree before nearest-wins has anything to
+mediate; a version the manifest declares still wins for its own dependency,
+at depth 1. A package at its managed version is marked `managed`, which
+`jrs.lock` records and `jrs tree` shows.
+
 A package's `Classpath` is a set of places its jar goes, and widening is their
 union (`Classpath::join`): `compile` (main compile, runtime, tests),
 `provided` (compile-only: main compile and tests), `runtime` (runtime-only:
@@ -388,9 +407,11 @@ package is `compile`. The main sources' compilers get `compile` and `provided`;
 `jrs run`, packaging and `jdeps` get `compile` and `runtime`; the test
 classpath gets everything.
 
-A compiler's graph goes through the same function via `resolve_tool`, but as
-a separate resolution: the Kotlin compiler's own `kotlinx-coroutines` must
-never mediate against the project's.
+A compiler's graph goes through the same function via `resolve_tool`, and a
+task's own dependencies via `resolve_tool_dependencies`, but each as a
+separate resolution: the Kotlin compiler's own `kotlinx-coroutines` must
+never mediate against the project's, nor a formatter's Guava. `[managed]`
+does not reach them.
 
 ### 6.3 Fetching and the cache
 
@@ -665,8 +686,11 @@ they cannot reorder or replace the built-in phases.
              │   for step in plan:                                         │
              │     Builtin ─► self.build() / test() / package() / doc()    │
              │     Task    ─► already in `ran`? skip                       │
+             │                task_classpath ─► its own tool graph, when   │
+             │                                  it has dependencies        │
              │                task::prepare ─► placeholders expanded,      │
              │                                  env (JRS_*, JAVA_HOME),    │
+             │                                  <name>.tool.args written,  │
              │                                  inputs/outputs fingerprint │
              │                  fresh?  ─► "Fresh (task)"                  │
              │                  else    ─► "Task" + toolchain::run_task_*  │
@@ -683,6 +707,12 @@ terminal: whole-manifest checks (unknown references, cycles, where a
 placeholder is available, generated output must be under `target-dir`),
 ordering, placeholder expansion, the environment and fingerprints. It is tested
 without a TTY; `cli.rs` decides when a task runs and what is printed around it.
+
+A task's action is `run`, `shell`, `script` or `main`. `main` runs a class
+from the task's own `[tasks.<name>.dependencies]` (TASKS.md §8): `cli.rs`
+hands `task::prepare` their classpath, which it writes to
+`target/.jrs/tasks/<name>.tool.args` and passes as `java @<argfile> <class>`;
+a `script` with dependencies gets the same argfile ahead of its file.
 
 ## 11. The output layer
 
@@ -800,6 +830,7 @@ poisoning, which is documented under each function's `# Panics`.
          ├── main.index  test.index  per source: classes, API digests, references
          ├── resources-main.list  resources-test.list  resources-*-generated-*.list
          ├── tasks/                 <task>.fingerprint  <task>.cp.args
+         │                          <task>.tool.args
          ├── javadoc.args  scaladoc.args  groovydoc.args
          ├── junit-palette.properties  jpackage-input/
          │   native-image.args
@@ -876,7 +907,8 @@ design regression, not a style nit.
 | Toolchain output passed through verbatim | `compile/`, `test.rs`, `image.rs` |
 | `jrs.lock` holds no absolute paths; `manifest-checksum` triggers re-resolution | `lockfile.rs` |
 | Resolution reads `effective_dependencies()`, never `dependencies` alone | `manifest.rs`, `resolve/mod.rs` |
-| A compiler's graph never meets the project's | `resolve::resolve_tool` |
+| A managed version replaces what a POM asks for, before mediation; a declared version still wins for its own dependency | `resolve::admissible`, `resolve::with_managed_versions` |
+| A compiler's or a task's graph never meets the project's | `resolve::resolve_tool`, `resolve::resolve_tool_dependencies` |
 | A group a repository's `groups` claim is looked up nowhere else | `resolve::repo::repositories_for` |
 | Tasks are subprocesses at fixed points; built-in phases cannot be reordered | `task.rs`, `cli.rs` |
 

@@ -105,6 +105,12 @@ impl Dependency {
     pub fn is_plain(&self) -> bool {
         self.exclusions.is_empty() && !self.compile_only && !self.runtime_only && !self.is_local()
     }
+
+    /// A coordinate that leaves its version to `[managed]` (SPEC §8.9).
+    #[must_use]
+    pub fn is_managed(&self) -> bool {
+        !self.is_local() && self.version.is_empty()
+    }
 }
 
 impl std::fmt::Display for Dependency {
@@ -112,11 +118,60 @@ impl std::fmt::Display for Dependency {
         if let Some(path) = &self.path {
             return write!(f, "{} ({path})", self.artifact);
         }
-        write!(f, "{}:{}:{}", self.group, self.artifact, self.version)?;
+        write!(f, "{}:{}", self.group, self.artifact)?;
+        if !self.version.is_empty() {
+            write!(f, ":{}", self.version)?;
+        }
         if let Some(c) = &self.classifier {
             write!(f, ":{c}")?;
         }
         Ok(())
+    }
+}
+
+/// One `[managed]` entry: a version for an artifact wherever it turns up in
+/// the graph, or a BOM whose `<dependencyManagement>` versions do (SPEC §8.9).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Managed {
+    pub group: String,
+    pub artifact: String,
+    pub version: String,
+    /// Import this POM's managed versions rather than manage the artifact.
+    pub bom: bool,
+}
+
+impl Managed {
+    #[must_use]
+    pub fn new(
+        group: impl Into<String>,
+        artifact: impl Into<String>,
+        version: impl Into<String>,
+    ) -> Managed {
+        Managed {
+            group: group.into(),
+            artifact: artifact.into(),
+            version: version.into(),
+            bom: false,
+        }
+    }
+
+    /// A BOM at `version`.
+    #[must_use]
+    pub fn bom(
+        group: impl Into<String>,
+        artifact: impl Into<String>,
+        version: impl Into<String>,
+    ) -> Managed {
+        Managed {
+            bom: true,
+            ..Managed::new(group, artifact, version)
+        }
+    }
+
+    /// `group:artifact`, as the table's key.
+    #[must_use]
+    pub fn key(&self) -> String {
+        format!("{}:{}", self.group, self.artifact)
     }
 }
 
@@ -668,6 +723,8 @@ pub enum Action {
     Shell(String),
     /// A `.java` file for the JDK's single-file source launcher.
     Script(Template),
+    /// A class run from the task's own `dependencies` (TASKS.md §8).
+    Main(String),
 }
 
 /// `[tasks.<name>]`.
@@ -686,15 +743,25 @@ pub struct TaskDef {
     pub outputs: Vec<Template>,
     pub source_outputs: Vec<Template>,
     pub resource_outputs: Vec<Template>,
+    /// `[tasks.<name>.dependencies]`: Java tools from a repository, resolved
+    /// as a graph of the task's own and pinned in `jrs.lock` (TASKS.md §8).
+    pub dependencies: Vec<Dependency>,
 }
 
 impl TaskDef {
+    /// The name of the `[[tool]]` block that pins this task's dependencies:
+    /// `tasks.format`, which no compiler's name can be.
+    #[must_use]
+    pub fn tool_name(&self) -> String {
+        format!("tasks.{}", self.name)
+    }
+
     /// Every template the task holds, with the key it came from.
     pub fn templates(&self) -> impl Iterator<Item = (&'static str, &Template)> + '_ {
         let action: Vec<(&'static str, &Template)> = match &self.action {
             Some(Action::Run(argv)) => argv.iter().map(|t| ("run", t)).collect(),
             Some(Action::Script(t)) => vec![("script", t)],
-            Some(Action::Shell(_)) | None => Vec::new(),
+            Some(Action::Shell(_) | Action::Main(_)) | None => Vec::new(),
         };
         action
             .into_iter()
@@ -787,6 +854,8 @@ pub struct Manifest {
     pub languages: Vec<LanguageConfig>,
     pub dependencies: Vec<Dependency>,
     pub dev_dependencies: Vec<Dependency>,
+    /// `[managed]`, in declaration order: pinned versions and BOMs.
+    pub managed: Vec<Managed>,
     /// User repositories in declaration order, with Central appended last.
     pub repositories: Vec<Repository>,
     /// `[tasks]`, in declaration order.
@@ -840,12 +909,15 @@ const DEPENDENCY_KEYS: &[&str] = &[
 /// What a local jar's table may hold: no version, classifier or exclusions,
 /// since it has no coordinate and no graph.
 const LOCAL_DEPENDENCY_KEYS: &[&str] = &["path", "compile-only", "runtime-only"];
+const MANAGED_KEYS: &[&str] = &["version", "bom"];
 const REPOSITORY_KEYS: &[&str] = &["url", "groups"];
 const TASK_KEYS: &[&str] = &[
     "description",
     "run",
     "shell",
     "script",
+    "main",
+    "dependencies",
     "args",
     "depends-on",
     "env",
@@ -866,6 +938,7 @@ const TOP_KEYS: &[&str] = &[
     "groovy",
     "dependencies",
     "dev-dependencies",
+    "managed",
     "repositories",
     "tasks",
     "hooks",
@@ -1026,7 +1099,7 @@ impl Manifest {
         }
         let main_class = optional_string(project, "main-class", "project")?;
         if let Some(mc) = &main_class {
-            validate_class_name(mc)?;
+            validate_class_name(mc, "project.main-class")?;
         }
 
         let source_dir = path_or(project, "source-dir", "src/main/java", "project")?;
@@ -1100,6 +1173,8 @@ impl Manifest {
                 ));
             }
         }
+        let managed = parse_managed(&table)?;
+        check_versionless(&dependencies, &dev_dependencies, &managed)?;
         let repositories = parse_repositories(&table)?;
         let tasks = parse_tasks(&table, &mut warnings)?;
         let hooks = parse_hooks(&table, &mut warnings)?;
@@ -1122,6 +1197,7 @@ impl Manifest {
             languages,
             dependencies,
             dev_dependencies,
+            managed,
             repositories,
             tasks,
             hooks,
@@ -1413,6 +1489,17 @@ impl Manifest {
             }
         }
 
+        if !self.managed.is_empty() {
+            let _ = writeln!(s, "\n[managed]");
+            for m in &self.managed {
+                let value = if m.bom {
+                    format!("{{ version = {}, bom = true }}", quote(&m.version))
+                } else {
+                    quote(&m.version)
+                };
+                let _ = writeln!(s, "{} = {value}", quote(&m.key()));
+            }
+        }
         if !self.dependencies.is_empty() {
             let _ = writeln!(s, "\n[dependencies]");
             for d in &self.dependencies {
@@ -1475,6 +1562,9 @@ fn render_task(s: &mut String, task: &TaskDef) {
         Some(Action::Script(file)) => {
             let _ = writeln!(s, "script = {}", quote(&file.raw));
         }
+        Some(Action::Main(class)) => {
+            let _ = writeln!(s, "main = {}", quote(class));
+        }
         None => {}
     }
     if !task.args.is_empty() {
@@ -1498,6 +1588,12 @@ fn render_task(s: &mut String, task: &TaskDef) {
     ] {
         if !list.is_empty() {
             let _ = writeln!(s, "{key} = {}", quote_templates(list));
+        }
+    }
+    if !task.dependencies.is_empty() {
+        let _ = writeln!(s, "\n[tasks.{}.dependencies]", task.name);
+        for d in &task.dependencies {
+            let _ = writeln!(s, "{}", render_dependency(d));
         }
     }
 }
@@ -1548,6 +1644,7 @@ pub fn blank(name: &str, version: &str, root: &Path) -> Manifest {
         languages: Vec::new(),
         dependencies: Vec::new(),
         dev_dependencies: Vec::new(),
+        managed: Vec::new(),
         repositories: vec![Repository::new(CENTRAL_NAME, CENTRAL_URL)],
         tasks: Vec::new(),
         hooks: Hooks::default(),
@@ -1716,10 +1813,15 @@ fn parse_tasks(table: &toml::Table, warnings: &mut Vec<String>) -> Result<Vec<Ta
         if let Some(file) = optional_string(t, "script", &section)? {
             actions.push(("script", Action::Script(template("script", &file)?)));
         }
+        if let Some(class) = optional_string(t, "main", &section)? {
+            validate_class_name(&class, &format!("{section}.main"))?;
+            actions.push(("main", Action::Main(class)));
+        }
         if actions.len() > 1 {
             let keys: Vec<String> = actions.iter().map(|(k, _)| format!("`{k}`")).collect();
             return Err(JrsError::manifest(format!(
-                "`{section}` has {}; a task runs exactly one of `run`, `shell` or `script`",
+                "`{section}` has {}; a task runs exactly one of `run`, `shell`, `script` \
+                 or `main`",
                 keys.join(" and ")
             )));
         }
@@ -1727,10 +1829,11 @@ fn parse_tasks(table: &toml::Table, warnings: &mut Vec<String>) -> Result<Vec<Ta
         let depends_on = parse_depends_on(t, &section)?;
         if action.is_none() && depends_on.is_empty() {
             return Err(JrsError::manifest(format!(
-                "`{section}` does nothing: give it one of `run`, `shell` or `script`, \
-                 or a `depends-on` list to run"
+                "`{section}` does nothing: give it one of `run`, `shell`, `script` or \
+                 `main`, or a `depends-on` list to run"
             )));
         }
+        let dependencies = parse_task_dependencies(t, &section, action.as_ref())?;
         let env = parse_task_env(t, &section)?;
         let cwd = optional_string(t, "cwd", &section)?
             .map(|raw| template("cwd", &raw))
@@ -1748,6 +1851,7 @@ fn parse_tasks(table: &toml::Table, warnings: &mut Vec<String>) -> Result<Vec<Ta
             outputs: templates("outputs")?,
             source_outputs: templates("source-outputs")?,
             resource_outputs: templates("resource-outputs")?,
+            dependencies,
         };
         for (key, t) in task
             .path_templates()
@@ -1764,6 +1868,50 @@ fn parse_tasks(table: &toml::Table, warnings: &mut Vec<String>) -> Result<Vec<Ta
         out.push(task);
     }
     Ok(out)
+}
+
+/// `[tasks.<name>.dependencies]`: the `[dependencies]` value forms, as the
+/// classpath of a `main` or `script` action. They are a tool's graph, never
+/// the project's, so what only means something there is refused: a local jar,
+/// `compile-only` and `runtime-only`, and a version left to `[managed]`.
+fn parse_task_dependencies(
+    t: &toml::Table,
+    section: &str,
+    action: Option<&Action>,
+) -> Result<Vec<Dependency>> {
+    let key = format!("{section}.dependencies");
+    let dependencies = parse_dependency_table(t.get("dependencies"), &key)?;
+    for d in &dependencies {
+        let refused = if d.is_local() {
+            Some("a local jar")
+        } else if d.compile_only || d.runtime_only {
+            Some("`compile-only` and `runtime-only`, which choose a classpath of the project's")
+        } else if d.is_managed() {
+            Some("a version from [managed], which versions the project's graph")
+        } else {
+            None
+        };
+        if let Some(what) = refused {
+            return Err(JrsError::manifest(format!(
+                "`{key}.\"{}\"`: a task's dependencies are a tool's graph of their own, \
+                 so {what} does not go here",
+                d.key()
+            )));
+        }
+    }
+    match action {
+        Some(Action::Main(_)) if dependencies.is_empty() => Err(JrsError::manifest(format!(
+            "`{section}.main` runs a class from the task's own dependencies, and it has none\n\n\
+             add them:\n\n    [{section}.dependencies]\n    \"group:artifact\" = \"<version>\""
+        ))),
+        Some(Action::Run(_) | Action::Shell(_)) | None if !dependencies.is_empty() => {
+            Err(JrsError::manifest(format!(
+                "`{key}` is the classpath of a `main` or `script` action, and `{section}` has \
+                 neither"
+            )))
+        }
+        _ => Ok(dependencies),
+    }
 }
 
 /// `depends-on`: task names, and the built-ins a task may depend on.
@@ -1955,7 +2103,12 @@ fn default_test_resource_dir(test_dir: &Path) -> PathBuf {
 }
 
 fn parse_dependencies(table: &toml::Table, section: &str) -> Result<Vec<Dependency>> {
-    let Some(value) = table.get(section) else {
+    parse_dependency_table(table.get(section), section)
+}
+
+/// A table of dependencies; `section` is how messages name it.
+fn parse_dependency_table(value: Option<&toml::Value>, section: &str) -> Result<Vec<Dependency>> {
+    let Some(value) = value else {
         return Ok(Vec::new());
     };
     let deps = value
@@ -1993,15 +2146,24 @@ fn parse_dependencies(table: &toml::Table, section: &str) -> Result<Vec<Dependen
                         )));
                     }
                 }
-                dep.version = t
-                    .get("version")
-                    .and_then(|v| v.as_str())
-                    .ok_or_else(|| {
-                        JrsError::manifest(format!(
-                            "`{section}.\"{key}\"` is missing a `version` string"
-                        ))
-                    })?
-                    .to_string();
+                // No `version` at all leaves it to `[managed]`, which is
+                // checked once the whole manifest is read.
+                dep.version = match t.get("version") {
+                    None => String::new(),
+                    Some(toml::Value::String(v)) if !v.trim().is_empty() => v.clone(),
+                    Some(toml::Value::String(_)) => {
+                        return Err(JrsError::manifest(format!(
+                            "`{section}.\"{key}\"` has an empty version; leave `version` out \
+                             to take it from [managed]"
+                        )));
+                    }
+                    Some(_) => {
+                        return Err(JrsError::manifest(format!(
+                            "{} must be a version string",
+                            name("version")
+                        )));
+                    }
+                };
                 if let Some(c) = optional_string(t, "classifier", &format!("{section}.\"{key}\""))?
                 {
                     if dep.classifier.as_ref().is_some_and(|k| *k != c) {
@@ -2039,9 +2201,10 @@ fn parse_dependencies(table: &toml::Table, section: &str) -> Result<Vec<Dependen
                 )));
             }
         }
-        if dep.version.trim().is_empty() {
+        if matches!(value, toml::Value::String(_)) && dep.version.trim().is_empty() {
             return Err(JrsError::manifest(format!(
-                "`{section}.\"{key}\"` has an empty version"
+                "`{section}.\"{key}\"` has an empty version; write `{{}}` to take it from \
+                 [managed]"
             )));
         }
         if out.iter().any(|d| d.key() == dep.key()) {
@@ -2053,6 +2216,119 @@ fn parse_dependencies(table: &toml::Table, section: &str) -> Result<Vec<Dependen
         out.push(dep);
     }
     Ok(out)
+}
+
+/// `[managed]`: `"group:artifact" = "version"` pins a version wherever the
+/// artifact turns up in the graph; `{ version = "...", bom = true }` imports a
+/// BOM's managed versions (SPEC §8.9). Order is kept: the first BOM to manage
+/// an artifact wins, as the first import does in Maven.
+fn parse_managed(table: &toml::Table) -> Result<Vec<Managed>> {
+    let Some(value) = table.get("managed") else {
+        return Ok(Vec::new());
+    };
+    let entries = value
+        .as_table()
+        .ok_or_else(|| JrsError::manifest("`managed` must be a table"))?;
+    let mut out: Vec<Managed> = Vec::with_capacity(entries.len());
+    for (key, value) in entries {
+        let (group, artifact, classifier) = split_coordinate(key, "managed")?;
+        if classifier.is_some() {
+            return Err(JrsError::manifest(format!(
+                "`managed.\"{key}\"`: a managed version applies to every classifier of \
+                 `group:artifact`, so the key names no classifier"
+            )));
+        }
+        let (version, bom) = match value {
+            toml::Value::String(v) => (v.clone(), false),
+            toml::Value::Table(t) => {
+                for k in t.keys() {
+                    if !MANAGED_KEYS.contains(&k.as_str()) {
+                        return Err(JrsError::manifest(format!(
+                            "`managed.\"{key}\"`: unknown key `{k}` (expected `version` or `bom`)"
+                        )));
+                    }
+                }
+                let version = optional_string(t, "version", &format!("managed.\"{key}\""))?
+                    .ok_or_else(|| {
+                        JrsError::manifest(format!(
+                            "`managed.\"{key}\"` is missing a `version` string"
+                        ))
+                    })?;
+                (
+                    version,
+                    bool_key(t, "bom", &format!("`managed.\"{key}\".bom`"))?,
+                )
+            }
+            _ => {
+                return Err(JrsError::manifest(format!(
+                    "`managed.\"{key}\"` must be a version string, or a table with `version` \
+                     and `bom = true`"
+                )));
+            }
+        };
+        let version = version.trim().to_string();
+        if version.is_empty() {
+            return Err(JrsError::manifest(format!(
+                "`managed.\"{key}\"` has an empty version"
+            )));
+        }
+        if is_range(&version) {
+            return Err(JrsError::manifest(format!(
+                "`managed.\"{key}\"` is the range `{version}`; a managed version is exact, \
+                 like every other"
+            )));
+        }
+        if out
+            .iter()
+            .any(|m| m.group == group && m.artifact == artifact)
+        {
+            return Err(JrsError::manifest(format!("`managed` names `{key}` twice")));
+        }
+        out.push(Managed {
+            group,
+            artifact,
+            version,
+            bom,
+        });
+    }
+    Ok(out)
+}
+
+/// A dependency that leaves its version out takes it from `[managed]`. With a
+/// BOM there, whether it covers the artifact is only known once the BOM is
+/// read, at resolution; without one, the table has to name it.
+fn check_versionless(
+    dependencies: &[Dependency],
+    dev_dependencies: &[Dependency],
+    managed: &[Managed],
+) -> Result<()> {
+    if managed.iter().any(|m| m.bom) {
+        return Ok(());
+    }
+    let tables = dependencies
+        .iter()
+        .map(|d| ("dependencies", d))
+        .chain(dev_dependencies.iter().map(|d| ("dev-dependencies", d)));
+    for (section, d) in tables {
+        let covered = managed
+            .iter()
+            .any(|m| m.group == d.group && m.artifact == d.artifact);
+        if d.is_managed() && !covered {
+            let what = if managed.is_empty() {
+                "there is no [managed] table"
+            } else {
+                "[managed] does not name it"
+            };
+            return Err(JrsError::manifest(format!(
+                "`{section}.\"{}\"` has no version, and {what}\n\n\
+                 give it a version, or manage it:\n\n    [managed]\n    \"{}:{}\" = \"<version>\"",
+                d.key(),
+                d.group,
+                d.artifact
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// A `true`/`false` key of a long form; `name` is how a message names it.
@@ -2338,10 +2614,14 @@ pub fn dependency_entry(d: &Dependency) -> (String, String) {
         None => format!("{}:{}", d.group, d.artifact),
     };
     let table_classifier = d.classifier.as_ref().filter(|_| key_classifier.is_none());
-    if d.is_plain() && table_classifier.is_none() {
+    if d.is_plain() && table_classifier.is_none() && !d.is_managed() {
         return (key, quote(&d.version));
     }
-    let mut fields = vec![format!("version = {}", quote(&d.version))];
+    // A managed dependency has no `version` field; `{}` alone says so.
+    let mut fields = Vec::new();
+    if !d.is_managed() {
+        fields.push(format!("version = {}", quote(&d.version)));
+    }
     if let Some(c) = table_classifier {
         fields.push(format!("classifier = {}", quote(c)));
     }
@@ -2354,6 +2634,9 @@ pub fn dependency_entry(d: &Dependency) -> (String, String) {
     }
     if d.runtime_only {
         fields.push("runtime-only = true".to_string());
+    }
+    if fields.is_empty() {
+        return (key, "{}".to_string());
     }
     (key, format!("{{ {} }}", fields.join(", ")))
 }
@@ -2590,7 +2873,8 @@ fn validate_name(name: &str) -> Result<()> {
     Ok(())
 }
 
-fn validate_class_name(class: &str) -> Result<()> {
+/// `key` is how the message names the value: `project.main-class`.
+fn validate_class_name(class: &str, key: &str) -> Result<()> {
     let ok = !class.is_empty()
         && !class.starts_with('.')
         && !class.ends_with('.')
@@ -2600,7 +2884,7 @@ fn validate_class_name(class: &str) -> Result<()> {
             .all(|c| c.is_alphanumeric() || c == '.' || c == '_' || c == '$');
     if !ok {
         return Err(JrsError::manifest(format!(
-            "`project.main-class` must be a fully-qualified class name (got `{class}`)"
+            "`{key}` must be a fully-qualified class name (got `{class}`)"
         )));
     }
     Ok(())
@@ -3018,6 +3302,197 @@ fixtures = { path = "test-libs/fixtures.jar" }
         let again = parse(&text).unwrap();
         assert_eq!(again.dependencies, m.dependencies);
         assert_eq!(again.dev_dependencies, m.dev_dependencies);
+    }
+
+    #[test]
+    fn managed_versions_and_boms_parse_and_render_back() {
+        let m = parse(
+            r#"
+[project]
+name = "a"
+version = "1"
+[managed]
+"org.springframework.boot:spring-boot-dependencies" = { version = "3.3.4", bom = true }
+"com.fasterxml.jackson.core:jackson-databind" = "2.17.2"
+[dependencies]
+"org.springframework.boot:spring-boot-starter-web" = {}
+"org.slf4j:slf4j-api" = { exclusions = ["x:y"] }
+[dev-dependencies]
+"org.springframework.boot:spring-boot-starter-test" = {}
+"#,
+        )
+        .unwrap();
+        assert!(m.warnings.is_empty(), "{:?}", m.warnings);
+        assert_eq!(m.managed.len(), 2);
+        assert!(m.managed[0].bom && !m.managed[1].bom);
+        assert_eq!(
+            m.managed[1].key(),
+            "com.fasterxml.jackson.core:jackson-databind"
+        );
+        let web = &m.dependencies[0];
+        assert!(web.is_managed() && !m.dependencies[0].is_local());
+        assert_eq!(
+            web.to_string(),
+            "org.springframework.boot:spring-boot-starter-web"
+        );
+        assert!(m.dev_dependencies[0].is_managed());
+
+        let text = m.render(None);
+        assert!(
+            text.contains(
+                "\n[managed]\n\
+                 \"org.springframework.boot:spring-boot-dependencies\" = { version = \"3.3.4\", bom = true }\n\
+                 \"com.fasterxml.jackson.core:jackson-databind\" = \"2.17.2\"\n\n[dependencies]\n"
+            ),
+            "{text}"
+        );
+        assert!(
+            text.contains("\"org.springframework.boot:spring-boot-starter-web\" = {}\n"),
+            "{text}"
+        );
+        assert!(
+            text.contains("\"org.slf4j:slf4j-api\" = { exclusions = [\"x:y\"] }\n"),
+            "{text}"
+        );
+        let again = parse(&text).unwrap();
+        assert_eq!(again.managed, m.managed);
+        assert_eq!(again.dependencies, m.dependencies);
+        assert_eq!(again.dev_dependencies, m.dev_dependencies);
+    }
+
+    #[test]
+    fn a_task_runs_a_class_from_dependencies_of_its_own() {
+        let m = parse(
+            r#"
+[project]
+name = "a"
+version = "1"
+[tasks.format]
+main = "com.google.googlejavaformat.java.Main"
+args = ["--replace", "{root}/src/main/java"]
+[tasks.format.dependencies]
+"com.google.googlejavaformat:google-java-format" = "1.22.0"
+"org.example:extra" = { version = "2.0", exclusions = ["x:y"] }
+[tasks.gen]
+script = "build/Gen.java"
+[tasks.gen.dependencies]
+"com.squareup:javapoet" = "1.13.0"
+"#,
+        )
+        .unwrap();
+        assert!(m.warnings.is_empty(), "{:?}", m.warnings);
+        let format = m.task("format").unwrap();
+        assert_eq!(
+            format.action,
+            Some(Action::Main("com.google.googlejavaformat.java.Main".into()))
+        );
+        assert_eq!(format.dependencies.len(), 2);
+        assert_eq!(format.dependencies[1].exclusions.len(), 1);
+        assert_eq!(format.tool_name(), "tasks.format");
+        assert_eq!(m.task("gen").unwrap().dependencies.len(), 1);
+        assert!(
+            m.dependencies.is_empty(),
+            "a task's dependencies are not the project's"
+        );
+
+        let text = m.render(None);
+        assert!(
+            text.contains("main = \"com.google.googlejavaformat.java.Main\"\n"),
+            "{text}"
+        );
+        assert!(
+            text.contains(
+                "\n[tasks.format.dependencies]\n\
+                 \"com.google.googlejavaformat:google-java-format\" = \"1.22.0\"\n"
+            ),
+            "{text}"
+        );
+        assert_eq!(parse(&text).unwrap().tasks, m.tasks);
+    }
+
+    #[test]
+    fn a_tasks_dependencies_go_only_where_they_mean_something() {
+        let base = "[project]\nname='a'\nversion='1'\n";
+        let err = |body: &str| parse(&format!("{base}{body}")).unwrap_err().to_string();
+        for (body, needle) in [
+            ("[tasks.t]\nmain = 'x.Y'", "has none"),
+            (
+                "[tasks.t]\nshell = 'x'\n[tasks.t.dependencies]\n'g:a' = '1'",
+                "`main` or `script` action",
+            ),
+            (
+                "[tasks.t]\nmain = 'x.Y'\n[tasks.t.dependencies]\nd = { path = 'd.jar' }",
+                "a local jar",
+            ),
+            (
+                "[tasks.t]\nmain = 'x.Y'\n[tasks.t.dependencies]\n'g:a' = { version = '1', compile-only = true }",
+                "compile-only",
+            ),
+            (
+                "[managed]\n'g:a' = '1'\n[tasks.t]\nmain = 'x.Y'\n[tasks.t.dependencies]\n'g:a' = {}",
+                "[managed]",
+            ),
+            (
+                "[tasks.t]\nmain = 'x.Y'\nscript = 'A.java'\n[tasks.t.dependencies]\n'g:a' = '1'",
+                "exactly one of",
+            ),
+            (
+                "[tasks.t]\nmain = 'not a class'\n[tasks.t.dependencies]\n'g:a' = '1'",
+                "`tasks.t.main` must be a fully-qualified class name",
+            ),
+            (
+                "[tasks.t]\nmain = 'x.Y'\n[tasks.t.dependencies]\n'g:a' = '[1,2)'",
+                "",
+            ),
+        ] {
+            // A range is refused at resolution, as in [dependencies].
+            if needle.is_empty() {
+                assert!(parse(&format!("{base}{body}")).is_ok(), "{body}");
+                continue;
+            }
+            let e = err(body);
+            assert!(e.contains(needle), "{body}: {e}");
+        }
+    }
+
+    #[test]
+    fn a_versionless_dependency_needs_something_to_manage_it() {
+        let base = "[project]\nname='a'\nversion='1'\n";
+        let err = |body: &str| parse(&format!("{base}{body}")).unwrap_err().to_string();
+        for (body, needle) in [
+            ("[dependencies]\n'g:a' = {}", "there is no [managed] table"),
+            (
+                "[managed]\n'g:b' = '1'\n[dev-dependencies]\n'g:a' = {}",
+                "[managed] does not name it",
+            ),
+            ("[dependencies]\n'g:a' = ''", "write `{}`"),
+            (
+                "[dependencies]\n'g:a' = { version = '' }",
+                "leave `version` out",
+            ),
+            ("[managed]\n'g:a' = '[1,2)'", "range"),
+            ("[managed]\n'g:a:natives' = '1'", "every classifier"),
+            (
+                "[managed]\n'g:a' = { version = '1', scope = 'x' }",
+                "unknown key `scope`",
+            ),
+            ("[managed]\n'g:a' = { bom = true }", "missing a `version`"),
+            (
+                "[managed]\n'g:a' = { version = '1', bom = 'yes' }",
+                "`true` or `false`",
+            ),
+            ("[managed]\n'g:a' = ''", "empty version"),
+        ] {
+            let e = err(body);
+            assert!(e.contains(needle), "{body}: {e}");
+        }
+        // With a BOM there, what it covers is only known at resolution.
+        let m = parse(&format!(
+            "{base}[managed]\n'g:bom' = {{ version = '1', bom = true }}\n\
+             [dependencies]\n'g:a' = {{}}"
+        ))
+        .unwrap();
+        assert!(m.dependencies[0].is_managed());
     }
 
     #[test]

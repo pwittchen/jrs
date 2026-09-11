@@ -253,9 +253,10 @@ Each compiler is resolved **as its own graph**, never merged into the
 project's. The Kotlin compiler's own `kotlinx-coroutines` must not mediate
 against the project's. Internally this is `resolve::resolve` over a synthetic
 manifest (`manifest::blank` plus the project's repositories), which is exactly
-the isolated tool graph that [TASKS.md §8](TASKS.md#8-tool-dependencies-a-later-milestone)
-proposes for task dependencies. **Both proposals share one mechanism**, and
-whichever lands first builds it.
+the isolated tool graph a task's own dependencies get
+([TASKS.md §8](TASKS.md#8-tool-dependencies)). **Both share one mechanism**:
+`resolve::resolve_tool` for a compiler, `resolve::resolve_tool_dependencies`
+for a task, each pinned as a `[[tool]]` block.
 
 ### 5.2 Pinning
 

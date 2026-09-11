@@ -3,7 +3,7 @@
 Design proposal for user-defined tasks and build hooks, in the spirit of
 Gradle's `tasks.register` / `dependsOn` / `doLast`, but declarative and small.
 
-Status: **T1 and T2 implemented; T3 (tool dependencies, §8) is not.** This
+Status: **T1, T2 and T3 (tool dependencies, §8) implemented.** This
 crossed a line drawn in [SPEC §1.2](INITIAL_SPEC.md#12-non-goals) ("plugin
 systems, custom task graphs, or a build DSL"), so per
 [ROADMAP §8](../ROADMAP.md#8-needs-a-spec-decision-first) it needed an
@@ -390,41 +390,52 @@ entirely generated still builds.
 
 ---
 
-## 8. Tool dependencies (a later milestone)
+## 8. Tool dependencies
 
 `script` tasks cover build logic you write yourself; `run` covers tools on
-`PATH`. The gap is **Java tools from Maven Central** — `google-java-format`,
-`protoc-jar`, Flyway, Checkstyle — which today would have to be installed by
+`PATH`. The gap was **Java tools from Maven Central** — `google-java-format`,
+`protoc-jar`, Flyway, Checkstyle — which would have had to be installed by
 hand, defeating the point of a build tool that resolves dependencies.
 
 ```toml
 [tasks.format]
 main = "com.google.googlejavaformat.java.Main"
-args = ["--replace", "{root}/src/main/java"]
+args = ["--replace", "src/main/java/com/example/App.java"]
 
 [tasks.format.dependencies]
 "com.google.googlejavaformat:google-java-format" = "1.22.0"
 ```
 
-- A new action kind, `main = "<class>"`, runs `java -cp <tool classpath> <class> <args>`.
-  `script` tasks may take `dependencies` too, as their `-cp`.
+- A fourth action kind, `main = "<class>"`, runs
+  `java @target/.jrs/tasks/<name>.tool.args <class> <args>`, the argfile
+  holding `-cp` and the tool's classpath, for the reason `{classpath-argfile}`
+  exists. `script` tasks may take `dependencies` too, as the same argfile
+  ahead of the file. `main` without dependencies, and dependencies on a
+  `run` or `shell` task or on an aggregate, are manifest errors.
 - `[tasks.<name>.dependencies]` uses the `[dependencies]` value forms (SPEC §4.2),
-  without `compile-only`.
+  without `compile-only`, `runtime-only`, local jars or a version left to
+  `[managed]` (SPEC §8.9): each of those means something only in the
+  project's graph.
 - Each task's dependencies are resolved **as their own graph**, never merged
   into the project's: a formatter's Guava must not mediate against the
-  project's Guava. Internally this is `resolve::resolve` over a synthetic
-  manifest (`manifest::blank` plus the project's repositories), the way the
-  JUnit launcher and JaCoCo are internal dependencies today.
+  project's Guava. It is `resolve::resolve_tool_dependencies`, the
+  `resolve_tool` the compilers go through, over declared dependencies: a
+  `manifest::blank` holding them, fetched from the project's repositories.
 - They are pinned in `jrs.lock`, since an unpinned build tool isn't
-  reproducible either: one `[[tool]]` block per task, holding `[[tool.package]]`
-  entries in the existing package format. Task dependencies join
-  `manifest-checksum`.
-- `jrs tree --task <name>` prints a tool's graph; `jrs cache prune` keeps what
-  `[[tool]]` blocks name.
+  reproducible either: one `[[tool]]` block per task, named `tasks.<name>`,
+  which no compiler's name can be, holding `[[tool.package]]` entries in the
+  existing package format. Task dependencies join `manifest-checksum` as
+  `task <name> <dependency>` lines, so a manifest without them keeps its
+  checksum, and a lockfile without a task's block does not match.
+- The jars are downloaded with the rest when the graph is resolved afresh, so
+  that `jrs.lock` pins their checksums; from `jrs.lock`, only when the task
+  first runs, so `jrs build` never downloads a formatter it does not run.
+- The task's fingerprint (§6) covers every tool jar's size and mtime.
+- `jrs tree --task <name>` prints a tool's graph; `jrs cache prune` and
+  `jrs verify` see what `[[tool]]` blocks name, as they do the compilers'.
 
-This is deliberately held back to its own milestone. It touches the lockfile
-format and the resolver's inputs, and whether §3–§7 work in practice is worth
-learning before that.
+This was held back to its own milestone until §3–§7 had been used; it touches
+the lockfile format and the resolver's inputs.
 
 ---
 
@@ -588,7 +599,7 @@ the main and test compile units, the "no sources" check moved after
 
 **T3 — Tool dependencies.** `main` action, `[tasks.<name>.dependencies]`,
 isolated resolution, `[[tool]]` in `jrs.lock`, `jrs tree --task`, prune
-awareness. Only after T1/T2 have seen real use.
+awareness. Landed after T1 and T2 had seen use.
 
 ### 11.3 Tests
 
@@ -641,11 +652,19 @@ Following CLAUDE.md's test layout:
    the main runtime classpath → `java @{classpath-argfile} <main>` depending
    on `build`, `dependsOn`-only tasks → aggregates, and `dependsOn` /
    `finalizedBy` on `compileJava`, `test`, `jar` and `run` → hooks. The rest
-   is listed as "not migrated", task by task. Maven's `exec-maven-plugin` /
-   `maven-antrun-plugin` still are, whole; an `exec:java` or `exec:exec`
-   execution bound to `generate-sources` maps cleanly onto a `pre-compile`
-   task, and is the next translation worth doing.
+   is listed as "not migrated", task by task. Maven's `exec-maven-plugin`
+   executions are translated too (`migrate/maven.rs`): `exec` becomes a
+   `run` task, `java` a `java @{classpath-argfile} <main>` one, or a `main`
+   task over the plugin's own `<dependencies>` when `includePluginDependencies`
+   asks for them (§8), and the `<phase>` the hook that fires at the same
+   point — `generate-sources` and the phases before compilation
+   `pre-compile`, `compile` `post-compile`, the test-compilation phases
+   `pre-test`, `test` `post-test`, `package` `post-package`. An execution in
+   another phase, or with `<async>` or `<outputFile>`, is reported whole.
+   `maven-antrun-plugin` still is.
 6. **Lockfile compatibility for T3.** An older jrs ignores `[[tool]]` blocks
-   and would drop them when it rewrites the lockfile. Bump `LOCK_VERSION`
-   only when a manifest declares task dependencies, so projects without them
-   keep a byte-identical lockfile?
+   and would drop them when it rewrites the lockfile. **Settled:** a task's
+   graph is a `[[tool]]` block like a compiler's, and a lockfile says
+   `version = 2` only when it has one, which a jrs from before tools refuses
+   rather than rewrite. Projects without tools keep a byte-identical
+   lockfile.

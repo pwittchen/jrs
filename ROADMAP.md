@@ -23,25 +23,7 @@ decision (see the last section) — it needs a spec change before it needs code.
   sources are still left out of its `javadoc`, with a warning. Dokka is a
   plugin host with its own configuration (JVM_LANGUAGES.md §14.4).
 
-## 2. Dependencies
-
-- **Managed versions and platforms.** Gradle has `platform()`,
-  `enforcedPlatform()` and `constraints { }`, and Maven has
-  `<dependencyManagement>`. Today the only way to pin a transitive version in
-  jrs is to declare it as a direct dependency. That puts it on the classpath
-  for good, even after nothing needs it, and it outranks everything under
-  nearest-wins. A `[managed]` table would hold versions that apply only if the
-  artifact turns up in the graph. It would also take BOM imports, which
-  `absorb_import` in `resolve/pom.rs` already knows how to fold in. A managed
-  version beats mediation, as it does in Maven, so the tie-break rules in SPEC
-  §8.2 need a line about it. The table feeds `manifest-checksum`, `jrs outdated`
-  (a BOM is outdated like any dependency), `jrs tree` (a managed version
-  should say so), and `jrs add`, which could then leave the version out. This
-  is also the first half of the Spring Boot item in section 7. Once it lands,
-  migration only has to translate the BOM. It is a new manifest table, so it
-  is a spec decision.
-
-## 3. Tests
+## 2. Tests
 
 - **Java agents outside the graph.** `test.java-agents` and `run.java-agents`
   load the jar the resolved graph pinned, so an agent has to be a dependency.
@@ -54,10 +36,10 @@ decision (see the last section) — it needs a spec change before it needs code.
   starts one launcher JVM. Forking several JVMs means splitting the test classes
   among launchers and merging their summaries, XML and coverage data. The live
   counter would then follow several processes, and `--debug` would have several
-  JVMs to attach to. Worth it once the section 6 benchmark shows test time
+  JVMs to attach to. Worth it once the section 5 benchmark shows test time
   dominating.
 
-## 4. Packaging
+## 3. Packaging
 
 - **Shading.** Package relocation for conflicting dependencies was ruled out
   for v1 (SPEC §13.5). Duplicate classes are reported today; relocation — which
@@ -80,16 +62,17 @@ decision (see the last section) — it needs a spec change before it needs code.
   a real need. It adds a manifest key, a `[[tool]]` block and a lockfile entry,
   so it is a spec-level decision (see the last section).
 
-## 5. Editors and tooling
+## 4. Editors and tooling
 
 - **Checks and formatting.** Gradle has the Checkstyle, PMD, SpotBugs and
-  Spotless plugins. In jrs these are tasks, and they become easy once a task can
-  depend on a pinned Java tool (T3, section 7). `jrs init` could then offer a
-  `check` task and a `post-compile` hook as a starting point. Error Prone is the
-  exception: it is a `javac` plugin, so it waits on the annotation-processor path
-  (see the last section).
+  Spotless plugins. In jrs these are tasks, and a task can depend on a pinned
+  Java tool ([TASKS.md §8](specs/TASKS.md#8-tool-dependencies)), so none of
+  them needs installing. What is left is a starting point: `jrs init` could
+  offer a `check` task and a `post-compile` hook. Error Prone is the exception:
+  it is a `javac` plugin, so it waits on the annotation-processor path (see the
+  last section).
 
-## 6. Benchmarks against Maven and Gradle
+## 5. Benchmarks against Maven and Gradle
 
 The M5 benchmark (`benches/resolution.rs`) measures jrs against itself and the
 network floor. It does not say how jrs compares to the tools people would
@@ -124,59 +107,19 @@ and testing the same projects, with the results written up in a report.
   a tool that is not installed, as `require_jdk!` does. It adds no crate to jrs.
   A manually triggered CI workflow can regenerate the report on a fixed runner.
 
-## 7. jrs itself
+## 6. jrs itself
 
 - **Migration fidelity.** Keep growing the `tests/fixtures/migrate/` corpus
   from real-world `pom.xml` and Gradle builds. Every construct that lands in the
-  "not migrated" block is a candidate for translation. Profiles, `system` scope
-  and anything computed still do not translate. A `system`-scoped jar under
-  `${project.basedir}` could become a local jar.
-  Maven's `exec-maven-plugin` is still reported whole; an execution bound to
-  `generate-sources` would map cleanly onto a `pre-compile` task
-  ([TASKS.md §12](specs/TASKS.md#12-open-questions)). Each item in sections
-  2–4 that answers a Gradle construct (`platform()`, `maxParallelForks`)
-  should arrive with its migration row and a fixture.
-- **Spring Boot projects from Gradle.** Spring Boot is the most common kind of
-  Java project, and `jrs migrate` cannot migrate it yet. A `start.spring.io`
-  build applies the `org.springframework.boot` and
-  `io.spring.dependency-management` plugins and declares its starters with no
-  version (`implementation 'org.springframework.boot:spring-boot-starter-web'`).
-  The versions come from the `spring-boot-dependencies` BOM that the plugins
-  import. The Gradle reader needs `g:a:v`, so every starter is listed as not
-  migrated, both plugins get "jrs has no plugin system", and the manifest ends up
-  with an empty `[dependencies]`. The fat jar already merges Spring's
-  registries (SPEC §9.2); jrs builds a flat fat jar, not Boot's nested
-  `bootJar` layout, and the proof below is what shows that is enough. Two
-  pieces are left:
-  - *Versions from a BOM.* The resolver already folds imported BOMs into a
-    POM's managed versions (`absorb_import` in `resolve/pom.rs`), but a
-    manifest cannot declare a BOM, and it rejects a dependency with an empty
-    version. Migration should read the Boot plugin's version,
-    `dependencyManagement { imports { mavenBom '...' } }` and
-    `implementation platform('...')` as the BOM to use. There are two ways to
-    apply it. The first writes a BOM key into the manifest and lets starters
-    stay versionless, so upgrading Boot means editing one line. That is a new
-    manifest key, and it touches the lockfile's `manifest-checksum`, `jrs add`
-    and `jrs outdated`. It is the managed-versions item in section 2. The
-    second writes every version out in full at migrate
-    time, which is simpler but means migration fetches the BOM, and migration
-    never touches the network today (`migrate/maven.rs`). Either way it needs a spec
-    decision. Maven's `spring-boot-starter-parent` has the same problem: it is a
-    parent in a repository, so it is reported and its managed versions are lost.
-  - *Proof.* Add Groovy and Kotlin DSL fixtures under `tests/fixtures/migrate/`,
-    taken unchanged from `start.spring.io`. Add a `network-tests` case that
-    migrates one of them, then builds it, runs its tests and runs the packaged
-    jar up to a started application context. Kotlin on Spring also needs the
-    `allopen` compiler plugin, which is still a non-goal (see the last section).
-- **Task tool dependencies (T3).** Java tools from Maven Central —
-  `google-java-format`, Checkstyle, Flyway — as a task's own dependencies,
-  resolved as a graph separate from the project's and pinned in `jrs.lock`
-  ([TASKS.md §8](specs/TASKS.md#8-tool-dependencies-a-later-milestone)). Deferred
-  until tasks and hooks have seen real use; it changes the lockfile format.
-  Most of what Gradle does with third-party plugins would become a jrs task
-  through this item (section 5).
+  "not migrated" block is a candidate for translation. Profiles and anything
+  computed still do not translate, and neither does `maven-antrun-plugin`; an
+  `exec-maven-plugin` execution in a phase jrs has no hook for is reported
+  whole. A Spring Boot build in Kotlin migrates, but does not build as Spring
+  expects: Kotlin on Spring needs the `allopen` compiler plugin (see the last
+  section). Each item in sections 2–3 that answers a Gradle construct
+  (`maxParallelForks`) should arrive with its migration row and a fixture.
 
-## 8. Needs a spec decision first
+## 7. Needs a spec decision first
 
 These cross a line drawn in SPEC §1.2 or §13 (or the dependency list). They are
 listed so the discussion has a home, not because they are planned.

@@ -176,9 +176,17 @@ regression, not a style nit.
   `Manifest::effective_dependencies()` — the declared dependencies plus the
   languages' runtime libraries, declared last — never `manifest.dependencies`
   alone; `render()` never writes the implied ones.
-- **A compiler's graph never meets the project's.** `resolve::resolve_tool`
-  resolves it alone, so the Kotlin compiler's own coroutines cannot mediate
-  against the project's.
+- **A tool's graph never meets the project's.** `resolve::resolve_tool`
+  resolves a compiler alone, and `resolve::resolve_tool_dependencies` a task's
+  `[tasks.<name>.dependencies]` (a `[[tool]]` block named `tasks.<name>`), so
+  the Kotlin compiler's own coroutines cannot mediate against the project's.
+  `[managed]` does not reach them either.
+- **A managed version is settled before mediation.** `[managed]` (SPEC §8.9),
+  its own entries first and then each BOM's, replaces the version any POM asks
+  for, in `resolve::admissible`; a version declared in `[dependencies]` still
+  wins for its own dependency. A dependency written without a version (`{}`,
+  `Dependency::is_managed`) takes it from there. A manifest without the table
+  keeps its `manifest-checksum` and its lockfile byte for byte.
 
 ## Tests
 

@@ -457,6 +457,8 @@ pub struct Context<'a> {
     pub classpaths: Option<&'a Classpaths>,
     /// Present once `package` has written the jar.
     pub jar: Option<&'a Path>,
+    /// The jars of the task's own `dependencies`, once fetched (TASKS.md §8).
+    pub tool_classpath: Option<&'a [PathBuf]>,
     pub offline: bool,
     /// The `PATH` jrs inherited, which the JDK's `bin` goes in front of.
     pub path: Option<&'a std::ffi::OsStr>,
@@ -562,8 +564,35 @@ pub fn prepare(task: &TaskDef, ctx: &Context<'_>, extra_args: &[String]) -> Resu
             _ => static_value(manifest, p),
         }
     };
+    // A `main` or `script` with dependencies of its own gets them as `-cp`,
+    // from an argfile, as `{classpath-argfile}` gets the project's.
+    let tool_argfile = tasks_dir(manifest).join(format!("{}.tool.args", task.name));
+    let tool_classpath = if task.dependencies.is_empty() {
+        None
+    } else {
+        Some(ctx.tool_classpath.ok_or_else(|| {
+            JrsError::build(format!(
+                "task `{}`: its dependencies have not been resolved",
+                task.name
+            ))
+        })?)
+    };
+    if let Some(classpath) = tool_classpath {
+        if let Some(dir) = tool_argfile.parent() {
+            std::fs::create_dir_all(dir).path(dir)?;
+        }
+        let text = render_argfile(&["-cp".to_string(), join(classpath)], &[]);
+        std::fs::write(&tool_argfile, text).path(&tool_argfile)?;
+    }
     let search_path = task_path(ctx);
-    let launch = launch(task, extra_args, ctx, &search_path, &mut value)?;
+    let launch = launch(
+        task,
+        extra_args,
+        ctx,
+        tool_classpath.map(|_| tool_argfile.as_path()),
+        &search_path,
+        &mut value,
+    )?;
     let cwd = match &task.cwd {
         Some(t) => root.join(t.expand(&mut value)?),
         None => root.clone(),
@@ -596,6 +625,7 @@ pub fn prepare(task: &TaskDef, ctx: &Context<'_>, extra_args: &[String]) -> Resu
             ctx,
             &inputs,
             needs_classpath(task),
+            tool_classpath.unwrap_or_default(),
         )?)
     };
     Ok(Prepared {
@@ -610,14 +640,17 @@ pub fn prepare(task: &TaskDef, ctx: &Context<'_>, extra_args: &[String]) -> Resu
 }
 
 /// The process a task's action starts: its command, its `args`, then
-/// `extra_args`.
+/// `extra_args`. `tool_argfile` holds `-cp` and the task's own dependencies,
+/// when it has any.
 fn launch(
     task: &TaskDef,
     extra_args: &[String],
     ctx: &Context<'_>,
+    tool_argfile: Option<&Path>,
     search_path: &OsString,
     value: &mut impl FnMut(Placeholder) -> Result<String>,
 ) -> Result<Launch> {
+    let classpath_arg = tool_argfile.map(|a| format!("@{}", a.display()));
     let root = static_root(ctx.manifest);
     let mut trailing = expand_list(&task.args, &mut *value)?;
     trailing.extend(extra_args.iter().cloned());
@@ -640,7 +673,22 @@ fn launch(
                     file.display()
                 )));
             }
-            let mut command = vec![file.display().to_string()];
+            let mut command: Vec<String> = classpath_arg.into_iter().collect();
+            command.push(file.display().to_string());
+            command.extend(trailing);
+            Launch::Exec {
+                program: ctx.toolchain.java.clone(),
+                args: command,
+            }
+        }
+        Some(Action::Main(class)) => {
+            let Some(classpath_arg) = classpath_arg else {
+                return Err(JrsError::build(format!(
+                    "task `{}` runs `{class}`, but has no dependencies to find it in",
+                    task.name
+                )));
+            };
+            let mut command = vec![classpath_arg, class.clone()];
             command.extend(trailing);
             Launch::Exec {
                 program: ctx.toolchain.java.clone(),
@@ -779,7 +827,8 @@ fn environment(
 /// the expanded command, its working directory and own environment, the JDK,
 /// each input file's size and modification time, and, when it reads a
 /// classpath, each jar's too — a snapshot changes without changing its path,
-/// as the compile fingerprint knows (SPEC §7.2).
+/// as the compile fingerprint knows (SPEC §7.2). The task's own tool jars
+/// always count: they are what runs.
 fn fingerprint(
     launch: &Launch,
     cwd: &Path,
@@ -787,6 +836,7 @@ fn fingerprint(
     ctx: &Context<'_>,
     inputs: &[PathBuf],
     reads_classpath: bool,
+    tool_classpath: &[PathBuf],
 ) -> Result<String> {
     let mut s = String::new();
     match launch {
@@ -815,6 +865,11 @@ fn fingerprint(
             if let Some((size, modified)) = stamp(jar) {
                 let _ = writeln!(s, "jar {} {size} {modified}", jar.display());
             }
+        }
+    }
+    for jar in tool_classpath {
+        if let Some((size, modified)) = stamp(jar) {
+            let _ = writeln!(s, "tool {} {size} {modified}", jar.display());
         }
     }
     for input in inputs {
@@ -932,6 +987,7 @@ mod tests {
             hook: None,
             classpaths: None,
             jar: None,
+            tool_classpath: None,
             offline: false,
             path: None,
         }
@@ -1329,6 +1385,92 @@ mod tests {
         again.record().unwrap();
         again.forget();
         assert!(!again.is_fresh());
+    }
+
+    #[test]
+    fn a_main_task_runs_its_class_from_its_own_dependencies() {
+        let tree = Tree::new("main");
+        let m = tree.manifest(
+            "[tasks.fmt]\nmain = 'com.example.Fmt'\nargs = ['--replace']\n\
+             [tasks.fmt.dependencies]\n'com.example:fmt' = '1.0'\n",
+        );
+        let t = toolchain();
+        let mut ctx = context(&m, &t);
+        let task = m.task("fmt").unwrap();
+        let err = prepare(task, &ctx, &[]).unwrap_err().to_string();
+        assert!(err.contains("have not been resolved"), "{err}");
+
+        let jars = [
+            PathBuf::from("/cache/fmt-1.0.jar"),
+            PathBuf::from("/cache/dep-2.0.jar"),
+        ];
+        ctx.tool_classpath = Some(&jars);
+        let prepared = prepare(task, &ctx, &["x".to_string()]).unwrap();
+        let argfile = tree.0.join("target/.jrs/tasks/fmt.tool.args");
+        let Launch::Exec { program, args } = &prepared.launch else {
+            panic!("{:?}", prepared.launch);
+        };
+        assert_eq!(program, &t.java);
+        assert_eq!(
+            args,
+            &[
+                format!("@{}", argfile.display()),
+                "com.example.Fmt".to_string(),
+                "--replace".to_string(),
+                "x".to_string()
+            ]
+        );
+        let text = std::fs::read_to_string(&argfile).unwrap();
+        assert!(text.starts_with("-cp"), "{text}");
+        assert!(
+            text.contains("fmt-1.0.jar") && text.contains("dep-2.0.jar"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn a_script_with_dependencies_gets_them_as_its_classpath() {
+        let tree = Tree::new("script-deps");
+        tree.write("Gen.java", "class Gen {}");
+        let m = tree.manifest(
+            "[tasks.gen]\nscript = 'Gen.java'\n[tasks.gen.dependencies]\n'g:poet' = '1.0'\n",
+        );
+        let t = toolchain();
+        let jars = [PathBuf::from("/cache/poet-1.0.jar")];
+        let mut ctx = context(&m, &t);
+        ctx.tool_classpath = Some(&jars);
+        let prepared = prepare(m.task("gen").unwrap(), &ctx, &[]).unwrap();
+        let Launch::Exec { args, .. } = &prepared.launch else {
+            panic!("{:?}", prepared.launch);
+        };
+        assert!(args[0].starts_with('@') && args[0].ends_with("gen.tool.args"));
+        assert!(args[1].ends_with("Gen.java"), "{args:?}");
+    }
+
+    #[test]
+    fn a_fingerprint_follows_the_tasks_own_tool_jars() {
+        let tree = Tree::new("tool-fingerprint");
+        tree.write("in.txt", "x");
+        let jar = tree.write("tools/tool.jar", "a");
+        let m = tree.manifest(
+            "[tasks.t]\nmain = 'x.Y'\ninputs = ['in.txt']\noutputs = ['out']\n\
+             [tasks.t.dependencies]\n'g:tool' = '1.0'\n",
+        );
+        let t = toolchain();
+        let jars = [jar.clone()];
+        let mut ctx = context(&m, &t);
+        ctx.tool_classpath = Some(&jars);
+        let task = m.task("t").unwrap();
+        let before = prepare(task, &ctx, &[]).unwrap().fingerprint.unwrap();
+        assert_eq!(
+            before,
+            prepare(task, &ctx, &[]).unwrap().fingerprint.unwrap()
+        );
+        std::fs::write(&jar, "a different tool").unwrap();
+        assert_ne!(
+            before,
+            prepare(task, &ctx, &[]).unwrap().fingerprint.unwrap()
+        );
     }
 
     #[test]

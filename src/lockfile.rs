@@ -127,15 +127,22 @@ impl Lockfile {
     }
 
     /// Whether this lockfile still describes `manifest`: its dependencies,
-    /// and a pinned compiler for every language it turns on.
+    /// a pinned compiler for every language it turns on, and a pinned graph
+    /// for every task with dependencies of its own.
     #[must_use]
     pub fn matches(&self, manifest: &Manifest) -> bool {
+        let pinned = |name: String| self.tools.iter().any(|t| t.name == name);
         supported(self.version)
             && self.manifest_checksum == manifest_checksum(manifest)
             && manifest
                 .languages
                 .iter()
-                .all(|c| self.tools.iter().any(|t| t.name == c.language.tool_name()))
+                .all(|c| pinned(c.language.tool_name()))
+            && manifest
+                .tasks
+                .iter()
+                .filter(|t| !t.dependencies.is_empty())
+                .all(|t| pinned(t.tool_name()))
     }
 
     /// Read and parse the lockfile at `path`; `Ok(None)` when there is none.
@@ -277,6 +284,10 @@ fn render_package(s: &mut String, header: &str, p: &ResolvedPackage) {
     let _ = writeln!(s, "packaging = \"{}\"", p.packaging);
     let _ = writeln!(s, "depth = {}", p.depth);
     let _ = writeln!(s, "direct = {}", p.direct);
+    // Only when true, so a lockfile without `[managed]` is unchanged.
+    if p.managed {
+        s.push_str("managed = true\n");
+    }
     if let Some(c) = &p.checksum {
         let _ = writeln!(s, "checksum = \"{c}\"");
     }
@@ -416,6 +427,10 @@ fn read_package(value: &toml::Value, path: &Path) -> Result<ResolvedPackage> {
             .and_then(|v| v.as_str())
             .map(str::to_string),
         mediated: false,
+        managed: t
+            .get("managed")
+            .and_then(toml::Value::as_bool)
+            .unwrap_or(false),
     })
 }
 
@@ -453,6 +468,12 @@ pub fn manifest_checksum(manifest: &Manifest) -> String {
     for d in &manifest.dev_dependencies {
         let _ = writeln!(canonical, "dev {}", line(d));
     }
+    // A managed version changes what the graph resolves to, wherever the
+    // artifact turns up. A manifest without `[managed]` adds nothing.
+    for m in &manifest.managed {
+        let kind = if m.bom { "bom" } else { "managed" };
+        let _ = writeln!(canonical, "{kind} {}:{} {}", m.group, m.artifact, m.version);
+    }
     for r in &manifest.repositories {
         // `groups` decide which repository an artifact may come from, and so
         // whether it resolves at all.
@@ -464,6 +485,13 @@ pub fn manifest_checksum(manifest: &Manifest) -> String {
     }
     for c in &manifest.languages {
         let _ = writeln!(canonical, "lang {} {}", c.language.key(), c.version);
+    }
+    // A task's own dependencies are resolved and pinned too (TASKS.md §8);
+    // the rest of a task changes no resolution.
+    for task in &manifest.tasks {
+        for d in &task.dependencies {
+            let _ = writeln!(canonical, "task {} {}", task.name, line(d));
+        }
     }
     format!("sha256:{}", sha256_hex(canonical.as_bytes()))
 }
@@ -489,6 +517,7 @@ mod tests {
             jar: Some(PathBuf::from("/cache/whatever.jar")),
             checksum: Some("sha1:abc123".into()),
             mediated: false,
+            managed: false,
         }
     }
 
@@ -789,6 +818,75 @@ mod tests {
         assert_ne!(manifest_checksum(&base), manifest_checksum(&local));
         assert_ne!(manifest_checksum(&local), manifest_checksum(&moved));
         assert_ne!(manifest_checksum(&plain), manifest_checksum(&grouped));
+    }
+
+    #[test]
+    fn the_checksum_follows_managed_versions_and_boms() {
+        let base = manifest("[dependencies]\n'g:a'='1.0'");
+        let managed = manifest("[managed]\n'g:b'='2.0'\n[dependencies]\n'g:a'='1.0'");
+        let bumped = manifest("[managed]\n'g:b'='2.1'\n[dependencies]\n'g:a'='1.0'");
+        let bom =
+            manifest("[managed]\n'g:b'={version='2.0', bom=true}\n[dependencies]\n'g:a'='1.0'");
+        let versionless = manifest("[managed]\n'g:b'='2.0'\n[dependencies]\n'g:a'='1.0'\n'g:b'={}");
+        assert_ne!(manifest_checksum(&base), manifest_checksum(&managed));
+        assert_ne!(manifest_checksum(&managed), manifest_checksum(&bumped));
+        assert_ne!(manifest_checksum(&managed), manifest_checksum(&bom));
+        assert_ne!(manifest_checksum(&managed), manifest_checksum(&versionless));
+    }
+
+    #[test]
+    fn a_managed_package_says_so_in_the_lockfile_only_when_it_is() {
+        let m = manifest("[managed]\n'g:child'='2.0'\n[dependencies]\n'g:a'='1.0'");
+        let mut r = resolution();
+        r.packages[1].managed = true;
+        let text = Lockfile::from_resolution(&m, &r).render();
+        assert_eq!(text.matches("managed = true").count(), 1, "{text}");
+        let again = Lockfile::parse(&text, Path::new("jrs.lock")).unwrap();
+        let child = again
+            .packages
+            .iter()
+            .find(|p| p.coord.artifact == "child")
+            .unwrap();
+        assert!(child.managed);
+        assert!(again.packages.iter().filter(|p| p.managed).count() == 1);
+        assert!(
+            !Lockfile::from_resolution(&m, &resolution())
+                .render()
+                .contains("managed"),
+            "nothing is written for a package [managed] did not decide"
+        );
+    }
+
+    #[test]
+    fn a_task_with_dependencies_needs_its_graph_pinned() {
+        let task = "[tasks.fmt]\nmain = 'x.Y'\n[tasks.fmt.dependencies]\n";
+        let m = manifest(&format!("[dependencies]\n'g:a'='1.0'\n{task}'g:fmt'='1.0'"));
+        let without = Lockfile::from_resolution(&m, &resolution());
+        assert!(!without.matches(&m), "the task's tools are not pinned");
+        let with = without.with_tool("tasks.fmt", &compiler_graph());
+        assert!(with.matches(&m));
+        let text = with.render();
+        assert!(text.contains("version = 2\n"), "{text}");
+        assert!(
+            text.contains("\n[[tool]]\nname = \"tasks.fmt\"\n"),
+            "{text}"
+        );
+        assert!(
+            Lockfile::parse(&text, Path::new("jrs.lock"))
+                .unwrap()
+                .matches(&m)
+        );
+
+        // The task's dependencies count; the rest of a task does not.
+        let base = manifest("[dependencies]\n'g:a'='1.0'");
+        let bumped = manifest(&format!("[dependencies]\n'g:a'='1.0'\n{task}'g:fmt'='1.1'"));
+        assert_ne!(manifest_checksum(&base), manifest_checksum(&m));
+        assert_ne!(manifest_checksum(&m), manifest_checksum(&bumped));
+        let described = manifest(
+            "[dependencies]\n'g:a'='1.0'\n[tasks.fmt]\nmain = 'x.Y'\ndescription = 'Format'\n\
+             [tasks.fmt.dependencies]\n'g:fmt'='1.0'",
+        );
+        assert_eq!(manifest_checksum(&m), manifest_checksum(&described));
     }
 
     #[test]

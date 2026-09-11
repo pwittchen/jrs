@@ -99,6 +99,9 @@ pub fn migrate(build_file: &Path, root: &Path) -> Result<Migration> {
     // Before the dependencies: `kotlin("reflect")` takes [kotlin]'s version.
     read_kotlin(&script, &plugins, &mut out, &mut report);
     read_main_class(&script, &mut out, &mut report);
+    // Before the dependencies: whether anything manages versions decides
+    // whether a coordinate without one can be migrated.
+    read_managed(&script, &plugins, &catalog, &mut out, &mut report);
     read_dependencies(&script, &catalog, &mut out, &mut report);
     // After them: `groovy` and `scala` take their library's version.
     read_library_languages(&plugins, &mut out, &mut report);
@@ -192,9 +195,10 @@ fn read_catalog(root: &Path, report: &mut Report) -> Catalog {
     let libraries = table.get("libraries").and_then(|v| v.as_table());
     for (alias, value) in libraries.into_iter().flatten() {
         let Some(entry) = value.as_table() else {
-            // The compact `alias = "g:a:v"` form.
+            // The compact `alias = "g:a:v"` form, or `"g:a"` for a library a
+            // platform versions.
             if let Some(gav) = value.as_str()
-                && let Some(dep) = parse_gav(gav)
+                && let Some(dep) = parse_gav(gav).or_else(|| parse_ga(gav))
             {
                 entries.insert(alias.clone(), dep);
             }
@@ -215,6 +219,12 @@ fn read_catalog(root: &Path, report: &mut Report) -> Catalog {
             }
         };
 
+        // No version at all is a library a platform versions; it is read as
+        // one, and whether anything manages it is decided where it is used.
+        if entry.get("version").is_none() && entry.get("version.ref").is_none() {
+            entries.insert(alias.clone(), Dependency::new(group, artifact, ""));
+            continue;
+        }
         let version = match entry.get("version") {
             Some(toml::Value::String(v)) => Some(v.clone()),
             Some(toml::Value::Table(t)) => t
@@ -300,10 +310,21 @@ fn read_dependencies(script: &str, catalog: &Catalog, out: &mut Manifest, report
     let mut closure: Option<(Target, usize, usize)> = None;
     let mut processors = Vec::new();
     let kotlin = out.language(Language::Kotlin).map(|c| c.version.clone());
+    let managed = !out.managed.is_empty();
+    // How deep inside `constraints { }` the scan is; `read_managed` read it.
+    let mut constraints = 0usize;
 
     for line in block_lines(script, "dependencies") {
         let trimmed = line.trim();
         let (opens, closes) = (trimmed.matches('{').count(), trimmed.matches('}').count());
+        if constraints > 0 {
+            constraints = (constraints + opens).saturating_sub(closes);
+            continue;
+        }
+        if trimmed.starts_with("constraints") && opens > closes {
+            constraints = opens - closes;
+            continue;
+        }
         if let Some((target, index, depth)) = &mut closure {
             if let Some(exclusion) = parse_exclude(trimmed) {
                 table(out, *target)[*index].exclusions.push(exclusion);
@@ -342,6 +363,10 @@ fn read_dependencies(script: &str, catalog: &Catalog, out: &mut Manifest, report
             Some(at) => (&trimmed[..at], Some(&trimmed[at..])),
             None => (trimmed, None),
         };
+        // `platform(...)` is a BOM, which `read_managed` put in [managed].
+        if platform_argument(declaration).is_some() {
+            continue;
+        }
         // `files(...)` and `fileTree(...)`: jars in the project, not coordinates.
         if let Some(jars) = super::gradle_files::read(trimmed, &out.root, report) {
             for dep in jars {
@@ -349,9 +374,14 @@ fn read_dependencies(script: &str, catalog: &Catalog, out: &mut Manifest, report
             }
             continue;
         }
-        let Some(mut dep) =
-            read_declaration(declaration, &config, kotlin.as_deref(), catalog, report)
-        else {
+        let Some(mut dep) = read_declaration(
+            declaration,
+            &config,
+            kotlin.as_deref(),
+            managed,
+            catalog,
+            report,
+        ) else {
             continue;
         };
         if let Some(body) = inline_closure {
@@ -388,42 +418,65 @@ fn read_dependencies(script: &str, catalog: &Catalog, out: &mut Manifest, report
 
 /// One dependency declaration, without its closure: a catalog reference, a
 /// `g:a:v` literal, the map notation, or `kotlin("<module>")` at `kotlin`,
-/// the `[kotlin]` version.
+/// the `[kotlin]` version. A coordinate without a version is migrated as one
+/// when something `[managed]` holds (`managed`) can version it.
 fn read_declaration(
     text: &str,
     config: &str,
     kotlin: Option<&str>,
+    managed: bool,
     catalog: &Catalog,
     report: &mut Report,
 ) -> Option<Dependency> {
     if let Some((module, version)) = kotlin_notation(text) {
         return kotlin_dependency(text.trim(), &module, version.as_deref().or(kotlin), report);
     }
+    let trimmed = text.trim();
+    let unversioned = |dep: Dependency, report: &mut Report| {
+        if managed {
+            return Some(dep);
+        }
+        report.skipped(format!(
+            "`{trimmed}` — {} has no version, and nothing in the build manages one",
+            dep.key()
+        ));
+        None
+    };
 
     // `libs.foo.bar`, resolved through the version catalog.
     if let Some(reference) = catalog_reference(text) {
         let found = catalog.get(&reference).cloned();
-        if found.is_none() {
-            report.skipped(format!(
-                "`{config} libs.{reference}` — no such alias in the version \
-                 catalog; add it to jrs.toml by hand"
-            ));
-        }
-        return found;
+        return match found {
+            Some(dep) if dep.is_managed() => unversioned(dep, report),
+            Some(dep) => Some(dep),
+            None => {
+                report.skipped(format!(
+                    "`{config} libs.{reference}` — no such alias in the version \
+                     catalog; add it to jrs.toml by hand"
+                ));
+                None
+            }
+        };
     }
 
-    // `implementation 'g:a:v'` / `implementation("g:a:v")`
+    // `implementation 'g:a:v'` / `implementation("g:a:v")`, or `'g:a'`
     let literals = quoted(text);
     if let Some(dep) = literals.first().and_then(|s| parse_gav(s)) {
         return Some(dep);
     }
+    if let Some(dep) = literals.first().and_then(|s| parse_ga(s)) {
+        return unversioned(dep, report);
+    }
 
     // `implementation group: 'g', name: 'a', version: 'v'`
     if let Some(dep) = parse_map_notation(text) {
-        return Some(dep);
+        return if dep.is_managed() {
+            unversioned(dep, report)
+        } else {
+            Some(dep)
+        };
     }
 
-    let trimmed = text.trim();
     if literals.len() == 1 {
         let literal = &literals[0];
         let why = if literal.contains('$') {
@@ -544,6 +597,193 @@ fn parse_exclude(text: &str) -> Option<Exclusion> {
         group: group.unwrap_or_else(|| "*".into()),
         artifact: module.unwrap_or_else(|| "*".into()),
     })
+}
+
+/// One statement in `constraints { }`. A constraint versions the artifact
+/// wherever it turns up, which is what a `[managed]` version does; only a
+/// literal `g:a:v` with no closure (`plain`) is one jrs can read.
+fn constraint(
+    statement: &str,
+    plain: bool,
+    out: &mut Manifest,
+    report: &mut Report,
+    pinned: &mut usize,
+) {
+    if !leading_word(statement).is_some_and(|w| is_configuration(&w)) {
+        return;
+    }
+    match quoted(statement).first().and_then(|s| parse_gav(s)) {
+        Some(d) if plain => {
+            if super::add_managed(out, &d.group, &d.artifact, &d.version) {
+                *pinned += 1;
+            }
+        }
+        _ => report.skipped(format!(
+            "`{statement}` — a constraint jrs cannot read: only a literal \
+             group:artifact:version is; pin it in [managed] by hand"
+        )),
+    }
+}
+
+/// What follows `platform(` or `enforcedPlatform(` in a declaration: the
+/// BOM it names, and whatever comes after.
+fn platform_argument(text: &str) -> Option<&str> {
+    ["enforcedPlatform(", "platform("]
+        .iter()
+        .find_map(|call| text.find(call).map(|at| &text[at + call.len()..]))
+}
+
+/// Whether `word` is a configuration a dependency is declared in.
+fn is_configuration(word: &str) -> bool {
+    [
+        MAIN_CONFIGS,
+        COMPILE_ONLY_CONFIGS,
+        RUNTIME_ONLY_CONFIGS,
+        PROCESSOR_CONFIGS,
+        TEST_CONFIGS,
+    ]
+    .iter()
+    .any(|configs| configs.contains(&word))
+}
+
+/// What versions the dependencies the build leaves unversioned, into
+/// `[managed]` (SPEC §8.9): Spring Boot's plugins, which import Boot's BOM;
+/// the dependency-management plugin's `dependencyManagement { }` block, with
+/// its `mavenBom` imports and `dependency` pins; and `platform()` and
+/// `constraints { }` in `dependencies { }`.
+fn read_managed(
+    script: &str,
+    plugins: &[Plugin],
+    catalog: &Catalog,
+    out: &mut Manifest,
+    report: &mut Report,
+) {
+    let boot = plugins.iter().find(|p| p.id == "org.springframework.boot");
+    let boot_version = boot.and_then(|p| p.version.clone());
+    if let Some(boot) = boot {
+        let from = "plugin `org.springframework.boot`";
+        let dependency_management = plugins
+            .iter()
+            .any(|p| p.id == "io.spring.dependency-management");
+        match &boot.version {
+            // Without the dependency-management plugin, Boot's BOM comes in
+            // only through `platform(SpringBootPlugin.BOM_COORDINATES)`,
+            // which is read below.
+            Some(version) if dependency_management => super::spring_boot_bom(
+                out,
+                version,
+                "plugins `org.springframework.boot` and `io.spring.dependency-management`",
+                report,
+            ),
+            Some(_) => {}
+            None => report.skipped(format!(
+                "{from} — its version is set somewhere jrs does not read (settings, a \
+                 catalog, a variable), so Spring Boot's BOM was not added to [managed]"
+            )),
+        }
+        super::spring_boot_parameters(out, from, report);
+        super::spring_boot_application(out, from, report);
+    }
+
+    let mut pinned = 0;
+    for line in block_lines(script, "dependencyManagement") {
+        // `imports { mavenBom '...' }` is as often written on one line as on
+        // three, so each statement between braces is read on its own.
+        for statement in line.split(['{', '}', ';']).map(str::trim) {
+            let Some(word) = leading_word(statement) else {
+                continue;
+            };
+            let literal = quoted(statement).first().and_then(|s| parse_gav(s));
+            match (word.as_str(), literal) {
+                ("mavenBom", Some(bom)) => super::add_bom(
+                    out,
+                    &bom.group,
+                    &bom.artifact,
+                    &bom.version,
+                    &format!("`{statement}`"),
+                    report,
+                ),
+                ("dependency", Some(d)) => {
+                    if super::add_managed(out, &d.group, &d.artifact, &d.version) {
+                        pinned += 1;
+                    }
+                }
+                ("mavenBom" | "dependency", None) => report.skipped(format!(
+                    "`{statement}` — not a literal group:artifact:version, which jrs can \
+                     read without running Gradle; add it to [managed] by hand"
+                )),
+                ("dependencySet", _) => report.skipped(format!(
+                    "`{statement}` — dependency sets are not read; pin each version in \
+                     [managed]"
+                )),
+                _ => {}
+            }
+        }
+    }
+
+    let mut constraints = 0usize;
+    for line in block_lines(script, "dependencies") {
+        let trimmed = line.trim();
+        let (opens, closes) = (trimmed.matches('{').count(), trimmed.matches('}').count());
+        if constraints > 0 {
+            constraints = (constraints + opens).saturating_sub(closes);
+            constraint(trimmed, opens == 0, out, report, &mut pinned);
+            continue;
+        }
+        if let Some(rest) = trimmed.strip_prefix("constraints")
+            && rest.trim_start().starts_with('{')
+        {
+            // `constraints { implementation 'g:a:v' }` on one line.
+            for statement in rest.trim_start()[1..].split(['}', ';']) {
+                constraint(statement.trim(), true, out, report, &mut pinned);
+            }
+            constraints = opens.saturating_sub(closes);
+            continue;
+        }
+        let Some(argument) = platform_argument(trimmed) else {
+            continue;
+        };
+        let bom = if argument
+            .trim_start()
+            .starts_with("SpringBootPlugin.BOM_COORDINATES")
+        {
+            boot_version
+                .as_ref()
+                .map(|v| Dependency::new(super::SPRING_BOOT_GROUP, "spring-boot-dependencies", v))
+        } else if let Some(reference) = catalog_reference(argument) {
+            catalog.get(&reference).filter(|d| !d.is_managed()).cloned()
+        } else {
+            quoted(argument).first().and_then(|s| parse_gav(s))
+        };
+        let Some(bom) = bom else {
+            report.skipped(format!(
+                "`{trimmed}` — the platform is not a group:artifact:version jrs can read; \
+                 add it to [managed] as a BOM by hand"
+            ));
+            continue;
+        };
+        super::add_bom(
+            out,
+            &bom.group,
+            &bom.artifact,
+            &bom.version,
+            &format!("`{trimmed}`"),
+            report,
+        );
+        if trimmed.contains("enforcedPlatform(") {
+            report.review(format!(
+                "`{trimmed}` — [managed] holds the whole graph to the BOM's versions, as \
+                 enforcedPlatform does, but a version written in [dependencies] still wins"
+            ));
+        }
+    }
+    if pinned > 0 {
+        let s = if pinned == 1 { "" } else { "s" };
+        report.migrated(format!(
+            "[managed] — {pinned} version{s} from the build's dependency management and \
+             constraints"
+        ));
+    }
 }
 
 /// `applicationDefaultJvmArgs` for `jrs run`; the test task's `jvmArgs` and
@@ -961,8 +1201,15 @@ fn report_the_unreadable(
         // Language plugins and Kotlin's compiler plugins have been reported,
         // migrated or not, by `read_kotlin` and `read_library_languages`.
         let id = plugin.id.as_str();
-        let understood = matches!(id, "java" | "java-library" | "application")
-            || language_plugin(id).is_some()
+        // Spring Boot's two have been reported by `read_managed`.
+        let understood = matches!(
+            id,
+            "java"
+                | "java-library"
+                | "application"
+                | "org.springframework.boot"
+                | "io.spring.dependency-management"
+        ) || language_plugin(id).is_some()
             || kotlin_compiler_plugin(id).is_some();
         if !understood {
             report.skipped(format!("plugin `{id}` — jrs has no plugin system"));
@@ -1348,13 +1595,30 @@ fn parse_gav(text: &str) -> Option<Dependency> {
     Some(dep)
 }
 
+/// `g:a`: a library whose version a platform or BOM supplies.
+fn parse_ga(text: &str) -> Option<Dependency> {
+    if text.contains(['$', '@']) {
+        return None;
+    }
+    let parts: Vec<&str> = text.split(':').map(str::trim).collect();
+    match parts.as_slice() {
+        [g, a] if !g.is_empty() && !a.is_empty() => Some(Dependency::new(*g, *a, "")),
+        _ => None,
+    }
+}
+
 /// `implementation group: 'g', name: 'a', version: 'v'` (and `classifier:`).
+/// Without `version:`, the version is left to `[managed]`.
 fn parse_map_notation(line: &str) -> Option<Dependency> {
     let field = |key: &str| -> Option<String> {
         let at = line.find(&format!("{key}:"))?;
         quoted(&line[at..]).into_iter().next()
     };
-    let mut dep = Dependency::new(field("group")?, field("name")?, field("version")?);
+    let mut dep = Dependency::new(
+        field("group")?,
+        field("name")?,
+        field("version").unwrap_or_default(),
+    );
     dep.classifier = field("classifier");
     Some(dep)
 }
@@ -2018,5 +2282,105 @@ junit = "org.junit.jupiter:junit-jupiter:5.10.2"
             ("org.jetbrains.kotlin.jvm".into(), None)
         );
         assert!(read_plugin("alias(libs.plugins.x)").is_none());
+    }
+
+    #[test]
+    fn platforms_constraints_and_dependency_management_become_managed() {
+        let dir = Dir::new("managed");
+        let migration = dir.migrate(
+            "plugins { id 'java' }\n\
+             dependencyManagement {\n    \
+                 imports { mavenBom 'org.springframework.cloud:spring-cloud-dependencies:2025.0.0' }\n    \
+                 dependencies {\n        dependency 'com.google.guava:guava:33.0.0-jre'\n    }\n\
+             }\n\
+             dependencies {\n    \
+                 implementation platform('io.micronaut.platform:micronaut-platform:4.5.0')\n    \
+                 implementation(enforcedPlatform(\"com.fasterxml.jackson:jackson-bom:2.19.0\"))\n    \
+                 implementation 'org.springframework.cloud:spring-cloud-starter-config'\n    \
+                 constraints {\n        \
+                     implementation 'org.slf4j:slf4j-api:2.0.17'\n        \
+                     implementation('org.yaml:snakeyaml') { version { strictly '2.2' } }\n    \
+                 }\n    \
+                 constraints { runtimeOnly 'org.postgresql:postgresql:42.7.3' }\n\
+             }\n",
+        );
+        let m = &migration.manifest;
+        let managed: Vec<(String, bool)> = m
+            .managed
+            .iter()
+            .map(|x| (format!("{}:{}", x.key(), x.version), x.bom))
+            .collect();
+        assert_eq!(
+            managed,
+            [
+                (
+                    "org.springframework.cloud:spring-cloud-dependencies:2025.0.0".to_string(),
+                    true
+                ),
+                ("com.google.guava:guava:33.0.0-jre".to_string(), false),
+                (
+                    "io.micronaut.platform:micronaut-platform:4.5.0".to_string(),
+                    true
+                ),
+                ("com.fasterxml.jackson:jackson-bom:2.19.0".to_string(), true),
+                ("org.slf4j:slf4j-api:2.0.17".to_string(), false),
+                ("org.postgresql:postgresql:42.7.3".to_string(), false),
+            ]
+        );
+        // Platforms and constraints are not dependencies.
+        assert_eq!(m.dependencies.len(), 1, "{:?}", m.dependencies);
+        assert!(m.dependencies[0].is_managed());
+        let review = migration.report.needs_review.join("\n");
+        assert!(review.contains("enforcedPlatform"), "{review}");
+        let skipped = migration.report.not_migrated.join("\n");
+        assert!(skipped.contains("snakeyaml"), "{skipped}");
+        let text = migration.render_manifest();
+        Manifest::parse(&text, &dir.path.join("jrs.toml"), &dir.path).unwrap();
+    }
+
+    #[test]
+    fn a_dependency_without_a_version_needs_something_to_manage_it() {
+        let dir = Dir::new("versionless");
+        let migration = dir.migrate(
+            "dependencies {\n    implementation 'org.example:lib'\n    \
+             implementation group: 'org.example', name: 'other'\n}\n",
+        );
+        assert!(migration.manifest.dependencies.is_empty());
+        let skipped = migration.report.not_migrated.join("\n");
+        assert_eq!(
+            skipped
+                .matches("has no version, and nothing in the build manages one")
+                .count(),
+            2,
+            "{skipped}"
+        );
+    }
+
+    #[test]
+    fn the_spring_boot_plugin_needs_a_version_to_bring_its_bom() {
+        let dir = Dir::new("boot-no-version");
+        dir.write(
+            "src/main/kotlin/com/example/App.kt",
+            "package com.example\n\n@SpringBootApplication\nclass App\n",
+        );
+        let migration = dir.migrate(
+            "plugins {\n    id 'org.springframework.boot'\n    \
+             id 'io.spring.dependency-management'\n    \
+             id 'org.jetbrains.kotlin.jvm' version '2.4.20'\n}\n",
+        );
+        let m = &migration.manifest;
+        assert!(m.managed.is_empty());
+        assert_eq!(m.java.javac_args, vec!["-parameters"]);
+        assert_eq!(
+            m.main_class.as_deref(),
+            Some("com.example.AppKt"),
+            "Kotlin's main function compiles into <File>Kt"
+        );
+        let skipped = migration.report.not_migrated.join("\n");
+        assert!(
+            skipped.contains("Spring Boot's BOM was not added"),
+            "{skipped}"
+        );
+        assert!(!skipped.contains("no plugin system"), "{skipped}");
     }
 }

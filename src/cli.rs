@@ -246,6 +246,9 @@ pub enum Command {
         /// `scala-compiler` or `groovy-compiler`.
         #[arg(long, value_name = "NAME", conflicts_with = "why")]
         tool: Option<String>,
+        /// Show the graph of a task's own [tasks.<name>.dependencies] instead.
+        #[arg(long, value_name = "NAME", conflicts_with_all = ["why", "tool"])]
+        task: Option<String>,
     },
 
     /// Print the resolved classpath, for editors and ad-hoc `java` runs.
@@ -600,9 +603,12 @@ fn dispatch(cli: &Cli, ui: &Ui) -> Result<i32> {
         Command::Doc => session.doc_command(),
         Command::Task(args) => session.task_command(args),
         Command::Clean => session.clean_command(),
-        Command::Tree { depth, why, tool } => {
-            session.tree_command(*depth, why.as_deref(), tool.as_deref())
-        }
+        Command::Tree {
+            depth,
+            why,
+            tool,
+            task,
+        } => session.tree_command(*depth, why.as_deref(), tool.as_deref(), task.as_deref()),
         Command::Classpath { test, runtime } => session.classpath_command(*test, *runtime),
         Command::Update => session.update_command(),
         Command::Verify => session.verify_command(),
@@ -652,6 +658,12 @@ struct Session<'a> {
     resolution: OnceCell<Resolution>,
     /// Each language's compiler graph, resolved and pinned with the project's.
     tools: OnceCell<Vec<Tool>>,
+    /// Each task's own dependency graph (TASKS.md §8), by task name: resolved
+    /// and pinned with the project's, and downloaded then, or when the task
+    /// first runs.
+    task_tools: OnceCell<Vec<(String, Resolution)>>,
+    /// The classpaths of the task graphs downloaded so far, by task name.
+    task_classpaths: RefCell<HashMap<String, Vec<PathBuf>>>,
     built: OnceCell<Built>,
     /// Tasks already run (or found fresh) in this invocation.
     ran: RefCell<HashSet<String>>,
@@ -685,6 +697,8 @@ impl<'a> Session<'a> {
             toolchain: OnceCell::new(),
             resolution: OnceCell::new(),
             tools: OnceCell::new(),
+            task_tools: OnceCell::new(),
+            task_classpaths: RefCell::new(HashMap::new()),
             built: OnceCell::new(),
             ran: RefCell::new(HashSet::new()),
             done: RefCell::new(HashSet::new()),
@@ -1958,12 +1972,14 @@ impl<'a> Session<'a> {
         depth: Option<usize>,
         why: Option<&str>,
         tool: Option<&str>,
+        task: Option<&str>,
     ) -> Result<i32> {
         let resolution = self.dependencies(false)?;
-        let trees = match (tool, why) {
-            (Some(name), _) => vec![self.tool_tree(name, depth)?],
-            (None, Some(target)) => self.why(&resolution, target)?,
-            (None, None) => vec![self.tree(&resolution, depth)],
+        let trees = match (tool, task, why) {
+            (Some(name), _, _) => vec![self.tool_tree(name, depth)?],
+            (None, Some(name), _) => vec![self.task_tree(name, depth)?],
+            (None, None, Some(target)) => self.why(&resolution, target)?,
+            (None, None, None) => vec![self.tree(&resolution, depth)],
         };
         self.ui.suspend();
         for tree in &trees {
@@ -2007,8 +2023,10 @@ impl<'a> Session<'a> {
     }
 
     /// What `jrs outdated` checks, as (row name, group, artifact, current
-    /// version): the declared dependencies, then each language's compiler. A
-    /// local jar has no repository to ask, so it is left out.
+    /// version): the declared dependencies, `[managed]`, then each language's
+    /// compiler. A local jar has no repository to ask, and a dependency that
+    /// takes its version from `[managed]` is outdated through the entry there,
+    /// so both are left out. A BOM is outdated like any dependency.
     fn outdated_checks(&self) -> Vec<(String, String, String, String)> {
         let mut checks: Vec<(String, String, String, String)> = self
             .manifest
@@ -2021,9 +2039,18 @@ impl<'a> Session<'a> {
                     .iter()
                     .map(|d| (format!("{} (dev)", d.key()), d)),
             )
-            .filter(|(_, d)| !d.is_local())
+            .filter(|(_, d)| !d.is_local() && !d.is_managed())
             .map(|(name, d)| (name, d.group.clone(), d.artifact.clone(), d.version.clone()))
             .collect();
+        for m in &self.manifest.managed {
+            let kind = if m.bom { "bom" } else { "managed" };
+            checks.push((
+                format!("{} ({kind})", m.key()),
+                m.group.clone(),
+                m.artifact.clone(),
+                m.version.clone(),
+            ));
+        }
         for config in &self.manifest.languages {
             if let Some(compiler) = config.language.compiler(&config.version) {
                 checks.push((
@@ -2272,6 +2299,16 @@ impl<'a> Session<'a> {
         // it from, so that `jrs test --offline` works after a fetch.
         if let Ok(launcher) = junit::launcher_coordinate(&self.manifest, &resolution) {
             self.fetch_internal(&[(launcher, "test launcher")])?;
+        }
+        // Each task's own tools too, which a build otherwise downloads only
+        // when the task first runs, so that its hooks work under `--offline`.
+        for def in self
+            .manifest
+            .tasks
+            .iter()
+            .filter(|t| !t.dependencies.is_empty())
+        {
+            self.task_classpath(def)?;
         }
         let jars = resolution
             .packages
@@ -2722,6 +2759,11 @@ impl<'a> Session<'a> {
         } else {
             None
         };
+        let tool_classpath = if def.dependencies.is_empty() {
+            None
+        } else {
+            Some(self.task_classpath(def)?)
+        };
         let jar = self.jar.borrow().clone();
         let path = std::env::var_os("PATH");
         let ctx = task::Context {
@@ -2730,6 +2772,7 @@ impl<'a> Session<'a> {
             hook,
             classpaths: classpaths.as_ref(),
             jar: jar.as_deref(),
+            tool_classpath: tool_classpath.as_deref(),
             offline: self.offline,
             path: path.as_deref(),
         };
@@ -2804,8 +2847,14 @@ impl<'a> Session<'a> {
     fn dependencies(&self, force_update: bool) -> Result<Resolution> {
         let manifest = &self.manifest;
         let declared = manifest.dependencies.len() + manifest.dev_dependencies.len();
-        if declared == 0 && manifest.languages.is_empty() {
+        let tasks_with_tools: Vec<&TaskDef> = manifest
+            .tasks
+            .iter()
+            .filter(|t| !t.dependencies.is_empty())
+            .collect();
+        if declared == 0 && manifest.languages.is_empty() && tasks_with_tools.is_empty() {
             let _ = self.tools.set(Vec::new());
+            let _ = self.task_tools.set(Vec::new());
             return Ok(Resolution::default());
         }
 
@@ -2815,7 +2864,7 @@ impl<'a> Session<'a> {
         let lock_path = manifest.lock_path();
         let existing = Lockfile::load(&lock_path)?;
 
-        let (mut resolution, mut tools, fresh) = match existing {
+        let (mut resolution, mut tools, mut task_tools, fresh) = match existing {
             Some(lock) if lock.matches(manifest) && !force_update => {
                 self.ui.verbose(format!("reusing {}", lock_path.display()));
                 let tools = manifest
@@ -2828,7 +2877,11 @@ impl<'a> Session<'a> {
                         })
                     })
                     .collect();
-                (lock.to_resolution(), tools, false)
+                let task_tools = tasks_with_tools
+                    .iter()
+                    .filter_map(|t| Some((t.name.clone(), lock.tool(&t.tool_name())?)))
+                    .collect();
+                (lock.to_resolution(), tools, task_tools, false)
             }
             _ => {
                 let mut what = format!("{declared} declared dependencies");
@@ -2841,12 +2894,18 @@ impl<'a> Session<'a> {
                     let plural = if names.len() > 1 { "s" } else { "" };
                     let _ = write!(what, " and the {} compiler{plural}", names.join(" and "));
                 }
+                if !tasks_with_tools.is_empty() {
+                    let names: Vec<&str> =
+                        tasks_with_tools.iter().map(|t| t.name.as_str()).collect();
+                    let plural = if names.len() > 1 { "s" } else { "" };
+                    let _ = write!(what, " and the tools of task{plural} {}", names.join(", "));
+                }
                 self.ui.phase("Resolving", &what);
                 let scope = self.ui.spinner("Resolving", &what);
                 let resolved = self.resolve_with_tools(&fetcher);
                 scope.finish();
-                let (resolution, tools) = resolved?;
-                (resolution, tools, true)
+                let (resolution, tools, task_tools) = resolved?;
+                (resolution, tools, task_tools, true)
             }
         };
 
@@ -2879,11 +2938,26 @@ impl<'a> Session<'a> {
         self.timings.since("downloads", downloading);
 
         self.fetch_tools(&mut tools, &fetcher)?;
+        // A fresh graph is downloaded now, so that jrs.lock pins its jars'
+        // checksums; one read from jrs.lock waits until its task runs.
+        if fresh {
+            for (name, graph) in &mut task_tools {
+                let classpath = self.fetch_task_tool(name, graph, &fetcher)?;
+                self.task_classpaths
+                    .borrow_mut()
+                    .insert(name.clone(), classpath);
+            }
+        }
 
         if fresh {
             let mut lock = Lockfile::from_resolution(manifest, &resolution);
             for tool in &tools {
                 lock = lock.with_tool(&tool.language.tool_name(), &tool.resolution);
+            }
+            for (name, graph) in &task_tools {
+                if let Some(def) = manifest.task(name) {
+                    lock = lock.with_tool(&def.tool_name(), graph);
+                }
             }
             lock.write(&lock_path)?;
             self.ui.verbose(format!("wrote {}", lock_path.display()));
@@ -2901,7 +2975,74 @@ impl<'a> Session<'a> {
             self.ui.warn(warning);
         }
         let _ = self.tools.set(tools);
+        let _ = self.task_tools.set(task_tools);
         Ok(resolution)
+    }
+
+    /// Download one task's tool graph, as the compilers' are, and return its
+    /// classpath.
+    fn fetch_task_tool(
+        &self,
+        name: &str,
+        graph: &mut Resolution,
+        fetcher: &Fetcher,
+    ) -> Result<Vec<PathBuf>> {
+        let started = Instant::now();
+        resolve::locate_cached(graph, fetcher);
+        let missing = graph
+            .packages
+            .iter()
+            .filter(|p| p.jar.is_none() && p.packaging != "pom")
+            .count();
+        if missing > 0 && !self.offline {
+            let artifact = graph
+                .roots
+                .first()
+                .map_or_else(String::new, |r| r.artifact.clone());
+            self.ui
+                .phase("Downloading", format!("{artifact} (task {name})"));
+            let scope = self.ui.downloads(missing);
+            let result = resolve::fetch_jars(graph, fetcher, self.jobs);
+            scope.finish();
+            result?;
+        } else {
+            resolve::fetch_jars(graph, fetcher, self.jobs)?;
+        }
+        self.timings
+            .since(format!("downloads (task {name})"), started);
+        // How a tool's own graph mediated is the tool's business.
+        for warning in &graph.warnings {
+            self.ui.verbose(format!("tasks.{name}: {warning}"));
+        }
+        Ok(graph.runtime_classpath())
+    }
+
+    /// The classpath of `def`'s own dependencies, downloaded if it has not
+    /// been yet in this invocation.
+    fn task_classpath(&self, def: &TaskDef) -> Result<Vec<PathBuf>> {
+        if let Some(classpath) = self.task_classpaths.borrow().get(&def.name) {
+            return Ok(classpath.clone());
+        }
+        self.resolved()?;
+        if let Some(classpath) = self.task_classpaths.borrow().get(&def.name) {
+            return Ok(classpath.clone());
+        }
+        let mut graph = self
+            .task_tools
+            .get()
+            .and_then(|tools| tools.iter().find(|(name, _)| *name == def.name))
+            .map(|(_, graph)| graph.clone())
+            .ok_or_else(|| {
+                JrsError::build(format!(
+                    "the dependencies of task `{}` were not resolved",
+                    def.name
+                ))
+            })?;
+        let classpath = self.fetch_task_tool(&def.name, &mut graph, &self.fetcher()?)?;
+        self.task_classpaths
+            .borrow_mut()
+            .insert(def.name.clone(), classpath.clone());
+        Ok(classpath)
     }
 
     /// Download the compilers' jars, as the test launcher's are: one line
@@ -2944,9 +3085,9 @@ impl<'a> Session<'a> {
         Ok(())
     }
 
-    /// The project's graph, and each language's compiler as a graph apart
-    /// from it.
-    fn resolve_with_tools(&self, fetcher: &Fetcher) -> Result<(Resolution, Vec<Tool>)> {
+    /// The project's graph, each language's compiler as a graph apart from
+    /// it, and each task's own dependencies as a graph apart from both.
+    fn resolve_with_tools(&self, fetcher: &Fetcher) -> Result<ResolvedWithTools> {
         let resolution = resolve::resolve(&self.manifest, fetcher, self.jobs)?;
         let mut tools = Vec::new();
         for config in &self.manifest.languages {
@@ -2957,7 +3098,43 @@ impl<'a> Session<'a> {
                 });
             }
         }
-        Ok((resolution, tools))
+        let mut task_tools = Vec::new();
+        for def in self
+            .manifest
+            .tasks
+            .iter()
+            .filter(|t| !t.dependencies.is_empty())
+        {
+            let graph = resolve::resolve_tool_dependencies(&def.dependencies, fetcher, self.jobs)?;
+            task_tools.push((def.name.clone(), graph));
+        }
+        Ok((resolution, tools, task_tools))
+    }
+
+    /// `jrs tree --task <name>`: a task's own dependency graph.
+    fn task_tree(&self, name: &str, limit: Option<usize>) -> Result<TreeNode> {
+        let task_tools = self.task_tools.get().cloned().unwrap_or_default();
+        let Some((_, graph)) = task_tools.iter().find(|(n, _)| n == name) else {
+            let known: Vec<String> = task_tools.iter().map(|(n, _)| format!("`{n}`")).collect();
+            let hint = if known.is_empty() {
+                "none of this project's tasks has a [tasks.<name>.dependencies] table".to_string()
+            } else {
+                format!("the tasks with dependencies are {}", known.join(", "))
+            };
+            return Err(JrsError::usage(format!(
+                "there is no task `{name}` with dependencies of its own\n\n{hint}"
+            )));
+        };
+        let mut root = TreeNode::styled(format!("tasks.{name}"), Style::Bold);
+        if limit == Some(0) {
+            return Ok(root);
+        }
+        let mut seen = Vec::new();
+        for ga in &graph.roots {
+            root.children
+                .push(Self::tree_node(graph, ga, &mut seen, 0, limit));
+        }
+        Ok(root)
     }
 
     /// `jrs tree --tool <name>`: a compiler's own graph.
@@ -3167,6 +3344,10 @@ struct Built {
     classes: usize,
 }
 
+/// The project's graph, the compilers' and the tasks' tools', freshly
+/// resolved.
+type ResolvedWithTools = (Resolution, Vec<Tool>, Vec<(String, Resolution)>);
+
 /// A language's compiler, as the graph jrs resolved for it.
 #[derive(Clone)]
 struct Tool {
@@ -3204,10 +3385,14 @@ fn deps_row(resolution: &Resolution) -> String {
 }
 
 /// A package as `jrs tree` draws it. Mediated versions are coloured so the
-/// nearest-wins decision is visible at a glance (SPEC §5.3.6).
+/// nearest-wins decision is visible at a glance (SPEC §5.3.6), and a version
+/// `[managed]` decided says so.
 fn package_label(package: &resolve::ResolvedPackage) -> (String, Style) {
     let mut label = package.coord.to_string();
     label.push_str(classpath_suffix(package.classpath));
+    if package.managed {
+        label.push_str(" (managed)");
+    }
     let style = if package.mediated {
         Style::Yellow
     } else {
@@ -3308,6 +3493,13 @@ fn add_command(
         "dependencies"
     };
     let fetcher = session.fetcher()?;
+    // What `[managed]` and its BOMs cover can go in without a version, so
+    // that upgrading the BOM upgrades it too.
+    let managed = if session.manifest.managed.is_empty() {
+        resolve::ManagedVersions::default()
+    } else {
+        resolve::managed_versions(&session.manifest, &fetcher)?
+    };
 
     let mut additions = Vec::new();
     for coordinate in coordinates {
@@ -3329,6 +3521,8 @@ fn add_command(
         };
         let version = if let Some(v) = version {
             v
+        } else if managed.get(group, artifact).is_some() {
+            String::new()
         } else {
             ui.phase(
                 "Looking up",
@@ -3365,6 +3559,10 @@ fn add_command(
             let (key, value) = manifest::dependency_entry(dep);
             let edited = edit::upsert(&text, section, &key, &value)?;
             match &edited {
+                edit::Edited::Added(_) if dep.is_managed() => ui.phase(
+                    "Adding",
+                    format!("{dep} to [{section}], at the version [managed] gives it"),
+                ),
                 edit::Edited::Added(_) => ui.phase("Adding", format!("{dep} to [{section}]")),
                 edit::Edited::Replaced { previous, .. } => {
                     ui.phase("Updating", format!("{key} from {previous} to {value}"));

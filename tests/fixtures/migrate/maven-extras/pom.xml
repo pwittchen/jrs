@@ -68,7 +68,7 @@
       <scope>test</scope>
     </dependency>
 
-    <!-- a file on one machine; not something a manifest can carry -->
+    <!-- a jar kept in the project: a local jar, compile-only as Maven has it -->
     <dependency>
       <groupId>com.example</groupId>
       <artifactId>legacy-native</artifactId>
