@@ -32,6 +32,17 @@ pub struct Compiler {
     pub main_class: &'static str,
 }
 
+/// The tool `jrs doc` documents a language with, as an internal tool: the
+/// roots of its graph and the class `java` starts (SPEC §7.4).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DocTool {
+    /// `scaladoc` or `groovydoc`, for messages and the argfile's name.
+    pub name: &'static str,
+    /// Empty when the tool ships in the compiler and runs on its graph.
+    pub roots: Vec<Coord>,
+    pub main_class: &'static str,
+}
+
 impl Language {
     /// Every language but Java, in the order jrs.toml's tables are read and
     /// written.
@@ -180,6 +191,50 @@ impl Language {
         })
     }
 
+    /// The tool that documents this language's sources, at the compiler's
+    /// version. Scaladoc 2 is in the compiler; Scala 3's is an artifact of
+    /// its own that reads the compiled classes' TASTy, and Groovydoc is a
+    /// small graph beside Groovy. Kotlin has none: Dokka is a plugin host with
+    /// a configuration of its own (`JVM_LANGUAGES.md` §14.4).
+    ///
+    /// A table per version line, like the runtime libraries. Scaladoc 3.9
+    /// moved to jackson-databind 3, which needs `jackson-annotations` 2.21,
+    /// while the `liqp` it also depends on asks for 2.13 one level nearer the
+    /// root. sbt resolves highest-wins and never sees the clash; nearest-wins
+    /// picks 2.13 and scaladoc fails to start. So from 3.9 on, jrs declares
+    /// the newer one beside it, the way a project pins a transitive version.
+    #[must_use]
+    pub fn doc_tool(self, version: &str) -> Option<DocTool> {
+        match self {
+            Language::Java | Language::Kotlin => None,
+            Language::Scala if is_scala3(version) => {
+                let mut roots = vec![Coord::new("org.scala-lang", "scaladoc_3", version)];
+                if compare_versions(version, "3.9") != Ordering::Less {
+                    roots.push(Coord::new(
+                        "com.fasterxml.jackson.core",
+                        "jackson-annotations",
+                        "2.21",
+                    ));
+                }
+                Some(DocTool {
+                    name: "scaladoc",
+                    roots,
+                    main_class: "dotty.tools.scaladoc.Main",
+                })
+            }
+            Language::Scala => Some(DocTool {
+                name: "scaladoc",
+                roots: Vec::new(),
+                main_class: "scala.tools.nsc.ScalaDoc",
+            }),
+            Language::Groovy => Some(DocTool {
+                name: "groovydoc",
+                roots: vec![Coord::new("org.apache.groovy", "groovy-groovydoc", version)],
+                main_class: "org.codehaus.groovy.tools.groovydoc.Main",
+            }),
+        }
+    }
+
     /// The runtime library code in this language links against, as
     /// `(group, artifact)`: an implied dependency at the compiler's version.
     ///
@@ -203,8 +258,8 @@ impl Language {
         }
     }
 
-    /// The line jrs adds under a compiler's error when the compiler does not
-    /// know the Java release it was asked for. The compiler's own message has
+    /// The line jrs adds under a compiler's or doc tool's error when it does
+    /// not know the Java release it was asked for. The tool's own message has
     /// been passed through; jrs does not clamp the release silently.
     #[must_use]
     pub fn release_hint(self, version: &str, release: u32, output: &str) -> Option<String> {
@@ -214,8 +269,10 @@ impl Language {
             // `'25' is not a valid choice for '-release'` on 2.13, and the
             // same words about `-java-output-version` on 3.
             Language::Scala => output.contains("is not a valid choice for"),
+            // groovyc's, then groovydoc's: Groovy 4's parses Java up to 21.
             Language::Groovy => {
-                output.contains("Bytecode version") && output.contains("is not supported")
+                (output.contains("Bytecode version") && output.contains("is not supported"))
+                    || output.contains("Unsupported Java Version")
             }
         };
         unknown.then(|| {
@@ -817,6 +874,49 @@ mod tests {
             Language::Kotlin.release_hint("2.4.20", 21, "Main.kt:1:1: error: nope"),
             None
         );
+        assert!(
+            Language::Groovy
+                .release_hint(
+                    "4.0.28",
+                    23,
+                    "java.lang.IllegalArgumentException: Unsupported Java Version: JAVA_23"
+                )
+                .is_some(),
+            "groovydoc's words"
+        );
+    }
+
+    #[test]
+    fn each_line_has_its_doc_tool() {
+        let scala3 = Language::Scala.doc_tool("3.3.6").unwrap();
+        assert_eq!(scala3.main_class, "dotty.tools.scaladoc.Main");
+        assert_eq!(
+            scala3.roots,
+            vec![Coord::new("org.scala-lang", "scaladoc_3", "3.3.6")]
+        );
+        assert_eq!(
+            Language::Scala.doc_tool("3.8.4").unwrap().roots.len(),
+            1,
+            "jackson 2 until 3.9"
+        );
+        let pinned = Language::Scala.doc_tool("3.9.0").unwrap();
+        assert_eq!(
+            pinned.roots[1].to_string(),
+            "com.fasterxml.jackson.core:jackson-annotations:2.21"
+        );
+
+        let scala2 = Language::Scala.doc_tool("2.13.18").unwrap();
+        assert!(scala2.roots.is_empty(), "Scaladoc 2 is in the compiler");
+        assert_eq!(scala2.main_class, "scala.tools.nsc.ScalaDoc");
+
+        let groovy = Language::Groovy.doc_tool("5.1.2").unwrap();
+        assert_eq!(groovy.name, "groovydoc");
+        assert_eq!(
+            groovy.roots[0].to_string(),
+            "org.apache.groovy:groovy-groovydoc:5.1.2"
+        );
+        assert_eq!(Language::Kotlin.doc_tool("2.4.20"), None);
+        assert_eq!(Language::Java.doc_tool("21"), None);
     }
 
     fn manifest(body: &str) -> Manifest {

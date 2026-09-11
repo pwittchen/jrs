@@ -469,15 +469,35 @@ These are unchanged, since the output is class files, with one exception:
 
 ## 9. Documentation (`jrs doc`)
 
-v1 documents **Java sources only**, as today. When a unit has sources in other
-languages, a warning names what was left out. Documenting them means a second
-tool for each language:
+v1 documented **Java sources only**, with a warning naming what was left out.
+Scaladoc and Groovydoc have landed since (SPEC §7.4). Kotlin is still
+documented by `javadoc` over its Java sources, with that warning:
 
-- Scaladoc ships inside the Scala compiler (`scala.tools.nsc.ScalaDoc`, Scala
-  3's `-doc` mode), so it costs an invocation and no new graph.
-- Groovydoc is `org.apache.groovy:groovy-groovydoc`, a small graph.
+- Scaladoc 2 ships inside the Scala compiler (`scala.tools.nsc.ScalaDoc`), so
+  it costs an invocation and no new graph. It reads the `.scala` and `.java`
+  sources and documents both.
+- Scala 3's scaladoc is not a compiler mode but `org.scala-lang:scaladoc_3`,
+  a graph of its own (48 jars for 3.9.0), and it reads TASTy, not sources: it
+  runs after the build, over `target/classes`, and Java classes, which have no
+  TASTy, are left out.
+- Groovydoc is `org.apache.groovy:groovy-groovydoc`, a small graph (7 jars).
 - Dokka is a CLI plus plugins with a configuration file. It is heavy, and it
   is an open question (§14.4).
+
+Each tool was run by hand before jrs drove it, on JDK 23, with Scala 3.9.0,
+3.3.6 and 2.13.18 and Groovy 5.1.2 and 4.0.28, over a mixed source set that
+used Java both ways:
+
+| Question | Finding |
+| --- | --- |
+| The output directory | Both scaladocs refuse one that does not exist; Scaladoc 2 says so and still exits 0. jrs creates it, emptied, first. |
+| Scaladoc 3.9's graph | It moved to jackson-databind 3, which needs `jackson-annotations` 2.21, while `liqp` asks for 2.13.2 a level nearer the root. Nearest-wins picks 2.13.2, and scaladoc dies with `NoClassDefFoundError: …/JsonSerializeAs`; sbt resolves highest-wins and never sees it. 3.3 to 3.8 are on jackson 2 and resolve as they are. From 3.9 on, jrs declares 2.21 beside scaladoc. |
+| Scaladoc 3's classpath | Given `-classpath`, 3.9 prints `Option -classpath was updated` and `1 warning found` on every run. Without it, references into libraries do not resolve, so jrs passes it, and those two lines through. |
+| Groovydoc's `-classpath` | It takes no value, since the launch script consumes it. Given one, option parsing goes wrong and `-javaVersion` is lost. Groovydoc only parses, so jrs passes none. |
+| Groovydoc's `-javaVersion` | Required: without it, Groovydoc fails with `Unsupported Java Version: false`. Groovy 4.0.28's javaparser knows Java up to 21, and 5.1.2's up to 26. A newer release fails with `Unsupported Java Version: JAVA_23`, under which jrs adds its release hint. |
+| Groovydoc's source paths | A class's package comes from its source's path relative to `-sourcepath`, and absolute paths put every class in `DefaultPackage`. jrs passes each source relative to its root. |
+| A source Groovydoc cannot parse | `ignored due to parsing exception`, and exit 0. jrs fails the run on those words. |
+| Determinism | Two runs of each tool over the same input wrote identical pages, with `-notimestamp -noversionstamp` for Groovydoc. |
 
 ---
 
@@ -732,9 +752,9 @@ space and a literal backslash.
 3. **Scala 3.8+ implies two libraries** (§4.3): the shim and the real one.
 4. **`jrs doc` builds first in a mixed project**, so that `javadoc` finds the
    other language's classes when the Java sources use them. It documents the
-   Java sources and warns about the rest (§9). Scaladoc and Groovydoc are not
-   built: Scala 3's scaladoc is its own artifact that reads TASTy, not
-   sources, and neither is needed to build.
+   Java sources and warns about the rest (§9). Scaladoc and Groovydoc were
+   not built then: Scala 3's scaladoc is its own artifact that reads TASTy,
+   not sources, and neither is needed to build. Both landed later (§9).
 5. **No start-up bench**: the spike's measurements answer §14.1's question
    for now, and `benches/` keeps the one M5 harness.
 6. **The phase line names the compilers** when a fresh resolution resolves

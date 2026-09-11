@@ -438,6 +438,98 @@ fn a_mixed_scala_3_project_builds_with_the_real_compiler() {
     );
 }
 
+// ---- Scaladoc and Groovydoc with the real tools (SPEC §7.4) ---------------
+
+/// `jrs doc`, then `jrs package --javadoc` twice: the pages are where they
+/// belong, and the Javadoc jar is byte-identical from one run to the next.
+fn documented(root: &Path, pages: &[&str]) {
+    let (code, _, stderr) = jrs(root, &["doc"]);
+    assert_eq!(code, 0, "{stderr}");
+    for page in pages {
+        assert!(
+            root.join("target/doc").join(page).is_file(),
+            "no {page}: {stderr}"
+        );
+    }
+    let name = root.file_name().unwrap().to_string_lossy().into_owned();
+    let jar = root.join(format!("target/{name}-1.0.0-javadoc.jar"));
+    let (code, _, stderr) = jrs(root, &["package", "--javadoc"]);
+    assert_eq!(code, 0, "{stderr}");
+    let first = std::fs::read(&jar).unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    let (code, _, stderr) = jrs(root, &["package", "--javadoc"]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(
+        first == std::fs::read(&jar).unwrap(),
+        "two runs gave different Javadoc jars"
+    );
+}
+
+const DOC_HELPER: &str = "package com.example;\n\n/** A Java helper. */\n\
+    public final class Helper {\n    private Helper() {}\n\n    /** Upper-cases. */\n    \
+    public static String shout(String s) { return s.toUpperCase(); }\n}\n";
+
+#[test]
+fn scala_and_groovy_are_documented_with_their_real_tools() {
+    let _toolchain = require_jdk!();
+    let scratch = Scratch::new("net-doc");
+
+    let groovy = scratch.join("groovy-doc");
+    write_project(
+        &groovy,
+        &[
+            (
+                "jrs.toml",
+                "[project]\nname = \"groovy-doc\"\nversion = \"1.0.0\"\n\n[java]\nsource = 17\n\n\
+                 [groovy]\nversion = \"5.1.2\"\n",
+            ),
+            (
+                "src/main/groovy/com/example/Greeter.groovy",
+                "package com.example\n\n/** Greets people, in Groovy. */\nclass Greeter {\n    \
+                 String name\n\n    /** The greeting. */\n    \
+                 String greet() { Helper.shout(\"hello $name\") }\n}\n",
+            ),
+            ("src/main/java/com/example/Helper.java", DOC_HELPER),
+        ],
+    );
+    documented(
+        &groovy,
+        &[
+            "index.html",
+            "com/example/Greeter.html",
+            "com/example/Helper.html",
+        ],
+    );
+
+    // Scala 3.9 needs the jackson pin to start at all; Scala 2's scaladoc is
+    // the compiler's, and documents the Java source too.
+    for (name, version) in [("scala3-doc", "3.9.0"), ("scala2-doc", "2.13.18")] {
+        let root = scratch.join(name);
+        let manifest = format!(
+            "[project]\nname = \"{name}\"\nversion = \"1.0.0\"\n\n[java]\nsource = 17\n\n\
+             [scala]\nversion = \"{version}\"\n"
+        );
+        write_project(
+            &root,
+            &[
+                ("jrs.toml", &manifest),
+                (
+                    "src/main/scala/com/example/Greeter.scala",
+                    "package com.example\n\n/** Greets people, in Scala. */\n\
+                     class Greeter(name: String) {\n  /** The greeting. */\n  \
+                     def greet(): String = Helper.shout(\"hello \" + name)\n}\n",
+                ),
+                ("src/main/java/com/example/Helper.java", DOC_HELPER),
+            ],
+        );
+        let mut pages = vec!["index.html", "com/example/Greeter.html"];
+        if version.starts_with('2') {
+            pages.push("com/example/Helper.html");
+        }
+        documented(&root, &pages);
+    }
+}
+
 #[test]
 fn a_classified_artifact_downloads_from_central() {
     // JaCoCo's agent is only published classified, which is how `jrs test

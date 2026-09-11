@@ -182,11 +182,19 @@ impl FixtureRepo {
             // Groovy's compiler is in its runtime jar, which is also the
             // runtime library a Groovy project implies.
             ("org.apache.groovy", "groovy", FAKE_GROOVY),
+            // The doc tools `jrs doc` resolves: the same jar holds their
+            // main classes too.
+            ("org.scala-lang", "scaladoc_3", FAKE_SCALA),
+            ("org.apache.groovy", "groovy-groovydoc", FAKE_GROOVY),
         ] {
             let coord = Coord::new(group, artifact, version);
             self.publish_pom(&coord, &pom(&coord, &[&support]));
             self.publish_jar(&coord, &compiler);
         }
+        // Scaladoc 3.9 and later run with this pinned beside them.
+        let pin = Coord::new("com.fasterxml.jackson.core", "jackson-annotations", "2.21");
+        self.publish_pom(&pin, &pom(&pin, &[]));
+        self.publish_jar(&pin, &jar(&support_classes, &work.join("jackson.jar")));
 
         for (group, artifact, version, class) in [
             (

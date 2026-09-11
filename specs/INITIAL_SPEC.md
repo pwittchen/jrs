@@ -759,14 +759,35 @@ removes paths from that record — never a class file or a processor's output.
 
 ### 7.4 Documentation
 
-`jrs doc` drives `javadoc` the way `javac` is driven: the main sources and the
-compile classpath go into `target/.jrs/javadoc.args`, the flags are
-`--release`, the encodings and a title, and `java.javadoc-args` is appended
-verbatim. The output goes to `target/doc`, which is emptied first so a deleted
-class does not keep its page. `javadoc`'s warnings are passed through verbatim.
-In a project with another language only the Java sources are documented, with
-a warning naming what was left out, and the build runs first so that
-`javadoc` finds the other language's classes (§7.7).
+`jrs doc` documents the main sources, generated ones included, into
+`target/doc`, which is emptied first so a deleted class does not keep its
+page. The tool follows the unit's language (§7.7):
+
+| Unit holds | Tool | Reads |
+| --- | --- | --- |
+| Java, or Java + Kotlin | `javadoc` | the Java sources; Kotlin's are left out with a warning, and the build runs first so that `javadoc` finds their classes |
+| Scala 2.13 (+ Java) | Scaladoc, `scala.tools.nsc.ScalaDoc` in the compiler's graph | every source, Java included |
+| Scala 3 (+ Java) | `org.scala-lang:scaladoc_3` at `scala.version` | the TASTy in `target/classes`, so the build runs first; Java sources have none and are left out with a warning |
+| Groovy (+ Java) | `org.apache.groovy:groovy-groovydoc` at `groovy.version` | every source, Java included, relative to its root |
+
+`javadoc` is driven the way `javac` is: the main sources and the compile
+classpath go into `target/.jrs/javadoc.args`, the flags are `--release`, the
+encodings and a title, and `java.javadoc-args` is appended verbatim.
+
+Scaladoc and Groovydoc run on the project's JDK as `java
+@target/.jrs/<scaladoc|groovydoc>.args`, as the compilers do, with
+`compiler-jvm-args` for their JVM; `javadoc-args` is not passed to them. Their
+graphs are resolved when `jrs doc` needs them and are not pinned in
+`jrs.lock`, like the test launcher's. From Scala 3.9 on, scaladoc's graph gets
+`com.fasterxml.jackson.core:jackson-annotations:2.21` as a second root, since
+nearest-wins would otherwise give it a version too old to start with
+(`JVM_LANGUAGES.md` §9). Groovydoc gets `-javaVersion=JAVA_<n>` for the
+release, and no classpath, since it only parses.
+
+Every tool's output is passed through verbatim. Groovydoc skips a source it
+cannot parse and still exits 0, so jrs fails the run on its message. A tool
+that does not know the release fails with its own message, and jrs adds the
+one-line hint it adds for compilers (§7.7).
 
 ### 7.5 Watch mode
 
@@ -987,7 +1008,8 @@ A compiler that does not know the release fails with its own message, and jrs
 adds one line: lower `java.source`, or raise the language's version.
 
 **Around the build.** `jrs run` suggests `<main-class>Kt` when that is the
-only class of the two. `jrs doc` documents the Java sources (§7.4). `jrs
+only class of the two. `jrs doc` runs Scaladoc or Groovydoc, and `javadoc` over
+a Kotlin unit's Java sources (§7.4). `jrs
 outdated` lists each `<lang>.version` against its compiler's releases, `jrs
 tree --tool <name>` prints a compiler's graph, `jrs add` warns about a `_2.13`
 or `_3` suffix that does not match `[scala]`, and `jrs verify` and `jrs cache
@@ -1292,7 +1314,10 @@ root — Java's and each turned-on language's — and the `source-outputs` of th
 relative to its root. `--javadoc` runs `jrs doc` (§7.4), once per invocation
 however it is reached, and jars `target/doc` into
 `target/<name>-<version>-javadoc.jar`; `javadoc` runs with `-notimestamp`, so
-its pages carry no date. Both use the deterministic jar writer, carry only
+its pages carry no date. In a Scala or Groovy project the jar holds Scaladoc or
+Groovydoc, which is what a repository expects under that name. Groovydoc runs
+with `-notimestamp -noversionstamp`, and both scaladocs write the same pages
+from the same classes. Both jars use the deterministic jar writer, carry only
 `Manifest-Version` and `Created-By`, and combine with every other flag.
 
 ### 9.6 Distribution archives (`--dist`)
@@ -1685,8 +1710,8 @@ produces something runnable.
   versions and `jrs tree --tool` (L4)
 - Added after M7; the design, and the argument for narrowing §1.2, is in
   [JVM_LANGUAGES.md](JVM_LANGUAGES.md), and §7.7 is the condensed contract.
-  Scaladoc and Groovydoc for `jrs doc` are deferred: `jrs doc` documents the
-  Java sources and says what it left out.
+  Scaladoc and Groovydoc for `jrs doc` came later (§7.4); Kotlin's Dokka is
+  still out.
 
 Tick the corresponding README boxes as each lands — the README is the
 user-facing progress tracker, this document is the design behind it.

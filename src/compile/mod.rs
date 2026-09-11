@@ -17,6 +17,7 @@
 //! a file may hold (groovyc's lists only sources), so jrs never uses them.
 
 pub mod abi;
+pub mod doc;
 pub mod javac;
 pub mod lang;
 
@@ -25,8 +26,9 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 pub use abi::api_digest;
+pub use doc::{ForeignDoc, document};
 pub use javac::{DocUnit, javadoc};
-pub use lang::Language;
+pub use lang::{DocTool, Language};
 
 use crate::error::{IoResultExt, JrsError, Result};
 use crate::project;

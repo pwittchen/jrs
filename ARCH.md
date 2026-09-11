@@ -85,6 +85,7 @@ src/
 │   ├── mod.rs         CompileUnit: steps, fingerprint, staleness, argfiles
 │   ├── abi.rs         the main classes' API digest: compile avoidance for tests
 │   ├── javac.rs       javac and javadoc
+│   ├── doc.rs         Scaladoc and Groovydoc
 │   └── lang.rs        enum Language: Kotlin/Scala/Groovy as plain data
 ├── resolve/
 │   ├── mod.rs         breadth-first walk, nearest-wins mediation, Resolution
@@ -479,6 +480,13 @@ classes register an annotation processor or a Groovy AST transformation.
                                compile the tests
 ```
 
+`jrs doc` picks its tool the same way a unit picks its steps: `javadoc`
+(`compile/javac.rs`) for Java and Kotlin units, and for Scala and Groovy the
+language's own (`compile/doc.rs`), from `Language::doc_tool`. Scaladoc 2 runs
+on the compiler's graph; Scala 3's scaladoc and Groovydoc are graphs of their
+own, resolved by `resolve_tool` when `jrs doc` runs and not pinned. Each runs
+as `java @target/.jrs/<tool>.args` into `target/doc`.
+
 ## 8. Tests
 
 `jrs test` runs the JUnit Platform Console Launcher, which jrs treats as an
@@ -748,7 +756,8 @@ poisoning, which is documented under each function's `# Panics`.
          ├── main.fingerprint  test.fingerprint
          ├── resources-main.list  resources-test.list  resources-*-generated-*.list
          ├── tasks/                 <task>.fingerprint  <task>.cp.args
-         ├── javadoc.args  junit-palette.properties  jpackage-input/
+         ├── javadoc.args  scaladoc.args  groovydoc.args
+         ├── junit-palette.properties  jpackage-input/
          │   native-image.args
          └── timings.txt            --timings: phase<TAB>ms, the last run's
 

@@ -18,7 +18,8 @@ filtering (SPEC §8.7), and, for the test and run JVMs, Java agents from the
 resolved graph, an environment and working directory, and `--debug`. So have
 the HTML test report, `--rerun-failed`, `--fail-fast`, test retries that
 report flaky tests, and coverage minimums. So have compile avoidance for the
-tests, which recompile only when the main classes' API changes (SPEC §7.2).
+tests, which recompile only when the main classes' API changes (SPEC §7.2),
+and Scaladoc and Groovydoc for `jrs doc` (SPEC §7.4).
 
 What is left is below. Much of it closes a gap with Gradle, and those items
 name the Gradle feature they answer. jrs is not trying to become Gradle
@@ -42,10 +43,11 @@ decision (see the last section) — it needs a spec change before it needs code.
   A compiler daemon would hide it, at the cost of jrs managing a long-lived
   process; worth it only if real projects feel it. This is the gap the Gradle
   daemon closes, and it does so for `javac` too, by running it in-process.
-- **Scaladoc and Groovydoc.** `jrs doc` documents the Java sources only.
-  Scaladoc 2 ships in the compiler, Scala 3's is an artifact of its own that
-  reads TASTy, and Groovydoc is a small graph. Dokka, for Kotlin, is a plugin
-  host with its own configuration (JVM_LANGUAGES.md §14.4).
+  SPEC §1.2 lists compiler daemons as a non-goal, so this needs a spec change
+  before it needs code.
+- **Dokka.** `jrs doc` runs Scaladoc and Groovydoc, but a Kotlin unit's Kotlin
+  sources are still left out of its `javadoc`, with a warning. Dokka is a
+  plugin host with its own configuration (JVM_LANGUAGES.md §14.4).
 
 ## 2. Dependencies
 

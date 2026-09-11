@@ -1587,6 +1587,156 @@ fn a_mixed_kotlin_project_compiles_in_two_steps_and_runs() {
     assert_ne!(p.modified("target/.jrs/javac-main.args"), javac_at);
 }
 
+/// What the fake doc tool wrote into `target/doc/index.html`: the tool's
+/// name, its arguments one per line, then its classpath and graph.
+fn doc_page(p: &Polyglot) -> Vec<String> {
+    std::fs::read_to_string(p.root.join("target/doc/index.html"))
+        .unwrap()
+        .lines()
+        .map(str::to_string)
+        .collect()
+}
+
+#[test]
+fn groovydoc_documents_the_groovy_and_java_sources_together() {
+    let toolchain = require_jdk!();
+    let scratch = Scratch::new("doc-groovy");
+    let p = Polyglot::new(
+        &scratch,
+        &toolchain,
+        "[project]\nname = \"groovy-app\"\nversion = \"1.0.0\"\n\n[groovy]\nversion = \"4.9.9\"\n",
+        &[
+            (
+                "src/main/groovy/com/example/Greeter.groovy",
+                "package com.example;\n\npublic final class Greeter {}\n",
+            ),
+            ("src/main/java/com/example/Util.java", UTIL_JAVA),
+        ],
+    );
+    let (code, _, stderr) = p.jrs(&["doc"]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(
+        stderr.contains("Downloading groovy-groovydoc (Groovy doc tool)"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("Documenting groovy-app v1.0.0 (1 Groovy + 1 Java source files)"),
+        "{stderr}"
+    );
+    assert!(
+        !stderr.contains("Compiling"),
+        "groovydoc reads the sources: {stderr}"
+    );
+
+    let page = doc_page(&p);
+    assert_eq!(page[0], "groovydoc");
+    let release = toolchain.release(None).unwrap();
+    assert!(
+        page.contains(&format!("-javaVersion=JAVA_{release}")),
+        "{page:?}"
+    );
+    assert!(
+        page.contains(&"-windowtitle=groovy-app 1.0.0".to_string()),
+        "{page:?}"
+    );
+    // Relative to their roots, which is how Groovydoc finds their packages.
+    let relative = |name: &str| {
+        Path::new("com")
+            .join("example")
+            .join(name)
+            .display()
+            .to_string()
+    };
+    assert!(page.contains(&relative("Greeter.groovy")), "{page:?}");
+    assert!(page.contains(&relative("Util.java")), "{page:?}");
+    assert!(
+        page.contains(&"support=fake-compiler-support".to_string()),
+        "the tool runs with its whole graph: {page:?}"
+    );
+    let lock = std::fs::read_to_string(p.root.join("jrs.lock")).unwrap();
+    assert!(!lock.contains("groovydoc"), "never pinned: {lock}");
+
+    let (code, _, stderr) = p.jrs(&["doc"]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(
+        !stderr.contains("doc tool"),
+        "resolved and downloaded once: {stderr}"
+    );
+}
+
+#[test]
+fn scaladoc_3_documents_the_compiled_scala_classes() {
+    let toolchain = require_jdk!();
+    let scratch = Scratch::new("doc-scala");
+    let p = Polyglot::new(
+        &scratch,
+        &toolchain,
+        "[project]\nname = \"scala-app\"\nversion = \"1.0.0\"\n\n[scala]\nversion = \"3.9.9\"\n",
+        &[
+            (
+                "src/main/scala/com/example/Greeter.scala",
+                "package com.example;\n\npublic final class Greeter {\n    \
+                 public static String greet() {\n        return Util.shout(\"hi\");\n    }\n}\n",
+            ),
+            ("src/main/java/com/example/Util.java", UTIL_JAVA),
+        ],
+    );
+    let (code, _, stderr) = p.jrs(&["doc"]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(
+        line_of(&stderr, "Compiling scala-app") < line_of(&stderr, "Documenting"),
+        "it reads TASTy, so the build runs first: {stderr}"
+    );
+    assert!(
+        stderr.contains("Documenting scala-app v1.0.0 (1 Scala source files)"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("1 Java source files were left out"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("Downloading scaladoc_3 (Scala doc tool)"),
+        "{stderr}"
+    );
+
+    let page = doc_page(&p);
+    assert_eq!(page[0], "scaladoc");
+    assert!(pair(&page, "-project", "scala-app"), "{page:?}");
+    assert!(pair(&page, "-project-version", "1.0.0"), "{page:?}");
+    assert!(
+        page.iter()
+            .any(|a| Path::new(a).ends_with(Path::new("target").join("classes"))),
+        "the classes are its input: {page:?}"
+    );
+    let cp = page.iter().position(|a| a == "-classpath").unwrap();
+    assert!(page[cp + 1].contains("scala-library-3.9.9.jar"), "{page:?}");
+    let tool = page.iter().find(|l| l.starts_with("classpath=")).unwrap();
+    assert!(
+        tool.contains("jackson-annotations-2.21.jar"),
+        "the pin runs beside scaladoc 3.9: {tool}"
+    );
+}
+
+#[test]
+fn kotlin_sources_are_left_out_of_javadoc_with_a_warning() {
+    let toolchain = require_jdk!();
+    let scratch = Scratch::new("doc-kotlin");
+    let p = kotlin_app(&scratch, &toolchain);
+    let (code, _, stderr) = p.jrs(&["doc"]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(
+        stderr
+            .contains("jrs has no documentation tool for Kotlin: its 1 source files were left out"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("Documenting mixed v1.0.0 (2 source files)"),
+        "{stderr}"
+    );
+    assert!(p.root.join("target/doc/com/example/Util.html").is_file());
+}
+
 #[test]
 fn a_mixed_project_packages_byte_identical_fat_jars() {
     let toolchain = require_jdk!();

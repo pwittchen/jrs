@@ -1,5 +1,6 @@
 package fake;
 
+import java.io.File;
 import java.io.IOException;
 import java.io.OutputStream;
 import java.net.URI;
@@ -9,6 +10,7 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
+import java.util.Set;
 import javax.tools.FileObject;
 import javax.tools.ForwardingJavaFileManager;
 import javax.tools.JavaCompiler;
@@ -76,6 +78,56 @@ public final class Fake {
         }
         boolean ok = javac.getTask(null, manager, null, options, null, units).call();
         return ok ? 0 : 1;
+    }
+
+    /** Options of the doc tools whose value is the next argument. */
+    private static final Set<String> DOC_VALUE_OPTIONS =
+            Set.of("-classpath", "-project", "-project-version", "-doc-title", "-doc-version",
+                    "-encoding");
+
+    /**
+     * A stand-in for scaladoc and groovydoc. Like the real ones it wants its
+     * output directory to exist already, and like Groovydoc it looks each
+     * relative source up under its {@code -sourcepath}; an input it cannot
+     * find fails the run. It writes an index page listing its arguments, one
+     * per line, then the classpath it ran with, for the test to read.
+     */
+    public static int document(String tool, String[] args) throws IOException {
+        String out = null;
+        List<String> roots = new ArrayList<>();
+        List<String> inputs = new ArrayList<>();
+        for (int i = 0; i < args.length; i++) {
+            String arg = args[i];
+            if (arg.equals("-d")) {
+                out = args[++i];
+            } else if (DOC_VALUE_OPTIONS.contains(arg)) {
+                i++;
+            } else if (arg.startsWith("-sourcepath=")) {
+                roots = Arrays.asList(arg.substring("-sourcepath=".length()).split(File.pathSeparator));
+            } else if (!arg.startsWith("-")) {
+                inputs.add(arg);
+            }
+        }
+        if (out == null || !Files.isDirectory(Path.of(out))) {
+            System.err.println(tool + ": " + out + " does not exist or is not a directory");
+            return 2;
+        }
+        for (String input : inputs) {
+            boolean found = roots.isEmpty()
+                    ? Files.exists(Path.of(input))
+                    : roots.stream().anyMatch(root -> Files.exists(Path.of(root, input)));
+            if (!found) {
+                System.err.println(tool + ": no such input: " + input);
+                return 1;
+            }
+        }
+        List<String> page = new ArrayList<>();
+        page.add(tool);
+        page.addAll(Arrays.asList(args));
+        page.add("classpath=" + System.getProperty("java.class.path"));
+        page.add("support=" + fake.support.Support.name());
+        Files.write(Path.of(out, "index.html"), page);
+        return 0;
     }
 
     /** A source file of any extension, read as Java. */

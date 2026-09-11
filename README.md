@@ -54,8 +54,8 @@ your own requirements before adopting it for production builds.
 - Running the project's main class directly, and rebuilding on every change
 - User-defined tasks and lifecycle hooks, for code generators, post-packaging
   steps and chores, run with the project's JDK and classpath
-- Javadoc, dependency trees with `--why`, outdated-dependency reports, and
-  `jrs add` / `jrs remove`
+- API docs with Javadoc, Scaladoc or Groovydoc, dependency trees with `--why`,
+  outdated-dependency reports, and `jrs add` / `jrs remove`
 - Parallel resolution, download and compilation, and tests that recompile only
   when the main classes' API changes
 - Progress output that adapts to the terminal: spinners, live download bars and
@@ -418,7 +418,7 @@ for any repository.
 | `jrs package --sources` / `--javadoc` | Also write `target/<name>-<version>-sources.jar` / `-javadoc.jar`; `--javadoc` runs `jrs doc` first. |
 | `jrs package --dist` | Also write a distribution with launch scripts in `bin/`, zipped into `target/<name>-<version>.zip`. |
 | `jrs package --native-image` | Also build a native executable in `target/native` with GraalVM's `native-image`. |
-| `jrs doc` | Generate Javadoc into `target/doc`. |
+| `jrs doc` | Generate API docs into `target/doc`: Javadoc, or Scaladoc / Groovydoc for Scala and Groovy code. |
 | `jrs clean` | Remove `target/`. |
 | `jrs tree [--depth <n>] [--why <artifact>] [--tool <name>]` | Print the resolved dependency graph, every path that leads to one artifact, or a compiler's own graph (`kotlin-compiler`, `scala-compiler`, `groovy-compiler`). |
 | `jrs classpath [--test \| --runtime]` | Print the resolved classpath, for editors and `java -cp "$(jrs classpath)"`. |
@@ -728,7 +728,10 @@ src/test/kotlin/com/example/MainTest.kt
 - Kotlin tests see the main code's `internal` declarations. A `main` at file
   level in `Main.kt` compiles to `MainKt`, and `jrs run` says so when
   `main-class` names `Main`.
-- `jrs doc` documents the Java sources only. Compiler plugins (Kotlin's
+- `jrs doc` runs Scaladoc for Scala and Groovydoc for Groovy, each over the
+  Java sources beside it too, except Scala 3's scaladoc, which reads the
+  compiled classes and leaves Java out. Kotlin sources are left out of
+  `javadoc`, since Dokka is not supported. Compiler plugins (Kotlin's
   `allopen`, `spring`, `serialization`), kapt/KSP and Kotlin Multiplatform
   projects are not supported. A Multiplatform library whose root artifact
   does not resolve to classes needs its `-jvm` artifact declared instead.
