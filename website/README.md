@@ -18,8 +18,8 @@ when `rust.yml` calls it with the version commit so the header shows the new
 version. It can also be run by hand from the Actions tab.
 
 - `index.html` is the page and the build entry point. Bun follows its links to
-  `src/style.css`, `src/main.ts` and the repository's own `../logo.png`, and
-  writes them to `dist/` with hashed names.
+  `src/style.css`, `src/main.ts`, the contact section's `avatar.jpg` and the
+  repository's own `../logo.png`, and writes them to `dist/` with hashed names.
 - The version in the header is imported from `../Cargo.toml` at build time, so
   the site shows whatever the crate is at.
 - The terminal replay in `src/main.ts` mirrors jrs's real output: 12-column
