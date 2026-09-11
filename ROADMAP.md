@@ -4,7 +4,9 @@ Every milestone in [SPEC §12](specs/INITIAL_SPEC.md#12-roadmap) has landed. Thi
 document lists only what is still open. Much of it closes a gap with Gradle, and those items
 name the Gradle feature they answer. jrs is not trying to become Gradle
 (SPEC §1.2), so each one is the single-module, declarative version of what a
-Gradle build gets from a plugin or a DSL block. Anything that touches a
+Gradle build gets from a plugin or a DSL block, and it arrives with its row in
+`jrs migrate` and a fixture in `tests/fixtures/migrate/`, as `test.forks` did
+for `maxParallelForks` (`gradle-forks`). Anything that touches a
 [non-goal](specs/INITIAL_SPEC.md#12-non-goals) or adds a crate is a spec-level
 decision (see the last section) — it needs a spec change before it needs code.
 
@@ -88,23 +90,7 @@ and testing the same projects, with the results written up in a report.
   a tool that is not installed, as `require_jdk!` does. It adds no crate to jrs.
   A manually triggered CI workflow can regenerate the report on a fixed runner.
 
-## 5. jrs itself
-
-- **Migration fidelity.** Keep growing the `tests/fixtures/migrate/` corpus
-  from real-world `pom.xml` and Gradle builds. Every construct that lands in the
-  "not migrated" block is a candidate for translation, and so is one that lands
-  in no block at all, as start.spring.io's `freeCompilerArgs` did until its
-  Kotlin build joined the corpus. The profiles a plain `mvn` build does not
-  activate and anything computed still do not translate, and neither does
-  `maven-antrun-plugin`; an `exec-maven-plugin` execution in a phase jrs has no
-  hook for is reported whole. A Spring Boot build in Kotlin migrates
-  (`spring-boot-kotlin`), but does not build as Spring expects: Kotlin on
-  Spring needs the `allopen` compiler plugin (see the last section). Each item
-  in sections 1–2 that answers a Gradle construct should arrive with its
-  migration row and a fixture, as `test.forks` did for `maxParallelForks`
-  (`gradle-forks`).
-
-## 6. Needs a spec decision first
+## 5. Needs a spec decision first
 
 These cross a line drawn in SPEC §1.2 or §13 (or the dependency list). They are
 listed so the discussion has a home, not because they are planned.
@@ -125,7 +111,7 @@ listed so the discussion has a home, not because they are planned.
 | Annotation-processor path in the manifest | Non-goal: no annotation-processor configuration. Processors on the compile classpath, as `compile-only` dependencies with `-proc:full`, work today. Error Prone, NullAway and other `javac` plugins need a processor path too |
 | JPMS (`module-info.java`, module path) | Non-goal |
 | JVM languages beyond Kotlin, Scala and Groovy; Kotlin Multiplatform | Non-goal (SPEC §1.2) |
-| Kotlin compiler plugins (`allopen`, `spring`, `serialization`), kapt/KSP | Non-goal: compiler-plugin configuration ([JVM_LANGUAGES.md §14.2](specs/JVM_LANGUAGES.md#14-open-questions)). Kotlin on Spring needs `allopen`, so this is the first to revisit |
+| Kotlin compiler plugins (`allopen`, `spring`, `serialization`), kapt/KSP | Non-goal: compiler-plugin configuration ([JVM_LANGUAGES.md §14.2](specs/JVM_LANGUAGES.md#14-open-questions)). Kotlin on Spring needs `allopen`, so this is the first to revisit: a Spring Boot build in Kotlin migrates (`spring-boot-kotlin`), but does not build as Spring expects |
 | Dokka | A plugin host with its own configuration (JVM_LANGUAGES.md §14.4). `jrs doc` runs Scaladoc and Groovydoc, but a Kotlin unit's Kotlin sources are still left out of its `javadoc`, with a warning |
 | sbt-style `%%` cross-version keys | New key syntax, touching `edit.rs`, the lockfile and migration (JVM_LANGUAGES.md §14.3) |
 | TestNG | SPEC §13.7: the JUnit Platform only (Jupiter and Vintage) |
