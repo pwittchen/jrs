@@ -19,12 +19,6 @@ decision (see the last section) — it needs a spec change before it needs code.
   pinned in `jrs.lock`. That would also let a `--fat` image carry a run
   agent, which today it refuses, since the fat jar has unpacked the agent's
   jar.
-- **Parallel test JVMs.** Gradle has `maxParallelForks` and `forkEvery`. jrs
-  starts one launcher JVM. Forking several JVMs means splitting the test classes
-  among launchers and merging their summaries, XML and coverage data. The live
-  counter would then follow several processes, and `--debug` would have several
-  JVMs to attach to. Worth it once the section 4 benchmark shows test time
-  dominating.
 
 ## 2. Packaging
 
@@ -104,7 +98,8 @@ and testing the same projects, with the results written up in a report.
   whole. A Spring Boot build in Kotlin migrates, but does not build as Spring
   expects: Kotlin on Spring needs the `allopen` compiler plugin (see the last
   section). Each item in sections 1–2 that answers a Gradle construct
-  (`maxParallelForks`) should arrive with its migration row and a fixture.
+  should arrive with its migration row and a fixture, as `test.forks` did for
+  `maxParallelForks` (`gradle-forks`).
 
 ## 6. Needs a spec decision first
 

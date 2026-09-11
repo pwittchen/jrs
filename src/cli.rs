@@ -426,6 +426,10 @@ pub struct TestArgs {
     /// Run failing tests again up to N times; overrides `[test] retries`.
     #[arg(long, value_name = "N")]
     pub retries: Option<u32>,
+    /// Split the test classes among N test JVMs run at once; overrides
+    /// `[test] forks`.
+    #[arg(long, value_name = "N", value_parser = clap::value_parser!(u32).range(1..))]
+    pub forks: Option<u32>,
 }
 
 #[derive(Debug, Default, Args)]
@@ -1462,10 +1466,11 @@ impl<'a> Session<'a> {
             classes: Vec::new(),
             fail_fast: args.fail_fast,
         };
-        self.announce_tests(&mut run, rerun.as_ref(), &sources);
+        let forks = self.forks(&run, args, rerun.is_some())?;
+        self.announce_tests(&mut run, rerun.as_ref(), &sources, forks.len());
         let started = Instant::now();
         let outcome = self
-            .launch_tests(&toolchain, &run, args.debug.as_ref())
+            .launch_tests(&toolchain, &run, &forks, args.debug.as_ref())
             .and_then(|mut outcome| {
                 self.conclude_tests(&toolchain, &run, args, &mut outcome)?;
                 Ok(outcome)
@@ -1496,33 +1501,86 @@ impl<'a> Session<'a> {
         Ok(runner::jvm_prefix(args.debug.as_ref(), &agents))
     }
 
+    /// The launchers `test.forks` (or `--forks`) splits the scan among, each
+    /// with the number of classes it was dealt; none for a run in one JVM. An
+    /// explicit selection — `--method`, `--rerun-failed` — runs whole in one,
+    /// and so does a run under `--debug`, which waits for one debugger, or
+    /// `--fail-fast`, which stops the whole run at its first failure.
+    fn forks(
+        &self,
+        run: &junit::TestRun,
+        args: &TestArgs,
+        rerun: bool,
+    ) -> Result<Vec<(junit::TestRun, usize)>> {
+        let forks = args.forks.unwrap_or_else(|| self.manifest.test.forks());
+        if forks < 2 || rerun || !run.methods.is_empty() || args.debug.is_some() || args.fail_fast {
+            return Ok(Vec::new());
+        }
+        let classes = junit::test_classes(&run.scan_dir)?;
+        let shares = junit::split(&classes, usize::try_from(forks).unwrap_or(usize::MAX));
+        if shares.len() < 2 {
+            return Ok(Vec::new());
+        }
+        let sizes = shares.iter().map(Vec::len);
+        Ok(junit::forked(run, &shares).into_iter().zip(sizes).collect())
+    }
+
     /// Run the launcher under the live test counter, or, when the JVM waits
     /// for a debugger, without one: it has nothing to count yet, and a
     /// counter animating over it would say otherwise.
+    ///
+    /// With `forks`, they all run at once under the one counter, and each
+    /// one's output is passed through whole once they are done, in fork
+    /// order, under a line naming it.
     fn launch_tests(
         &self,
         toolchain: &Toolchain,
         run: &junit::TestRun,
+        forks: &[(junit::TestRun, usize)],
         debug: Option<&runner::DebugAddress>,
     ) -> Result<junit::TestOutcome> {
         if let Some(debug) = debug {
             self.announce_debugger(debug);
         }
         let scope = debug.is_none().then(|| self.ui.tests());
-        let outcome = junit::run(toolchain, run, self.ui);
+        if forks.is_empty() {
+            let outcome = junit::run(toolchain, run, self.ui);
+            if let Some(scope) = scope {
+                scope.finish();
+            }
+            return outcome;
+        }
+        let runs: Vec<junit::TestRun> = forks.iter().map(|(fork, _)| fork.clone()).collect();
+        let result = junit::run_forks(toolchain, run, &runs, self.ui);
         if let Some(scope) = scope {
             scope.finish();
         }
-        outcome
+        let mut outcome = junit::TestOutcome::default();
+        for (n, (fork, (_, classes))) in result?.into_iter().zip(forks).enumerate() {
+            let noun = if *classes == 1 { "class" } else { "classes" };
+            self.ui.status(
+                "Fork",
+                format!("{} of {}: {classes} test {noun}", n + 1, forks.len()),
+            );
+            for line in &fork.stdout {
+                self.ui.println_out(line);
+            }
+            if !fork.stderr.trim().is_empty() {
+                self.ui.passthrough(ui::Stream::Err, fork.stderr.trim_end());
+            }
+            outcome.absorb(&fork.outcome);
+        }
+        Ok(outcome)
     }
 
     /// Point `run` at what `--rerun-failed` selected, and say what is about to
-    /// run, and when `--fail-fast` cannot be honoured.
+    /// run, in how many JVMs, and when `--fail-fast` cannot be honoured.
     fn announce_tests(
         &self,
         run: &mut junit::TestRun,
         rerun: Option<&(usize, test_report::Selection)>,
         sources: &Sources,
+        forks: usize,
     ) {
         if let Some((_, selection)) = rerun {
             // The selectors name exactly what failed; no class-name pattern
@@ -1543,6 +1601,10 @@ impl<'a> Session<'a> {
             Some((failed, _)) => self.ui.phase(
                 "Testing",
                 format!("{} that failed in the last run", counted(*failed, "test")),
+            ),
+            None if forks > 1 => self.ui.phase(
+                "Testing",
+                format!("{} in {forks} JVMs", sources.describe("test sources")),
             ),
             None => self.ui.phase("Testing", sources.describe("test sources")),
         }
@@ -1636,7 +1698,7 @@ impl<'a> Session<'a> {
                 ),
             );
             let retry = junit::TestRun {
-                jvm_args: junit::retry_jvm_args(&first.jvm_args),
+                jvm_args: junit::appending_coverage(&first.jvm_args),
                 filter: None,
                 include_tags: Vec::new(),
                 exclude_tags: Vec::new(),
@@ -4583,6 +4645,17 @@ mod tests {
         assert!(Cli::try_parse_from(["jrs", "test", "--rerun-failed", "--watch"]).is_err());
         assert!(Cli::try_parse_from(["jrs", "test", "--retries", "-1"]).is_err());
         assert!(Cli::try_parse_from(["jrs", "test", "--fail-fast", "--retries", "2"]).is_ok());
+        match Cli::try_parse_from(["jrs", "test", "--forks", "3"])
+            .unwrap()
+            .command
+        {
+            Command::Test(args) => assert_eq!(args.forks, Some(3)),
+            other => panic!("{other:?}"),
+        }
+        assert!(
+            Cli::try_parse_from(["jrs", "test", "--forks", "0"]).is_err(),
+            "at least one test JVM"
+        );
     }
 
     #[test]

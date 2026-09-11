@@ -3093,6 +3093,104 @@ class StopTest {
 }
 "#;
 
+/// `test.forks`: the classes dealt out to launchers run at once, each
+/// scanning with a pattern of its own; their XML side by side where CI looks
+/// for it, their counts added up, and what failed retried in a launcher of
+/// its own. `--forks 1`, `--fail-fast` and `--method` run in one JVM.
+#[test]
+fn forks_split_the_classes_among_launchers_and_add_them_up() {
+    let toolchain = require_jdk!();
+    let scratch = Scratch::new("tests-forks");
+    let p = junit_project(
+        &scratch,
+        &toolchain,
+        FAKE_LAUNCHER_1,
+        "forks = 2\nretries = 1",
+        &[
+            ("AddTest.java", ADD_TEST),
+            ("FlakyTest.java", FLAKY_TEST),
+            ("OtherTest.java", OTHER_TEST),
+        ],
+    );
+
+    let (code, stdout, stderr) = p.jrs(&["test"]);
+    assert_eq!(code, 0, "the flaky test passes on its retry: {stderr}");
+    assert!(
+        stderr.contains("Testing 3 test sources in 2 JVMs"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("Fork 1 of 2: 2 test classes"), "{stderr}");
+    assert!(stderr.contains("Fork 2 of 2: 1 test class"), "{stderr}");
+    assert!(
+        stderr.contains("Finished 3 tests, 2 passed, 1 flaky in"),
+        "{stderr}"
+    );
+
+    // In name order, the first fork has AddTest and OtherTest, the second
+    // FlakyTest; each fork's output is whole, the first fork's first.
+    let runs = launches(&stdout);
+    assert_eq!(runs.len(), 3, "two forks, then a retry: {stdout}");
+    for (run, mine, theirs) in [
+        (runs[0], "AddTest", "FlakyTest"),
+        (runs[1], "FlakyTest", "OtherTest"),
+    ] {
+        assert!(run.contains("--scan-class-path"), "{run}");
+        assert!(run.contains(&format!(r"\Qcom.example.{mine}\E")), "{run}");
+        assert!(
+            !run.contains(&format!(r"\Qcom.example.{theirs}\E")),
+            "{run}"
+        );
+    }
+    assert!(
+        runs[2].contains("--select-method com.example.FlakyTest#sometimes()"),
+        "{}",
+        runs[2]
+    );
+    let first_fork = stdout.find(runs[0]).unwrap();
+    let second_fork = stdout.find(runs[1]).unwrap();
+    let adds = stdout.find("adds()").unwrap();
+    assert!(
+        first_fork < adds && adds < second_fork,
+        "not interleaved: {stdout}"
+    );
+
+    let reports = p.root.join("target/test-reports");
+    for fork in 1..=2 {
+        assert!(
+            reports
+                .join(format!("TEST-junit-jupiter-fork-{fork}.xml"))
+                .is_file()
+        );
+        assert!(!reports.join(format!("fork-{fork}")).exists());
+    }
+    assert!(reports.join("retry-1/TEST-junit-jupiter.xml").is_file());
+    let html = std::fs::read_to_string(reports.join("index.html")).unwrap();
+    for class in ["com.example.AddTest", "com.example.OtherTest"] {
+        assert!(html.contains(class), "{html}");
+    }
+    assert!(
+        html.contains("<span class=\"badge flaky\">FLAKY</span>"),
+        "{html}"
+    );
+
+    // One JVM when asked for, and for runs that cannot be split.
+    for args in [
+        &["test", "--forks", "1"][..],
+        &["test", "--fail-fast"][..],
+        &["test", "--method", "com.example.AddTest#adds"][..],
+    ] {
+        let (code, stdout, stderr) = p.jrs(args);
+        assert_eq!(code, 0, "{args:?}: {stderr}");
+        assert_eq!(launches(&stdout).len(), 1, "{args:?}: {stdout}");
+        assert!(!stderr.contains("JVMs"), "{args:?}: {stderr}");
+        assert!(reports.join("TEST-junit-jupiter.xml").is_file(), "{args:?}");
+        assert!(
+            !reports.join("TEST-junit-jupiter-fork-1.xml").exists(),
+            "{args:?}: the forked run's reports are cleared"
+        );
+    }
+}
+
 #[test]
 fn a_failing_run_leaves_a_page_and_reruns_only_what_failed() {
     let toolchain = require_jdk!();

@@ -1059,6 +1059,40 @@ fn read_test_settings(effective: &Effective, pom: &Pom, out: &mut Manifest, repo
         ));
         out.test.jvm_args = args;
     }
+    read_forks(effective, config, out, report);
+}
+
+/// surefire's `<forkCount>` → `test.forks`. `<reuseForks>false</reuseForks>`,
+/// a fresh JVM for every test class, has no counterpart.
+fn read_forks(effective: &Effective, config: &Element, out: &mut Manifest, report: &mut Report) {
+    if let Some(raw) = config.text_of("forkCount") {
+        let count = pom::interpolate(raw, &effective.properties);
+        match count.parse::<u32>() {
+            // Maven's default, and jrs's.
+            Ok(1) => {}
+            Ok(0) => report.review(
+                "surefire <forkCount>0</forkCount> runs the tests inside Maven's own JVM; \
+                 jrs runs them in a test JVM of their own",
+            ),
+            Ok(n) => {
+                out.test.forks = n;
+                report.migrated(format!("test.forks = {n} (from surefire <forkCount>)"));
+            }
+            Err(_) if count.ends_with('C') => report.skipped(format!(
+                "surefire <forkCount>{count}</forkCount> — so many JVMs per CPU core, which \
+                 depends on the machine; set test.forks to a number"
+            )),
+            Err(_) => report.skipped(format!(
+                "surefire <forkCount>{count}</forkCount> — not a number of test JVMs"
+            )),
+        }
+    }
+    if config.text_of("reuseForks") == Some("false") {
+        report.skipped(
+            "surefire <reuseForks>false</reuseForks> — a fresh JVM for every test class; \
+             jrs starts each test JVM once, for its whole share of the classes",
+        );
+    }
 }
 
 /// `<annotationProcessorPaths>`: jrs has no processor path (SPEC §1.2), but a
@@ -1861,6 +1895,38 @@ mod tests {
         assert_eq!(
             migration.manifest.java.javac_args,
             vec!["-Xlint:all", "-Werror"]
+        );
+    }
+
+    #[test]
+    fn surefire_fork_settings_are_read() {
+        let dir = Dir::new("forks");
+        let surefire = |config: &str| {
+            format!(
+                "<project><groupId>g</groupId><artifactId>a</artifactId><version>1</version>\
+                 <build><plugins><plugin><artifactId>maven-surefire-plugin</artifactId>\
+                 <configuration>{config}</configuration></plugin></plugins></build></project>"
+            )
+        };
+        let four = dir.migrate(&surefire("<forkCount>4</forkCount>"));
+        assert_eq!(four.manifest.test.forks, 4);
+
+        let per_core = dir.migrate(&surefire(
+            "<forkCount>1C</forkCount><reuseForks>false</reuseForks>",
+        ));
+        assert_eq!(per_core.manifest.test.forks, 0);
+        let skipped = per_core.report.not_migrated.join("\n");
+        assert!(skipped.contains("per CPU core"), "{skipped}");
+        assert!(
+            skipped.contains("<reuseForks>false</reuseForks>"),
+            "{skipped}"
+        );
+
+        let inside = dir.migrate(&surefire("<forkCount>0</forkCount>"));
+        assert!(
+            inside.report.needs_review[0].contains("inside Maven's own JVM"),
+            "{:?}",
+            inside.report.needs_review
         );
     }
 

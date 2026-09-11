@@ -362,6 +362,26 @@ fn the_gradle_local_fixture_translates_exactly() {
     );
 }
 
+/// `maxParallelForks` becomes `test.forks`; `forkEvery` is reported, since
+/// jrs never restarts a test JVM part of the way through its share.
+#[test]
+fn the_gradle_forks_fixture_translates_exactly() {
+    let (migration, dir) = migrate_fixture("gradle-forks");
+    assert_eq!(migration.manifest.render(None), expected(&dir));
+
+    let migrated = migration.report.migrated.join("\n");
+    assert!(
+        migrated.contains("test.forks = 4 (from maxParallelForks)"),
+        "{migrated}"
+    );
+    let skipped = &migration.report.not_migrated;
+    assert_eq!(skipped.len(), 1, "{skipped:?}");
+    assert!(
+        skipped[0].starts_with("`forkEvery = 100` — Gradle restarts a test JVM"),
+        "{skipped:?}"
+    );
+}
+
 #[test]
 fn every_expected_manifest_is_a_manifest_jrs_can_read() {
     for name in [
@@ -380,6 +400,7 @@ fn every_expected_manifest_is_a_manifest_jrs_can_read() {
         "spring-boot-kts",
         "spring-boot-maven",
         "maven-exec",
+        "gradle-forks",
     ] {
         let (migration, dir) = migrate_fixture(name);
         let text = migration.render_manifest();

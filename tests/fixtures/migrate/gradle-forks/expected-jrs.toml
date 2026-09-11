@@ -1,0 +1,20 @@
+[project]
+name = "parallel-suite"
+version = "3.0.0"
+
+[java]
+source = 21
+
+[test]
+jvm-args = ["-Xmx512m"]
+forks = 4
+
+[managed]
+"org.junit:junit-bom" = { version = "5.13.4", bom = true }
+
+[dependencies]
+"com.fasterxml.jackson.core:jackson-databind" = "2.19.1"
+
+[dev-dependencies]
+"org.junit.jupiter:junit-jupiter" = {}
+"org.junit.platform:junit-platform-launcher" = {}

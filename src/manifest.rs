@@ -294,9 +294,20 @@ pub struct TestConfig {
     /// `test.retries`: how many times a failed test is run again before it
     /// counts as failed. One that passes on a retry is reported as flaky.
     pub retries: u32,
+    /// `test.forks`: how many test JVMs a run's classes are split among. `0`
+    /// when the key is not set, which runs one, as `1` does.
+    pub forks: u32,
     /// `test.coverage-minimum`: project-wide totals `jrs test --coverage`
     /// must reach, in declaration order. Ignored without `--coverage`.
     pub coverage_minimum: Vec<CoverageMinimum>,
+}
+
+impl TestConfig {
+    /// How many test JVMs to run: `test.forks`, and one when it is not set.
+    #[must_use]
+    pub fn forks(&self) -> u32 {
+        self.forks.max(1)
+    }
 }
 
 /// A `JaCoCo` counter `test.coverage-minimum` can set a minimum for.
@@ -895,6 +906,7 @@ const TEST_KEYS: &[&str] = &[
     "java-agents",
     "env",
     "retries",
+    "forks",
     "coverage-minimum",
 ];
 const PACKAGE_KEYS: &[&str] = &["add-modules", "manifest", "native-image-args"];
@@ -1134,6 +1146,7 @@ impl Manifest {
                 java_agents: parse_java_agents(t, "test")?,
                 env: parse_jvm_env(t, "test")?,
                 retries: optional_count(t, "retries", "test")?,
+                forks: test_forks(t)?,
                 coverage_minimum: coverage_minimum(t, &mut warnings)?,
             },
         };
@@ -1456,6 +1469,9 @@ impl Manifest {
             render_jvm_extras(&mut s, &self.test.java_agents, &self.test.env);
             if self.test.retries > 0 {
                 let _ = writeln!(s, "retries = {}", self.test.retries);
+            }
+            if self.test.forks > 0 {
+                let _ = writeln!(s, "forks = {}", self.test.forks);
             }
             if !self.test.coverage_minimum.is_empty() {
                 let entries: Vec<String> = self
@@ -2799,6 +2815,21 @@ fn optional_count(t: &toml::Table, key: &str, section: &str) -> Result<u32> {
     }
 }
 
+/// `test.forks`: a whole number of test JVMs, 1 or more; `0` when absent.
+fn test_forks(t: &toml::Table) -> Result<u32> {
+    let invalid = || {
+        JrsError::manifest("`test.forks` must be a whole number of test JVMs, 1 or more, e.g. `4`")
+    };
+    match t.get("forks") {
+        None => Ok(0),
+        Some(toml::Value::Integer(n)) => u32::try_from(*n)
+            .ok()
+            .filter(|n| *n >= 1)
+            .ok_or_else(invalid),
+        Some(_) => Err(invalid()),
+    }
+}
+
 /// `test.coverage-minimum = { line = 0.80, branch = 0.70 }`: a ratio from 0 to
 /// 1 per `JaCoCo` counter. An unknown counter is a warning, like any unknown
 /// key; a value that is not a ratio is an error naming its key.
@@ -3120,7 +3151,7 @@ version = "1"
         let m = parse(
             "[project]\nname='a'\nversion='1'\n[java]\njdk = 21\n\
              [run]\njvm-args = ['-Xmx256m', '--enable-preview']\n\
-             [test]\njvm-args = ['-Dmode=test']\njacoco-version = '0.8.15'\n\
+             [test]\njvm-args = ['-Dmode=test']\njacoco-version = '0.8.15'\nforks = 4\n\
              [package]\nadd-modules = ['jdk.crypto.ec']",
         )
         .unwrap();
@@ -3129,6 +3160,7 @@ version = "1"
         assert_eq!(m.run.jvm_args, vec!["-Xmx256m", "--enable-preview"]);
         assert_eq!(m.test.jvm_args, vec!["-Dmode=test"]);
         assert_eq!(m.test.jacoco_version.as_deref(), Some("0.8.15"));
+        assert_eq!(m.test.forks(), 4);
         assert_eq!(m.package.add_modules, vec!["jdk.crypto.ec"]);
 
         let again = parse(&m.render(None)).unwrap();
@@ -3140,6 +3172,15 @@ version = "1"
         let err =
             parse("[project]\nname='a'\nversion='1'\n[run]\njvm-args = '-Xmx1g'").unwrap_err();
         assert!(err.to_string().contains("run.jvm-args"), "{err}");
+
+        let one = parse("[project]\nname='a'\nversion='1'\n").unwrap();
+        assert_eq!(one.test.forks(), 1, "one test JVM when the key is not set");
+        for bad in ["forks = 0", "forks = -2", "forks = 'auto'"] {
+            let err = parse(&format!("[project]\nname='a'\nversion='1'\n[test]\n{bad}"))
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains("`test.forks` must be"), "{bad}: {err}");
+        }
     }
 
     const DEMO: &str = "[project]\nname = \"demo\"\nversion = \"2.1.0\"\n\n";

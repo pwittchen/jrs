@@ -95,7 +95,7 @@ src/
 │   ├── metadata.rs    maven-metadata.xml: version lists, snapshot builds
 │   ├── repo.rs        Fetcher: cache → repositories, checksums, retries
 │   └── cache.rs       the local store: layout, atomic writes, pruning
-├── test.rs            the JUnit Platform console launcher; JaCoCo
+├── test.rs            the JUnit Platform console launcher, one or several; JaCoCo
 ├── test_report.rs     JUnit XML read back: the HTML page, reruns, retries
 ├── package.rs         thin / portable / fat / sources jars; merge rules; zip writing
 ├── image.rs           jdeps, jlink, jpackage
@@ -258,6 +258,8 @@ add to it:
  │  sync test resources
  │  fetch_internal: JUnit console launcher (+ JaCoCo agent/cli with --coverage)
  │  test::run  ─► java … ConsoleLauncher --scan-class-path …   (+ test.env)
+ │    or, with test.forks: the classes dealt out, test::run_forks, one launcher
+ │    each at once, output held and passed through whole, XML moved up
  │  retries (test.retries): what still fails, one launcher each
  │  test_report: XML read back ─► flaky count, test-reports/index.html
  │  coverage report (even when tests failed), then test.coverage-minimum
@@ -594,7 +596,9 @@ runtime classpath for `run`) ahead of `jvm-args`. `run.env`, `test.env` and
 
 When the launcher exits, `test_report.rs` reads its XML back: the per-engine
 `TEST-*.xml` files, with each test's unique ID taken from its `<system-out>`,
-and any retries folded in over them.
+and any retries folded in over them. A run split among forks leaves the same
+shape: each fork writes into `fork-<k>/`, and `test::run_forks` moves its
+files up as `TEST-<engine>-fork-<k>.xml` beside the others.
 
 ```
  test-reports/TEST-*.xml ────────┐

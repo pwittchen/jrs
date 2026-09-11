@@ -45,7 +45,8 @@ your own requirements before adopting it for production builds.
   its runtime library implied
 - JUnit 5 and 6 tests, and JUnit 4 through the Vintage engine, with class, tag
   and method selection, reruns of what failed, fail-fast, retries that report
-  flaky tests, JUnit XML and HTML reports, and JaCoCo coverage with minimums;
+  flaky tests, the classes split among parallel test JVMs, JUnit XML and HTML
+  reports, and JaCoCo coverage with minimums;
   Spock, Kotest, ScalaTest and MUnit through their JUnit Platform engines
 - Packaging to a plain jar, a portable jar with its `lib/`, a self-contained fat
   jar (Spring's registries merged), a zipped distribution with launch scripts,
@@ -263,6 +264,7 @@ jacoco-version = "0.8.15"                    # for `jrs test --coverage`; option
 java-agents = ["org.mockito:mockito-core"]
 env = { TZ = "UTC" }
 retries = 2                                  # run failed tests again; optional
+forks = 4                                    # test JVMs to split the classes among; optional
 coverage-minimum = { line = 0.80, branch = 0.70 }   # for `jrs test --coverage`; optional
 
 [package]
@@ -670,13 +672,24 @@ the JDK it picked.
 | `--rerun-failed` | Only the tests that failed in the last run, read from its JUnit XML. |
 | `--fail-fast` | Stop at the first failing test. |
 | `--retries <n>` | Run failing tests again up to `n` times; overrides `[test] retries`. |
+| `--forks <n>` | Split the test classes among `n` test JVMs run at once; overrides `[test] forks`. |
 
 JUnit XML reports land in `target/test-reports`, where CI systems look for
 them. `[test] jvm-args` sets the test JVM's arguments, and `[test] env` and
 `java-agents` its environment and agents (see
 [`[run]`, `[test]` and `[package]`](#run-test-and-package)).
 
-Jupiter runs tests in parallel inside the one test JVM when asked to, and
+`[test] forks = n`, or `--forks n`, splits the test classes among `n` test
+JVMs that run at once, as Gradle's `maxParallelForks` does. Each JVM is dealt
+every `n`-th class in name order and still scans for it, so `--filter` and the
+tags apply as before. Each JVM's output is printed whole, one after another,
+once all have finished; their XML lands side by side in `target/test-reports`
+as `TEST-<engine>-fork-<k>.xml`, and their coverage goes into the one
+`target/jacoco.exec`. Retries, `--rerun-failed`, `--method`, `--fail-fast`
+and `--debug` run in one JVM. Tests that share something outside the JVM — a
+port, a database, a file — must be ready for another JVM running beside them.
+
+Jupiter also runs tests in parallel inside each test JVM when asked to, and
 asking goes through `jvm-args`:
 
 ```toml
@@ -956,6 +969,10 @@ jar, a flat one with Spring's registries merged.
 Maven's `exec-maven-plugin` executions become tasks, and their `<phase>` a
 hook: `exec` a `run` command, and `java` a `java` command over jrs's
 classpath, or a `main` task over the plugin's own `<dependencies>`.
+
+Gradle's `maxParallelForks` and surefire's `<forkCount>` become
+`test.forks` when they are numbers; one worked out from the machine's cores
+is reported.
 
 Kotlin, Scala and Groovy builds migrate too. The Kotlin Gradle plugin,
 `id 'groovy'` and `id 'scala'`, and Maven's `kotlin-maven-plugin`,

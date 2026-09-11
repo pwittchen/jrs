@@ -640,9 +640,33 @@ pub fn run_streaming_in(
     Ok(code)
 }
 
+/// Where [`run_streaming_until`] sends the process's output.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Echo {
+    /// Through the UI, line by line, as it arrives.
+    Through,
+    /// Nowhere yet: it comes back in [`Streamed`] for the caller to pass
+    /// through, as `jrs test` does with several test JVMs, so that one
+    /// launcher's tree is not interleaved with another's.
+    Hold,
+}
+
+/// How a process run by [`run_streaming_until`] ended, and, with
+/// [`Echo::Hold`], what it printed.
+#[derive(Debug, Default)]
+pub struct Streamed {
+    pub code: i32,
+    /// `on_line` stopped it.
+    pub stopped: bool,
+    /// With [`Echo::Hold`], every stdout line `on_line` let through.
+    pub stdout: Vec<String>,
+    /// With [`Echo::Hold`], everything on stderr.
+    pub stderr: String,
+}
+
 /// [`run_streaming_in`], except that `on_line` may stop the process: a
 /// `Break` kills it, and the line that asked for that is not passed through.
-/// The second value says whether that happened; the exit code of a killed
+/// [`Streamed::stopped`] says whether that happened; the exit code of a killed
 /// process is whatever the platform reports for one.
 ///
 /// # Errors
@@ -653,8 +677,9 @@ pub fn run_streaming_until(
     program: &Path,
     args: &[impl AsRef<OsStr>],
     environment: &Environment,
+    echo: Echo,
     mut on_line: impl FnMut(&str) -> std::ops::ControlFlow<()>,
-) -> Result<(i32, bool)> {
+) -> Result<Streamed> {
     use std::io::BufRead;
 
     ui.verbose(describe(program, args));
@@ -678,18 +703,21 @@ pub fn run_streaming_until(
         buf
     });
 
-    let mut stopped = false;
+    let mut streamed = Streamed::default();
     if let Some(stdout) = child.stdout.take() {
         for line in std::io::BufReader::new(stdout).lines() {
             let line = line.unwrap_or_default();
             if on_line(&line).is_break() {
-                stopped = true;
+                streamed.stopped = true;
                 // It may have exited on its own in the meantime; either way
                 // it is gone once `wait` returns.
                 let _ = child.kill();
                 break;
             }
-            ui.println_out(&line);
+            match echo {
+                Echo::Through => ui.println_out(&line),
+                Echo::Hold => streamed.stdout.push(line),
+            }
         }
     }
 
@@ -697,16 +725,24 @@ pub fn run_streaming_until(
         .wait()
         .map_err(|e| JrsError::build(format!("{} did not finish: {e}", program.display())))?;
     let errors = drain.join().unwrap_or_default();
-    if !errors.trim().is_empty() {
-        ui.passthrough(Stream::Err, errors.trim_end());
+    match echo {
+        Echo::Through if !errors.trim().is_empty() => {
+            ui.passthrough(Stream::Err, errors.trim_end());
+        }
+        Echo::Through => {}
+        Echo::Hold => streamed.stderr = errors,
     }
-    let code = status.code().unwrap_or(-1);
-    if stopped {
+    streamed.code = status.code().unwrap_or(-1);
+    if streamed.stopped {
         ui.verbose(format!("{} stopped by jrs", program.display()));
     } else {
-        ui.verbose(format!("{} exited with {code}", program.display()));
+        ui.verbose(format!(
+            "{} exited with {}",
+            program.display(),
+            streamed.code
+        ));
     }
-    Ok((code, stopped))
+    Ok(streamed)
 }
 
 // ---- running tasks ---------------------------------------------------------

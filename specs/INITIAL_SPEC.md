@@ -214,6 +214,7 @@ post-package = ["checksum"]
 | `test.java-agents` | no | `[]` | As `run.java-agents`, looked up on the test classpath (dev-dependencies included), ahead of JaCoCo's agent (§10.2). |
 | `test.env` | no | `{}` | As `run.env`, for the test JVM. |
 | `test.retries` | no | `0` | Run a failed test again up to this many times (§10.2). One that passes on a retry is reported as flaky, not as passed. `jrs test --retries <n>` overrides it. |
+| `test.forks` | no | `1` | Test JVMs a run's classes are split among, run at once (§10.2): Gradle's `maxParallelForks`, surefire's `<forkCount>`. `jrs test --forks <n>` overrides it. |
 | `test.coverage-minimum` | no | `{}` | Ratios from 0 to 1 that `jrs test --coverage` must reach, per JaCoCo counter: `instruction`, `branch`, `line`, `complexity`, `method`, `class` — e.g. `{ line = 0.80, branch = 0.70 }` (§10.2). Ignored without `--coverage`. |
 | `package.add-modules` | no | `[]` | Modules a runtime image needs beyond what `jdeps` finds (§9.4). |
 | `package.manifest.*` | no | `{}` | Extra `MANIFEST.MF` main attributes, written after jrs's own in declaration order (§9.1). Values may use `{project.name}` and `{project.version}`; `Main-Class`, `Class-Path`, `Created-By`, `Manifest-Version` and `Name` are jrs's and refused. |
@@ -305,7 +306,7 @@ jrs <command> [options]
 | Command | Behaviour |
 | --- | --- |
 | `jrs build [--watch]` | Resolve → compile main sources → copy resources. `--watch` repeats on every change (§7.5). |
-| `jrs test [--debug[=port]]` | `build` + compile test sources + run the test engine (§10.2). `--rerun-failed` runs only what failed last time, `--fail-fast` stops at the first failure, `--retries <n>` overrides `test.retries`. |
+| `jrs test [--debug[=port]]` | `build` + compile test sources + run the test engine (§10.2). `--rerun-failed` runs only what failed last time, `--fail-fast` stops at the first failure, `--retries <n>` overrides `test.retries`, `--forks <n>` overrides `test.forks`. |
 | `jrs run [--debug[=port]] [-- args...]` | `build` + `java [<jdwp>] [<run.java-agents>] <run.jvm-args> -cp <cp> <main-class> args...`, in `run.cwd` with `run.env`. |
 | `jrs package` | `build` + produce `target/<name>-<version>.jar`. |
 | `jrs package --portable` | Same, with the runtime dependencies in `target/lib/` (§9.3). |
@@ -1569,6 +1570,24 @@ uses.
   plugin. The coverage agent appends to the first attempt's data. Under
   `--debug` there are no retries: each would be a JVM waiting for a debugger
   again.
+- `test.forks = n` (or `--forks n`) splits a class-path scan among `n`
+  launchers run at once, Gradle's `maxParallelForks`. jrs lists the top-level
+  classes in `target/test-classes` and deals them out in name order, one to
+  each launcher in turn. Each still scans, with one `--include-classname`: a
+  lookahead naming its classes, nested ones included, in front of `--filter`,
+  the pattern for the project's languages, or the launcher's own. It cannot
+  be `--select-class`, since the launcher adds every selected class to its
+  class-name patterns, and a class `--filter` leaves out would run. Each
+  launcher writes its XML into `fork-<k>/`, which jrs moves up as
+  `TEST-<engine>-fork-<k>.xml`, so the first attempt's reports stay in one
+  directory. The counts are added up; the live counter follows all of them;
+  their output is held and passed through whole, launcher by launcher under a
+  `Fork` line, once all have finished. The coverage agents append to one
+  `jacoco.exec`, which JaCoCo locks for each write. Retries run in one
+  launcher over what failed. An explicit selection (`--method`,
+  `--rerun-failed`), `--fail-fast`, which stops the whole run, and `--debug`,
+  which waits for one debugger, run in one JVM. There is no `forkEvery`: each
+  JVM runs its whole share.
 - `test.coverage-minimum = { line = 0.80, branch = 0.70 }` makes
   `jrs test --coverage` exit `1` when a project-wide total in `jacoco.xml` is
   below its minimum, and the error names both numbers. The counters are
@@ -1638,6 +1657,8 @@ parent chains and `<dependencyManagement>` already work.
 | `maven-jar-plugin` → `<mainClass>`, `maven-shade-plugin`'s transformer, `spring-boot-maven-plugin`'s `<mainClass>` or `start-class`; for Spring Boot, else the `@SpringBootApplication` class | `project.main-class` |
 | `maven-jar-plugin` → `<archive><manifestEntries>` | `[package.manifest]`; `${project.version}` and `${project.artifactId}` become placeholders, any other property is reported |
 | `exec-maven-plugin` executions | `[tasks]` and `[hooks]`: `exec` → a `run` task, `java` → `java @{classpath-argfile} <main>`, or a `main` task over the plugin's `<dependencies>` with `includePluginDependencies`; the `<phase>` → the hook at the same point ([TASKS.md §12](TASKS.md#12-open-questions) item 5). With no execution, its `<mainClass>` → `project.main-class` |
+| `maven-surefire-plugin` `<argLine>`, `<systemPropertyVariables>` | `test.jvm-args` |
+| `maven-surefire-plugin` `<forkCount>`, a number | `test.forks` |
 
 Reported, not translated:
 
@@ -1654,6 +1675,8 @@ Reported, not translated:
   translate whole (another phase, `<async>`, a property it cannot evaluate)
   is named on its own.
 - Profiles: only the default-active ones are read; the rest are listed.
+- A per-core `<forkCount>` (`1C`), which depends on the machine, and
+  `<reuseForks>false</reuseForks>`, a fresh JVM per test class.
 
 ### 11.3 Gradle (`build.gradle`, `build.gradle.kts`)
 
@@ -1686,6 +1709,10 @@ the conventional declarative subset, and is explicit about the fact:
   as there is no `test.cwd`). A `-javaagent:` in `jvmArgs` is a path into
   Gradle's cache and is reported, except Mockito's recipe, which becomes
   `test.java-agents = ["org.mockito:mockito-core"]`.
+- `maxParallelForks` on the `test` task, when literal → `test.forks`. A
+  computed value, usually worked out from `availableProcessors()`, is
+  reported, and so is `forkEvery`: jrs never restarts a test JVM part of the
+  way through its share.
 - `jar { manifest { attributes(...) } }` (also `tasks.jar`, Kotlin's
   `mapOf(...)` and `attributes["..."] = ...`) with literal values →
   `[package.manifest]`; `version` / `project.version` → `{project.version}`,

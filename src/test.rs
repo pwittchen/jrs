@@ -21,7 +21,7 @@ use crate::error::{IoResultExt, JrsError, Result, exit};
 use crate::manifest::{CoverageCounter, CoverageMinimum, Manifest};
 use crate::resolve::Resolution;
 use crate::resolve::coord::{Coord, Ga, compare_versions};
-use crate::toolchain::{Environment, Toolchain, run_captured, run_streaming_until};
+use crate::toolchain::{Echo, Environment, Streamed, Toolchain, run_captured, run_streaming_until};
 use crate::ui::{Live, Outcome, Stream, Ui};
 
 pub const LAUNCHER_GROUP: &str = "org.junit.platform";
@@ -419,6 +419,18 @@ impl TestOutcome {
         }
         s
     }
+
+    /// Add one test JVM's counts to those of a run split among several: a
+    /// failing fork fails the run.
+    pub fn absorb(&mut self, fork: &TestOutcome) {
+        if self.exit_code == 0 {
+            self.exit_code = fork.exit_code;
+        }
+        self.found += fork.found;
+        self.passed += fork.passed;
+        self.failed += fork.failed;
+        self.skipped += fork.skipped;
+    }
 }
 
 /// Launch the console launcher and follow along.
@@ -429,6 +441,13 @@ impl TestOutcome {
 /// reports cannot be removed, and [`JrsError::Build`] if `java` cannot be
 /// started. Failing tests are not an error: they are in the [`TestOutcome`].
 pub fn run(toolchain: &Toolchain, run: &TestRun, ui: &Ui) -> Result<TestOutcome> {
+    prepare(run)?;
+    Ok(follow(toolchain, run, ui, Echo::Through)?.0)
+}
+
+/// What every launcher of a run needs before it starts: the colour palette,
+/// written once, and no reports left from an earlier run.
+fn prepare(run: &TestRun) -> Result<()> {
     if let Some(palette) = run.palette() {
         std::fs::create_dir_all(&run.work_dir).path(&run.work_dir)?;
         std::fs::write(&palette, COLOR_PALETTE).path(&palette)?;
@@ -440,7 +459,17 @@ pub fn run(toolchain: &Toolchain, run: &TestRun, ui: &Ui) -> Result<TestOutcome>
             std::fs::remove_dir_all(dir).path(dir)?;
         }
     }
+    Ok(())
+}
 
+/// Run one launcher and count along with it, its output passed through or
+/// held as `echo` says.
+fn follow(
+    toolchain: &Toolchain,
+    run: &TestRun,
+    ui: &Ui,
+    echo: Echo,
+) -> Result<(TestOutcome, Streamed)> {
     // The launcher's output is always streamed, even with nothing animated: the
     // counts jrs reports come from the summary block it prints, and reading them
     // costs nothing.
@@ -452,8 +481,8 @@ pub fn run(toolchain: &Toolchain, run: &TestRun, ui: &Ui) -> Result<TestOutcome>
     let mut cancelled = false;
     let stop_it = run.fail_fast_mode() == FailFast::Stop;
     let mut failing = false;
-    let (exit_code, stopped) =
-        run_streaming_until(ui, &toolchain.java, &args, &run.environment, |line| {
+    let streamed =
+        run_streaming_until(ui, &toolchain.java, &args, &run.environment, echo, |line| {
             // The test after the first failure has started: stop it before it
             // gets anywhere, with the failure and its trace already through.
             if stop_it && failing && feed_started(line) {
@@ -484,7 +513,7 @@ pub fn run(toolchain: &Toolchain, run: &TestRun, ui: &Ui) -> Result<TestOutcome>
             ControlFlow::Continue(())
         })?;
 
-    outcome.exit_code = exit_code;
+    outcome.exit_code = streamed.code;
     for (count, what) in summary {
         match what.as_str() {
             "found" => outcome.found = count,
@@ -494,7 +523,7 @@ pub fn run(toolchain: &Toolchain, run: &TestRun, ui: &Ui) -> Result<TestOutcome>
             _ => {}
         }
     }
-    if stopped {
+    if streamed.stopped {
         // Stopped before its summary: what jrs counted is all there is, and
         // it stopped because something failed.
         let failed = seen.failed.max(1);
@@ -507,8 +536,176 @@ pub fn run(toolchain: &Toolchain, run: &TestRun, ui: &Ui) -> Result<TestOutcome>
             ..TestOutcome::default()
         };
     }
-    outcome.stopped_early = stopped || cancelled;
-    Ok(outcome)
+    outcome.stopped_early = streamed.stopped || cancelled;
+    Ok((outcome, streamed))
+}
+
+// ---- several test JVMs ------------------------------------------------------
+
+/// The launcher's own `--include-classname` pattern, which it applies when
+/// given none.
+pub const LAUNCHER_CLASS_PATTERN: &str = r"^(Test.*|.+[.$]Test.*|.*Tests?)$";
+
+/// A fork writes its reports into `fork-<n>/`, from 1, before they are moved up.
+const FORK_PREFIX: &str = "fork-";
+
+/// The top-level classes compiled into `dir`, by binary name and sorted: what
+/// a scan of it discovers. A nested class goes with the class that holds it,
+/// as a `@Nested` test class does.
+///
+/// # Errors
+///
+/// [`JrsError::Io`] if `dir` cannot be walked.
+pub fn test_classes(dir: &Path) -> Result<Vec<String>> {
+    let mut classes: Vec<String> = crate::project::find_all(dir)?
+        .iter()
+        .filter_map(|file| {
+            let relative = file.strip_prefix(dir).ok()?.to_str()?;
+            let name = relative.strip_suffix(".class")?.replace(['/', '\\'], ".");
+            let simple = name.rsplit('.').next().unwrap_or(&name);
+            let top_level =
+                !simple.contains('$') && simple != "module-info" && simple != "package-info";
+            top_level.then_some(name)
+        })
+        .collect();
+    classes.sort();
+    Ok(classes)
+}
+
+/// Deal `classes` out to at most `forks` test JVMs in turn, each getting every
+/// `forks`-th class in name order. No share is empty: there are never more
+/// shares than classes.
+#[must_use]
+pub fn split(classes: &[String], forks: usize) -> Vec<Vec<String>> {
+    let forks = forks.min(classes.len()).max(1);
+    let mut shares = vec![Vec::new(); forks];
+    for (i, class) in classes.iter().enumerate() {
+        shares[i % forks].push(class.clone());
+    }
+    shares
+}
+
+/// The `--include-classname` pattern of a fork: the classes in its `share`,
+/// with their nested classes, and of those only what `base` lets through —
+/// `--filter`, or the pattern for the project's languages, or the launcher's
+/// own.
+///
+/// It has to be one pattern: the launcher ORs a second with the first, and it
+/// adds every class `--select-class` names to its patterns, which would run
+/// classes `--filter` leaves out. So the share is a lookahead in front of
+/// `base`, which the launcher matches against the whole class name.
+#[must_use]
+pub fn fork_pattern(share: &[String], base: Option<&str>) -> String {
+    let names: Vec<String> = share.iter().map(|class| format!(r"\Q{class}\E")).collect();
+    format!(
+        r"(?=(?:{})(?:\$.*)?$)(?:{})",
+        names.join("|"),
+        base.unwrap_or(LAUNCHER_CLASS_PATTERN)
+    )
+}
+
+/// The launchers of a run split among several test JVMs, one per share. Each
+/// scans the same directory with a pattern of its own ([`fork_pattern`]) and
+/// writes its XML into `fork-<n>/` below the run's reports. The coverage agent
+/// appends, since they all record into one execution file, which `JaCoCo`
+/// locks for each JVM's write.
+#[must_use]
+pub fn forked(run: &TestRun, shares: &[Vec<String>]) -> Vec<TestRun> {
+    shares
+        .iter()
+        .enumerate()
+        .map(|(i, share)| TestRun {
+            jvm_args: appending_coverage(&run.jvm_args),
+            filter: Some(fork_pattern(share, run.filter.as_deref())),
+            reports_dir: run
+                .reports_dir
+                .as_ref()
+                .map(|dir| dir.join(format!("{FORK_PREFIX}{}", i + 1))),
+            ..run.clone()
+        })
+        .collect()
+}
+
+/// One test JVM of a run split among several, and what it printed, held until
+/// it finished so that its tree reads whole.
+#[derive(Debug)]
+pub struct Fork {
+    pub outcome: TestOutcome,
+    pub stdout: Vec<String>,
+    pub stderr: String,
+}
+
+/// Run `forks`, the launchers [`forked`] made of `run`, all at once, under
+/// one live counter, and bring their reports together: each fork's
+/// `TEST-<engine>.xml` moves up into `run`'s reports as
+/// `TEST-<engine>-fork-<n>.xml`, so the first attempt's XML is in one
+/// directory, where CI looks for it. What each printed comes back in fork
+/// order, for the caller to pass through.
+///
+/// # Errors
+///
+/// As for [`run`], and [`JrsError::Io`] if a fork's reports cannot be moved.
+pub fn run_forks(
+    toolchain: &Toolchain,
+    run: &TestRun,
+    forks: &[TestRun],
+    ui: &Ui,
+) -> Result<Vec<Fork>> {
+    prepare(run)?;
+    let followed: Vec<Result<(TestOutcome, Streamed)>> = std::thread::scope(|scope| {
+        let threads: Vec<_> = forks
+            .iter()
+            .map(|fork| scope.spawn(move || follow(toolchain, fork, ui, Echo::Hold)))
+            .collect();
+        threads
+            .into_iter()
+            .map(|thread| {
+                thread
+                    .join()
+                    .unwrap_or_else(|_| Err(JrsError::build("a test JVM's thread panicked")))
+            })
+            .collect()
+    });
+    let mut out = Vec::with_capacity(forks.len());
+    for (n, (fork, followed)) in forks.iter().zip(followed).enumerate() {
+        let (outcome, streamed) = followed?;
+        if let (Some(from), Some(to)) = (&fork.reports_dir, &run.reports_dir) {
+            hoist_reports(from, to, n + 1)?;
+        }
+        out.push(Fork {
+            outcome,
+            stdout: streamed.stdout,
+            stderr: streamed.stderr,
+        });
+    }
+    Ok(out)
+}
+
+/// Move the `TEST-*.xml` files fork `n` wrote into `from` up into `to`, named
+/// for the fork, and remove `from`.
+fn hoist_reports(from: &Path, to: &Path, n: usize) -> Result<()> {
+    if !from.is_dir() {
+        return Ok(());
+    }
+    let mut files: Vec<PathBuf> = std::fs::read_dir(from)
+        .path(from)?
+        .filter_map(std::result::Result::ok)
+        .map(|entry| entry.path())
+        .collect();
+    files.sort();
+    for file in files {
+        let Some(stem) = file
+            .file_name()
+            .and_then(|name| name.to_str())
+            .and_then(|name| name.strip_suffix(".xml"))
+            .filter(|stem| stem.starts_with("TEST-"))
+        else {
+            continue;
+        };
+        let moved = to.join(format!("{stem}-{FORK_PREFIX}{n}.xml"));
+        std::fs::rename(&file, &moved).path(&file)?;
+    }
+    std::fs::remove_dir_all(from).path(from)
 }
 
 /// Recognise a finished *test* in the launcher's tree output.
@@ -811,11 +1008,12 @@ pub fn coverage_shortfalls(xml: &str, minimums: &[CoverageMinimum]) -> Vec<Cover
         .collect()
 }
 
-/// The test JVM's arguments for a retry: the coverage agent, when there is
-/// one, appends to the execution data the first attempt recorded instead of
-/// starting it over.
+/// The arguments of a test JVM that adds to execution data another records
+/// too — a retry, to the first attempt's, or one of several forks, to one
+/// shared file: the coverage agent, when there is one, appends instead of
+/// starting the data over.
 #[must_use]
-pub fn retry_jvm_args(jvm_args: &[String]) -> Vec<String> {
+pub fn appending_coverage(jvm_args: &[String]) -> Vec<String> {
     jvm_args
         .iter()
         .map(|arg| match arg.strip_suffix(",append=false") {
@@ -1464,13 +1662,145 @@ mod tests {
             "-Xmx256m".to_string(),
         ];
         assert_eq!(
-            retry_jvm_args(&first),
+            appending_coverage(&first),
             [
                 "-javaagent:/c/agent.jar=destfile=/t/jacoco.exec,append=true",
                 "-Xmx256m"
             ]
         );
         let other = vec!["-javaagent:/c/mockito.jar".to_string()];
-        assert_eq!(retry_jvm_args(&other), other, "other agents are left alone");
+        assert_eq!(
+            appending_coverage(&other),
+            other,
+            "other agents are left alone"
+        );
+    }
+
+    fn strings(items: &[&str]) -> Vec<String> {
+        items.iter().map(|s| (*s).to_string()).collect()
+    }
+
+    #[test]
+    fn classes_are_dealt_out_in_turn_and_no_fork_is_left_empty() {
+        let classes = strings(&["a.A", "a.B", "a.C", "b.D", "b.E"]);
+        assert_eq!(
+            split(&classes, 2),
+            [strings(&["a.A", "a.C", "b.E"]), strings(&["a.B", "b.D"])]
+        );
+        assert_eq!(split(&classes, 9).len(), 5, "no more forks than classes");
+        assert_eq!(split(&[], 4), [Vec::<String>::new()]);
+    }
+
+    #[test]
+    fn a_forks_pattern_pins_its_classes_in_front_of_the_usual_one() {
+        let share = strings(&["com.example.CalcTest", "Outer"]);
+        assert_eq!(
+            fork_pattern(&share, None),
+            r"(?=(?:\Qcom.example.CalcTest\E|\QOuter\E)(?:\$.*)?$)(?:^(Test.*|.+[.$]Test.*|.*Tests?)$)"
+        );
+        assert!(fork_pattern(&share, Some(".*Only")).ends_with("(?:.*Only)"));
+    }
+
+    #[test]
+    fn each_fork_scans_its_share_writes_its_own_reports_and_appends_coverage() {
+        let base = TestRun {
+            jvm_args: vec!["-javaagent:/a.jar=destfile=/t/jacoco.exec,append=false".into()],
+            filter: Some(".*IT".into()),
+            reports_dir: Some(PathBuf::from("/t/test-reports")),
+            ..run("1.10.2")
+        };
+        let forks = forked(&base, &[strings(&["a.AIT"]), strings(&["a.BIT"])]);
+        assert_eq!(forks.len(), 2);
+        for (n, fork) in forks.iter().enumerate() {
+            assert_eq!(
+                fork.reports_dir,
+                Some(PathBuf::from(format!("/t/test-reports/fork-{}", n + 1)))
+            );
+            assert!(
+                fork.jvm_args[0].ends_with(",append=true"),
+                "{:?}",
+                fork.jvm_args
+            );
+            let args = fork.args();
+            assert!(args.contains(&"--scan-class-path".to_string()), "{args:?}");
+            let filter = fork.filter.as_deref().unwrap();
+            assert!(filter.ends_with("(?:.*IT)"), "{filter}");
+        }
+        assert!(forks[0].filter.as_deref().unwrap().contains(r"\Qa.AIT\E"));
+        assert!(forks[1].filter.as_deref().unwrap().contains(r"\Qa.BIT\E"));
+    }
+
+    #[test]
+    fn outcomes_of_forks_add_up_and_one_failure_fails_the_run() {
+        let mut total = TestOutcome::default();
+        total.absorb(&TestOutcome {
+            found: 3,
+            passed: 3,
+            ..TestOutcome::default()
+        });
+        total.absorb(&TestOutcome {
+            exit_code: 1,
+            found: 2,
+            passed: 1,
+            failed: 1,
+            ..TestOutcome::default()
+        });
+        assert_eq!(total.describe(), "5 tests, 4 passed, 1 failed");
+        assert!(!total.ok());
+    }
+
+    /// A directory under the system's temp dir, gone when dropped.
+    struct Temp(PathBuf);
+
+    impl Temp {
+        fn new(name: &str) -> Temp {
+            let dir = std::env::temp_dir().join(format!("jrs-test-{name}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            Temp(dir)
+        }
+
+        fn touch(&self, relative: &str) {
+            let file = self.0.join(relative);
+            std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+            std::fs::write(file, relative).unwrap();
+        }
+    }
+
+    impl Drop for Temp {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn only_top_level_classes_are_dealt_out() {
+        let dir = Temp::new("classes");
+        for file in [
+            "com/example/CalcTest.class",
+            "com/example/CalcTest$Nested.class",
+            "com/example/package-info.class",
+            "module-info.class",
+            "RootTest.class",
+            "com/example/fixture.json",
+        ] {
+            dir.touch(file);
+        }
+        assert_eq!(
+            test_classes(&dir.0).unwrap(),
+            ["RootTest", "com.example.CalcTest"]
+        );
+    }
+
+    #[test]
+    fn a_forks_reports_move_up_named_for_it() {
+        let dir = Temp::new("hoist");
+        dir.touch("fork-2/TEST-junit-jupiter.xml");
+        dir.touch("fork-2/TEST-junit-vintage.xml");
+        dir.touch("fork-2/notes.txt");
+        hoist_reports(&dir.0.join("fork-2"), &dir.0, 2).unwrap();
+        assert!(!dir.0.join("fork-2").exists());
+        assert!(dir.0.join("TEST-junit-jupiter-fork-2.xml").is_file());
+        assert!(dir.0.join("TEST-junit-vintage-fork-2.xml").is_file());
     }
 }

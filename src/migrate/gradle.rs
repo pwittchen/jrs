@@ -830,6 +830,13 @@ fn read_jvm_args(script: &str, out: &mut Manifest, report: &mut Report) {
                  engine; TestNG is not supported"
                     .to_string(),
             );
+        } else if let Some(value) = setting(trimmed, "maxParallelForks") {
+            read_max_parallel_forks(trimmed, value, out, report);
+        } else if setting(trimmed, "forkEvery").is_some() {
+            report.skipped(format!(
+                "`{trimmed}` — Gradle restarts a test JVM after so many classes; jrs starts \
+                 each test JVM once, for its whole share of the classes"
+            ));
         }
     }
     if !test_args.is_empty() {
@@ -838,6 +845,34 @@ fn read_jvm_args(script: &str, out: &mut Manifest, report: &mut Report) {
     }
     for agent in test_agents {
         translate_java_agent("test", &agent, out, report);
+    }
+}
+
+/// The value of `key = value` or `key value` on one line of a Gradle block, in
+/// either DSL; `None` when the line sets something else.
+fn setting<'a>(line: &'a str, key: &str) -> Option<&'a str> {
+    let rest = line.strip_prefix(key)?;
+    let value = match rest.trim_start().strip_prefix('=') {
+        Some(value) => value,
+        None if rest.starts_with(char::is_whitespace) => rest,
+        None => return None,
+    };
+    Some(value.trim().trim_end_matches(';').trim_end())
+}
+
+/// `maxParallelForks` → `test.forks`. Builds usually compute it from the
+/// machine's cores, which a committed jrs.toml cannot, so that is reported.
+fn read_max_parallel_forks(line: &str, value: &str, out: &mut Manifest, report: &mut Report) {
+    match value.parse::<u32>() {
+        // Gradle's default, and jrs's.
+        Ok(0 | 1) => {}
+        Ok(n) => {
+            out.test.forks = n;
+            report.migrated(format!("test.forks = {n} (from maxParallelForks)"));
+        }
+        Err(_) => report.skipped(format!(
+            "`{line}` — its value is computed; set test.forks to a number of test JVMs"
+        )),
     }
 }
 
@@ -1884,6 +1919,43 @@ application {
                 .iter()
                 .any(|s| s.contains("TestNG"))
         );
+    }
+
+    #[test]
+    fn max_parallel_forks_becomes_test_forks_unless_it_is_computed() {
+        let dir = Dir::new("forks");
+        for script in [
+            "test {\n  maxParallelForks = 3\n}\n",
+            "test {\n  maxParallelForks 3\n}\n",
+            "tasks.withType<Test> {\n  maxParallelForks = 3\n}\n",
+        ] {
+            let migration = dir.migrate(script);
+            assert_eq!(migration.manifest.test.forks, 3, "{script}");
+            assert!(
+                migration
+                    .report
+                    .migrated
+                    .iter()
+                    .any(|s| s == "test.forks = 3 (from maxParallelForks)"),
+                "{script}"
+            );
+        }
+
+        let computed = dir.migrate(
+            "test {\n  maxParallelForks = Runtime.runtime.availableProcessors().intdiv(2) ?: 1\n  \
+             forkEvery 100\n  maxParallelForksExtra = 2\n}\n",
+        );
+        assert_eq!(computed.manifest.test.forks, 0);
+        let skipped = computed.report.not_migrated.join("\n");
+        assert!(skipped.contains("its value is computed"), "{skipped}");
+        assert!(
+            skipped.contains("`forkEvery 100` — Gradle restarts a test JVM"),
+            "{skipped}"
+        );
+        assert!(!skipped.contains("Extra"), "another setting: {skipped}");
+
+        let default = dir.migrate("test {\n  maxParallelForks = 1\n}\n");
+        assert_eq!(default.manifest.test.forks, 0, "one JVM is the default");
     }
 
     #[test]
