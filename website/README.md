@@ -36,7 +36,7 @@ version. It can also be run by hand from the Actions tab.
   colouring and the copy buttons. A `<pre data-lang="toml">` is coloured as
   TOML, `plain` not at all, anything else by its `#` comments; in the docs a
   `data-file` attribute gives the block a caption.
-- The docs follow the repository's `README.md` and `specs/`. A change to
+- The docs follow the repository's `DOCS.md` and `specs/`. A change to
   jrs's behaviour, a flag or a manifest key belongs in them too.
 - `install.sh` is the installer behind `curl -fsSL https://getjrs.dev/install.sh | sh`.
   Bun does not bundle it; the build copies it into `dist/` as is, so

@@ -45,8 +45,10 @@ version stays current. The site also serves `website/install.sh` as
 `getjrs.dev/install.sh`, the `curl | sh` installer for the release binaries; it
 fetches `releases/latest/download/jrs-<target>.tar.gz` and `SHA256SUMS`, so the
 asset names in `dist` must stay unversioned. `website/docs/index.html` is the
-user documentation at `getjrs.dev/docs/`, written from `README.md` and the
+user documentation at `getjrs.dev/docs/`, written from `DOCS.md` and the
 specs: a change to a command, a flag or a manifest key belongs there too.
+`README.md` is a short overview that links into `DOCS.md`, the full reference;
+keep the details in `DOCS.md`.
 
 Single tests and single suites:
 

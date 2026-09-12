@@ -133,7 +133,7 @@ jobs:
 
   # Prebuilt binaries, built from the version commit. Asset names carry no
   # version, so `releases/latest/download/<asset>` is a stable URL for the
-  # installation instructions in the README and for website/install.sh, which
+  # installation instructions in DOCS.md and for website/install.sh, which
   # also reads SHA256SUMS. Renaming an asset breaks that script.
   dist:
     needs: bump

@@ -1,6 +1,6 @@
 ---
 name: update-docs
-description: Review the jrs project against its Markdown documentation and update whatever has gone out of date — README, ARCH.md, CLAUDE.md, ROADMAP.md, the specs and the example READMEs. Checks every factual claim (commands, flags, manifest keys, module and file names, test suites, crates, CI, status lines, links) against the code, fixes drift in the docs only, and reports anything that looks like a code bug or needs a decision instead of editing it. Use when the user asks to update, refresh, sync, audit or check the docs.
+description: Review the jrs project against its Markdown documentation and update whatever has gone out of date — README, DOCS.md, ARCH.md, CLAUDE.md, ROADMAP.md, the specs and the example READMEs. Checks every factual claim (commands, flags, manifest keys, module and file names, test suites, crates, CI, status lines, links) against the code, fixes drift in the docs only, and reports anything that looks like a code bug or needs a decision instead of editing it. Use when the user asks to update, refresh, sync, audit or check the docs.
 argument-hint: "[optional: files to limit the review to, or a git ref to review changes since]"
 allowed-tools: Bash(git status:*), Bash(git diff:*), Bash(git log:*), Bash(git show:*), Bash(git ls-files:*), Bash(git rev-parse:*), Bash(cargo run:*), Bash(cargo build:*), Bash(python3 .claude/skills/update-docs/check_links.py:*), Bash(ls:*), Bash(find:*), Bash(grep:*), Bash(wc:*), Read, Edit, Grep, Glob, Agent
 ---
@@ -40,11 +40,12 @@ it, never the other way round.
 
 | Document | What it is | Check it against |
 | --- | --- | --- |
-| `README.md` | The user manual: features, install, manifest reference, commands, config, tasks, languages, development. | `cargo run -q -- --help` and `cargo run -q -- <cmd> --help` for every command; `src/manifest.rs` (accepted keys, defaults, validation), `src/config.rs` (user config), `src/cli.rs` (behaviour), `src/compile/lang.rs` (languages, default versions), `src/task.rs` (task keys, placeholders, env vars), `src/resolve/cache.rs` (cache location), `src/completions.rs` (shells), `.github/workflows/rust.yml` (release assets, targets). |
+| `README.md` | A short overview: status, feature summary, quick install, a first project, links into `DOCS.md`. Keep it short — details belong in `DOCS.md`. | The feature summary against `DOCS.md`; the install commands against `website/install.sh`; every link and `DOCS.md#…` anchor resolves. |
+| `DOCS.md` | The user manual: install, manifest reference, commands, config, tests, tasks, languages, migration, development. | `cargo run -q -- --help` and `cargo run -q -- <cmd> --help` for every command; `src/manifest.rs` (accepted keys, defaults, validation), `src/config.rs` (user config), `src/cli.rs` (behaviour), `src/compile/lang.rs` (languages, default versions), `src/task.rs` (task keys, placeholders, env vars), `src/resolve/cache.rs` (cache location), `src/completions.rs` (shells), `.github/workflows/rust.yml` (release assets, targets). |
 | `ARCH.md` | The architecture map: source map, module layers, `Session` spine, resolution, compile units, output layer, files on disk, invariants. | The `src/` tree (`find src -name '*.rs' \| sort`), `mod` declarations in `src/lib.rs` and each `mod.rs`, `use` statements (which module depends on which), the functions and types it names, the files actually written under `target/` and `target/.jrs/`, `tests/`. |
 | `CLAUDE.md` | Guidance for Claude Code: commands, CI, architecture summary, invariants, test layout, crate list. | `Cargo.toml` (dependencies, features, benches), `.github/workflows/rust.yml` (jobs, OSes, `paths-ignore`, release steps), `tests/*.rs` and `tests/fixtures/`, `benches/`, the `require_jdk!` macro. Keep it consistent with `ARCH.md`, which it summarises. |
 | `ROADMAP.md` | What is **left** to do, and nothing else — it keeps no list of what has landed. | Grep the code for each remaining item. An item that has been implemented is removed; don't mark it done in place or record it elsewhere in the roadmap. A landed piece of a larger item goes too, leaving only the context the open part needs. Adding new items is the user's call — suggest, don't add. |
-| `specs/INITIAL_SPEC.md` | The design contract the code follows; module doc comments cite it by section. | Only update: milestone status in §12, cross-references, file and module names, and statements the code has plainly superseded in a way already reflected elsewhere (ARCH.md, README). A behavioural mismatch that §12.1 doesn't cover is a **finding** — report it with both sides; don't silently rewrite the spec or add a §12.1 entry. Never renumber sections: code cites them. |
+| `specs/INITIAL_SPEC.md` | The design contract the code follows; module doc comments cite it by section. | Only update: milestone status in §12, cross-references, file and module names, and statements the code has plainly superseded in a way already reflected elsewhere (ARCH.md, DOCS.md). A behavioural mismatch that §12.1 doesn't cover is a **finding** — report it with both sides; don't silently rewrite the spec or add a §12.1 entry. Never renumber sections: code cites them. |
 | `specs/JVM_LANGUAGES.md`, `specs/TASKS.md` | Design records, "corrected where the implementation settled a detail differently". | Their `Status:` line (what is and isn't built), and details the implementation settled differently — those may be corrected in place, as the documents themselves say. Leave the problem statements, arguments and spike notes alone. |
 | `examples/*/README.md` | What each example exercises and how to try it. | That example's `jrs.toml`, `jrs.lock`, sources and tests: versions, dependency coordinates, file and class names, test counts (count the test methods), commands shown. |
 
@@ -85,9 +86,9 @@ Gather the facts the documents are checked against, once, before reading them:
 
 ## 3. Review the documents
 
-The documents are long (README ~700 lines, ARCH ~680, INITIAL_SPEC ~1400).
+The documents are long (DOCS ~1100 lines, ARCH ~680, INITIAL_SPEC ~1400).
 For a full review, fan out: launch one `general-purpose` agent per document or
-group (README; ARCH.md + CLAUDE.md; ROADMAP.md + the three specs; the example
+group (README + DOCS.md; ARCH.md + CLAUDE.md; ROADMAP.md + the three specs; the example
 READMEs), **in a single message so they run in parallel**. Give each agent:
 
 - the document(s), its row from the table above, and the ground truth from
@@ -106,7 +107,7 @@ What to check, claim by claim:
 
 - **Commands and flags**: every command, flag, short option, default value and
   example invocation exists and behaves as described; no command or flag
-  in `--help` is missing from the README's command list.
+  in `--help` is missing from the command list in `DOCS.md`.
 - **Manifest and config keys**: names, types, defaults, which table they sit
   in; new keys documented, removed keys gone.
 - **Names**: modules, files, functions, types, `target/` paths, test suites,
@@ -116,11 +117,11 @@ What to check, claim by claim:
   suites") still hold.
 - **Lists that should be complete**: the crate list, CI jobs and OSes,
   supported shells, the §12.1 divergence count mentioned in `CLAUDE.md`, the
-  README feature list.
+  README feature summary.
 - **Status lines**: specs' `Status:`, ROADMAP items, "not built" or "not yet"
   statements anywhere — grep for `not yet`, `not built`, `TODO`, `planned`,
   `future`, `will ` and check each.
-- **Cross-document consistency**: `CLAUDE.md` agrees with `ARCH.md`; README
+- **Cross-document consistency**: `CLAUDE.md` agrees with `ARCH.md`; DOCS.md
   agrees with SPEC §5 (CLI) and §4 (manifest) except where §12.1 says otherwise.
 
 ## 4. Apply
