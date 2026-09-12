@@ -1,14 +1,9 @@
-import cargo from "../../Cargo.toml";
+import { $, $$, esc, highlight, setupCopy, stampVersion } from "./shared";
 
-const $ = <T extends Element>(sel: string, root: ParentNode = document) => root.querySelector<T>(sel);
-const $$ = <T extends Element>(sel: string, root: ParentNode = document) => [...root.querySelectorAll<T>(sel)];
-
-const esc = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const reducedMotion = matchMedia("(prefers-reduced-motion: reduce)").matches;
 
-// The version comes from the crate itself, so the site never drifts from a release.
-for (const el of $$<HTMLElement>("[data-version]")) el.textContent = `v${cargo.package.version}`;
+stampVersion();
 
 // ---- terminal replay ------------------------------------------------------
 //
@@ -164,45 +159,7 @@ function setupTerminal() {
 
 // ---- syntax colouring -----------------------------------------------------
 
-function highlightToml(src: string): string {
-  return src
-    .split("\n")
-    .map((line) => {
-      const header = /^(\[[^\]]+\])(.*)$/.exec(line);
-      if (header) return `<span class="t-table">${esc(header[1]!)}</span>${rest(header[2]!)}`;
-      return rest(line);
-    })
-    .join("\n");
-
-  function rest(s: string): string {
-    const token = /("(?:[^"\\]|\\.)*")|(#.*$)|(\b\d+(?:\.\d+)*\b)|([A-Za-z][\w-]*(?=\s*=))/g;
-    let out = "";
-    let last = 0;
-    for (const m of s.matchAll(token)) {
-      out += esc(s.slice(last, m.index));
-      const [text, str, com, num] = m;
-      const cls = str ? "t-str" : com ? "t-com" : num ? "t-num" : "t-key";
-      out += `<span class="${cls}">${esc(text)}</span>`;
-      last = m.index! + text.length;
-    }
-    return out + esc(s.slice(last));
-  }
-}
-
-function highlightComments(src: string): string {
-  return src
-    .split("\n")
-    .map((line) => {
-      const i = line.indexOf("#");
-      return i < 0 ? esc(line) : `${esc(line.slice(0, i))}<span class="t-com">${esc(line.slice(i))}</span>`;
-    })
-    .join("\n");
-}
-
-for (const pre of $$<HTMLPreElement>("pre[data-lang]")) {
-  const src = pre.textContent ?? "";
-  pre.innerHTML = pre.dataset.lang === "toml" ? highlightToml(src) : highlightComments(src);
-}
+for (const pre of $$<HTMLPreElement>("pre[data-lang]")) highlight(pre);
 
 // ---- install tabs ---------------------------------------------------------
 
@@ -235,21 +192,6 @@ function setupTabs() {
       : null;
   const tab = detected && tabs.find((t) => t.id === detected);
   if (tab) select(tab);
-}
-
-function setupCopy() {
-  for (const button of $$<HTMLButtonElement>(".copy")) {
-    button.addEventListener("click", async () => {
-      const text = button.parentElement?.querySelector("pre")?.textContent ?? "";
-      try {
-        await navigator.clipboard.writeText(text.trim());
-        button.textContent = "Copied";
-      } catch {
-        button.textContent = "Select and copy";
-      }
-      setTimeout(() => (button.textContent = "Copy"), 1600);
-    });
-  }
 }
 
 setupTerminal();
