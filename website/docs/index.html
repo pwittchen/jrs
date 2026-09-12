@@ -1,0 +1,2788 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Documentation · jrs</title>
+    <meta
+      name="description"
+      content="The jrs documentation: installing jrs, the jrs.toml manifest, every command and flag, and guides to dependencies, tests, packaging, tasks and migration."
+    />
+    <meta name="theme-color" content="#16110d" />
+    <link rel="icon" type="image/png" href="../../logo.png" />
+    <link rel="stylesheet" href="../src/docs.css" />
+    <script type="module" src="../src/docs.ts"></script>
+  </head>
+  <body>
+    <header class="topbar">
+     <div class="topbar-inner">
+      <div class="topbar-side">
+      <button class="menu-toggle" type="button" data-menu aria-expanded="false" aria-controls="sidebar" aria-label="Sections">
+        <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16M4 12h16M4 18h16" /></svg>
+      </button>
+      <a class="brand" href="../"><img src="../../logo.png" alt="" width="32" height="32" />jrs</a>
+      <span class="brand-page">docs</span>
+      </div>
+      <div class="topbar-main">
+      <nav class="topnav" aria-label="Site">
+        <a class="wide" href="../">
+          <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 11.5 12 4l9 7.5M5.5 9.5V20h4.5v-5.5h4V20h4.5V9.5" /></svg>
+          Home
+        </a>
+        <a class="wide" href="./" aria-current="page">
+          <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20V3H6.5A2.5 2.5 0 0 0 4 5.5v14zM4 19.5A2.5 2.5 0 0 0 6.5 22H20v-5" /></svg>
+          Docs
+        </a>
+        <a class="wide" href="../#install">
+          <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v12M7 10l5 5 5-5M5 21h14" /></svg>
+          Install
+        </a>
+        <a href="https://github.com/pwittchen/jrs" aria-label="GitHub">
+          <svg class="icon filled" viewBox="0 0 16 16" aria-hidden="true"><path d="M8 0c4.42 0 8 3.58 8 8a8.013 8.013 0 0 1-5.45 7.59c-.4.08-.55-.17-.55-.38 0-.27.01-1.13.01-2.2 0-.75-.25-1.23-.54-1.48 1.78-.2 3.65-.88 3.65-3.95 0-.88-.31-1.59-.82-2.15.08-.2.36-1.02-.08-2.12 0 0-.67-.22-2.2.82-.64-.18-1.32-.27-2-.27-.68 0-1.36.09-2 .27-1.53-1.03-2.2-.82-2.2-.82-.44 1.1-.16 1.92-.08 2.12-.51.56-.82 1.28-.82 2.15 0 3.06 1.86 3.75 3.64 3.95-.23.2-.44.55-.51 1.07-.46.21-1.61.55-2.33-.66-.15-.24-.6-.83-1.23-.82-.67.01-.27.38.01.53.34.19.73.9.82 1.13.16.45.68 1.31 2.69.94 0 .67.01 1.3.01 1.49 0 .21-.15.45-.55.38A7.995 7.995 0 0 1 0 8c0-4.42 3.58-8 8-8Z" /></svg>
+          <span class="label">GitHub</span>
+        </a>
+        <a class="version" data-version href="https://github.com/pwittchen/jrs/releases" title="Release notes"></a>
+      </nav>
+      </div>
+     </div>
+    </header>
+
+    <div class="docs">
+      <aside class="sidebar" id="sidebar" aria-label="Documentation">
+        <div class="search" role="search">
+          <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7" /><path d="m20 20-3.5-3.5" /></svg>
+          <input type="search" data-search placeholder="Search the docs" aria-label="Search the docs" aria-controls="results" autocomplete="off" spellcheck="false" />
+          <kbd>/</kbd>
+        </div>
+        <nav class="toc" data-toc aria-label="Sections"></nav>
+        <div class="results" id="results" data-results role="listbox" aria-label="Search results" hidden></div>
+      </aside>
+      <div class="scrim" data-scrim></div>
+
+      <main class="doc">
+        <article class="doc-body">
+<!-- ===================================================================== -->
+<div class="group" data-title="Getting started">
+
+<section id="introduction">
+<h2>Introduction</h2>
+<p class="lead">
+  jrs is a build system for the JVM, written in Rust. It builds, tests, runs and packages a
+  single-module Java project from one <code>jrs.toml</code> manifest, resolving dependencies
+  from Maven Central. Kotlin, Scala and Groovy compile alongside Java.
+</p>
+<p>
+  It aims for the ergonomics of Cargo: a small declarative manifest, a committed lockfile, one
+  binary, and no build script to write. A project that holds nothing but <code>src/</code> and
+  <code>jrs.toml</code> can be cloned and started with <code>jrs run</code>: its dependencies are
+  downloaded and linked, and no JDK flag is typed by hand.
+</p>
+
+<h3>A driver, not a compiler</h3>
+<p>
+  jrs does not reimplement the JDK. It shells out to <code>javac</code>, <code>java</code> and
+  <code>jar</code>, and for the features that need them to <code>javadoc</code>,
+  <code>jdeps</code>, <code>jlink</code>, <code>jpackage</code> and GraalVM's
+  <code>native-image</code>. The Kotlin, Scala and Groovy compilers, the JUnit launcher, JaCoCo
+  and ProGuard are resolved from Maven Central like any library, pinned in the lockfile, and run
+  on your JDK. Toolchain output is passed through verbatim, so a <code>javac</code> error looks
+  exactly like a <code>javac</code> error.
+</p>
+<pre data-lang="plain">jrs.toml ──parse──► manifest ──► resolve ──► jrs.lock ──► classpath
+                                                              │
+ src/ + classpath ──► compile ──► target/classes ──► test | run | package</pre>
+
+<h3>What jrs deliberately does not do</h3>
+<ul>
+  <li>
+    <strong>No plugin system and no build DSL.</strong> Configuration is declarative TOML. A
+    project's own build steps are <a href="#tasks">tasks</a>: subprocesses jrs runs at fixed
+    points, which can extend the build but never replace, remove or reorder its phases. No user
+    code runs inside jrs.
+  </li>
+  <li><strong>No multi-module builds.</strong> One manifest is one module; there is no reactor.</li>
+  <li><strong>No publishing</strong> to a repository (<code>deploy</code> / <code>publish</code>).</li>
+  <li>
+    No Android, no JPMS module-descriptor configuration, no annotation-processor path (processors
+    still work from the classpath, see <a href="#annotation-processors">Annotation processors</a>),
+    and no IDE project files.
+  </li>
+  <li>For Kotlin, Scala and Groovy: nothing off the JVM (Multiplatform, JS, Native), no compiler plugins, no kapt or KSP.</li>
+  <li>
+    No building from <code>pom.xml</code> or <code>build.gradle</code>. They are read once, by
+    <a href="#cmd-migrate"><code>jrs migrate</code></a>, and never treated as a build input.
+  </li>
+</ul>
+
+<h3>Status</h3>
+<div class="callout warn">
+  <span class="callout-title">Experimental</span>
+  <p>
+    jrs is experimental and is not a replacement for Maven or Gradle: it implements a
+    deliberately narrow subset of what they do. Evaluate it against your own requirements before
+    adopting it for production builds. The
+    <a href="https://github.com/pwittchen/jrs/blob/master/ROADMAP.md">roadmap</a> lists the known
+    gaps, and the <a href="https://github.com/pwittchen/jrs/blob/master/specs/INITIAL_SPEC.md">design specification</a>
+    explains the reasoning behind every behaviour described here.
+  </p>
+</div>
+
+<h3>How these docs are organised</h3>
+<ul>
+  <li><strong>Getting started</strong>: install jrs, build a first project, and learn the handful of ideas everything else rests on.</li>
+  <li><strong>The manifest</strong>: every table and key of <code>jrs.toml</code>, and what <code>jrs.lock</code> records.</li>
+  <li><strong>Commands</strong>: every command, its flags and examples.</li>
+  <li><strong>Guides</strong>: how resolution, compilation, testing, packaging, tasks, JDK selection, the cache, CI and migration work in practice.</li>
+  <li><strong>Reference</strong>: environment variables, files on disk, exit codes and troubleshooting.</li>
+</ul>
+<p>Press <kbd>/</kbd> or <kbd>Ctrl</kbd>&nbsp;<kbd>K</kbd> anywhere on this page to search.</p>
+</section>
+
+<section id="installation">
+<h2>Installation</h2>
+<p>
+  jrs is a single self-contained binary. Install it with the script, download a release by
+  hand, or build it from source.
+</p>
+
+<h3>Requirements</h3>
+<ul>
+  <li>
+    <strong>A JDK 17 or newer</strong> on <code>PATH</code>, or pointed at by
+    <code>JAVA_HOME</code>. jrs does not bundle a compiler. A project can also
+    <a href="#jdk">pin a JDK version</a> that jrs then finds among the JDKs installed on the machine.
+  </li>
+  <li>Nothing else. The Kotlin, Scala and Groovy compilers are downloaded from Maven Central when a project turns them on.</li>
+  <li>Building jrs itself from source needs a Rust toolchain with edition 2024 support; the prebuilt binaries do not.</li>
+</ul>
+
+<h3>Install script (macOS and Linux)</h3>
+<pre>curl -fsSL https://getjrs.dev/install.sh | sh</pre>
+<p>
+  The script picks the build for your OS and CPU, checks it against the release's
+  <code>SHA256SUMS</code>, and installs <code>jrs</code> into <code>~/.local/bin</code>, which must
+  be on your <code>PATH</code>. To install a particular release, or into another directory, pass
+  options after <code>sh -s --</code>:
+</p>
+<pre>curl -fsSL https://getjrs.dev/install.sh | sh -s -- --version 0.5.0 --to ~/bin</pre>
+<p>
+  The same two settings can come from the environment as <code>JRS_INSTALL_VERSION</code> and
+  <code>JRS_INSTALL_DIR</code>. The script is
+  <a href="https://github.com/pwittchen/jrs/blob/master/website/install.sh">website/install.sh</a>
+  in the repository, if you want to read it before piping it into a shell.
+</p>
+
+<h3>Prebuilt binaries by hand</h3>
+<p>Every tagged <a href="https://github.com/pwittchen/jrs/releases">release</a> ships a binary for each of these platforms:</p>
+<table>
+  <thead><tr><th>Platform</th><th>Target</th></tr></thead>
+  <tbody>
+    <tr><td>macOS, Apple Silicon</td><td><code>aarch64-apple-darwin</code></td></tr>
+    <tr><td>macOS, Intel</td><td><code>x86_64-apple-darwin</code></td></tr>
+    <tr><td>Linux, x86_64</td><td><code>x86_64-unknown-linux-musl</code></td></tr>
+    <tr><td>Linux, ARM64</td><td><code>aarch64-unknown-linux-musl</code></td></tr>
+    <tr><td>Windows, x86_64</td><td><code>x86_64-pc-windows-msvc</code></td></tr>
+  </tbody>
+</table>
+<p>The Linux binaries are statically linked and run on any distribution. To install the latest release without the script:</p>
+<pre>TARGET=aarch64-apple-darwin
+mkdir -p ~/.local/bin
+curl -fsSL "https://github.com/pwittchen/jrs/releases/latest/download/jrs-$TARGET.tar.gz" | tar -xz -C ~/.local/bin jrs</pre>
+<p>Each release also carries a <code>SHA256SUMS</code> file for verifying the downloads yourself.</p>
+
+<h3>Windows</h3>
+<p>In PowerShell:</p>
+<pre>curl.exe -fsSLO https://github.com/pwittchen/jrs/releases/latest/download/jrs-x86_64-pc-windows-msvc.zip
+tar -xf jrs-x86_64-pc-windows-msvc.zip jrs.exe</pre>
+<p>then move <code>jrs.exe</code> to a directory on your <code>PATH</code>.</p>
+
+<h3>From source</h3>
+<pre>git clone https://github.com/pwittchen/jrs.git
+cd jrs
+cargo install --path .</pre>
+<p>This places the <code>jrs</code> binary in <code>~/.cargo/bin</code>.</p>
+
+<h3>Checking the installation</h3>
+<pre>jrs --version
+jrs --help            # every command
+jrs build --help      # one command's flags</pre>
+<p>
+  To get tab completion for commands and flags, see <a href="#cmd-completions">jrs completions</a>.
+</p>
+
+<h3>Upgrading</h3>
+<p>
+  Run the install script again for the latest release, or download the new archive by hand. A
+  project that needs a newer jrs than the one installed says so itself when it declares
+  <a href="#manifest-requiring-a-jrs-version"><code>jrs-version</code></a>.
+</p>
+
+<h3>Uninstalling</h3>
+<p>Delete the binary: <code>rm ~/.local/bin/jrs</code> for a prebuilt one, or <code>cargo uninstall jrs</code> if it was built from source.</p>
+<p>
+  That leaves the downloaded dependencies behind. To reclaim that space, delete the
+  <a href="#cache">dependency cache</a> as well, for example
+  <code>rm -rf ~/Library/Caches/jrs</code> on macOS, or whatever <code>JRS_CACHE_DIR</code>
+  points at. Each project's <code>target/</code> is disposable: remove it with
+  <code>jrs clean</code> first, or delete it by hand afterwards.
+</p>
+</section>
+
+<section id="quick-start">
+<h2>Quick start</h2>
+
+<h3>Create a project</h3>
+<pre>mkdir hello &amp;&amp; cd hello
+jrs init</pre>
+<p>
+  <code>jrs init</code> scaffolds <code>jrs.toml</code>, a starter main class and its test, in the
+  current directory or in the path you give it. The project is named after its directory unless
+  you pass <code>--name</code>. The templates declare JUnit 5 as a dev-dependency, so the first
+  build downloads it.
+</p>
+<table>
+  <thead><tr><th>Command</th><th>Scaffolds</th></tr></thead>
+  <tbody>
+    <tr><td><code>jrs init</code></td><td>A Java application: a main class and a JUnit 5 test.</td></tr>
+    <tr><td><code>jrs init --lib</code></td><td>A Java library: no main class, a starter class and its test.</td></tr>
+    <tr><td><code>jrs init --lang kotlin</code></td><td>The same in Kotlin, with JUnit 5 tests.</td></tr>
+    <tr><td><code>jrs init --lang scala</code></td><td>The same in Scala, with MUnit tests.</td></tr>
+    <tr><td><code>jrs init --lang groovy</code></td><td>Java code, specified with Spock.</td></tr>
+    <tr><td><code>jrs init --check</code></td><td>Adds a <code>check</code> task that runs PMD over the Java sources after every compile. Refused with <code>--lang kotlin</code> and <code>scala</code>, whose starters have no Java sources.</td></tr>
+  </tbody>
+</table>
+
+<h3>Build, run and test</h3>
+<pre>jrs build      # resolve dependencies, compile, copy resources
+jrs run        # build, then run the main class
+jrs test       # build, compile the tests, run them</pre>
+<p>
+  The first build resolves the dependency graph, writes it to <code>jrs.lock</code>, and
+  downloads the jars into the shared cache. Later builds read the lockfile and skip what is
+  already up to date. Each phase prints one line, and a summary closes the run:
+</p>
+<pre data-lang="plain">    Resolving 1 declared dependency
+  Downloading 6 artifacts
+    Compiling hello v0.1.0 (1 source file)
+     Finished build in 1.84s
+
+  ┌─ jrs ─────────────────────────┐
+  │  build   ok      1 class      │
+  │  deps    6       6 downloaded │
+  │  time    1.84s                │
+  └───────────────────────────────┘</pre>
+<p>
+  On a terminal the phases animate with spinners and live download bars. In CI, in a pipe or with
+  <code>--progress never</code>, the same build prints only the plain lines. See
+  <a href="#output">Terminal output</a>.
+</p>
+
+<h3>Add a dependency</h3>
+<pre>jrs add com.google.guava:guava                 # newest release, into [dependencies]
+jrs add org.assertj:assertj-core --dev         # test classpath only
+jrs add org.postgresql:postgresql --runtime-only</pre>
+<p>
+  <code>jrs add</code> edits <code>jrs.toml</code> in place, keeping its comments and order, and
+  resolves again. You can equally edit the file by hand: jrs notices the change and re-resolves
+  on the next build.
+</p>
+
+<h3>Package it</h3>
+<pre>jrs package            # target/hello-&lt;version&gt;.jar, runnable with java -jar on this machine
+jrs package --fat      # one self-contained jar that runs anywhere
+java -jar target/hello-*.jar</pre>
+
+<h3>Project layout</h3>
+<pre data-lang="plain">hello/
+├── jrs.toml                  # the manifest
+├── jrs.lock                  # generated by resolution; commit it
+├── src/
+│   ├── main/java/            # production sources
+│   ├── main/kotlin/          # with [kotlin]; likewise scala/ and groovy/
+│   ├── main/resources/       # copied into the jar
+│   ├── test/java/            # test sources
+│   └── test/resources/       # on the test classpath only
+└── target/                   # generated; git-ignore it</pre>
+<p>
+  Commit <code>jrs.toml</code>, <code>jrs.lock</code> and <code>src/</code>. Add
+  <code>target/</code> to <code>.gitignore</code>: everything in it is regenerated on demand. Every
+  directory can be moved with a key in <a href="#project"><code>[project]</code></a>.
+</p>
+
+<h3>Starting from Maven or Gradle</h3>
+<pre>jrs migrate --dry-run      # print the jrs.toml that would be written
+jrs migrate                # write it; pom.xml / build.gradle stay untouched</pre>
+<p>See <a href="#migration">Migrating from Maven and Gradle</a> for what carries over and what is reported for review.</p>
+
+<h3>Example projects</h3>
+<p>The repository's <a href="https://github.com/pwittchen/jrs/tree/master/examples">examples</a> are complete projects for trying every command:</p>
+<ul>
+  <li><a href="https://github.com/pwittchen/jrs/tree/master/examples/wordstats">wordstats</a>: Java, with Maven Central dependencies, resources, a <code>ServiceLoader</code> plugin and JUnit 5 tests.</li>
+  <li><a href="https://github.com/pwittchen/jrs/tree/master/examples/orders">orders</a>: Kotlin and Java calling each other, coroutines from a Kotlin Multiplatform library, and tests in both languages.</li>
+  <li><a href="https://github.com/pwittchen/jrs/tree/master/examples/calc">calc</a>: Scala 3 and Java calling each other, with MUnit tests.</li>
+  <li><a href="https://github.com/pwittchen/jrs/tree/master/examples/cart">cart</a>: Java code specified with Spock, Groovy on the test classpath only.</li>
+</ul>
+</section>
+
+<section id="concepts">
+<h2>Core concepts</h2>
+<p>A handful of ideas explain almost everything jrs does.</p>
+
+<h3>The manifest</h3>
+<p>
+  <code>jrs.toml</code> at the project root is the only build configuration. It is declarative:
+  what the project is, what it depends on, and how its JVMs and jars should be set up. Anything
+  that belongs to a person or a machine (credentials, proxies, mirrors, JDK locations) lives in
+  the <a href="#user-config">user configuration</a> instead, because the manifest is committed.
+</p>
+
+<h3>The lockfile</h3>
+<p>
+  <code>jrs.lock</code> records every resolved artifact with its exact version and checksum, plus
+  the graphs of the compilers and tools the project uses. You commit it, so every machine builds
+  against the same jars. It is rewritten when <code>jrs.toml</code> changes or when you run
+  <code>jrs update</code>. See <a href="#lockfile">jrs.lock</a>.
+</p>
+
+<h3>The shared cache</h3>
+<p>
+  Downloaded artifacts go into one cache per user, in the Maven repository layout, shared by
+  every project. Downloads are checksum-verified and written atomically, so concurrent builds can
+  share it safely. See <a href="#cache">Dependency cache</a>.
+</p>
+
+<h3>The target directory</h3>
+<p>
+  Everything a build writes goes under <code>target/</code>: classes, jars, reports, images, and
+  jrs's own bookkeeping in <code>target/.jrs/</code>. Nothing there cannot be regenerated, so
+  <code>jrs clean</code> can never lose your work. That is also why task-generated sources must
+  live under it.
+</p>
+
+<h3>Three classpaths</h3>
+<table>
+  <thead><tr><th>Classpath</th><th>Used by</th><th>Holds</th></tr></thead>
+  <tbody>
+    <tr><td>compile</td><td><code>javac</code> for the main sources</td><td>Plain and <code>compile-only</code> dependencies.</td></tr>
+    <tr><td>runtime</td><td><code>jrs run</code>, the jars and images</td><td>Plain and <code>runtime-only</code> dependencies.</td></tr>
+    <tr><td>test</td><td>Compiling and running the tests</td><td>Everything: every kind of dependency, plus <code>[dev-dependencies]</code>.</td></tr>
+  </tbody>
+</table>
+<p>
+  The order is deterministic: direct dependencies first, then transitive ones, each sorted by
+  coordinate. <code>jrs classpath</code> prints any of them.
+</p>
+
+<h3>Compile units</h3>
+<p>
+  The main sources and the test sources are two compile units. Each has one output directory
+  (<code>target/classes</code>, <code>target/test-classes</code>) and one fingerprint, and is
+  skipped when nothing it depends on changed. A unit mixes Java with at most one of Kotlin, Scala
+  or Groovy. A Java-only unit recompiles file by file where it safely can. See
+  <a href="#compilation">Compilation and incremental builds</a>.
+</p>
+
+<h3>Phases, hooks and tasks</h3>
+<p>
+  Every command runs fixed phases in a fixed order: resolve, download, compile, copy resources,
+  then test, run or package. <a href="#tasks">Tasks</a> are commands you declare; hooks attach
+  them to fixed points between the phases. They extend the build without being able to reorder it.
+</p>
+
+<h3>Reproducible output</h3>
+<p>
+  Directory walks are sorted, and jar entries are written sorted, with a fixed 1980 timestamp and
+  fixed permissions. Two builds of the same inputs produce byte-identical jars.
+</p>
+</section>
+
+</div>
+<!-- ===================================================================== -->
+<div class="group" data-title="The manifest">
+
+<section id="manifest">
+<h2 data-nav="jrs.toml at a glance">jrs.toml at a glance</h2>
+<p>
+  <code>jrs.toml</code> is a TOML file at the project root. Only <code>[project]</code> with a
+  <code>name</code> and a <code>version</code> is required; every other table is optional. This
+  one uses most of them:
+</p>
+<pre data-lang="toml" data-file="jrs.toml">[project]
+name = "my-app"
+version = "1.0.0"
+main-class = "com.example.Main"     # required for `jrs run` and fat jars
+
+[java]
+source = 21                          # -> javac --release 21
+javac-args = ["-Xlint:all", "-Werror"]
+jdk = 21                             # optional; build with JDK 21
+
+[run]
+jvm-args = ["-Xmx512m"]              # `java` flags for `jrs run`
+
+[test]
+jvm-args = ["-Dmode=test"]           # `java` flags for the test JVM
+
+[kotlin]                             # optional: Kotlin alongside Java
+version = "2.4.20"                   # the compiler, and the implied kotlin-stdlib
+
+[managed]
+# a version for wherever an artifact turns up in the graph
+"com.fasterxml.jackson.core:jackson-databind" = "2.17.2"
+# a BOM: its managed versions apply the same way
+"org.springframework.boot:spring-boot-dependencies" = { version = "3.3.4", bom = true }
+
+[dependencies]
+"com.google.guava:guava" = "33.0.0-jre"                       # short form
+"org.springframework.boot:spring-boot-starter-web" = {}       # versioned by [managed]
+"jakarta.servlet:jakarta.servlet-api" = { version = "6.0.0", compile-only = true }
+"org.postgresql:postgresql" = { version = "42.7.3", runtime-only = true }
+"io.netty:netty-handler" = { version = "4.1.100.Final", exclusions = ["io.netty:netty-codec"] }
+"org.lwjgl:lwjgl:natives-linux" = "3.3.3"                      # a classifier in the key
+ojdbc = { path = "libs/ojdbc11.jar" }                          # a jar kept in the project
+
+[dev-dependencies]                   # test classpath only
+"org.junit.jupiter:junit-jupiter" = "5.10.2"
+
+[repositories]                       # Maven Central is implicit and always last
+internal = { url = "https://nexus.example.com/maven", groups = ["com.acme", "com.acme.*"] }
+
+[tasks.build-info]                   # a Java file run with the project's JDK
+script = "build/GenerateBuildInfo.java"
+args = ["{target}/generated/sources", "{project.version}"]
+inputs = ["build/GenerateBuildInfo.java"]
+outputs = ["{target}/generated/sources"]
+source-outputs = ["{target}/generated/sources"]
+
+[hooks]
+pre-compile = ["build-info"]</pre>
+
+<h3>Tables</h3>
+<table>
+  <thead><tr><th>Table</th><th>Purpose</th></tr></thead>
+  <tbody>
+    <tr><td><a href="#project"><code>[project]</code></a></td><td>Name, version, main class, directory layout, minimum jrs version.</td></tr>
+    <tr><td><a href="#java"><code>[java]</code></a></td><td><code>--release</code>, encoding, <code>javac</code> and <code>javadoc</code> flags, the JDK to use.</td></tr>
+    <tr><td><a href="#language-config"><code>[kotlin]</code> <code>[scala]</code> <code>[groovy]</code></a></td><td>Turn another JVM language on, pinned to a compiler version.</td></tr>
+    <tr><td><a href="#dependencies"><code>[dependencies]</code></a></td><td>What the main code needs, from repositories or local jars.</td></tr>
+    <tr><td><a href="#dependencies-test-dependencies"><code>[dev-dependencies]</code></a></td><td>What only the tests need.</td></tr>
+    <tr><td><a href="#managed"><code>[managed]</code></a></td><td>Versions kept in one place, BOMs included.</td></tr>
+    <tr><td><a href="#repositories"><code>[repositories]</code></a></td><td>Repositories besides Maven Central.</td></tr>
+    <tr><td><a href="#run-config"><code>[run]</code></a></td><td>JVM flags, agents, environment and working directory for <code>jrs run</code>.</td></tr>
+    <tr><td><a href="#test-config"><code>[test]</code></a></td><td>The test JVM, retries, forks, coverage minimums.</td></tr>
+    <tr><td><a href="#package-config"><code>[package]</code></a></td><td>Image modules, native-image flags, manifest attributes, relocation.</td></tr>
+    <tr><td><a href="#obfuscate-config"><code>[obfuscate]</code></a></td><td>ProGuard obfuscation of the packaged jar.</td></tr>
+    <tr><td><a href="#tasks-config"><code>[tasks.&lt;name&gt;]</code> <code>[hooks]</code></a></td><td>Your own build steps, and when they run.</td></tr>
+  </tbody>
+</table>
+
+<h3>Validation</h3>
+<p>
+  A manifest error names the offending key and, where the TOML parser knows it, the line and
+  column, and exits with code <code>2</code>. An <strong>unknown key is a warning</strong>, not an
+  error, so a manifest written for a newer jrs still builds on an older one where it can.
+</p>
+
+<h3>Requiring a jrs version</h3>
+<p>
+  Forward compatibility has a limit: a jrs that ignores a key it does not understand may build a
+  newer manifest wrongly. <code>jrs-version</code> in <code>[project]</code>, like Cargo's
+  <code>rust-version</code>, names the oldest jrs that may build the project:
+</p>
+<pre data-lang="toml">[project]
+name = "my-app"
+version = "1.0.0"
+jrs-version = "0.5"          # or "0.5.1"</pre>
+<p>
+  It is checked before any other key is read. An older jrs stops with exit code <code>2</code>,
+  naming the version the project needs, its own version, and where to download releases. A
+  pre-release suffix on the running version is ignored (<code>0.9.0-dev</code> satisfies
+  <code>0.9</code>). <code>jrs init</code> and <code>jrs migrate</code> do not write the key.
+</p>
+
+<h3>Where jrs finds the manifest</h3>
+<p>
+  jrs looks for <code>jrs.toml</code> in the working directory and then in each parent
+  directory, so any command works from anywhere inside the project. <code>--manifest-path</code>
+  points at a manifest elsewhere, either the file itself or the directory holding it:
+</p>
+<pre>jrs --manifest-path ../other-project build
+jrs --manifest-path /work/api/jrs.toml test</pre>
+</section>
+
+<section id="project">
+<h2><code>[project]</code></h2>
+<table>
+  <thead><tr><th>Key</th><th>Default</th><th>Meaning</th></tr></thead>
+  <tbody>
+    <tr><td><code>name</code></td><td>required</td><td>The project's name. Also names the jar, <code>target/&lt;name&gt;-&lt;version&gt;.jar</code>, so it must be a valid file name.</td></tr>
+    <tr><td><code>version</code></td><td>required</td><td>A free-form version string, used in the jar name and available to tasks as <code>{project.version}</code>.</td></tr>
+    <tr><td><code>main-class</code></td><td>none</td><td>Fully qualified entry point. Required by <code>jrs run</code>, <code>package --fat</code>, <code>--jlink</code>, <code>--jpackage</code>, <code>--dist</code> and <code>--native-image</code>.</td></tr>
+    <tr><td><code>source-dir</code></td><td><code>src/main/java</code></td><td>Production Java sources.</td></tr>
+    <tr><td><code>test-dir</code></td><td><code>src/test/java</code></td><td>Test Java sources.</td></tr>
+    <tr><td><code>resource-dir</code></td><td><code>src/main/resources</code></td><td>Copied into <code>target/classes</code> and the jar.</td></tr>
+    <tr><td><code>test-resource-dir</code></td><td>beside <code>test-dir</code></td><td>On the test classpath only; <code>src/test/resources</code> for the default <code>test-dir</code>.</td></tr>
+    <tr><td><code>target-dir</code></td><td><code>target</code></td><td>Where all build output goes.</td></tr>
+    <tr><td><code>jrs-version</code></td><td>none</td><td>The oldest jrs that may build the project, as <code>"0.9"</code> or <code>"0.9.1"</code>. See <a href="#manifest-requiring-a-jrs-version">above</a>.</td></tr>
+  </tbody>
+</table>
+
+<h3>A flat layout</h3>
+<p>Older projects that keep their sources directly under <code>src/</code> only need the directories spelled out:</p>
+<pre data-lang="toml">[project]
+name = "legacy-tool"
+version = "2.3.0"
+main-class = "org.example.tool.Cli"
+source-dir = "src"
+test-dir = "test"
+resource-dir = "resources"</pre>
+<p>
+  Package structure is expected to mirror directory structure, as <code>javac</code> requires; jrs
+  does not check it itself. The source directories of Kotlin, Scala and Groovy are set in their
+  own tables.
+</p>
+</section>
+
+<section id="java">
+<h2><code>[java]</code></h2>
+<table>
+  <thead><tr><th>Key</th><th>Default</th><th>Meaning</th></tr></thead>
+  <tbody>
+    <tr><td><code>source</code></td><td>the JDK's release</td><td>Passed to <code>javac --release</code>, and to every other language's compiler, so a jar never mixes bytecode levels.</td></tr>
+    <tr><td><code>target</code></td><td><code>source</code></td><td>Set only when it differs from <code>source</code>.</td></tr>
+    <tr><td><code>encoding</code></td><td><code>UTF-8</code></td><td><code>javac -encoding</code>.</td></tr>
+    <tr><td><code>javac-args</code></td><td><code>[]</code></td><td>Extra <code>javac</code> flags, appended verbatim after jrs's own.</td></tr>
+    <tr><td><code>javadoc-args</code></td><td><code>[]</code></td><td>Extra flags for <code>jrs doc</code>'s <code>javadoc</code>, such as <code>-Xdoclint:none</code>.</td></tr>
+    <tr><td><code>jdk</code></td><td>none</td><td>The JDK feature version to build with, such as <code>21</code>. See <a href="#jdk">Choosing the JDK</a>.</td></tr>
+  </tbody>
+</table>
+<pre data-lang="toml">[java]
+source = 21
+jdk = 21
+javac-args = [
+  "-Xlint:all",       # every warning
+  "-Werror",          # and fail on them
+  "-parameters",      # keep parameter names, as Spring expects
+]
+javadoc-args = ["-Xdoclint:none"]</pre>
+<p>
+  <code>javac</code> is started as <code>javac --release &lt;n&gt; -encoding &lt;enc&gt; -d
+  target/classes -cp &lt;classpath&gt; &lt;javac-args&gt; @sources.args</code>, with the sources and
+  classpath in an argfile under <code>target/.jrs/</code>, so a long classpath never overflows the
+  OS command-line limit. <code>jrs -v build</code> echoes the exact command.
+</p>
+</section>
+
+<section id="dependencies">
+<h2><code>[dependencies]</code> and <code>[dev-dependencies]</code></h2>
+<p>
+  Each entry maps a quoted <code>"group:artifact"</code> coordinate to a version.
+  <code>[dependencies]</code> are what the main code needs; <code>[dev-dependencies]</code> are on
+  the test classpath only and never packaged.
+</p>
+<pre data-lang="toml">[dependencies]
+"com.google.guava:guava" = "33.0.0-jre"
+"org.slf4j:slf4j-api" = "2.0.13"
+
+[dev-dependencies]
+"org.junit.jupiter:junit-jupiter" = "5.10.2"
+"org.assertj:assertj-core" = "3.26.0"</pre>
+
+<h3>The long form</h3>
+<p>A table instead of a string takes a <code>version</code> and any of these keys:</p>
+<table>
+  <thead><tr><th>Key</th><th>Meaning</th></tr></thead>
+  <tbody>
+    <tr><td><code>version</code></td><td>The version. Left out, the version comes from <a href="#managed"><code>[managed]</code></a>.</td></tr>
+    <tr><td><code>exclusions</code></td><td><code>"group:artifact"</code> patterns cut from this dependency's transitive graph; <code>*</code> may stand for either half.</td></tr>
+    <tr><td><code>compile-only</code></td><td><code>true</code>: compile and test classpaths, never at runtime. Maven's <code>provided</code>, Gradle's <code>compileOnly</code>.</td></tr>
+    <tr><td><code>runtime-only</code></td><td><code>true</code>: runtime and test classpaths, never compiled against by the main sources. Maven's <code>runtime</code>, Gradle's <code>runtimeOnly</code>.</td></tr>
+    <tr><td><code>classifier</code></td><td>A file published beside the main jar, such as natives or a platform build.</td></tr>
+    <tr><td><code>path</code></td><td>A jar in the project instead of a repository. See <a href="#dependencies-local-jars">Local jars</a>.</td></tr>
+  </tbody>
+</table>
+<pre data-lang="toml">[dependencies]
+"com.google.guava:guava" = { version = "33.0.0-jre", exclusions = ["com.google.code.findbugs:jsr305"] }
+"jakarta.servlet:jakarta.servlet-api" = { version = "6.0.0", compile-only = true }
+"org.postgresql:postgresql" = { version = "42.7.3", runtime-only = true }
+"io.netty:netty-transport-native-epoll" = { version = "4.1.100.Final", classifier = "linux-x86_64" }</pre>
+
+<h3>Exclusions</h3>
+<p>
+  A dependency's transitive graph stops at anything its <code>exclusions</code> match. Either half
+  of a pattern can be <code>*</code>: <code>"commons-logging:*"</code> drops every artifact of that
+  group, <code>"*:*"</code> keeps the dependency but none of what it brings. Exclusions declared in
+  the libraries' own POMs are honoured as well.
+</p>
+
+<h3>compile-only</h3>
+<p>
+  The dependency, and everything only it brings in, is on the compile and test classpaths, but not
+  on the runtime one. It stays out of <code>jrs run</code>, the thin jar's
+  <code>Class-Path</code>, <code>lib/</code> and the fat jar. Use it for APIs the runtime
+  environment provides (a servlet container), and for annotation processors such as Lombok.
+</p>
+
+<h3>runtime-only</h3>
+<p>
+  The reverse: the dependency, and everything only it brings in, is on the runtime and test
+  classpaths, but not on the one the main sources compile against. JDBC drivers, SLF4J bindings and
+  Logback belong here, so code cannot accidentally depend on an implementation. It is in
+  <code>jrs run</code>, the thin jar's <code>Class-Path</code>, <code>lib/</code>, the fat jar and
+  runtime images. The tests compile against it too, as they do in Maven.
+</p>
+
+<h3>Which classpath gets what</h3>
+<table>
+  <thead><tr><th>Declared as</th><th>Main compile</th><th>Runtime, jars, images</th><th>Tests</th></tr></thead>
+  <tbody>
+    <tr><td><code>[dependencies]</code></td><td class="c">✓</td><td class="c">✓</td><td class="c">✓</td></tr>
+    <tr><td><code>compile-only = true</code></td><td class="c">✓</td><td class="c">·</td><td class="c">✓</td></tr>
+    <tr><td><code>runtime-only = true</code></td><td class="c">·</td><td class="c">✓</td><td class="c">✓</td></tr>
+    <tr><td><code>[dev-dependencies]</code></td><td class="c">·</td><td class="c">·</td><td class="c">✓</td></tr>
+  </tbody>
+</table>
+<p>
+  An artifact reached along several paths lands on every classpath one of them puts it on. A
+  package one path brings in as compile-only and another as runtime-only is needed on both, so it
+  ends up as a plain dependency.
+</p>
+
+<h3>Classifiers</h3>
+<p>
+  A classifier selects a jar published beside the main one, described by the same POM. It is part
+  of the artifact's identity, so writing it in the key lets one table hold the same artifact with
+  and without it:
+</p>
+<pre data-lang="toml">[dependencies]
+"org.lwjgl:lwjgl" = "3.3.3"
+"org.lwjgl:lwjgl:natives-linux" = "3.3.3"
+"org.lwjgl:lwjgl:natives-macos-arm64" = "3.3.3"</pre>
+
+<h3>Test dependencies</h3>
+<p>
+  <code>[dev-dependencies]</code> take the same forms without <code>compile-only</code> or
+  <code>runtime-only</code>. Declaring the test framework here is also how <code>jrs test</code>
+  knows what to run: see <a href="#testing">Testing</a>.
+</p>
+
+<h3>SNAPSHOT versions</h3>
+<p>
+  A version ending in <code>-SNAPSHOT</code> resolves through the repository's
+  <code>maven-metadata.xml</code> to its current timestamped build. Since a snapshot is
+  republished under one name by design, its checksum is not pinned in <code>jrs.lock</code>. A
+  cached snapshot is re-checked once a day, or on every build when it came from a
+  <code>file://</code> repository such as <code>~/.m2/repository</code>; <code>jrs update</code>
+  re-checks every snapshot at once. If the repository cannot be reached, the cached copy is used
+  with a warning. Identical bytes are not rewritten, so a check that finds nothing new does not
+  cause a recompile.
+</p>
+
+<h3>Local jars</h3>
+<p>
+  A jar that is in no repository, such as a vendor's JDBC driver or a licensed SDK checked into
+  <code>libs/</code>, is named by its path instead:
+</p>
+<pre data-lang="toml">[dependencies]
+ojdbc = { path = "libs/ojdbc11.jar" }
+vendor-api = { path = "libs/vendor-api.jar", compile-only = true }
+
+[dev-dependencies]
+fixtures = { path = "libs/test-fixtures.jar" }</pre>
+<ul>
+  <li>The key is a name of your choosing (letters, digits, <code>.</code>, <code>-</code> and <code>_</code>), since the jar has no coordinate. The path is relative to the project root.</li>
+  <li>The jar is taken as it is, with no transitive graph. <code>compile-only</code> and <code>runtime-only</code> apply as usual.</li>
+  <li><code>jrs.lock</code> records the relative path and pins the jar's SHA-256. The jar is re-hashed on every build, and one that changed under the same name fails the build until <code>jrs update</code> pins it again. A missing jar is an error naming its path.</li>
+  <li><code>jrs tree</code> shows it as <code>ojdbc = libs/ojdbc11.jar</code>, <code>jrs remove ojdbc</code> removes it, and <code>jrs outdated</code> skips it.</li>
+</ul>
+
+<h3>Version ranges</h3>
+<p>
+  Maven version ranges such as <code>[1.0,2.0)</code> are rejected with a clear error rather than
+  guessed at. jrs only builds against versions written down.
+</p>
+</section>
+
+<section id="managed">
+<h2><code>[managed]</code> and BOMs</h2>
+<p>
+  <code>[managed]</code> keeps versions in one place. It does what Maven's
+  <code>&lt;dependencyManagement&gt;</code> and Gradle's <code>platform()</code> and
+  <code>constraints { }</code> do:
+</p>
+<pre data-lang="toml">[managed]
+"org.springframework.boot:spring-boot-dependencies" = { version = "4.1.1", bom = true }
+"com.fasterxml.jackson.core:jackson-databind" = "2.19.0"
+
+[dependencies]
+"org.springframework.boot:spring-boot-starter-webmvc" = {}   # versioned by the BOM
+"com.fasterxml.jackson.core:jackson-databind" = {}           # versioned by [managed]</pre>
+<ul>
+  <li><strong>A managed version holds an artifact to that version wherever the graph reaches it</strong>, ahead of nearest-wins mediation. It adds nothing to a classpath: an artifact nothing depends on stays out.</li>
+  <li><strong><code>bom = true</code></strong> imports a BOM's own managed versions instead of managing the BOM itself.</li>
+  <li><strong>A dependency may leave its version out</strong>, as <code>{}</code> or as a long form without <code>version</code>, and takes it from <code>[managed]</code>. Upgrading the BOM then upgrades it.</li>
+  <li><strong>A version written in <code>[dependencies]</code> still wins</strong> for that dependency, as it does in Maven.</li>
+  <li><strong>Order matters</strong>: the table's own entries come before any BOM's, and an earlier BOM before a later one. A managed version covers every classifier of its <code>group:artifact</code>.</li>
+</ul>
+<p>
+  <code>jrs tree</code> marks a version that <code>[managed]</code> decided with
+  <code>(managed)</code>, <code>jrs outdated</code> checks every entry, BOMs included, and
+  <code>jrs add</code> leaves the version out of what <code>[managed]</code> covers. A manifest
+  without the table keeps its lockfile byte for byte.
+</p>
+</section>
+
+<section id="repositories">
+<h2><code>[repositories]</code></h2>
+<p>
+  Additional Maven repositories, tried in declaration order. Maven Central is implicit and always
+  tried last.
+</p>
+<pre data-lang="toml">[repositories]
+internal = "https://repo.example.com/maven2"
+local-m2 = "file:///home/me/.m2/repository"</pre>
+
+<h3>Confining a repository to its groups</h3>
+<p>The long form names the groups a repository serves:</p>
+<pre data-lang="toml">[repositories]
+internal = { url = "https://nexus.example.com/maven", groups = ["com.acme", "com.acme.*"] }
+jitpack = { url = "https://jitpack.io", groups = ["com.github.someone"] }</pre>
+<ul>
+  <li><code>com.acme</code> is that group; <code>com.acme.*</code> is every group below it.</li>
+  <li>A repository with <code>groups</code> is asked only for those groups.</li>
+  <li>A group that some repository's <code>groups</code> names is looked up <strong>only there</strong>, never in another repository or in Maven Central.</li>
+</ul>
+<p>
+  That keeps a public repository from answering for your internal groups (dependency confusion),
+  and saves a request per artifact to repositories that cannot have it.
+</p>
+
+<h3>Credentials and mirrors</h3>
+<p>
+  <code>jrs.toml</code> is committed, so credentials never go in it. They live in the
+  <a href="#user-config-credentials">user configuration</a>, or in
+  <code>JRS_REPO_&lt;NAME&gt;_*</code> environment variables, keyed by the repository's name.
+  Mirrors are set there too, and work for Maven Central as for any other repository.
+</p>
+</section>
+
+<section id="run-config">
+<h2><code>[run]</code></h2>
+<p>How <code>jrs run</code> starts the program.</p>
+<table>
+  <thead><tr><th>Key</th><th>Default</th><th>Meaning</th></tr></thead>
+  <tbody>
+    <tr><td><code>jvm-args</code></td><td><code>[]</code></td><td><code>java</code> flags, placed before <code>-cp</code>. Also baked into the launchers of <code>--jlink</code>, <code>--jpackage</code> and <code>--dist</code>.</td></tr>
+    <tr><td><code>java-agents</code></td><td><code>[]</code></td><td>Agents passed as <code>-javaagent:</code>, by coordinate. See below.</td></tr>
+    <tr><td><code>env</code></td><td><code>{}</code></td><td>Environment variables for the program. Names starting with <code>JRS_</code> are refused.</td></tr>
+    <tr><td><code>cwd</code></td><td>where jrs was started</td><td>The program's working directory, relative to the project root.</td></tr>
+  </tbody>
+</table>
+<pre data-lang="toml">[run]
+jvm-args = ["-Xmx512m", "--enable-preview"]
+java-agents = [
+  "com.example:my-agent",                                        # from the resolved graph
+  "io.opentelemetry.javaagent:opentelemetry-javaagent:2.10.0",   # pinned apart from it
+]
+env = { APP_MODE = "dev", DATA = "{target}/data" }
+cwd = "work"</pre>
+<p>
+  <code>env</code> and <code>cwd</code> take the placeholders a <a href="#tasks-placeholders">task</a>
+  does (<code>{root}</code>, <code>{target}</code>, <code>{project.version}</code>,
+  <code>{runtime-classpath}</code>…), except <code>{jar}</code> and
+  <code>{classpath-argfile}</code>, and <code>cwd</code> takes no classpath. They belong to
+  <code>jrs run</code>, so an image's launchers do not use them.
+</p>
+
+<h3>Java agents</h3>
+<p>
+  Agents are named by coordinate, never by path: <code>jrs.toml</code> is committed and the jar
+  lives in the machine's cache.
+</p>
+<ul>
+  <li>
+    <strong><code>group:artifact</code></strong> is looked up in the resolved graph, so it is the
+    version <code>jrs.lock</code> pins, and it has to be a dependency. <code>run.java-agents</code>
+    looks on the runtime classpath. An agent the graph does not hold is a manifest error that says
+    where to declare it.
+  </li>
+  <li>
+    <strong><code>group:artifact:version</code></strong> (a classifier may follow) is for an agent
+    the program never calls, such as OpenTelemetry's. jrs resolves that one jar alone, as it does
+    a compiler, pins it in <code>jrs.lock</code> as a <code>[[tool]]</code> named
+    <code>run.java-agents.&lt;group&gt;:&lt;artifact&gt;</code>, and keeps it off every classpath.
+  </li>
+</ul>
+<p>
+  Agents go to the JVM ahead of every other argument. <code>run.java-agents</code> also goes into
+  the launchers of <code>--jlink</code>, <code>--jpackage</code> and <code>--dist</code>, which load
+  an agent from the graph from their <code>lib/</code> and a pinned one from their
+  <code>agents/</code>. An image or distribution of a <code>--fat</code> jar can carry only pinned
+  agents, since the fat jar has unpacked the others, and jrs says so.
+</p>
+</section>
+
+<section id="test-config">
+<h2><code>[test]</code></h2>
+<p>How <code>jrs test</code> runs the tests. Each key is optional.</p>
+<table>
+  <thead><tr><th>Key</th><th>Default</th><th>Meaning</th></tr></thead>
+  <tbody>
+    <tr><td><code>jvm-args</code></td><td><code>[]</code></td><td>Flags for the test JVM.</td></tr>
+    <tr><td><code>java-agents</code></td><td><code>[]</code></td><td>As <code>run.java-agents</code>, looked up on the test classpath (dev-dependencies included), ahead of JaCoCo's agent.</td></tr>
+    <tr><td><code>env</code></td><td><code>{}</code></td><td>Environment variables for the test JVM. There is no <code>test.cwd</code>: the tests run where jrs does.</td></tr>
+    <tr><td><code>retries</code></td><td><code>0</code></td><td>Run a failed test again up to this many times. One that passes on a retry is reported as flaky. <code>--retries</code> overrides it.</td></tr>
+    <tr><td><code>forks</code></td><td><code>1</code></td><td>Test JVMs the classes are split among, run at once. <code>--forks</code> overrides it.</td></tr>
+    <tr><td><code>jacoco-version</code></td><td>jrs's default</td><td>The JaCoCo release for <code>--coverage</code>.</td></tr>
+    <tr><td><code>coverage-minimum</code></td><td><code>{}</code></td><td>Ratios from 0 to 1 that <code>--coverage</code> must reach, per JaCoCo counter: <code>line</code>, <code>branch</code>, <code>instruction</code>, <code>method</code>, <code>class</code>, <code>complexity</code>.</td></tr>
+  </tbody>
+</table>
+<pre data-lang="toml">[test]
+jvm-args = ["-Dmode=test", "-Xmx1g"]
+java-agents = ["org.mockito:mockito-core"]   # Mockito 5 on JDK 21+
+env = { TZ = "UTC" }
+retries = 2
+forks = 4
+jacoco-version = "0.8.15"
+coverage-minimum = { line = 0.80, branch = 0.70 }</pre>
+<p>Everything about running tests is in the <a href="#testing">Testing</a> guide.</p>
+</section>
+
+<section id="package-config">
+<h2><code>[package]</code></h2>
+<table>
+  <thead><tr><th>Key</th><th>Default</th><th>Meaning</th></tr></thead>
+  <tbody>
+    <tr><td><code>add-modules</code></td><td><code>[]</code></td><td>JDK modules a <code>--jlink</code> or <code>--jpackage</code> image needs beyond what <code>jdeps</code> finds.</td></tr>
+    <tr><td><code>native-image-args</code></td><td><code>[]</code></td><td>Passed verbatim to GraalVM's <code>native-image</code> by <code>--native-image</code>.</td></tr>
+    <tr><td><code>[package.manifest]</code></td><td><code>{}</code></td><td>Extra <code>META-INF/MANIFEST.MF</code> attributes.</td></tr>
+    <tr><td><code>[package.relocate]</code></td><td><code>{}</code></td><td>Packages a fat jar moves, references and all.</td></tr>
+  </tbody>
+</table>
+<pre data-lang="toml">[package]
+add-modules = ["jdk.crypto.ec"]
+native-image-args = ["--no-fallback"]
+
+[package.manifest]
+Implementation-Title = "{project.name}"
+Implementation-Version = "{project.version}"
+Automatic-Module-Name = "com.example.app"
+
+[package.relocate]
+"com.google.common" = "com.example.shaded.guava"
+"org.slf4j" = { to = "com.example.shaded.slf4j", exclude = ["org.slf4j.impl.*"] }</pre>
+
+<h3>Image modules</h3>
+<p>
+  <code>jdeps</code> works out which JDK modules the application needs, but it cannot see modules
+  reached only by reflection or <code>ServiceLoader</code>, such as the TLS providers in
+  <code>jdk.crypto.ec</code>. Name those in <code>add-modules</code>.
+</p>
+
+<h3>Manifest attributes</h3>
+<p>
+  <code>[package.manifest]</code> adds attributes to the jar's <code>META-INF/MANIFEST.MF</code>
+  (the thin, portable and fat jar alike) after the ones jrs writes, in declaration order, so the
+  jar stays byte-identical. Values may use <code>{project.name}</code> and
+  <code>{project.version}</code>. <code>Main-Class</code>, <code>Class-Path</code>,
+  <code>Created-By</code>, <code>Manifest-Version</code> and <code>Name</code> belong to jrs and are
+  refused, and a name must be one the jar specification allows.
+  <code>Implementation-Version</code> is only there if you set it;
+  <code>Package.getImplementationVersion()</code> then reads it.
+</p>
+
+<h3>Relocation</h3>
+<p>
+  <code>[package.relocate]</code> moves packages inside a fat jar, as Maven Shade's relocation
+  does, so the jar carries a private copy of a library that cannot clash with another copy on the
+  same classpath: for an agent, a plugin, or a job submitted to a cluster. See
+  <a href="#packaging-relocating-packages">Relocating packages</a>.
+</p>
+</section>
+
+<section id="obfuscate-config">
+<h2><code>[obfuscate]</code></h2>
+<pre data-lang="toml">[obfuscate]
+version = "7.6.1"                          # the ProGuard release to pin; required
+keep = ["com.example.plugin.Api"]          # names reflection looks up; optional
+proguard-args = ["-dontwarn org.foo.**"]   # passed to ProGuard verbatim; optional</pre>
+<p>
+  The table makes <code>jrs package --obfuscate</code> available; plain <code>jrs package</code> is
+  unaffected. See <a href="#obfuscation">Obfuscation</a>.
+</p>
+</section>
+
+<section id="language-config">
+<h2><code>[kotlin]</code>, <code>[scala]</code> and <code>[groovy]</code></h2>
+<p>A table turns its language on:</p>
+<pre data-lang="toml">[kotlin]
+version = "2.4.20"                    # the compiler, and the implied kotlin-stdlib
+kotlinc-args = ["-Xjsr305=strict"]    # optional, appended verbatim
+compiler-jvm-args = ["-Xmx2g"]        # optional, for the compiler's JVM</pre>
+<table>
+  <thead><tr><th>Key</th><th>Default</th><th>Meaning</th></tr></thead>
+  <tbody>
+    <tr><td><code>version</code></td><td>required</td><td>The compiler, pinned exactly: Kotlin 2.0+, Scala 2.13.9+ or 3.3+, Groovy 4.0+.</td></tr>
+    <tr><td><code>source-dir</code></td><td><code>src/main/&lt;lang&gt;</code></td><td>The language's main source root.</td></tr>
+    <tr><td><code>test-dir</code></td><td><code>src/test/&lt;lang&gt;</code></td><td>The language's test source root.</td></tr>
+    <tr><td><code>kotlinc-args</code> / <code>scalac-args</code> / <code>groovyc-args</code></td><td><code>[]</code></td><td>Extra compiler flags, passed through verbatim.</td></tr>
+    <tr><td><code>compiler-jvm-args</code></td><td><code>[]</code></td><td>Flags for the JVM the compiler runs in, such as <code>-Xmx2g</code> or <code>-Xss4m</code>.</td></tr>
+  </tbody>
+</table>
+<p>How the languages compile together is in <a href="#languages">Kotlin, Scala and Groovy</a>.</p>
+</section>
+
+<section id="tasks-config">
+<h2><code>[tasks]</code> and <code>[hooks]</code></h2>
+<p>
+  A task is declared as <code>[tasks.&lt;name&gt;]</code>, with a name matching
+  <code>[a-z][a-z0-9-]*</code> that is not a built-in command's. It has at most one action
+  (<code>run</code>, <code>shell</code>, <code>script</code> or <code>main</code>) and any of the
+  other keys:
+</p>
+<table>
+  <thead><tr><th>Key</th><th>Type</th><th>Meaning</th></tr></thead>
+  <tbody>
+    <tr><td><code>run</code></td><td>array</td><td>A program and its arguments, run without a shell. Portable.</td></tr>
+    <tr><td><code>shell</code></td><td>string</td><td>A command for <code>sh -c</code>, or <code>cmd /C</code> on Windows. Not portable.</td></tr>
+    <tr><td><code>script</code></td><td>path</td><td>A <code>.java</code> file run with the project's JDK, no compile step.</td></tr>
+    <tr><td><code>main</code></td><td>class</td><td>A class from the task's own <code>dependencies</code>.</td></tr>
+    <tr><td><code>description</code></td><td>string</td><td>Shown by <code>jrs task --list</code>.</td></tr>
+    <tr><td><code>args</code></td><td>array</td><td>Arguments after the action.</td></tr>
+    <tr><td><code>depends-on</code></td><td>array</td><td>Tasks, or <code>build</code>, <code>test</code>, <code>package</code> and <code>doc</code>, run first.</td></tr>
+    <tr><td><code>env</code></td><td>table</td><td>Extra environment variables; no <code>JRS_</code> names.</td></tr>
+    <tr><td><code>cwd</code></td><td>path</td><td>Working directory, relative to the root.</td></tr>
+    <tr><td><code>inputs</code>, <code>outputs</code></td><td>arrays</td><td>Files or directories; with both, the task is skipped while nothing changed.</td></tr>
+    <tr><td><code>source-outputs</code></td><td>array</td><td>Generated source directories to compile, under <code>target-dir</code>.</td></tr>
+    <tr><td><code>resource-outputs</code></td><td>array</td><td>Generated resource directories to copy, under <code>target-dir</code>.</td></tr>
+    <tr><td><code>[tasks.&lt;name&gt;.dependencies]</code></td><td>table</td><td>The classpath of a <code>main</code> or <code>script</code> task, resolved as its own graph.</td></tr>
+  </tbody>
+</table>
+<p>
+  <code>[hooks]</code> maps a lifecycle point to a list of task names: <code>pre-compile</code>,
+  <code>post-compile</code>, <code>pre-test</code>, <code>post-test</code>,
+  <code>post-package</code> and <code>pre-run</code>.
+</p>
+<pre data-lang="toml">[tasks.checksum]
+description = "Write a SHA-256 next to the jar"
+shell = "shasum -a 256 \"$JRS_JAR\" &gt; \"$JRS_JAR.sha256\""
+
+[hooks]
+post-package = ["checksum"]</pre>
+<p>The <a href="#tasks">Tasks and hooks</a> guide covers actions, ordering, placeholders, the environment and up-to-date checks.</p>
+</section>
+
+<section id="lockfile">
+<h2><code>jrs.lock</code></h2>
+<p>
+  Resolution writes <code>jrs.lock</code> beside the manifest. It records every resolved artifact
+  with its exact version and checksum, so builds are reproducible and can run offline. Commit it.
+</p>
+<pre data-lang="toml" data-file="jrs.lock">version = 1
+manifest-checksum = "sha256:17e5005c…"
+roots = ["com.google.guava:guava", "org.apache.commons:commons-lang3"]
+test-roots = ["org.junit.jupiter:junit-jupiter"]
+
+[[package]]
+group = "com.google.guava"
+artifact = "guava"
+version = "33.3.1-jre"
+classpath = "compile"
+packaging = "jar"
+depth = 1
+direct = true
+checksum = "sha1:…"</pre>
+
+<h3>When it is rewritten</h3>
+<ul>
+  <li><strong>When <code>jrs.toml</code> changes</strong> in a way that affects resolution. <code>manifest-checksum</code> covers the dependencies, repositories, <code>[managed]</code>, each language's version and each task's dependencies; when it no longer matches, the next build resolves afresh. Adding a task or changing a flag does not.</li>
+  <li><strong>When you run <code>jrs update</code></strong>, which also re-checks every snapshot and re-pins local jars.</li>
+</ul>
+<p>
+  Otherwise the lockfile is read, not rewritten, and resolution costs a few milliseconds. After a
+  merge conflict in <code>jrs.lock</code>, keep either side and run <code>jrs update</code>.
+</p>
+
+<h3>Checksums are pins</h3>
+<p>
+  A jar downloaded while the lockfile is in use must match its recorded checksum as well as the
+  repository's own <code>.sha1</code>, or the download is discarded and the build fails. A
+  repository that starts serving different bytes under the same version cannot slip them in. A
+  <code>-SNAPSHOT</code> is recorded without a checksum.
+</p>
+
+<h3>What it contains</h3>
+<table>
+  <thead><tr><th>Block</th><th>Holds</th></tr></thead>
+  <tbody>
+    <tr><td><code>[[package]]</code></td><td class="wrap">One per artifact: <code>group</code>, <code>artifact</code>, <code>version</code>, its <code>classpath</code> (<code>compile</code>, <code>provided</code>, <code>runtime</code> or <code>test</code>), <code>packaging</code>, <code>depth</code> in the graph, whether it is <code>direct</code>, its <code>checksum</code>, and <code>managed = true</code> when <code>[managed]</code> decided its version.</td></tr>
+    <tr><td><code>[[tool]]</code></td><td class="wrap">A graph that never meets the project's: a compiler (<code>kotlin-compiler</code>, <code>scala-compiler</code>, <code>groovy-compiler</code>), the <code>obfuscator</code>, a task's tools (<code>tasks.&lt;name&gt;</code>) or a pinned agent. It has a <code>name</code>, its <code>roots</code>, and <code>[[tool.package]]</code> entries in the same format.</td></tr>
+    <tr><td><code>[[local]]</code></td><td class="wrap">A local jar: its <code>name</code>, its <code>path</code> relative to the root, its <code>classpath</code> and a <code>sha256</code>.</td></tr>
+  </tbody>
+</table>
+<p>
+  The file says <code>version = 2</code> only when it has <code>[[tool]]</code> blocks, so a
+  plain Java project's lockfile stays byte-identical across jrs releases. It never records an
+  absolute path: cache locations are recomputed on every machine.
+</p>
+</section>
+
+</div>
+<!-- ===================================================================== -->
+<div class="group" data-title="Commands">
+
+<section id="commands">
+<h2 data-nav="Overview and global flags">Command-line overview</h2>
+<pre data-lang="plain">jrs [global flags] &lt;command&gt; [flags] [-- args...]</pre>
+<table>
+  <thead><tr><th>Command</th><th>What it does</th></tr></thead>
+  <tbody>
+    <tr><td><a href="#cmd-build"><code>build</code></a></td><td>Resolve, compile the main sources, copy resources.</td></tr>
+    <tr><td><a href="#cmd-run"><code>run</code></a></td><td>Build, then run the main class.</td></tr>
+    <tr><td><a href="#cmd-test"><code>test</code></a></td><td>Build, compile the tests, run them.</td></tr>
+    <tr><td><a href="#cmd-package"><code>package</code></a></td><td>Build, then write jars, images, distributions or native executables.</td></tr>
+    <tr><td><a href="#cmd-doc"><code>doc</code></a></td><td>Generate API docs into <code>target/doc</code>.</td></tr>
+    <tr><td><a href="#cmd-clean"><code>clean</code></a></td><td>Remove <code>target/</code>.</td></tr>
+    <tr><td><a href="#cmd-task"><code>task</code></a></td><td>Run a task from <code>jrs.toml</code>, or list them.</td></tr>
+    <tr><td><a href="#cmd-tree"><code>tree</code></a></td><td>Print the dependency graph.</td></tr>
+    <tr><td><a href="#cmd-classpath"><code>classpath</code></a></td><td>Print a resolved classpath.</td></tr>
+    <tr><td><a href="#cmd-add"><code>add</code></a> / <a href="#cmd-remove"><code>remove</code></a></td><td>Edit the dependency tables.</td></tr>
+    <tr><td><a href="#cmd-update"><code>update</code></a></td><td>Re-resolve and rewrite <code>jrs.lock</code>.</td></tr>
+    <tr><td><a href="#cmd-outdated"><code>outdated</code></a></td><td>List dependencies with newer releases.</td></tr>
+    <tr><td><a href="#cmd-verify"><code>verify</code></a></td><td>Re-hash cached jars against <code>jrs.lock</code>.</td></tr>
+    <tr><td><a href="#cmd-fetch"><code>fetch</code></a></td><td>Download everything a build needs, without building.</td></tr>
+    <tr><td><a href="#cmd-metadata"><code>metadata</code></a></td><td>Print the project model as JSON.</td></tr>
+    <tr><td><a href="#cmd-cache"><code>cache</code></a></td><td>Show or prune the shared cache.</td></tr>
+    <tr><td><a href="#cmd-init"><code>init</code></a></td><td>Scaffold a new project.</td></tr>
+    <tr><td><a href="#cmd-migrate"><code>migrate</code></a></td><td>Generate <code>jrs.toml</code> from Maven or Gradle.</td></tr>
+    <tr><td><a href="#cmd-completions"><code>completions</code></a></td><td>Print a shell completion script.</td></tr>
+  </tbody>
+</table>
+<p><code>jrs --help</code> lists the commands, and <code>jrs &lt;command&gt; --help</code> a command's flags.</p>
+
+<h3>Global flags</h3>
+<p>These work with every command, before or after its name.</p>
+<table>
+  <thead><tr><th>Flag</th><th>Effect</th></tr></thead>
+  <tbody>
+    <tr><td><code>-v</code>, <code>--verbose</code></td><td>Echo every subprocess command line and its exit status. Also names the JDK picked.</td></tr>
+    <tr><td><code>-q</code>, <code>--quiet</code></td><td>Errors only.</td></tr>
+    <tr><td><code>--offline</code></td><td>Never touch the network; use the cache and lockfile only, and fail on a miss.</td></tr>
+    <tr><td><code>-j</code>, <code>--jobs &lt;N&gt;</code></td><td>Cap parallelism. Defaults to the user configuration's <code>jobs</code>, else the number of cores, with a floor of 4 for network work.</td></tr>
+    <tr><td><code>--manifest-path &lt;PATH&gt;</code></td><td>Use a manifest outside the working directory: the file or its directory.</td></tr>
+    <tr><td><code>--progress &lt;auto|always|never&gt;</code></td><td>Live animated output. <code>auto</code> animates only on an interactive terminal.</td></tr>
+    <tr><td><code>--color &lt;auto|always|never&gt;</code></td><td>Colour and styling.</td></tr>
+    <tr><td><code>--charset &lt;auto|unicode|ascii&gt;</code></td><td>Glyphs for spinners, bars and trees.</td></tr>
+  </tbody>
+</table>
+
+<h3>stdout and stderr</h3>
+<p>
+  Progress, phase lines and diagnostics go to stderr. stdout carries only real output: the
+  program <code>jrs run</code> starts, <code>jrs tree</code>, <code>jrs classpath</code>,
+  <code>jrs metadata</code>, <code>jrs task --list</code> and <code>migrate --dry-run</code>. So
+  pipes and redirects always get clean data:
+</p>
+<pre>java -cp "$(jrs classpath --runtime)" com.example.Main
+jrs metadata | jq '.classpaths.test[].jar'</pre>
+
+<h3>Exit codes</h3>
+<table>
+  <thead><tr><th>Code</th><th>Meaning</th></tr></thead>
+  <tbody>
+    <tr><td><code>0</code></td><td>Success.</td></tr>
+    <tr><td><code>1</code></td><td>A build or test failure: compiler errors, failing tests, a download or checksum failure, no JDK, a failed task.</td></tr>
+    <tr><td><code>2</code></td><td>A usage or manifest error: a bad flag, an invalid <code>jrs.toml</code>, a missing prerequisite.</td></tr>
+    <tr><td><code>101</code></td><td>An internal error in jrs itself. Please <a href="https://github.com/pwittchen/jrs/issues">report it</a>.</td></tr>
+  </tbody>
+</table>
+<p><code>jrs run</code> and <code>jrs task &lt;name&gt;</code> return the program's own exit code.</p>
+</section>
+
+<section id="cmd-build">
+<h2><code>jrs build</code></h2>
+<pre data-lang="plain">jrs build [--watch] [--timings]</pre>
+<p>Builds the main code. In order:</p>
+<ol>
+  <li>Resolve dependencies: from <code>jrs.lock</code> when it matches the manifest, afresh otherwise.</li>
+  <li>Download what the cache is missing, in parallel, checksum-verified.</li>
+  <li>Run the <code>pre-compile</code> hook.</li>
+  <li>Compile the main unit into <code>target/classes</code>, or print <code>Fresh</code> and skip it when nothing it depends on changed.</li>
+  <li>Copy <code>src/main/resources</code> into <code>target/classes</code>, skipping files that did not change and deleting ones you deleted.</li>
+  <li>Run the <code>post-compile</code> hook.</li>
+</ol>
+<table>
+  <thead><tr><th>Flag</th><th>Effect</th></tr></thead>
+  <tbody>
+    <tr><td><code>--watch</code></td><td>Build again whenever a source, a resource, a task input or <code>jrs.toml</code> changes. See <a href="#watch">Watch mode</a>.</td></tr>
+    <tr><td><code>--timings</code></td><td>Print the wall time of each phase after the summary. See <a href="#output-timings">Timings</a>.</td></tr>
+  </tbody>
+</table>
+<p><code>test</code>, <code>run</code> and <code>package</code> all start with exactly this build.</p>
+</section>
+
+<section id="cmd-run">
+<h2><code>jrs run</code></h2>
+<pre data-lang="plain">jrs run [--debug[=[HOST:]PORT]] [--timings] [-- ARGS...]</pre>
+<p>Builds, runs the <code>pre-run</code> hook, then starts the program:</p>
+<pre data-lang="plain">java [jdwp] [run.java-agents] &lt;run.jvm-args&gt; -cp &lt;runtime classpath&gt; &lt;main-class&gt; ARGS...</pre>
+<p>
+  in <code>run.cwd</code> with <code>run.env</code>. The program inherits the terminal (stdin,
+  stdout and stderr), and jrs exits with its exit code. Everything after <code>--</code> goes to
+  the program.
+</p>
+<table>
+  <thead><tr><th>Flag</th><th>Effect</th></tr></thead>
+  <tbody>
+    <tr><td><code>--debug[=[HOST:]PORT]</code></td><td>Start the JVM suspended with the JDWP agent and wait for a debugger: port 5005 unless given, localhost unless given a host. <code>--debug=*:5005</code> listens on every interface.</td></tr>
+    <tr><td><code>--timings</code></td><td>Print the phase timings before the program starts.</td></tr>
+  </tbody>
+</table>
+<pre>jrs run
+jrs run -- --port 8080 --verbose       # arguments for the program
+jrs run --debug                        # attach a debugger to localhost:5005
+jrs run --debug=8000
+jrs -q run -- input.txt &gt; output.txt   # only the program's output</pre>
+<p>Requires <code>project.main-class</code>. See <a href="#running">Running and debugging</a>.</p>
+</section>
+
+<section id="cmd-test">
+<h2><code>jrs test</code></h2>
+<pre data-lang="plain">jrs test [--filter PATTERN] [--include-tag TAG]... [--exclude-tag TAG]... [--method CLASS#METHOD]...
+         [--coverage] [--watch] [--debug[=[HOST:]PORT]] [--rerun-failed] [--fail-fast]
+         [--retries N] [--forks N] [--timings]</pre>
+<p>
+  Builds, runs <code>pre-test</code>, compiles the test sources into
+  <code>target/test-classes</code>, runs them on the JUnit Platform, then runs
+  <code>post-test</code> if they passed. The tests are not recompiled for a main change that
+  leaves the main classes' API alone.
+</p>
+<table>
+  <thead><tr><th>Flag</th><th>Effect</th></tr></thead>
+  <tbody>
+    <tr><td><code>--filter &lt;PATTERN&gt;</code></td><td>Only classes whose name matches this regular expression.</td></tr>
+    <tr><td><code>--include-tag &lt;TAG&gt;</code></td><td>Only tests with this JUnit tag expression; repeatable.</td></tr>
+    <tr><td><code>--exclude-tag &lt;TAG&gt;</code></td><td>Skip tests with this tag expression; repeatable.</td></tr>
+    <tr><td><code>--method &lt;CLASS#METHOD&gt;</code></td><td>Only this method, as <code>com.example.FooTest#adds</code>; repeatable.</td></tr>
+    <tr><td><code>--coverage</code></td><td>Record coverage with JaCoCo; the report lands in <code>target/coverage</code>.</td></tr>
+    <tr><td><code>--watch</code></td><td>Test again on every change.</td></tr>
+    <tr><td><code>--debug[=[HOST:]PORT]</code></td><td>Wait for a debugger before the tests start.</td></tr>
+    <tr><td><code>--rerun-failed</code></td><td>Only the tests that failed in the last run, read from its JUnit XML.</td></tr>
+    <tr><td><code>--fail-fast</code></td><td>Stop at the first failing test.</td></tr>
+    <tr><td><code>--retries &lt;N&gt;</code></td><td>Run failing tests again up to <code>N</code> times; overrides <code>[test] retries</code>.</td></tr>
+    <tr><td><code>--forks &lt;N&gt;</code></td><td>Split the test classes among <code>N</code> JVMs run at once; overrides <code>[test] forks</code>.</td></tr>
+    <tr><td><code>--timings</code></td><td>Print the phase timings after the run.</td></tr>
+  </tbody>
+</table>
+<pre>jrs test --filter '.*ParserTest'
+jrs test --method com.example.ParserTest#parsesEmptyInput
+jrs test --include-tag fast --exclude-tag 'slow | network'
+jrs test --coverage
+jrs test --rerun-failed
+jrs test --forks 4 --retries 2</pre>
+<p>The <a href="#testing">Testing</a> guide explains each of these in depth.</p>
+</section>
+
+<section id="cmd-package">
+<h2><code>jrs package</code></h2>
+<pre data-lang="plain">jrs package [--fat | --portable] [--jlink] [--jpackage [TYPE]] [--dist] [--native-image]
+            [--sources] [--javadoc] [--obfuscate] [--timings]</pre>
+<p>
+  Builds, then writes <code>target/&lt;name&gt;-&lt;version&gt;.jar</code> and runs the
+  <code>post-package</code> hook. The flags add to that jar or change its layout.
+</p>
+<table>
+  <thead><tr><th>Flag</th><th>Produces</th></tr></thead>
+  <tbody>
+    <tr><td><em>none</em></td><td>A thin jar whose <code>Class-Path</code> points at the cached dependency jars: <code>java -jar</code> works on the machine that built it.</td></tr>
+    <tr><td><code>--portable</code></td><td>The runtime dependencies copied into <code>target/lib/</code>, with the jar's <code>Class-Path</code> pointing there, to ship together.</td></tr>
+    <tr><td><code>--fat</code></td><td>Every runtime dependency unpacked into the jar: one file that runs anywhere. Applies <code>[package.relocate]</code>.</td></tr>
+    <tr><td><code>--jlink</code></td><td>Also a trimmed Java runtime in <code>target/image</code>, the app under <code>app/</code>, a launcher in <code>bin/&lt;name&gt;</code>.</td></tr>
+    <tr><td><code>--jpackage [TYPE]</code></td><td>Also a native package in <code>target/jpackage</code>. <code>TYPE</code> is jpackage's own: <code>app-image</code>, <code>dmg</code>, <code>pkg</code>, <code>deb</code>, <code>rpm</code>, <code>exe</code> or <code>msi</code>.</td></tr>
+    <tr><td><code>--dist</code></td><td>Also a distribution with launch scripts, staged in <code>target/dist/&lt;name&gt;-&lt;version&gt;/</code> and zipped into <code>target/&lt;name&gt;-&lt;version&gt;.zip</code>.</td></tr>
+    <tr><td><code>--native-image</code></td><td>Also a native executable in <code>target/native</code>, with GraalVM's <code>native-image</code>.</td></tr>
+    <tr><td><code>--sources</code></td><td>Also <code>target/&lt;name&gt;-&lt;version&gt;-sources.jar</code>, generated sources included.</td></tr>
+    <tr><td><code>--javadoc</code></td><td>Also runs <code>jrs doc</code> and writes <code>-javadoc.jar</code>.</td></tr>
+    <tr><td><code>--obfuscate</code></td><td>Runs ProGuard over the jar. Needs an <code>[obfuscate]</code> table.</td></tr>
+    <tr><td><code>--timings</code></td><td>Print the phase timings after the summary.</td></tr>
+  </tbody>
+</table>
+<p>
+  <code>--fat</code> and <code>--portable</code> exclude each other; everything else combines.
+  <code>--fat</code>, <code>--jlink</code>, <code>--jpackage</code>, <code>--dist</code> and
+  <code>--native-image</code> require <code>project.main-class</code>.
+</p>
+<pre>jrs package --fat                          # one runnable jar
+jrs package --fat --obfuscate              # obfuscated and self-contained
+jrs package --jlink                        # app + trimmed JRE in target/image
+jrs package --jpackage dmg                 # a macOS disk image
+jrs package --dist                         # zip with bin/ launchers, no JRE
+jrs package --sources --javadoc            # the jars a repository wants</pre>
+<p>See <a href="#packaging">Packaging</a> and <a href="#images">Runtime images and distributions</a>.</p>
+</section>
+
+<section id="cmd-doc">
+<h2><code>jrs doc</code></h2>
+<pre data-lang="plain">jrs doc</pre>
+<p>
+  Documents the main sources, generated ones included, into <code>target/doc</code>, which is
+  emptied first so a deleted class does not keep its page. It runs the <code>pre-compile</code>
+  hook first, so generated sources are there. The tool follows the language:
+</p>
+<table>
+  <thead><tr><th>Main unit</th><th>Tool</th><th>Documents</th></tr></thead>
+  <tbody>
+    <tr><td>Java, or Java + Kotlin</td><td><code>javadoc</code></td><td class="wrap">The Java sources. Kotlin's are left out with a warning (Dokka is not supported).</td></tr>
+    <tr><td>Scala 2.13</td><td>Scaladoc</td><td class="wrap">Every source, Java included.</td></tr>
+    <tr><td>Scala 3</td><td>Scaladoc 3</td><td class="wrap">The compiled classes, so the build runs first; Java sources are left out.</td></tr>
+    <tr><td>Groovy</td><td>Groovydoc</td><td class="wrap">Every source, Java included.</td></tr>
+  </tbody>
+</table>
+<p>
+  <code>java.javadoc-args</code> is appended to <code>javadoc</code>; Scaladoc and Groovydoc run
+  with the language's <code>compiler-jvm-args</code>.
+</p>
+</section>
+
+<section id="cmd-clean">
+<h2><code>jrs clean</code></h2>
+<pre data-lang="plain">jrs clean</pre>
+<p>
+  Removes the target directory. Everything in it can be regenerated, so this can never lose your
+  work. It also forgets every task fingerprint and compile index, so the next build compiles
+  everything. The shared cache is untouched; see <a href="#cmd-cache"><code>jrs cache prune</code></a>
+  for that.
+</p>
+</section>
+
+<section id="cmd-task">
+<h2><code>jrs task</code></h2>
+<pre data-lang="plain">jrs task &lt;NAME&gt; [--watch] [-- ARGS...]
+jrs task --list</pre>
+<p>
+  Runs a task from <code>jrs.toml</code> after whatever its <code>depends-on</code> names. The task
+  inherits the terminal, receives the arguments after <code>--</code>, and jrs exits with its exit
+  code.
+</p>
+<table>
+  <thead><tr><th>Flag</th><th>Effect</th></tr></thead>
+  <tbody>
+    <tr><td><code>--list</code></td><td>List every task, its description and the hooks that run it, on stdout. <code>shell</code> tasks are marked <code>(sh)</code>.</td></tr>
+    <tr><td><code>--watch</code></td><td>Run it again whenever its inputs, a source or <code>jrs.toml</code> changes.</td></tr>
+  </tbody>
+</table>
+<pre>jrs task --list
+jrs task release                 # run a task and its dependencies
+jrs task format -- --dry-run     # extra arguments for the task
+jrs task build-info --watch</pre>
+<p>A standalone <code>jrs task</code> resolves dependencies if the task uses a classpath, but does not compile unless it depends on <code>build</code>. See <a href="#tasks">Tasks and hooks</a>.</p>
+</section>
+
+<section id="cmd-tree">
+<h2><code>jrs tree</code></h2>
+<pre data-lang="plain">jrs tree [--depth N] [--why ARTIFACT] [--tool NAME] [--task NAME]</pre>
+<p>
+  Prints the resolved dependency graph. Versions changed by conflict mediation are highlighted, so
+  a nearest-wins decision is visible at a glance, and versions that <code>[managed]</code> decided
+  are marked <code>(managed)</code>.
+</p>
+<table>
+  <thead><tr><th>Flag</th><th>Effect</th></tr></thead>
+  <tbody>
+    <tr><td><code>--depth &lt;N&gt;</code></td><td>Show this many levels; <code>1</code> is the declared dependencies only.</td></tr>
+    <tr><td><code>--why &lt;ARTIFACT&gt;</code></td><td>Every path from the manifest that leads to this artifact.</td></tr>
+    <tr><td><code>--tool &lt;NAME&gt;</code></td><td>A tool's own graph instead: <code>kotlin-compiler</code>, <code>scala-compiler</code>, <code>groovy-compiler</code> or <code>obfuscator</code>.</td></tr>
+    <tr><td><code>--task &lt;NAME&gt;</code></td><td>The graph of a task's <code>[tasks.&lt;name&gt;.dependencies]</code>.</td></tr>
+  </tbody>
+</table>
+<pre>jrs tree --depth 1
+jrs tree --why com.google.guava:failureaccess
+jrs tree --tool kotlin-compiler
+jrs tree --task format</pre>
+<p>It never runs a task, so it is safe on a project you have just cloned.</p>
+</section>
+
+<section id="cmd-classpath">
+<h2><code>jrs classpath</code></h2>
+<pre data-lang="plain">jrs classpath [--test | --runtime]</pre>
+<p>Prints a resolved classpath on stdout, with the platform's path separator:</p>
+<table>
+  <thead><tr><th>Flag</th><th>Classpath</th></tr></thead>
+  <tbody>
+    <tr><td><em>none</em></td><td><code>target/classes</code>, then the jars the main sources compile against.</td></tr>
+    <tr><td><code>--runtime</code></td><td>What <code>jrs run</code> uses: without compile-only dependencies, with runtime-only ones.</td></tr>
+    <tr><td><code>--test</code></td><td>Test classes, main classes, and every jar.</td></tr>
+  </tbody>
+</table>
+<pre>java -cp "$(jrs classpath --runtime)" com.example.Main
+jshell --class-path "$(jrs classpath)"</pre>
+</section>
+
+<section id="cmd-add">
+<h2><code>jrs add</code></h2>
+<pre data-lang="plain">jrs add &lt;COORDINATE&gt;... [--dev | --compile-only | --runtime-only]</pre>
+<p>
+  Adds dependencies to <code>jrs.toml</code>. A coordinate is <code>group:artifact</code>,
+  <code>group:artifact:version</code> or <code>group:artifact:version:classifier</code>. Without a
+  version, jrs looks up the newest release in the repository's <code>maven-metadata.xml</code>;
+  an artifact that <code>[managed]</code> covers goes in without one.
+</p>
+<table>
+  <thead><tr><th>Flag</th><th>Effect</th></tr></thead>
+  <tbody>
+    <tr><td><code>--dev</code></td><td>Into <code>[dev-dependencies]</code>.</td></tr>
+    <tr><td><code>--compile-only</code></td><td>As <code>{ compile-only = true }</code>.</td></tr>
+    <tr><td><code>--runtime-only</code></td><td>As <code>{ runtime-only = true }</code>.</td></tr>
+  </tbody>
+</table>
+<pre>jrs add com.google.guava:guava
+jrs add org.slf4j:slf4j-api:2.0.13 ch.qos.logback:logback-classic:1.5.6
+jrs add jakarta.servlet:jakarta.servlet-api:6.0.0 --compile-only
+jrs add org.postgresql:postgresql --runtime-only
+jrs add org.lwjgl:lwjgl:3.3.3:natives-linux
+jrs add org.junit.jupiter:junit-jupiter --dev</pre>
+<p>
+  The file is edited in place: comments, order, quoting and line endings survive. The editor
+  knows the one-entry-per-line forms jrs writes, and refuses anything else (dotted keys, sub-tables,
+  values spanning lines) with a message to edit by hand. After the change the graph is resolved
+  again, and if that fails, for a coordinate that does not exist say, the manifest is put back as
+  it was.
+</p>
+</section>
+
+<section id="cmd-remove">
+<h2><code>jrs remove</code></h2>
+<pre data-lang="plain">jrs remove &lt;KEY&gt;... [--dev]</pre>
+<p>
+  Removes dependencies by the key <code>jrs.toml</code> gives them:
+  <code>group:artifact</code>, <code>group:artifact:classifier</code>, or a local jar's name. With
+  <code>--dev</code> it only looks in <code>[dev-dependencies]</code>. It edits and re-resolves as
+  <code>jrs add</code> does.
+</p>
+<pre>jrs remove com.google.guava:guava
+jrs remove ojdbc
+jrs remove org.assertj:assertj-core --dev</pre>
+</section>
+
+<section id="cmd-update">
+<h2><code>jrs update</code></h2>
+<pre data-lang="plain">jrs update</pre>
+<p>
+  Resolves the graph afresh and rewrites <code>jrs.lock</code>. It also re-checks every cached
+  snapshot and re-pins the SHA-256 of local jars. Use it to pick up a new snapshot, after
+  replacing a jar in <code>libs/</code>, or to settle a merge conflict in the lockfile. Versions
+  written in the manifest do not change; to move to newer releases, edit them (see
+  <code>jrs outdated</code>).
+</p>
+</section>
+
+<section id="cmd-outdated">
+<h2><code>jrs outdated</code></h2>
+<pre data-lang="plain">jrs outdated</pre>
+<p>
+  Lists declared dependencies, <code>[managed]</code> entries (BOMs included) and language
+  compilers that have newer releases, read from each repository's <code>maven-metadata.xml</code>.
+  Local jars are skipped. It reports; it changes nothing.
+</p>
+</section>
+
+<section id="cmd-verify">
+<h2><code>jrs verify</code></h2>
+<pre data-lang="plain">jrs verify</pre>
+<p>
+  Re-hashes every cached jar the lockfile names, tool graphs included, against the checksums in
+  <code>jrs.lock</code>, and exits <code>1</code> on a mismatch. Builds do not re-hash cached jars
+  every time, so this is the on-demand check that a cache has not been tampered with or damaged.
+</p>
+</section>
+
+<section id="cmd-fetch">
+<h2><code>jrs fetch</code></h2>
+<pre data-lang="plain">jrs fetch [--sources]</pre>
+<p>
+  Resolves and downloads everything a build and a test run need (the dependencies, the
+  compilers, each task's tools and the JUnit launcher) into the cache without building. A CI job
+  can warm the cache this way and run <code>--offline</code> afterwards.
+</p>
+<p>
+  <code>--sources</code> also downloads each dependency's <code>-sources.jar</code>, which
+  <code>jrs metadata</code> then lists beside the jar, so an editor can go to a library's
+  definitions. A library that publishes no sources jar is a warning, not an error.
+</p>
+</section>
+
+<section id="cmd-metadata">
+<h2><code>jrs metadata</code></h2>
+<pre data-lang="plain">jrs metadata [--no-deps]</pre>
+<p>
+  Prints the project model as JSON on stdout, the way <code>cargo metadata</code> does: what an
+  editor plugin or language server needs without reading <code>jrs.toml</code> itself. It resolves
+  the dependencies but never compiles. <code>--no-deps</code> skips resolution; the classpaths are
+  then <code>null</code> and nothing is downloaded or written.
+</p>
+<pre data-lang="plain" data-file="jrs metadata (abridged)">{
+  "version": 1,
+  "jrs": "0.5.1",
+  "project": { "name": "my-app", "version": "1.0.0", "main-class": "com.example.Main",
+               "root": "/work/my-app", "manifest": "/work/my-app/jrs.toml", ... },
+  "jdk": { "home": "/usr/lib/jvm/jdk-21", "version": 21, "javac": "...", "java": "..." },
+  "java": { "release": 21, "target": null, "encoding": "UTF-8", "javac-args": [] },
+  "languages": [ { "name": "java", "version": null, "compiler": null } ],
+  "main": { "sources": [ { "language": "java", "dir": "/work/my-app/src/main/java" } ],
+            "generated-sources": [], "resources": [...], "output": "/work/my-app/target/classes" },
+  "test": { ... },
+  "target-dir": "/work/my-app/target",
+  "jar": "/work/my-app/target/my-app-1.0.0.jar",
+  "classpaths": {
+    "compile": [ { "coordinate": "com.google.guava:guava:33.0.0-jre",
+                   "jar": "&lt;cache&gt;/.../guava-33.0.0-jre.jar", "sources": null } ],
+    "runtime": [ ... ],
+    "test": [ ... ]
+  },
+  "tasks": [ { "name": "build-info", "description": "...", "hooks": ["pre-compile"] } ]
+}</pre>
+<p>
+  Every path is absolute. The classpaths are in the build's order and hold jars only; the class
+  directories are <code>main.output</code> and <code>test.output</code>. A local jar's
+  <code>coordinate</code> is <code>null</code>. The top-level <code>version</code> goes up only when
+  a key changes meaning or disappears; new keys may appear within a version. The full schema is in
+  <a href="https://github.com/pwittchen/jrs/blob/master/specs/INITIAL_SPEC.md#54-the-project-model-jrs-metadata-and-jrs-fetch">SPEC §5.4</a>.
+</p>
+</section>
+
+<section id="cmd-cache">
+<h2><code>jrs cache</code></h2>
+<pre data-lang="plain">jrs cache path
+jrs cache prune [--unused-for DAYS] [--dry-run]</pre>
+<table>
+  <thead><tr><th>Command</th><th>Effect</th></tr></thead>
+  <tbody>
+    <tr><td><code>jrs cache path</code></td><td>Print where the shared cache is.</td></tr>
+    <tr><td><code>jrs cache prune</code></td><td>Remove what no known project's <code>jrs.lock</code> names.</td></tr>
+    <tr><td><code>jrs cache prune --unused-for &lt;DAYS&gt;</code></td><td>Instead, remove what no build has used for that many days.</td></tr>
+    <tr><td><code>--dry-run</code></td><td>Say what would be removed; remove nothing.</td></tr>
+  </tbody>
+</table>
+<p>See <a href="#cache">Dependency cache</a> for how pruning decides.</p>
+</section>
+
+<section id="cmd-init">
+<h2><code>jrs init</code></h2>
+<pre data-lang="plain">jrs init [--lib] [--lang java|kotlin|scala|groovy] [--check] [--name NAME] [PATH]</pre>
+<table>
+  <thead><tr><th>Flag</th><th>Effect</th></tr></thead>
+  <tbody>
+    <tr><td><code>--lib</code></td><td>A library: no main class, a starter library class instead.</td></tr>
+    <tr><td><code>--lang &lt;LANG&gt;</code></td><td>The language of the starter code and its test: <code>java</code> (default), <code>kotlin</code>, <code>scala</code> (MUnit tests) or <code>groovy</code> (Java code with Spock specs).</td></tr>
+    <tr><td><code>--check</code></td><td>Add a <code>check</code> task running PMD's quickstart rules over the Java sources, in the <code>post-compile</code> hook.</td></tr>
+    <tr><td><code>--name &lt;NAME&gt;</code></td><td>The project name; defaults to the directory's name.</td></tr>
+    <tr><td><code>PATH</code></td><td>Where to scaffold; defaults to the current directory.</td></tr>
+  </tbody>
+</table>
+<pre>jrs init
+jrs init --lib --name text-utils libs/text-utils
+jrs init --lang kotlin
+jrs init --check</pre>
+</section>
+
+<section id="cmd-migrate">
+<h2><code>jrs migrate</code></h2>
+<pre data-lang="plain">jrs migrate [--from maven|gradle] [--dry-run] [--force] [--path DIR]</pre>
+<table>
+  <thead><tr><th>Flag</th><th>Effect</th></tr></thead>
+  <tbody>
+    <tr><td><code>--dry-run</code></td><td>Print the manifest that would be written on stdout; touch nothing.</td></tr>
+    <tr><td><code>--from &lt;SYSTEM&gt;</code></td><td>Force the source build system (<code>maven</code> or <code>gradle</code>) instead of detecting it.</td></tr>
+    <tr><td><code>--force</code></td><td>Overwrite an existing <code>jrs.toml</code>.</td></tr>
+    <tr><td><code>--path &lt;DIR&gt;</code></td><td>The project root to migrate; defaults to the current directory.</td></tr>
+  </tbody>
+</table>
+<p>
+  The original build file is never modified. See <a href="#migration">Migrating from Maven and
+  Gradle</a> for what is translated and what is reported.
+</p>
+</section>
+
+<section id="cmd-completions">
+<h2><code>jrs completions</code></h2>
+<pre data-lang="plain">jrs completions &lt;bash|zsh|fish&gt;</pre>
+<p>Prints a completion script for commands and flags. Load it from your shell's startup file:</p>
+<pre>source &lt;(jrs completions bash)          # in ~/.bashrc
+source &lt;(jrs completions zsh)           # in ~/.zshrc, after compinit
+jrs completions fish | source           # in ~/.config/fish/config.fish</pre>
+<p>Task names are not completed: nothing calls back into jrs at completion time.</p>
+</section>
+
+</div>
+<!-- ===================================================================== -->
+<div class="group" data-title="Guides">
+
+<section id="resolution">
+<h2>Dependency resolution</h2>
+<p>
+  Resolution turns the declared coordinates into one flat, deduplicated set of jars. It runs when
+  there is no lockfile, when the manifest changed, or on <code>jrs update</code>; otherwise the
+  lockfile answers.
+</p>
+
+<h3>The algorithm</h3>
+<ol>
+  <li>Start from the manifest's direct dependencies.</li>
+  <li>Fetch each POM (cache first) and parse it: interpolate <code>${…}</code> properties, walk <code>&lt;parent&gt;</code> chains, and fill in missing versions from <code>&lt;dependencyManagement&gt;</code>. Then apply <code>[managed]</code>.</li>
+  <li>Collect the POM's <code>compile</code> and <code>runtime</code> dependencies. <code>provided</code>, <code>system</code> and <code>test</code> ones are skipped, and so is anything marked <code>&lt;optional&gt;true&lt;/optional&gt;</code>. Exclusions, the POM's and the manifest's, cut the graph.</li>
+  <li>Repeat for everything new, breadth-first, level by level, with each level's fetches in parallel.</li>
+  <li>Mediate conflicts, assign each jar its classpath, and write <code>jrs.lock</code>.</li>
+</ol>
+<p>
+  A <code>&lt;type&gt;</code> of <code>jar</code>, <code>bundle</code>, <code>ejb</code> or
+  <code>maven-plugin</code> is a jar; <code>test-jar</code> is the jar classified
+  <code>tests</code>; <code>pom</code> contributes dependencies but no jar; anything else is skipped
+  with a warning. Cycles in the graph terminate.
+</p>
+
+<h3>Nearest wins</h3>
+<p>
+  When two paths ask for different versions of one artifact, the version nearest the root wins,
+  as in Maven. Ties at the same depth go to the dependency declared first in the manifest, and jrs
+  warns, naming both versions. So a version you declare directly always wins, and to force a
+  transitive version you either declare the artifact yourself or manage it:
+</p>
+<pre data-lang="toml">[managed]
+"com.fasterxml.jackson.core:jackson-databind" = "2.19.0"   # wherever it appears</pre>
+<p>
+  <code>[managed]</code> is settled before mediation: every path to a managed artifact asks for
+  the same version, so there is nothing to mediate.
+</p>
+
+<h3>Inspecting the graph</h3>
+<pre>jrs tree                                  # everything
+jrs tree --depth 1                        # what you declared
+jrs tree --why org.checkerframework:checker-qual   # who brings this in?</pre>
+
+<h3>Where artifacts come from</h3>
+<p>
+  Repositories are asked in declaration order, Maven Central last, except where a repository's
+  <code>groups</code> claims a group. A 404 moves on to the next repository; a 401 or 403 fails at
+  once and says where credentials go. A dropped connection or an HTTP 429 or 5xx is retried, with a
+  doubling backoff, up to three attempts in total. Mirrors and proxies from the
+  <a href="#user-config">user configuration</a> apply to every request.
+</p>
+</section>
+
+<section id="compilation">
+<h2>Compilation and incremental builds</h2>
+<p>
+  jrs's rule is that skipping work must never produce a wrong result: a spurious recompile costs
+  seconds, a stale class costs a wrong answer. When in doubt, it compiles.
+</p>
+
+<h3>When a unit is fresh</h3>
+<p>
+  Each unit, main and test, has a fingerprint of its settings (flags, source list, classpath,
+  including each jar's size and modification time) and its sources. A source counts as changed
+  when its contents did: one whose size or mtime moved is hashed and compared, so merely touching
+  a file does not rebuild. A fresh unit prints <code>Fresh</code> and costs a staleness check.
+</p>
+
+<h3>File by file</h3>
+<p>
+  A Java-only unit compiles only what a change needs. Every build records in
+  <code>target/.jrs/&lt;unit&gt;.index</code> which classes each source produced, their API, their
+  constants and which classes of the unit they refer to. Then:
+</p>
+<ul>
+  <li>A change inside method bodies compiles <strong>that one source</strong>.</li>
+  <li>A change to a class's API also compiles every source that refers to it, transitively, since a subclass passes an inherited change on to its own users.</li>
+  <li>The classes are the ones a whole build would have written, byte for byte.</li>
+</ul>
+<p>The whole unit is compiled instead, into an emptied output directory, when file by file cannot be sure:</p>
+<ul>
+  <li>the settings changed, or there is no index yet;</li>
+  <li>a source was added or deleted, or a top-level class appeared or disappeared;</li>
+  <li>a compile-time constant changed, since <code>javac</code> inlines constants without a reference back;</li>
+  <li>annotation processors or <code>javac</code> plugins are in play, or there is a <code>module-info.java</code>;</li>
+  <li>the unit has Kotlin, Scala or Groovy sources.</li>
+</ul>
+<p>Emptying the directory means a class whose source was deleted or renamed can never survive into the jar.</p>
+
+<h3>Compile avoidance for tests</h3>
+<p>
+  The test unit depends on the main classes' <em>API</em>, not their bytes: class flags,
+  supertypes, and every non-private member's signature, annotations and constant values. A main
+  change that leaves that API alone, such as a fix inside a method, leaves the tests fresh. Kotlin
+  and Scala classes count by their bytes (inline functions and macros carry bodies across), and so
+  does every class once the main code registers an annotation processor or Groovy AST
+  transformation.
+</p>
+
+<h3>Resources</h3>
+<p>
+  <code>src/main/resources</code> is copied into <code>target/classes</code> and
+  <code>src/test/resources</code> into <code>target/test-classes</code>, skipping files whose size
+  and mtime match. A resource you delete is deleted from the output too. jrs records what it copied
+  and only ever removes those files, never a class or a processor's output.
+</p>
+
+<h3>Seeing what happened</h3>
+<pre>jrs -v build            # every command line, and how many sources each unit compiled
+jrs build --timings     # how long each step took</pre>
+</section>
+
+<section id="watch">
+<h2>Watch mode</h2>
+<pre>jrs build --watch
+jrs test --watch
+jrs test --watch --filter '.*Parser.*'
+jrs task generate --watch</pre>
+<p>
+  Watch mode runs the command, then polls every 300 ms for changes to the manifest, every source
+  and resource root of every language, and every task's <code>inputs</code>. Once a change has
+  settled, it runs the command again. The manifest is re-read on every run, so editing
+  <code>jrs.toml</code> takes effect immediately.
+</p>
+<p>
+  A failure is reported and waited out rather than ending the loop, since the next save is usually
+  the fix. Nothing under the target directory is watched, so a generator's output can never
+  retrigger it. Stop with <kbd>Ctrl</kbd>&nbsp;<kbd>C</kbd>.
+</p>
+</section>
+
+<section id="testing">
+<h2>Testing</h2>
+<p>
+  <code>jrs test</code> runs the JUnit Platform console launcher, which jrs resolves itself, over
+  <code>target/test-classes</code>. You only declare the test framework.
+</p>
+
+<h3>Frameworks</h3>
+<table>
+  <thead><tr><th>Framework</th><th>Declare in <code>[dev-dependencies]</code></th></tr></thead>
+  <tbody>
+    <tr><td>JUnit 5 and 6</td><td class="wrap"><code>org.junit.jupiter:junit-jupiter</code>. The launcher version follows from it.</td></tr>
+    <tr><td>JUnit 4</td><td class="wrap"><code>junit:junit</code>. Runs on the Vintage engine the launcher bundles. With JUnit 5 declared too, both kinds run.</td></tr>
+    <tr><td>Spock</td><td class="wrap"><code>org.spockframework:spock-core</code> and <code>org.apache.groovy:groovy</code>, with a <code>[groovy]</code> table for the compiler. Declared here, Groovy stays out of the jar.</td></tr>
+    <tr><td>Kotest, ScalaTest</td><td class="wrap">The framework's JUnit Platform engine.</td></tr>
+    <tr><td>MUnit</td><td class="wrap">MUnit, which runs on Vintage.</td></tr>
+  </tbody>
+</table>
+<p>
+  Each runs on its JUnit Platform engine, and the launcher follows the platform version the
+  framework brings. Test classes are found by name, <code>*Test</code>; when the tests are not all
+  Java, classes named <code>*Spec</code> and <code>*Suite</code> run as well.
+</p>
+
+<h3>Choosing what runs</h3>
+<pre>jrs test --filter '.*Integration.*'                    # classes by regex
+jrs test --method com.example.CartTest#addsItems       # one method; repeatable
+jrs test --include-tag fast                            # JUnit tag expressions
+jrs test --exclude-tag 'slow | docker'</pre>
+
+<h3>Reports</h3>
+<p>
+  JUnit XML lands in <code>target/test-reports</code>, where CI systems look for it. Every run
+  that leaves XML also gets <code>target/test-reports/index.html</code>: a static page with a row
+  per class, failing classes first and unfolded with their stack traces. It is written for failing
+  runs too, and <code>jrs test</code> prints its path. While the tests run, a live counter shows
+  passed and failed tests.
+</p>
+
+<h3>Rerunning failures</h3>
+<p>
+  <code>--rerun-failed</code> runs only what failed last time, read from the last run's XML: a
+  plain method by name, one invocation of a parameterised test or a dynamic test by its JUnit
+  unique ID, and otherwise the class. When nothing failed it says so and exits <code>0</code>; with
+  no earlier run at all it exits <code>2</code>.
+</p>
+
+<h3>Retries and flaky tests</h3>
+<p>
+  <code>[test] retries = n</code>, or <code>--retries n</code>, runs failing tests again up to
+  <code>n</code> times, each attempt writing its XML into
+  <code>target/test-reports/retry-&lt;n&gt;/</code>. A test that passes on a retry does not fail
+  the run, but it is not counted as passed either: it is reported as <strong>flaky</strong>, by name
+  and in the <code>Finished</code> line, and marked on the HTML page.
+</p>
+
+<h3>Fail fast</h3>
+<p>
+  <code>--fail-fast</code> stops at the first failing test. On JUnit 6 it uses the launcher's own
+  <code>--fail-fast</code>. The 1.x launchers of JUnit 5 and 4 do not have one, so jrs follows the
+  launcher's test feed and stops it after the first failure; that run writes no XML. Launchers
+  older than 1.10 (JUnit 5.9 and earlier) cannot be followed that way and run every test. A run
+  stopped early is not retried.
+</p>
+
+<h3>Parallel test JVMs</h3>
+<p>
+  <code>[test] forks = n</code>, or <code>--forks n</code>, splits the test classes among
+  <code>n</code> JVMs running at once, like Gradle's <code>maxParallelForks</code>. Each JVM gets
+  every <code>n</code>-th class in name order, so <code>--filter</code> and tags still apply. Their
+  output is printed whole, one after another, once all finish; their XML lands side by side as
+  <code>TEST-&lt;engine&gt;-fork-&lt;k&gt;.xml</code>. Retries, <code>--rerun-failed</code>,
+  <code>--method</code>, <code>--fail-fast</code> and <code>--debug</code> run in one JVM. Tests
+  that share a port, a database or a file must be ready for another JVM beside them.
+</p>
+<p>Jupiter's own parallelism inside each JVM is switched on through <code>jvm-args</code>, or the same keys in <code>src/test/resources/junit-platform.properties</code>:</p>
+<pre data-lang="toml">[test]
+jvm-args = [
+  "-Djunit.jupiter.execution.parallel.enabled=true",
+  "-Djunit.jupiter.execution.parallel.mode.default=concurrent",
+]</pre>
+
+<h3>Coverage</h3>
+<pre>jrs test --coverage</pre>
+<p>
+  Records coverage with JaCoCo and writes an HTML report plus <code>jacoco.xml</code> to
+  <code>target/coverage</code>. <code>[test] jacoco-version</code> picks the JaCoCo release.
+  <code>[test] coverage-minimum</code> makes the run exit <code>1</code> when a project-wide total
+  falls short, naming the counter and the minimum:
+</p>
+<pre data-lang="toml">[test]
+coverage-minimum = { line = 0.80, branch = 0.70, method = 0.75 }</pre>
+<p>Without <code>--coverage</code> the minimums are ignored.</p>
+
+<h3>Debugging a test</h3>
+<pre>jrs test --debug --method com.example.CartTest#addsItems</pre>
+<p>
+  The test JVM starts suspended and waits for a debugger on <code>localhost:5005</code>
+  (<code>--debug=8000</code> for another port, <code>--debug=*:5005</code> for every interface).
+  The live counter stays off while it waits, and retries are disabled.
+</p>
+
+<h3>Environment, agents and Mockito</h3>
+<p>
+  <code>[test] jvm-args</code>, <code>env</code> and <code>java-agents</code> configure the test
+  JVM. Mockito 5 on JDK 21 and later needs its agent loaded up front, or the JVM warns about
+  dynamic attachment:
+</p>
+<pre data-lang="toml">[test]
+java-agents = ["org.mockito:mockito-core"]</pre>
+</section>
+
+<section id="running">
+<h2>Running and debugging</h2>
+<p>
+  <code>jrs run</code> builds and runs <code>project.main-class</code> on the runtime classpath,
+  directly from <code>target/classes</code>; no jar is written.
+</p>
+<pre data-lang="toml">[project]
+main-class = "com.example.Main"
+
+[run]
+jvm-args = ["-Xmx512m", "-Dapp.profile=dev"]
+env = { DATABASE_URL = "jdbc:postgresql://localhost/app" }
+cwd = "{target}/run"</pre>
+<pre>jrs run -- serve --port 8080</pre>
+<ul>
+  <li>Arguments after <code>--</code> go to the program. It inherits stdin, stdout and stderr, and jrs exits with the program's exit code.</li>
+  <li>Phase lines go to stderr and the program's output to stdout, so <code>jrs -q run &gt; out.txt</code> captures exactly the program's output.</li>
+  <li>The <code>pre-run</code> hook runs after the build, before the program starts.</li>
+  <li>For a Kotlin file-level <code>main</code> in <code>Main.kt</code>, the class is <code>MainKt</code>; jrs says so when <code>main-class</code> names <code>Main</code>.</li>
+</ul>
+
+<h3>Attaching a debugger</h3>
+<pre>jrs run --debug              # JDWP on localhost:5005, suspended
+jrs run --debug=8000
+jrs run --debug='*:5005'     # every interface, for a JVM in a container</pre>
+<p>
+  jrs prints a <code>Debugging</code> line naming where to attach, then the JVM waits. Attach
+  from your IDE with a "Remote JVM Debug" configuration. A bad port is a usage error.
+</p>
+
+<h3>Rebuilding on change</h3>
+<p>
+  <code>jrs run</code> has no watch mode of its own, since the program usually keeps running. Use
+  <code>jrs build --watch</code> in another terminal to keep <code>target/classes</code> current,
+  or <code>jrs test --watch</code> for a test loop.
+</p>
+</section>
+
+<section id="packaging">
+<h2>Packaging</h2>
+<p>
+  <code>jrs package</code> always writes <code>target/&lt;name&gt;-&lt;version&gt;.jar</code>. What
+  differs is where the dependencies go.
+</p>
+
+<h3>Thin, portable or fat</h3>
+<table>
+  <thead><tr><th>Command</th><th>Dependencies</th><th>Runs</th></tr></thead>
+  <tbody>
+    <tr><td><code>jrs package</code></td><td class="wrap">Referenced by the jar's <code>Class-Path</code>, in the local cache.</td><td class="wrap">With <code>java -jar</code> on the machine that built it.</td></tr>
+    <tr><td><code>jrs package --portable</code></td><td class="wrap">Copied into <code>target/lib/</code>, which the <code>Class-Path</code> points at.</td><td class="wrap">Anywhere the jar and its <code>lib/</code> are shipped together.</td></tr>
+    <tr><td><code>jrs package --fat</code></td><td class="wrap">Unpacked into the jar itself.</td><td class="wrap">Anywhere, as a single file.</td></tr>
+  </tbody>
+</table>
+<p>
+  Only runtime dependencies are packaged: <code>compile-only</code> and
+  <code>[dev-dependencies]</code> never are, <code>runtime-only</code> ones always are. A
+  <code>main-class</code> becomes the jar's <code>Main-Class</code>.
+</p>
+
+<h3>Byte-identical jars</h3>
+<p>
+  Entries are written in sorted order, with a fixed 1980 timestamp and fixed permissions. Two
+  builds of the same inputs produce the same bytes, so a jar's checksum means something and
+  caches downstream stay warm.
+</p>
+
+<h3>How a fat jar merges</h3>
+<p>
+  Several jars often register the same file. A fat jar merges them instead of letting one copy
+  overwrite the others, which would break things silently:
+</p>
+<ul>
+  <li><code>META-INF/services/*</code> files are concatenated, so every <code>ServiceLoader</code> provider survives.</li>
+  <li>Groovy extension modules are merged.</li>
+  <li>Spring's <code>spring.factories</code> is merged key by key, <code>META-INF/spring/*.imports</code> as a union of lines, and <code>spring.handlers</code>, <code>spring.schemas</code> and <code>spring.tooling</code> are concatenated, so no auto-configuration is lost.</li>
+</ul>
+<p>
+  The project's own copy always comes first. A duplicate class is reported by name, with both
+  jars; exclude one side, or relocate it.
+</p>
+
+<h3>Relocating packages</h3>
+<p>
+  <code>[package.relocate]</code> moves packages inside a fat jar, as Maven Shade does, so it can
+  carry a private copy of a library:
+</p>
+<pre data-lang="toml">[package.relocate]
+"com.google.common" = "com.example.shaded.guava"
+"org.slf4j" = { to = "com.example.shaded.slf4j", exclude = ["org.slf4j.impl.*"] }</pre>
+<ul>
+  <li><code>jrs package --fat</code> renames the package and every package under it, moves its classes and resources, and rewrites every reference: in your classes, in every dependency's, in <code>META-INF/services/</code> files and in Spring's registries.</li>
+  <li><code>exclude</code> keeps classes, or packages written <code>&lt;package&gt;.*</code>, where they are.</li>
+  <li>Only the fat jar is relocated. <code>jrs run</code>, <code>jrs test</code> and the thin and portable jars use the dependencies as they are; <code>jrs package</code> without <code>--fat</code> warns that the table does not apply.</li>
+  <li>jrs rewrites the names in each class's constant pool and nothing else, so no tool is downloaded. A class name inside a longer string, or in another kind of resource, is left alone. A class that cannot be read fails the build rather than ship unrelocated.</li>
+</ul>
+
+<h3>Manifest attributes</h3>
+<pre data-lang="toml">[package.manifest]
+Implementation-Title = "{project.name}"
+Implementation-Version = "{project.version}"
+Automatic-Module-Name = "com.example.app"</pre>
+<p>Written after jrs's own attributes, in declaration order, in every kind of jar. See <a href="#package-config-manifest-attributes"><code>[package]</code></a> for the rules.</p>
+
+<h3>Sources and Javadoc jars</h3>
+<pre>jrs package --sources --javadoc</pre>
+<p>
+  <code>--sources</code> writes <code>target/&lt;name&gt;-&lt;version&gt;-sources.jar</code> from the
+  main sources, generated ones included. <code>--javadoc</code> runs <code>jrs doc</code> and jars
+  <code>target/doc</code> into <code>-javadoc.jar</code>. They are the jars an IDE or a repository
+  wants beside the main one, and they combine with every other flag.
+</p>
+
+<h3>After packaging</h3>
+<p>
+  The <code>post-package</code> hook runs once the jar, and any image, is written. Its tasks see
+  the jar as <code>{jar}</code> and <code>$JRS_JAR</code>: sign it, checksum it, upload it.
+</p>
+</section>
+
+<section id="images">
+<h2>Runtime images and distributions</h2>
+<p>Beyond a jar, jrs can ship the application with a Java runtime, with launch scripts, or as a native executable.</p>
+<table>
+  <thead><tr><th>Flag</th><th>Ships a JRE</th><th>Output</th></tr></thead>
+  <tbody>
+    <tr><td><code>--jlink</code></td><td>trimmed</td><td><code>target/image</code></td></tr>
+    <tr><td><code>--jpackage [type]</code></td><td>trimmed</td><td><code>target/jpackage</code>: an app image or a native installer</td></tr>
+    <tr><td><code>--dist</code></td><td>no</td><td><code>target/dist/&lt;name&gt;-&lt;version&gt;/</code> and <code>target/&lt;name&gt;-&lt;version&gt;.zip</code></td></tr>
+    <tr><td><code>--native-image</code></td><td>none needed</td><td><code>target/native</code></td></tr>
+  </tbody>
+</table>
+<p>All four require <code>project.main-class</code>, and all combine with each other and with <code>--fat</code> or <code>--portable</code>.</p>
+
+<h3>jlink images</h3>
+<pre>jrs package --jlink
+target/image/bin/my-app</pre>
+<p>
+  <code>jdeps</code> works out which JDK modules the application and its dependencies need, and
+  <code>jlink</code> builds a runtime with only those. The image holds the runtime, the
+  application under <code>app/</code>, and a launcher at <code>bin/&lt;name&gt;</code> that applies
+  <code>run.jvm-args</code> and <code>run.java-agents</code>. It uses the portable layout unless
+  <code>--fat</code> is given too. Name modules reached only by reflection or
+  <code>ServiceLoader</code> in <code>[package] add-modules</code>.
+</p>
+
+<h3>jpackage installers</h3>
+<pre>jrs package --jpackage              # jpackage's default type for the platform
+jrs package --jpackage app-image
+jrs package --jpackage dmg          # macOS: dmg or pkg
+jrs package --jpackage deb          # Linux: deb or rpm
+jrs package --jpackage msi          # Windows: exe or msi</pre>
+<p>
+  The same trimmed runtime, handed to <code>jpackage</code> for a native package. Installer types
+  need the platform's own packaging tools, as <code>jpackage</code> documents.
+</p>
+
+<h3>Distribution archives</h3>
+<pre>jrs package --dist
+unzip target/my-app-1.0.0.zip &amp;&amp; my-app-1.0.0/bin/my-app</pre>
+<p>
+  A distribution ships the application without a runtime: the portable layout (or the fat jar,
+  with <code>--fat</code>) plus <code>bin/&lt;name&gt;</code> and <code>bin/&lt;name&gt;.bat</code>,
+  which run it on <code>$JAVA_HOME/bin/java</code> or the <code>java</code> on <code>PATH</code>,
+  with <code>run.jvm-args</code>. It is staged in <code>target/dist/</code>, where it runs in place,
+  and zipped deterministically, with the POSIX launcher kept executable.
+</p>
+
+<h3>Native executables</h3>
+<pre data-lang="toml">[package]
+native-image-args = ["--no-fallback", "-H:+ReportExceptionStackTraces"]</pre>
+<pre>jrs package --native-image
+target/native/my-app</pre>
+<p>
+  GraalVM's <code>native-image</code> compiles the application ahead of time. The JDK jrs builds
+  with must be a GraalVM one, and jrs says so before building anything when it is not: point
+  <code>JAVA_HOME</code> at GraalVM, or pin it with <code>java.jdk</code> and its home in the
+  user configuration's <code>[jdks]</code> table. <code>native-image-args</code> passes resource
+  and reflection configuration and other flags through verbatim.
+</p>
+</section>
+
+<section id="obfuscation">
+<h2>Obfuscation</h2>
+<pre data-lang="toml">[obfuscate]
+version = "7.6.1"
+keep = ["com.example.plugin.Api"]
+proguard-args = ["-dontwarn org.foo.**"]</pre>
+<pre>jrs package --fat --obfuscate</pre>
+<p>
+  <code>--obfuscate</code> runs ProGuard over the jar just written, renaming classes, methods and
+  fields and stripping debug information while leaving behaviour untouched: the same entry point
+  runs and the same tests pass against the obfuscated jar.
+</p>
+<ul>
+  <li>ProGuard is resolved from Maven Central as its own tool graph, pinned in <code>jrs.lock</code> and run on the project's JDK, exactly like the compilers. <code>jrs tree --tool obfuscator</code> shows it.</li>
+  <li>The entry point and every <code>META-INF/services/</code> provider keep their names, so reflection through them and <code>ServiceLoader</code> still work. <code>keep</code> adds any other names a framework looks up; <code>proguard-args</code> passes anything else to ProGuard.</li>
+  <li>It runs after packaging, so it composes with the fat-jar merge rules rather than redoing them. Pair it with <code>--fat</code> for a self-contained obfuscated jar.</li>
+  <li>It is opt-in: without the flag, <code>jrs package</code> is unaffected by the table.</li>
+</ul>
+</section>
+
+<section id="languages">
+<h2>Kotlin, Scala and Groovy</h2>
+<p>A <code>[kotlin]</code>, <code>[scala]</code> or <code>[groovy]</code> table compiles that language alongside Java:</p>
+<pre data-lang="toml">[kotlin]
+version = "2.4.20"</pre>
+<pre data-lang="plain">src/main/kotlin/com/example/Main.kt      # fun main() at file level: main-class = "com.example.MainKt"
+src/main/java/com/example/Legacy.java    # may use the Kotlin classes, as they may use it
+src/test/kotlin/com/example/MainTest.kt</pre>
+
+<h3>The compiler is jrs's dependency, not yours</h3>
+<p>
+  It is resolved from Maven Central as a graph of its own, pinned in <code>jrs.lock</code> beside
+  yours, and run on the project's JDK. Its dependencies never mediate against the project's: the
+  Kotlin compiler's own coroutines cannot change yours. <code>jrs tree --tool kotlin-compiler</code>
+  shows its graph and <code>jrs outdated</code> lists newer releases. Supported: Kotlin 2.0+,
+  Scala 2.13.9+ and 3.3+, Groovy 4.0+.
+</p>
+
+<h3>The runtime library is implied</h3>
+<p>
+  <code>kotlin-stdlib</code>, <code>scala-library</code> / <code>scala3-library_3</code>, or
+  <code>groovy</code> is added at the compiler's version. You don't declare it; if you do, your
+  declaration wins. Groovy declared under <code>[dev-dependencies]</code> stays off the runtime
+  classpath and out of the jar, which is what a project with only Spock tests wants.
+</p>
+
+<h3>Mixed sources, both ways</h3>
+<p>
+  Kotlin and Scala compile first, reading the Java sources for their symbols, then
+  <code>javac</code> compiles the Java against their classes. Groovy compiles both itself, jointly.
+  A compile unit mixes Java with at most one other language, but main and test are separate
+  units, so Kotlin code with Spock tests is fine. A <code>.kt</code> file without a
+  <code>[kotlin]</code> table is an error, not a file silently skipped.
+</p>
+
+<h3>One release for everything</h3>
+<p>
+  <code>java.source</code>, or the JDK's version, is passed to every compiler, so a jar never
+  mixes bytecode levels. A compiler that does not know the release fails with its own message,
+  and jrs adds a one-line hint.
+</p>
+
+<h3>Kotlin specifics</h3>
+<ul>
+  <li>Kotlin tests see the main code's <code>internal</code> declarations.</li>
+  <li>A file-level <code>main</code> in <code>Main.kt</code> compiles to <code>MainKt</code>; <code>jrs run</code> says so when <code>main-class</code> names <code>Main</code>.</li>
+  <li>A Multiplatform library whose root artifact does not resolve to classes needs its <code>-jvm</code> artifact declared instead, such as <code>kotlinx-coroutines-core-jvm</code>.</li>
+</ul>
+
+<h3>Not supported</h3>
+<p>
+  Compiler plugins (Kotlin's <code>allopen</code>, <code>spring</code>,
+  <code>serialization</code>), kapt and KSP, Kotlin Multiplatform projects, Dokka, and incremental
+  compilation or daemons for these languages. Units with them are compiled whole.
+</p>
+</section>
+
+<section id="tasks">
+<h2>Tasks and hooks</h2>
+<p>
+  A task is a command jrs runs for you: a code generator before <code>javac</code>, a checksum after
+  the jar, a formatter on demand. Tasks are subprocesses; <code>[hooks]</code> attaches them to
+  fixed points of the build.
+</p>
+<pre data-lang="toml">[tasks.build-info]
+description = "Generate BuildInfo.java"
+script = "build/GenerateBuildInfo.java"
+args = ["{target}/generated/sources", "{project.version}"]
+inputs = ["build/GenerateBuildInfo.java"]
+outputs = ["{target}/generated/sources"]
+source-outputs = ["{target}/generated/sources"]
+
+[tasks.checksum]
+description = "Write a SHA-256 next to the jar"
+shell = "shasum -a 256 \"$JRS_JAR\" &gt; \"$JRS_JAR.sha256\""
+
+[tasks.release]
+description = "Package, then checksum"
+depends-on = ["package", "checksum"]
+
+[hooks]
+pre-compile = ["build-info"]
+post-package = ["checksum"]</pre>
+<pre>jrs task release
+jrs task --list</pre>
+
+<h3>Actions</h3>
+<p>A task has exactly one action, or none:</p>
+<ul>
+  <li><strong><code>run</code></strong>: a program and its arguments, passed to the OS without a shell, so it behaves the same everywhere. The program is looked up on <code>PATH</code> with the JDK's <code>bin/</code> first (so <code>java</code> is the project's JDK), or taken relative to the root if it contains a path separator.</li>
+  <li><strong><code>shell</code></strong>: a string for <code>sh -c</code>, or <code>cmd /C</code> on Windows. Pipes and redirects work, but it is <strong>not portable</strong>: the same string goes to a different shell on each platform.</li>
+  <li><strong><code>script</code></strong>: a <code>.java</code> file run by the project's JDK in source-launcher mode, no compile step. The portable way to write build logic.</li>
+  <li><strong><code>main</code></strong>: a class from the task's own dependencies, so a Java tool from Maven Central needs no installing.</li>
+  <li><strong>none</strong>: the task only runs its <code>depends-on</code>, like <code>release</code> above.</li>
+</ul>
+<p><code>args</code> follow the action: appended to <code>run</code>, passed to the script or main class, and as <code>$1</code>, <code>$2</code>… to a <code>shell</code> string.</p>
+
+<h3>A generator in Java</h3>
+<pre data-lang="plain" data-file="build/GenerateBuildInfo.java">import java.nio.file.Files;
+import java.nio.file.Path;
+
+public class GenerateBuildInfo {
+    public static void main(String[] args) throws Exception {
+        Path dir = Path.of(args[0], "com", "example");
+        Files.createDirectories(dir);
+        Files.writeString(dir.resolve("BuildInfo.java"), """
+            package com.example;
+
+            public final class BuildInfo {
+                public static final String VERSION = "%s";
+            }
+            """.formatted(args[1]));
+    }
+}</pre>
+<p>
+  Hooked into <code>pre-compile</code>, it writes a source under <code>target/</code> that
+  <code>source-outputs</code> adds to the main compile. With <code>inputs</code> and
+  <code>outputs</code> declared, it only runs when the script changed.
+</p>
+
+<h3>Tools from Maven Central</h3>
+<pre data-lang="toml">[tasks.format]
+description = "Format App.java in place"
+main = "com.google.googlejavaformat.java.Main"
+args = ["--replace", "src/main/java/com/example/App.java"]
+
+[tasks.format.dependencies]
+"com.google.googlejavaformat:google-java-format" = "1.22.0"</pre>
+<p>
+  A task's dependencies take the <code>[dependencies]</code> forms, without
+  <code>compile-only</code>, <code>runtime-only</code>, local jars or <code>[managed]</code>
+  versions. They are resolved as a graph of the task's own that never meets the project's, pinned
+  in <code>jrs.lock</code> as a <code>[[tool]]</code> named <code>tasks.format</code>, and shown by
+  <code>jrs tree --task format</code>. They download with everything else on a fresh resolution, or
+  when the task first runs. A <code>script</code> task can take <code>dependencies</code> too, as
+  its classpath.
+</p>
+
+<h3>Checks: PMD, Checkstyle, SpotBugs</h3>
+<p>
+  Checkers are tools like any other, so they need neither a plugin nor an install.
+  <code>jrs init --check</code> scaffolds this one; a violation fails the build after PMD's report:
+</p>
+<pre data-lang="toml">[tasks.check]
+description = "Check the Java sources with PMD's quickstart rules"
+main = "net.sourceforge.pmd.cli.PmdCli"
+args = ["check", "--no-progress", "--rulesets", "rulesets/java/quickstart.xml", "--dir", "src/main/java", "--cache", "{target}/pmd.cache"]
+
+[tasks.check.dependencies]
+"net.sourceforge.pmd:pmd-cli" = "7.27.0"
+"net.sourceforge.pmd:pmd-java" = "7.27.0"
+
+[hooks]
+post-compile = ["check"]</pre>
+
+<h3>Hooks</h3>
+<table>
+  <thead><tr><th>Hook</th><th>Runs</th></tr></thead>
+  <tbody>
+    <tr><td><code>pre-compile</code></td><td class="wrap">After dependencies are resolved, before the main sources are compiled. For code generation.</td></tr>
+    <tr><td><code>post-compile</code></td><td class="wrap">After the main classes and resources are in <code>target/classes</code>.</td></tr>
+    <tr><td><code>pre-test</code></td><td class="wrap">After the main build, before the test sources compile.</td></tr>
+    <tr><td><code>post-test</code></td><td class="wrap">After the tests, only if they passed.</td></tr>
+    <tr><td><code>post-package</code></td><td class="wrap">After the jar, and any image, is written.</td></tr>
+    <tr><td><code>pre-run</code></td><td class="wrap">After the build, before <code>jrs run</code> starts the program.</td></tr>
+  </tbody>
+</table>
+<p>
+  Commands include each other, so their hooks do too: <code>build</code> fires the compile hooks,
+  and <code>test</code>, <code>package</code> and <code>run</code> add their own. <code>doc</code>
+  fires <code>pre-compile</code>, since it documents generated sources. A hook runs every time its
+  point is reached, whether or not <code>javac</code> had work to do.
+</p>
+
+<h3>Ordering</h3>
+<ul>
+  <li>Tasks run one at a time, and each task and each built-in runs at most once per command. <code>build</code> in the <code>depends-on</code> of a task hooked into <code>jrs test</code> does not build twice.</li>
+  <li><code>depends-on</code> runs depth-first in list order, dependencies before dependents; a hook's tasks run in the order it lists them.</li>
+  <li>A built-in in <code>depends-on</code> runs as its command would, hooks included, but without its summary. <code>test</code> runs unfiltered, and <code>package</code> builds the plain thin jar.</li>
+  <li>A cycle is a manifest error, named in full (<code>a → b → a</code>), including one through a built-in, such as a <code>pre-compile</code> task that depends on <code>build</code>.</li>
+</ul>
+
+<h3>Placeholders</h3>
+<p>
+  <code>run</code>, <code>args</code>, <code>cwd</code>, <code>env</code> values, <code>inputs</code>,
+  <code>outputs</code> and the <code>*-outputs</code> lists are expanded before the process starts.
+  <code>{{</code> and <code>}}</code> are literal braces. An unknown placeholder is a manifest error.
+</p>
+<table>
+  <thead><tr><th>Placeholder</th><th>Value</th></tr></thead>
+  <tbody>
+    <tr><td><code>{root}</code>, <code>{target}</code></td><td class="wrap">The project root and the target directory, absolute.</td></tr>
+    <tr><td><code>{project.name}</code>, <code>{project.version}</code></td><td class="wrap">From <code>[project]</code>.</td></tr>
+    <tr><td><code>{classes}</code>, <code>{test-classes}</code></td><td class="wrap"><code>target/classes</code> and <code>target/test-classes</code>, absolute.</td></tr>
+    <tr><td><code>{classpath}</code></td><td class="wrap">What <code>jrs classpath</code> prints: <code>target/classes</code>, then the compile jars.</td></tr>
+    <tr><td><code>{runtime-classpath}</code>, <code>{test-classpath}</code></td><td class="wrap">What <code>jrs classpath --runtime</code> and <code>--test</code> print.</td></tr>
+    <tr><td><code>{classpath-argfile}</code></td><td class="wrap">A file holding <code>-cp &lt;compile classpath&gt;</code>, for <code>java @{classpath-argfile}</code>, since a long classpath in an argument vector overflows the OS limit.</td></tr>
+    <tr><td><code>{jar}</code></td><td class="wrap">The packaged jar. Only in a task that runs after <code>package</code>: from <code>post-package</code>, or one that depends on <code>package</code>.</td></tr>
+  </tbody>
+</table>
+<p>
+  Classpath placeholders cannot be used in path-valued keys (<code>cwd</code>, <code>inputs</code>,
+  <code>outputs</code>, <code>*-outputs</code>). A task that uses one resolves dependencies if nothing
+  else has. <code>shell</code> strings get no placeholders; they read environment variables instead.
+</p>
+
+<h3>Environment</h3>
+<p>A task inherits jrs's environment, plus:</p>
+<table>
+  <thead><tr><th>Variable</th><th>Value</th></tr></thead>
+  <tbody>
+    <tr><td><code>JAVA_HOME</code></td><td>The project's JDK, pin honoured; <code>$JAVA_HOME/bin</code> is first on <code>PATH</code>.</td></tr>
+    <tr><td><code>JRS_TASK</code></td><td>The task's name.</td></tr>
+    <tr><td><code>JRS_HOOK</code></td><td>The hook that ran it, if one did.</td></tr>
+    <tr><td><code>JRS_ROOT</code>, <code>JRS_TARGET_DIR</code>, <code>JRS_CLASSES_DIR</code></td><td>The project root, target and classes directories.</td></tr>
+    <tr><td><code>JRS_PROJECT_NAME</code>, <code>JRS_PROJECT_VERSION</code></td><td>From <code>[project]</code>.</td></tr>
+    <tr><td><code>JRS_CLASSPATH</code>, <code>JRS_RUNTIME_CLASSPATH</code></td><td>Once resolved.</td></tr>
+    <tr><td><code>JRS_JAR</code></td><td>Once packaged.</td></tr>
+    <tr><td><code>JRS_OFFLINE</code></td><td><code>1</code> under <code>--offline</code>.</td></tr>
+    <tr><td><code>SOURCE_DATE_EPOCH</code></td><td><code>315532800</code>, the 1980 timestamp jrs's own jars carry, for reproducible tool output.</td></tr>
+  </tbody>
+</table>
+<p>The task's <code>env</code> wins over all of these, except that it may not set <code>JRS_</code> names.</p>
+
+<h3>Up-to-date checks</h3>
+<p>
+  Only a task with both <code>inputs</code> and <code>outputs</code> can be skipped. Entries are
+  files or directories relative to the root, a directory meaning everything under it; there are no
+  globs. The fingerprint covers the expanded command, <code>args</code>, <code>cwd</code> and
+  <code>env</code>, the JDK version, each input's path, size and mtime, any classpath the task uses,
+  and its tool jars. When it matches and every output exists, the task prints
+  <code>Fresh &lt;name&gt; (task)</code> and does not run. A task without both always runs.
+  <code>jrs clean</code> forgets every fingerprint.
+</p>
+
+<h3>Generated sources and resources</h3>
+<p>
+  The <code>source-outputs</code> and <code>resource-outputs</code> of tasks reached from
+  <code>pre-compile</code> feed the main unit and <code>target/classes</code>; those reached from
+  <code>pre-test</code> feed the test unit. They must lie under the target directory, because
+  <code>jrs clean</code> must never delete anything you wrote and watch mode must not retrigger on
+  a generator's output. A project whose sources are all generated still builds.
+</p>
+
+<h3>How tasks run</h3>
+<ul>
+  <li>The task named on <code>jrs task &lt;name&gt;</code> inherits the terminal and returns its exit code.</li>
+  <li>Tasks run by hooks or as dependencies have stdin closed and their output passed through to stderr, so stdout stays the command's own. One that fails stops the command with exit code <code>1</code>, after its output.</li>
+  <li><code>-v</code> echoes each expanded command, its working directory and its <code>JRS_</code> variables.</li>
+</ul>
+
+<h3>Tasks run code</h3>
+<div class="callout warn">
+  <span class="callout-title">Security</span>
+  <p>
+    <code>jrs build</code> on a freshly cloned project runs whatever its <code>[hooks]</code> name,
+    as <code>gradle build</code> or <code>npm install</code> would. Read a project's
+    <code>jrs.toml</code> before building it if you do not trust it. <code>tree</code>,
+    <code>classpath</code>, <code>update</code>, <code>verify</code>, <code>outdated</code>,
+    <code>add</code>, <code>remove</code>, <code>cache</code>, <code>init</code>,
+    <code>migrate</code>, <code>completions</code> and <code>clean</code> never run a task, so
+    inspecting a project with them is always safe.
+  </p>
+</div>
+</section>
+
+<section id="annotation-processors">
+<h2>Annotation processors</h2>
+<p>
+  jrs has no separate processor path; configuring one is a non-goal. But <code>javac</code> runs
+  any processor it finds on the compile classpath, so Lombok, MapStruct, Dagger and the like work
+  as compile-only dependencies:
+</p>
+<pre data-lang="toml">[java]
+javac-args = ["-proc:full"]        # needed from JDK 23 on
+
+[dependencies]
+"org.projectlombok:lombok" = { version = "1.18.34", compile-only = true }
+"org.mapstruct:mapstruct" = "1.5.5.Final"
+"org.mapstruct:mapstruct-processor" = { version = "1.5.5.Final", compile-only = true }</pre>
+<p>
+  Since JDK 23, <code>javac</code> only runs processors found on the classpath when given
+  <code>-proc:full</code>. JDK 21 and 22 accept the flag and don't need it; JDK 17 rejects it, so
+  leave it out there. <code>jrs migrate</code> translates <code>annotationProcessor</code> and
+  <code>&lt;annotationProcessorPaths&gt;</code> into exactly this. A unit with processors is always
+  compiled whole, since jrs cannot see what they generate.
+</p>
+</section>
+
+<section id="jdk">
+<h2>Choosing the JDK</h2>
+<p>
+  By default jrs builds with the JDK at <code>JAVA_HOME</code>, or failing that the
+  <code>javac</code> on <code>PATH</code>. It needs JDK 17 or newer, and fails with an actionable
+  message when the JDK is missing or older than <code>java.source</code>.
+</p>
+
+<h3>Pinning a version</h3>
+<p>A project can pin a JDK feature version instead, in the first of these that exists:</p>
+<ol>
+  <li><code>jdk = 21</code> under <code>[java]</code> in <code>jrs.toml</code>;</li>
+  <li>a <code>.java-version</code> file, as jenv, asdf and mise write (<code>21</code>, <code>temurin-21.0.2</code>);</li>
+  <li>a <code>.sdkmanrc</code> file with a <code>java=21.0.2-tem</code> line.</li>
+</ol>
+<p>It is a version, never a path, since the manifest is committed and a path belongs to one machine.</p>
+
+<h3>Where a pinned JDK is found</h3>
+<ol>
+  <li>The user configuration's <code>[jdks]</code> table.</li>
+  <li>The JDK at <code>JAVA_HOME</code> or on <code>PATH</code>, if it is that version.</li>
+  <li>The JDKs installed in the usual places: SDKMAN!, asdf, mise, IntelliJ and Gradle toolchain directories in your home; <code>/Library/Java/JavaVirtualMachines</code>, <code>/usr/lib/jvm</code>, <code>/usr/java</code> and <code>/opt/java</code>; <code>Program Files</code> on Windows; and the <code>JAVA_HOME_&lt;version&gt;_&lt;arch&gt;</code> variables <code>actions/setup-java</code> exports.</li>
+</ol>
+<p>
+  When several builds of that version are installed, the newest wins. If none is found, the error
+  lists the versions that were. <code>jrs -v build</code> names the JDK it picked.
+</p>
+<pre data-lang="toml" data-file="~/.config/jrs/config.toml">[jdks]
+21 = "/opt/jdks/temurin-21"
+25 = "/opt/graalvm-25"</pre>
+
+<h3>The other JDK tools</h3>
+<p>
+  <code>java</code>, <code>jar</code>, <code>javadoc</code>, <code>jdeps</code>, <code>jlink</code>,
+  <code>jpackage</code> and <code>native-image</code> are taken from beside the selected
+  <code>javac</code>, and a JDK that lacks one is an error naming it. Tasks get the same JDK as
+  <code>JAVA_HOME</code>, and the Kotlin, Scala and Groovy compilers run on it.
+</p>
+</section>
+
+<section id="cache">
+<h2>Dependency cache</h2>
+<p>Downloaded artifacts are stored in one Maven-layout cache per user, shared by every project:</p>
+<table>
+  <thead><tr><th>Platform</th><th>Location</th></tr></thead>
+  <tbody>
+    <tr><td>macOS</td><td><code>~/Library/Caches/jrs</code></td></tr>
+    <tr><td>Linux and other Unix</td><td><code>$XDG_CACHE_HOME/jrs</code>, else <code>~/.cache/jrs</code></td></tr>
+    <tr><td>Windows</td><td><code>%LOCALAPPDATA%\jrs\cache</code></td></tr>
+  </tbody>
+</table>
+<p><code>JRS_CACHE_DIR</code> overrides it, which is useful in CI, where the cache is worth keeping between runs. <code>jrs cache path</code> prints the one in use.</p>
+
+<h3>Safe to share</h3>
+<p>
+  Every download is verified against the repository's checksum and, when the lockfile pins it,
+  against <code>jrs.lock</code>; a mismatch is deleted and fails loudly. Downloads go to a temporary
+  file that is renamed into place, so an interrupted run never leaves a truncated jar, and
+  concurrent builds can share one cache. Cached jars are not re-hashed on every build;
+  <code>jrs verify</code> does that on demand.
+</p>
+
+<h3>Offline builds</h3>
+<p>
+  <code>--offline</code> uses only the cache and the lockfile, and fails on anything missing
+  rather than reaching the network. Run <code>jrs fetch</code> first to download everything a
+  build and a test run need.
+</p>
+
+<h3>Pruning</h3>
+<pre>jrs cache prune --dry-run             # what would go
+jrs cache prune                       # drop what no project's jrs.lock names
+jrs cache prune --unused-for 30       # drop what no build has used in 30 days</pre>
+<p>
+  Every build records its lockfile in the cache, so a plain <code>prune</code> keeps exactly what
+  those projects' lockfiles name, their pinned compilers and tools included. Lockfiles that no
+  longer exist are forgotten, and one that cannot be read stops the prune rather than risk a guess.
+  It also drops parent POMs, BOMs, test launchers and JaCoCo jars, which only a fresh resolution or
+  a <code>--coverage</code> run needs and which are downloaded again when wanted.
+  <code>--unused-for</code> goes by when each artifact was last used, recorded in its access time
+  at most once a day, so it works even on filesystems mounted <code>noatime</code>.
+</p>
+</section>
+
+<section id="user-config">
+<h2>User configuration</h2>
+<p>
+  Settings that belong to a person or a machine rather than the project live in one file per user.
+  Every setting is optional, and a missing file is not an error.
+</p>
+<table>
+  <thead><tr><th>Platform</th><th>Location</th></tr></thead>
+  <tbody>
+    <tr><td>Linux, macOS, other Unix</td><td><code>$XDG_CONFIG_HOME/jrs/config.toml</code>, else <code>~/.config/jrs/config.toml</code></td></tr>
+    <tr><td>Windows</td><td><code>%APPDATA%\jrs\config.toml</code></td></tr>
+  </tbody>
+</table>
+<p><code>JRS_CONFIG</code> points at another file. It is parsed like the manifest: unknown keys warn, errors name the key.</p>
+<pre data-lang="toml" data-file="~/.config/jrs/config.toml">jobs = 8                                  # default for --jobs
+
+[proxy]
+url = "http://proxy.example.com:3128"
+no-proxy = ["localhost", ".internal.example.com"]
+
+[mirrors]                                 # repository name → URL to use instead
+central = "https://nexus.example.com/repository/maven-central"
+
+[credentials.internal]                    # a repository name from jrs.toml
+username = "ci"
+password-env = "NEXUS_PASSWORD"           # or password, token, token-env
+
+[jdks]                                    # JDKs jrs would not find on its own
+21 = "/opt/jdks/temurin-21"</pre>
+
+<h3>Credentials</h3>
+<p>
+  A <code>[credentials.&lt;repo&gt;]</code> table, named after a repository in
+  <code>jrs.toml</code>, sends HTTP basic auth (<code>username</code> + <code>password</code>) or a
+  bearer <code>token</code>. The <code>password-env</code> and <code>token-env</code> variants read
+  the secret from an environment variable instead of the file. Environment variables take
+  precedence over the file:
+</p>
+<pre>export JRS_REPO_INTERNAL_USERNAME=ci
+export JRS_REPO_INTERNAL_PASSWORD=…
+export JRS_REPO_MY_REPO_TOKEN=…          # for a repository named my-repo</pre>
+<p>
+  <code>&lt;NAME&gt;</code> is the repository name upper-cased, with every other character turned
+  into <code>_</code>. Credentials are sent only to the repository they are named for.
+</p>
+
+<h3>Mirrors</h3>
+<p>
+  <code>[mirrors]</code> redirects a repository, Maven Central included, to another URL. The key
+  <code>*</code> mirrors every repository that has no mirror of its own. A mirror changes where
+  bytes come from, not what the project is, so it does not change <code>jrs.lock</code>.
+  <code>file://</code> repositories are never mirrored, and credentials still go by the
+  repository's name.
+</p>
+
+<h3>Proxy</h3>
+<p>
+  Without a <code>[proxy]</code> table, <code>HTTPS_PROXY</code>, <code>HTTP_PROXY</code>,
+  <code>ALL_PROXY</code> and <code>NO_PROXY</code> from the environment apply.
+</p>
+
+<h3>JDKs and parallelism</h3>
+<p>
+  <code>[jdks]</code> maps a Java feature version to a JDK home, for a pinned version installed
+  where jrs does not look. <code>jobs</code> sets the default for <code>--jobs</code>.
+</p>
+</section>
+
+<section id="ci">
+<h2>Continuous integration</h2>
+<p>jrs needs no special mode for CI; a few habits make it fast and strict:</p>
+<ul>
+  <li><strong>Commit <code>jrs.lock</code></strong>, so CI builds exactly what you built.</li>
+  <li><strong>Persist the cache</strong> between runs, keyed on the lockfile. Set <code>JRS_CACHE_DIR</code> if the default location is inconvenient.</li>
+  <li><strong>Warm, then build offline</strong>: <code>jrs fetch</code> downloads everything, and <code>--offline</code> afterwards proves nothing else is reached for.</li>
+  <li><strong>Output adapts by itself.</strong> Animation is off whenever <code>CI</code>, <code>GITHUB_ACTIONS</code>, <code>GITLAB_CI</code>, <code>TRAVIS</code>, <code>CIRCLECI</code>, <code>BUILDKITE</code>, <code>TEAMCITY_VERSION</code> or <code>JENKINS_URL</code> is set, or stderr is not a terminal.</li>
+  <li><strong>Collect reports</strong> from <code>target/test-reports</code> (JUnit XML and <code>index.html</code>) and <code>target/coverage</code>.</li>
+  <li><strong>Gate on coverage</strong> with <code>[test] coverage-minimum</code> and <code>jrs test --coverage</code>.</li>
+  <li><strong>Keep timings</strong>: <code>--timings</code> writes <code>target/.jrs/timings.txt</code> even under <code>-q</code>.</li>
+</ul>
+
+<h3>GitHub Actions</h3>
+<pre data-lang="plain" data-file=".github/workflows/build.yml">name: build
+on: [push, pull_request]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - name: Install jrs
+        run: |
+          curl -fsSL https://getjrs.dev/install.sh | sh
+          echo "$HOME/.local/bin" &gt;&gt; "$GITHUB_PATH"
+
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/jrs
+          key: jrs-${{ runner.os }}-${{ hashFiles('jrs.lock') }}
+          restore-keys: jrs-${{ runner.os }}-
+
+      - run: jrs fetch
+      - run: jrs test --offline --coverage
+      - run: jrs package --offline --fat
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: test-reports
+          path: target/test-reports</pre>
+<p>
+  A project that pins its JDK with <code>java.jdk</code> finds one installed by
+  <code>actions/setup-java</code> through the <code>JAVA_HOME_&lt;version&gt;_&lt;arch&gt;</code>
+  variables it exports, so several JDKs can be installed side by side.
+</p>
+</section>
+
+<section id="editors">
+<h2>Editors and tooling</h2>
+<p>jrs generates no IDE project files. Instead it answers questions a tool can ask:</p>
+<ul>
+  <li><strong><code>jrs metadata</code></strong> prints the whole project model as JSON: source and resource roots per language, output directories, the three classpaths with each jar's coordinate, the JDK and release, the main class and the tasks. See <a href="#cmd-metadata">jrs metadata</a>.</li>
+  <li><strong><code>jrs fetch --sources</code></strong> downloads each dependency's <code>-sources.jar</code>, which <code>jrs metadata</code> then lists, for go-to-definition into libraries.</li>
+  <li><strong><code>jrs classpath</code></strong> prints a classpath for a tool that only needs that.</li>
+  <li><strong><code>jrs completions</code></strong> gives your shell completion for commands and flags.</li>
+</ul>
+<p>
+  For an IDE without jrs support, point its project at the source roots and add the jars
+  <code>jrs classpath --test</code> prints as libraries; or migrate the other way temporarily and
+  keep <code>jrs.toml</code> as the source of truth.
+</p>
+</section>
+
+<section id="output">
+<h2>Terminal output</h2>
+<p>
+  On a terminal jrs animates: spinners, live download bars, a live test counter, and a framed
+  summary. The animation is a presentation layer over a build that produces identical results
+  without it, and it never costs time.
+</p>
+
+<h3>Phase lines</h3>
+<p>Every phase prints one Cargo-style line, the verb right-aligned in 12 columns:</p>
+<pre data-lang="plain">    Resolving 14 dependencies
+  Downloading guava-33.0.0-jre.jar
+        Fresh build-info (task)
+    Compiling my-app v1.0.0 (47 source files)
+    Packaging target/my-app-1.0.0.jar
+         Task checksum (post-package)
+     Finished package in 2.31s</pre>
+<p>A task prints <code>Task &lt;name&gt;</code> with the hook that ran it, or <code>Fresh &lt;name&gt; (task)</code> when its check let it be skipped.</p>
+
+<h3>When it animates</h3>
+<p>
+  <code>--progress auto</code>, the default, animates only when stderr is an interactive terminal
+  and none of these holds: <code>--quiet</code> or <code>--verbose</code> is given,
+  <code>NO_COLOR</code> is set, <code>TERM=dumb</code>, or a CI variable is set. Otherwise each phase
+  prints plain lines, a log rather than a canvas. <code>--progress always</code> and
+  <code>never</code> force it.
+</p>
+
+<h3>Colour and glyphs</h3>
+<p>
+  <code>--color auto|always|never</code> controls styling; <code>NO_COLOR</code> is honoured.
+  <code>--charset auto|unicode|ascii</code> picks the glyphs for spinners, bars and trees; every
+  glyph has an ASCII twin, and <code>auto</code> probes the locale.
+</p>
+
+<h3>Compiler and test output</h3>
+<p>
+  <code>javac</code>'s and the test launcher's diagnostics are passed through verbatim, never
+  reformatted. The live region is torn down before they print, so errors always land in a clean
+  terminal, and lines are truncated to the terminal width so nothing half-drawn reaches your
+  scrollback.
+</p>
+
+<h3>Timings</h3>
+<pre>jrs build --timings</pre>
+<pre data-lang="plain">  phase                           time   share
+  resolution (jrs.lock)            4ms    0.1%
+  downloads                      1.12s   15.5%
+  task build-info (pre-compile)  310ms    4.3%
+  compile main: kotlinc          3.02s   41.9%
+  compile main: javac            640ms    8.9%
+  resources main                   3ms    0.0%
+  test JVM                       1.89s   26.2%
+  total                          7.21s</pre>
+<p>
+  <code>--timings</code> on <code>build</code>, <code>test</code>, <code>run</code> and
+  <code>package</code> adds this table after the summary (before the program, for
+  <code>jrs run</code>). The same numbers go to <code>target/.jrs/timings.txt</code> as
+  tab-separated <code>phase</code> and <code>ms</code> columns, even under <code>-q</code>.
+</p>
+</section>
+
+<section id="migration">
+<h2>Migrating from Maven and Gradle</h2>
+<pre>jrs migrate --dry-run      # see the manifest that would be written
+jrs migrate                # write jrs.toml; the original build file is untouched</pre>
+<p>
+  Migration is a one-shot, best-effort translation. It prints a report in three blocks: what was
+  migrated, what needs review, and what was skipped, each with a reason. Gradle scripts are read by
+  pattern, their declarative subset, without running Gradle, and the report says so. Build the
+  result, run the tests, and read the review list before deleting anything.
+</p>
+
+<h3>What maps to what</h3>
+<table>
+  <thead><tr><th>Maven / Gradle</th><th>jrs</th></tr></thead>
+  <tbody>
+    <tr><td class="wrap"><code>provided</code> / <code>compileOnly</code></td><td class="wrap"><code>compile-only = true</code></td></tr>
+    <tr><td class="wrap"><code>runtime</code> / <code>runtimeOnly</code></td><td class="wrap"><code>runtime-only = true</code></td></tr>
+    <tr><td class="wrap"><code>test</code> scope / <code>testImplementation</code></td><td class="wrap"><code>[dev-dependencies]</code></td></tr>
+    <tr><td class="wrap"><code>files(…)</code>, <code>fileTree(…)</code>, a <code>system</code> jar under <code>${project.basedir}</code></td><td class="wrap">Local jars; a <code>fileTree</code> is expanded to the jars it holds.</td></tr>
+    <tr><td class="wrap"><code>&lt;dependencyManagement&gt;</code>, imported BOMs, <code>platform()</code>, <code>enforcedPlatform()</code>, <code>constraints { }</code>, <code>dependencyManagement { }</code></td><td class="wrap"><code>[managed]</code></td></tr>
+    <tr><td class="wrap"><code>annotationProcessor</code>, <code>&lt;annotationProcessorPaths&gt;</code></td><td class="wrap">compile-only dependencies plus <code>-proc:full</code></td></tr>
+    <tr><td class="wrap">A repository's <code>content { includeGroup }</code> or <code>exclusiveContent</code></td><td class="wrap">The repository's <code>groups</code></td></tr>
+    <tr><td class="wrap"><code>Exec</code> and <code>JavaExec</code> tasks, aggregate tasks, <code>exec-maven-plugin</code></td><td class="wrap"><code>[tasks]</code></td></tr>
+    <tr><td class="wrap"><code>compileJava.dependsOn</code>, <code>test.dependsOn</code>, <code>run.dependsOn</code>, <code>jar.finalizedBy</code>, an execution's <code>&lt;phase&gt;</code></td><td class="wrap"><code>[hooks]</code></td></tr>
+    <tr><td class="wrap"><code>environment</code>, <code>workingDir</code> on <code>run</code> / <code>test</code></td><td class="wrap"><code>run.env</code>, <code>run.cwd</code>, <code>test.env</code></td></tr>
+    <tr><td class="wrap"><code>maxParallelForks</code>, surefire's <code>&lt;forkCount&gt;</code></td><td class="wrap"><code>test.forks</code>, when a number</td></tr>
+    <tr><td class="wrap"><code>jar { manifest { attributes(…) } }</code>, <code>&lt;manifestEntries&gt;</code></td><td class="wrap"><code>[package.manifest]</code></td></tr>
+    <tr><td class="wrap">Shade <code>&lt;relocations&gt;</code>, Shadow <code>relocate</code></td><td class="wrap"><code>[package.relocate]</code>, and <code>jrs package --fat</code></td></tr>
+    <tr><td class="wrap"><code>proguard-maven-plugin</code>, <code>com.guardsquare.proguard</code></td><td class="wrap"><code>[obfuscate]</code></td></tr>
+    <tr><td class="wrap">Kotlin plugin, <code>id 'scala'</code>, <code>id 'groovy'</code>, <code>kotlin-</code> / <code>scala-maven-plugin</code>, <code>gmavenplus-plugin</code></td><td class="wrap"><code>[kotlin]</code>, <code>[scala]</code>, <code>[groovy]</code></td></tr>
+    <tr><td class="wrap"><code>freeCompilerArgs</code>, Maven's Kotlin <code>&lt;args&gt;</code></td><td class="wrap"><code>kotlinc-args</code>, when literals</td></tr>
+    <tr><td class="wrap"><code>withSourcesJar()</code>, <code>withJavadocJar()</code></td><td class="wrap">Reported: <code>jrs package --sources</code> and <code>--javadoc</code></td></tr>
+  </tbody>
+</table>
+
+<h3>Spring Boot</h3>
+<p>
+  A Spring Boot build as start.spring.io generates it migrates whole. The Boot plugin with
+  <code>io.spring.dependency-management</code>, or Maven's <code>spring-boot-starter-parent</code>,
+  becomes Boot's BOM in <code>[managed]</code>, so the starters stay versionless.
+  <code>-parameters</code>, which Boot compiles with, goes into <code>javac-args</code>, and the
+  <code>@SpringBootApplication</code> class becomes the main class. <code>jrs package --fat</code>
+  then builds a runnable flat jar with Spring's registries merged.
+</p>
+
+<h3>Gradle version variables</h3>
+<p>
+  A version kept in a variable is written into each declaration that uses it: <code>ext</code>,
+  <code>def</code>, the Kotlin DSL's <code>val</code> and <code>extra</code>, and
+  <code>gradle.properties</code>, used as <code>"g:a:$v"</code>, <code>${project.v}</code>,
+  <code>${property("v")}</code> or map notation's <code>version: v</code>, in platforms,
+  <code>mavenBom</code>, <code>constraints { }</code> and Boot's plugin. A review line names the
+  variable, since the manifest no longer shows those versions moving together. Only a variable
+  assigned once, to a literal, outside a conditional, is used; anything else is reported, never
+  migrated without its version.
+</p>
+
+<h3>Maven profiles</h3>
+<p>
+  <code>jrs.toml</code> is one fixed configuration, so a Maven build migrates as a plain
+  <code>mvn</code> build runs it: the profiles that build activates (<code>&lt;activeByDefault&gt;</code>
+  ones, or one waiting only on a property being unset, such as <code>!skipDocs</code>) are merged
+  in first, the way Maven merges them, and the others are listed with what activates them.
+</p>
+
+<h3>What needs rewriting by hand</h3>
+<ul>
+  <li>Gradle tasks with a <code>doLast { }</code> closure, of another type such as <code>Copy</code>, or with a value built from a variable: listed with the reason, to rewrite as a <code>run</code>, <code>shell</code> or <code>script</code> task.</li>
+  <li>A <code>-javaagent:</code> in <code>jvmArgs</code>, a path into Gradle's cache, except Mockito's own recipe, which becomes <code>test.java-agents = ["org.mockito:mockito-core"]</code>.</li>
+  <li>Kotlin compiler plugins, which jrs does not support.</li>
+  <li>A Shade <code>&lt;includes&gt;</code>, a <code>&lt;rawString&gt;</code> relocation or a wildcard jrs cannot match; the Gradle <code>proguard { }</code> task's keep rules.</li>
+  <li>A fork count worked out from the machine's cores.</li>
+</ul>
+<p>An explicit standard-library dependency (<code>kotlin-stdlib</code> and friends) is dropped, since jrs implies it.</p>
+</section>
+
+</div>
+<!-- ===================================================================== -->
+<div class="group" data-title="Reference">
+
+<section id="env-vars">
+<h2>Environment variables</h2>
+
+<h3>Read by jrs</h3>
+<table>
+  <thead><tr><th>Variable</th><th>Effect</th></tr></thead>
+  <tbody>
+    <tr><td><code>JAVA_HOME</code></td><td class="wrap">The JDK to build with; else the <code>javac</code> on <code>PATH</code>.</td></tr>
+    <tr><td><code>JAVA_HOME_&lt;n&gt;_&lt;arch&gt;</code></td><td class="wrap">JDKs exported by <code>actions/setup-java</code>, searched for a pinned version.</td></tr>
+    <tr><td><code>JRS_CACHE_DIR</code></td><td class="wrap">Where the shared dependency cache lives.</td></tr>
+    <tr><td><code>JRS_CONFIG</code></td><td class="wrap">The user configuration file to read.</td></tr>
+    <tr><td><code>JRS_REPO_&lt;NAME&gt;_USERNAME</code><br /><code>JRS_REPO_&lt;NAME&gt;_PASSWORD</code><br /><code>JRS_REPO_&lt;NAME&gt;_TOKEN</code></td><td class="wrap">Credentials for the repository named <code>&lt;name&gt;</code>, upper-cased with other characters as <code>_</code>. They override the configuration file.</td></tr>
+    <tr><td><code>HTTPS_PROXY</code>, <code>HTTP_PROXY</code>, <code>ALL_PROXY</code>, <code>NO_PROXY</code></td><td class="wrap">The proxy, when the configuration has no <code>[proxy]</code>.</td></tr>
+    <tr><td><code>XDG_CACHE_HOME</code>, <code>XDG_CONFIG_HOME</code></td><td class="wrap">Base directories for the cache and configuration on Unix.</td></tr>
+    <tr><td><code>LOCALAPPDATA</code>, <code>APPDATA</code></td><td class="wrap">The same on Windows.</td></tr>
+    <tr><td><code>NO_COLOR</code>, <code>TERM=dumb</code></td><td class="wrap">Plain output: no animation, no colour.</td></tr>
+    <tr><td><code>CI</code>, <code>GITHUB_ACTIONS</code>, <code>GITLAB_CI</code>, <code>TRAVIS</code>, <code>CIRCLECI</code>, <code>BUILDKITE</code>, <code>TEAMCITY_VERSION</code>, <code>JENKINS_URL</code></td><td class="wrap">Any of them set (and not <code>0</code> or <code>false</code>) turns animation off.</td></tr>
+  </tbody>
+</table>
+
+<h3>Read by the install script</h3>
+<table>
+  <thead><tr><th>Variable</th><th>Effect</th></tr></thead>
+  <tbody>
+    <tr><td><code>JRS_INSTALL_VERSION</code></td><td class="wrap">The release to install, like <code>--version</code>.</td></tr>
+    <tr><td><code>JRS_INSTALL_DIR</code></td><td class="wrap">Where to install, like <code>--to</code>.</td></tr>
+  </tbody>
+</table>
+
+<h3>Set for tasks</h3>
+<p>
+  <code>JAVA_HOME</code>, <code>PATH</code>, <code>JRS_TASK</code>, <code>JRS_HOOK</code>,
+  <code>JRS_ROOT</code>, <code>JRS_TARGET_DIR</code>, <code>JRS_CLASSES_DIR</code>,
+  <code>JRS_PROJECT_NAME</code>, <code>JRS_PROJECT_VERSION</code>, <code>JRS_CLASSPATH</code>,
+  <code>JRS_RUNTIME_CLASSPATH</code>, <code>JRS_JAR</code>, <code>JRS_OFFLINE</code> and
+  <code>SOURCE_DATE_EPOCH</code>. See <a href="#tasks-environment">Tasks: Environment</a>.
+</p>
+</section>
+
+<section id="files">
+<h2>Files and directories</h2>
+
+<h3>In the project</h3>
+<pre data-lang="plain">my-project/
+├── jrs.toml                     the manifest (commit)
+├── jrs.lock                     the resolved graphs and checksums (commit)
+├── .java-version / .sdkmanrc    optional JDK pin
+├── src/main/{java,kotlin,scala,groovy,resources}
+├── src/test/{java,kotlin,scala,groovy,resources}
+└── target/                      disposable: jrs clean removes it</pre>
+
+<h3>Under target/</h3>
+<table>
+  <thead><tr><th>Path</th><th>Written by</th></tr></thead>
+  <tbody>
+    <tr><td><code>classes/</code></td><td class="wrap">Main classes and resources.</td></tr>
+    <tr><td><code>test-classes/</code></td><td class="wrap">Test classes and resources.</td></tr>
+    <tr><td><code>&lt;name&gt;-&lt;version&gt;.jar</code></td><td class="wrap"><code>jrs package</code>.</td></tr>
+    <tr><td><code>&lt;name&gt;-&lt;version&gt;-sources.jar</code>, <code>-javadoc.jar</code></td><td class="wrap"><code>--sources</code>, <code>--javadoc</code>.</td></tr>
+    <tr><td><code>lib/</code></td><td class="wrap"><code>--portable</code>.</td></tr>
+    <tr><td><code>dist/</code>, <code>&lt;name&gt;-&lt;version&gt;.zip</code></td><td class="wrap"><code>--dist</code>.</td></tr>
+    <tr><td><code>image/</code>, <code>jpackage/</code></td><td class="wrap"><code>--jlink</code>, <code>--jpackage</code>.</td></tr>
+    <tr><td><code>native/</code></td><td class="wrap"><code>--native-image</code>.</td></tr>
+    <tr><td><code>doc/</code></td><td class="wrap"><code>jrs doc</code>.</td></tr>
+    <tr><td><code>test-reports/</code></td><td class="wrap">JUnit XML and <code>index.html</code>; <code>retry-&lt;n&gt;/</code> per retry.</td></tr>
+    <tr><td><code>coverage/</code>, <code>jacoco.exec</code></td><td class="wrap"><code>jrs test --coverage</code>.</td></tr>
+    <tr><td><code>generated/…</code></td><td class="wrap">By convention, task output.</td></tr>
+    <tr><td><code>.jrs/</code></td><td class="wrap">jrs's own scratch space: argfiles, fingerprints, compile indexes, resource records, task fingerprints, <code>timings.txt</code>.</td></tr>
+  </tbody>
+</table>
+
+<h3>Per user</h3>
+<table>
+  <thead><tr><th>What</th><th>Where</th></tr></thead>
+  <tbody>
+    <tr><td>Dependency cache</td><td class="wrap"><code>JRS_CACHE_DIR</code>, or <code>~/Library/Caches/jrs</code>, <code>$XDG_CACHE_HOME/jrs</code> / <code>~/.cache/jrs</code>, <code>%LOCALAPPDATA%\jrs\cache</code>. It also keeps <code>.jrs/projects</code>, the lockfiles <code>jrs cache prune</code> keeps alive.</td></tr>
+    <tr><td>Configuration</td><td class="wrap"><code>JRS_CONFIG</code>, or <code>$XDG_CONFIG_HOME/jrs/config.toml</code> / <code>~/.config/jrs/config.toml</code>, <code>%APPDATA%\jrs\config.toml</code>.</td></tr>
+    <tr><td>The binary</td><td class="wrap"><code>~/.local/bin/jrs</code> from the install script, <code>~/.cargo/bin/jrs</code> from source.</td></tr>
+  </tbody>
+</table>
+<p>Exit codes are listed under <a href="#commands-exit-codes">Commands</a>.</p>
+</section>
+
+<section id="troubleshooting">
+<h2>Troubleshooting</h2>
+
+<h3>No JDK found, or the wrong one</h3>
+<p>
+  Set <code>JAVA_HOME</code> to a JDK 17 or newer, or put its <code>bin/</code> on
+  <code>PATH</code>. For a pinned version, the error lists the versions jrs did find; add the
+  missing one to <code>[jdks]</code> in the <a href="#user-config">user configuration</a>.
+  <code>jrs -v build</code> names the JDK in use.
+</p>
+
+<h3>Lombok or another processor does nothing</h3>
+<p>
+  On JDK 23 and later, add <code>-proc:full</code> to <code>java.javac-args</code>, and make sure
+  the processor is a <code>compile-only</code> dependency. See
+  <a href="#annotation-processors">Annotation processors</a>.
+</p>
+
+<h3>Mockito warns about a dynamically loaded agent</h3>
+<p>Add <code>test.java-agents = ["org.mockito:mockito-core"]</code>, as Mockito 5 on JDK 21+ asks.</p>
+
+<h3>"Main class not found" in a Kotlin project</h3>
+<p>A file-level <code>main</code> in <code>Main.kt</code> lives in class <code>MainKt</code>: set <code>main-class = "com.example.MainKt"</code>.</p>
+
+<h3>A Kotlin Multiplatform library resolves to no classes</h3>
+<p>Declare its <code>-jvm</code> artifact instead, such as <code>org.jetbrains.kotlinx:kotlinx-coroutines-core-jvm</code>.</p>
+
+<h3>401 or 403 from a repository</h3>
+<p>
+  Credentials are missing or wrong. They go in <code>[credentials.&lt;repo&gt;]</code> of the user
+  configuration or in <code>JRS_REPO_&lt;NAME&gt;_*</code> variables, keyed by the repository's
+  name in <code>jrs.toml</code>, never in the manifest.
+</p>
+
+<h3>A checksum mismatch</h3>
+<p>
+  The repository served different bytes than <code>jrs.lock</code> pinned, or than its own
+  <code>.sha1</code>. jrs refuses them on purpose. Find out why before running
+  <code>jrs update</code> to accept new pins; <code>jrs verify</code> re-checks what is already
+  in the cache. For a local jar you replaced deliberately, <code>jrs update</code> pins the new one.
+</p>
+
+<h3>An --offline build fails on a missing artifact</h3>
+<p>
+  The cache lacks something the build needs. Run <code>jrs fetch</code> online first; it
+  downloads the dependencies, compilers, task tools and test launcher.
+</p>
+
+<h3>A duplicate class in a fat jar</h3>
+<p>
+  Two dependencies ship the same class; jrs names it and both jars. Drop one side with
+  <code>exclusions</code>, or move one out of the way with <code>[package.relocate]</code>.
+</p>
+
+<h3>A version range in a POM</h3>
+<p>
+  jrs rejects Maven version ranges such as <code>[1.0,2.0)</code> with an error rather than
+  guessing at one. It builds only against versions written down.
+</p>
+
+<h3>Garbled output in a log</h3>
+<p>
+  Animation is off automatically when stderr is not a terminal or a CI variable is set. If a tool
+  still captures escape codes, pass <code>--progress never --color never</code>, or set
+  <code>NO_COLOR=1</code>.
+</p>
+
+<h3>Something else</h3>
+<p>
+  Rerun with <code>-v</code> to see every command jrs runs, and check the
+  <a href="https://github.com/pwittchen/jrs/issues">issue tracker</a>. An exit code of
+  <code>101</code> is a bug in jrs; please report it.
+</p>
+</section>
+
+</div>
+        </article>
+        <footer class="doc-foot">
+          <span>Apache License 2.0</span>
+          <span>
+            <a href="https://github.com/pwittchen/jrs/blob/master/website/docs/index.html">Edit this page</a> ·
+            <a href="https://github.com/pwittchen/jrs/issues">Report an issue</a>
+          </span>
+        </footer>
+      </main>
+    </div>
+  </body>
+</html>
