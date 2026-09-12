@@ -20,7 +20,7 @@ build script to write.
 
 ## Project status
 
-jrs is an experimental, single-module build system, not a replacement for Maven
+jrs is an **experimental**, single-module build system, not a replacement for Maven
 or Gradle. It implements a deliberately narrow subset of what those tools do —
 there is no plugin system, no build DSL and no multi-module reactor. A project's
 own build steps are [tasks](DOCS.md#tasks-and-hooks): commands jrs runs as
