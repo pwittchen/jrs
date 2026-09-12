@@ -95,7 +95,8 @@ Kotlin, Scala and Groovy.
 ## Documentation
 
 - [DOCS.md](DOCS.md) — the full reference: the manifest, every command, tests,
-  tasks, JVM languages, configuration and migration
+  tasks, JVM languages, configuration and migration; also on the web at
+  [getjrs.dev/docs](https://getjrs.dev/docs/)
 - [ARCH.md](ARCH.md) — how the code is put together
 - [specs/INITIAL_SPEC.md](specs/INITIAL_SPEC.md) — the design behind it
 - [ROADMAP.md](ROADMAP.md) — known gaps and what comes next
