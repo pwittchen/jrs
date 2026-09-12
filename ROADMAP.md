@@ -12,7 +12,72 @@ decision (see the last section) — it needs a spec change before it needs code.
 
 ---
 
-## 1. Benchmarks against Maven and Gradle
+## 1. Hardening against real projects
+
+The `examples/` projects and the `tests/fixtures/migrate/` fixtures are small
+and written for jrs: each one shows a feature, and each one builds. Real
+projects are not like that. Tried on the maintainer's own Java and Kotlin
+projects, `jrs migrate` and the build that follows did not fully work. Before
+more features are added, jrs has to migrate, build, test, run and package real
+projects of the two kinds people are most likely to bring to it: **Java with
+Spring Boot** and **Kotlin with Ktor**.
+
+- **A corpus of real projects.** A fixed list of open-source projects, each
+  pinned to a commit, from both kinds and both build tools: Spring Boot on
+  Maven (`spring-boot-starter-parent`) and on Gradle (Groovy and Kotlin DSL),
+  Spring Boot in Kotlin, Ktor on the Kotlin DSL, with and without
+  `kotlinx.serialization`. Candidates: `spring-petclinic`, the Spring guides,
+  the official Ktor samples, and a mid-sized service or two with a few dozen
+  dependencies, a database driver, Flyway or Liquibase, Testcontainers and
+  Mockito. The maintainer's projects that failed go in first, or stand-ins
+  that reproduce the same failures if they cannot be published.
+- **One pass, every step.** For each project: `jrs migrate`, then `jrs build`,
+  `jrs test`, `jrs run` (the application starts and answers one request) and
+  `jrs package` (the jar starts with `java -jar`). The reference is the
+  project's own Maven or Gradle build: the same resolved runtime classpath, the
+  same number of tests run and passed. Each step's outcome is recorded, so a
+  project that migrates but does not build is a finding, not a pass.
+- **Record the failures.** Every failure is written down with the project, the
+  step, the error and its cause, then sorted into one of three bins:
+  - *a jrs bug* — fixed, with a regression test built from a minimal
+    reproduction: a POM published into `tests/fixtures/repo`, a project in
+    `tests/build.rs`, never a test that reaches for Maven Central;
+  - *a migration gap* — a new row in `jrs migrate` and a fixture in
+    `tests/fixtures/migrate/`, as every other migration rule has;
+  - *a non-goal in the way* — the project is cited in section 3, next to the
+    idea it needs. Several rows there wait for exactly this evidence (Kotlin
+    compiler plugins for Spring's `allopen` and `kotlinx.serialization`, the
+    annotation-processor path, Gradle Module Metadata, the compiler daemon).
+- **Java and Spring Boot, what to check.** The Spring Boot BOM through
+  `[managed]` and the starters' deep graphs, including optional and
+  `provided` dependencies; Lombok, MapStruct and
+  `spring-boot-configuration-processor` as processors on the compile
+  classpath; `application.yml` and profile resources; `@SpringBootTest`
+  contexts, Mockito's agent on JDK 21 and later, Testcontainers; the fat jar's
+  Spring registry merge against a real application's auto-configuration, and
+  whether `jrs package` has to answer Boot's nested-jar layout
+  (`BOOT-INF/`) or a flat fat jar is enough.
+- **Kotlin and Ktor, what to check.** Ktor and kotlinx publish Kotlin
+  Multiplatform artifacts, and far more of them than `examples/orders` uses.
+  Some root POMs depend on their `-jvm` artifact and resolve as they are;
+  others, like `kotlinx-datetime`'s, do not, and today the user has to declare
+  the `-jvm` artifact by hand ([JVM_LANGUAGES.md](specs/JVM_LANGUAGES.md)).
+  `jrs migrate` should do that, or say which ones need it; `io.ktor.server.netty.EngineMain` as the main
+  class with `application.conf` or `application.yaml`; `ktor-server-test-host`
+  tests; Logback and `META-INF/services` in the fat jar; mixed Kotlin and Java
+  sources; `kotlinc` arguments and `jvmToolchain` read from the Gradle build.
+- **Keep it running.** The corpus needs the network and a JDK, so it lives
+  outside the default `cargo test`, like `tests/network.rs`: a harness that
+  clones the pinned commits into a scratch directory with its own
+  `JRS_CACHE_DIR`, runs the pass and prints a table of project × step. A
+  manually triggered CI workflow runs it on Linux. It adds no crate to jrs.
+- **Say where jrs stands.** A compatibility table in `DOCS.md` (and on the
+  website) lists which corpus projects build end to end and, for the ones that
+  do not, why — so a user knows before trying their own project. The same
+  projects then feed the benchmarks in section 2, which are only worth running
+  on projects that build.
+
+## 2. Benchmarks against Maven and Gradle
 
 The M5 benchmark (`benches/resolution.rs`) measures jrs against itself and the
 network floor. It does not say how jrs compares to the tools people would
@@ -47,7 +112,7 @@ and testing the same projects, with the results written up in a report.
   a tool that is not installed, as `require_jdk!` does. It adds no crate to jrs.
   A manually triggered CI workflow can regenerate the report on a fixed runner.
 
-## 2. Needs a spec decision first
+## 3. Needs a spec decision first
 
 These cross a line drawn in SPEC §1.2 or §13 (or the dependency list). They are
 listed so the discussion has a home, not because they are planned.
