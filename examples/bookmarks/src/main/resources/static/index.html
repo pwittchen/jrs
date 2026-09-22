@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>bookmarks</title>
+    <style>
+      body {
+        margin: 0 auto;
+        padding: 3rem 1.5rem;
+        max-width: 40rem;
+        font: 16px/1.6 system-ui, sans-serif;
+        color: #1c1c1c;
+        background: #fbfbf9;
+      }
+      h1 {
+        font-size: 1.4rem;
+        margin: 0 0 0.25rem;
+      }
+      p.lead {
+        margin: 0 0 2rem;
+        color: #6b6b6b;
+      }
+      ul {
+        list-style: none;
+        padding: 0;
+      }
+      li {
+        padding: 0.6rem 0;
+        border-top: 1px solid #e6e4de;
+      }
+      a {
+        color: #1c1c1c;
+      }
+      code {
+        color: #6b6b6b;
+        font-size: 0.85em;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>bookmarks</h1>
+    <p class="lead">Served from <code>src/main/resources/static/</code>, over <code>/api/bookmarks</code>.</p>
+    <ul id="list"></ul>
+    <script>
+      fetch("/api/bookmarks")
+        .then((response) => response.json())
+        .then((bookmarks) => {
+          document.getElementById("list").innerHTML = bookmarks
+            .map(
+              (bookmark) =>
+                `<li><a href="${bookmark.url}">${bookmark.title}</a><br><code>${bookmark.url}</code></li>`,
+            )
+            .join("");
+        });
+    </script>
+  </body>
+</html>

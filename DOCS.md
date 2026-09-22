@@ -141,6 +141,9 @@ end to end:
 - [`calc`](examples/calc): Scala 3 and Java calling each other, with MUnit tests
 - [`cart`](examples/cart): Java code specified with Spock, Groovy on the test
   classpath only
+- [`bookmarks`](examples/bookmarks): a Spring Boot REST service, versioned by
+  Boot's BOM through `[managed]`, packaged as a fat jar that starts with
+  `java -jar`
 
 ## The manifest
 

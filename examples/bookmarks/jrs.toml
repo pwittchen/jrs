@@ -1,0 +1,27 @@
+[project]
+name = "bookmarks"
+version = "1.0.0"
+# the @SpringBootApplication class, as `bootJar` would have written it
+main-class = "com.example.bookmarks.BookmarksApplication"
+
+[java]
+source = 17
+# Spring binds constructor parameters by name, so javac must keep the names
+javac-args = ["-parameters"]
+
+[managed]
+# Boot's BOM: every Spring version below is decided here, and nowhere else
+"org.springframework.boot:spring-boot-dependencies" = { version = "4.1.1", bom = true }
+
+[dependencies]
+# no version: the BOM has one, and upgrading the BOM upgrades this
+"org.springframework.boot:spring-boot-starter-webmvc" = {}
+
+[dev-dependencies]
+# JUnit 5, AssertJ, MockMvc and Boot's test context, all from the BOM
+"org.springframework.boot:spring-boot-starter-webmvc-test" = {}
+
+[test]
+# Boot's test starter brings Mockito; loading it as an agent is what it asks
+# for instead of self-attaching
+java-agents = ["org.mockito:mockito-core"]
