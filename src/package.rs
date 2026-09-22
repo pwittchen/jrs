@@ -44,6 +44,31 @@ fn entry_options() -> SimpleFileOptions {
         .unix_permissions(0o644)
 }
 
+fn directory_options() -> SimpleFileOptions {
+    SimpleFileOptions::default()
+        .compression_method(zip::CompressionMethod::Stored)
+        .last_modified_time(fixed_timestamp())
+        .unix_permissions(0o755)
+}
+
+/// Every directory the entry names imply, with their trailing slash, sorted.
+///
+/// A jar reader that looks a package up as a resource —
+/// `ClassLoader.getResources("com/example")`, which is how Spring's component
+/// scan and every other classpath scanner finds classes — sees nothing unless
+/// the directory is an entry of its own. A `jar cf` writes them, so does jrs.
+fn directories_of<'a>(names: impl Iterator<Item = &'a str>) -> std::collections::BTreeSet<String> {
+    let mut directories = std::collections::BTreeSet::new();
+    for name in names {
+        let mut start = 0;
+        while let Some(slash) = name[start..].find('/') {
+            start += slash + 1;
+            directories.insert(name[..start].to_string());
+        }
+    }
+    directories
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct JarManifest {
     pub main_class: Option<String>,
@@ -191,6 +216,8 @@ pub fn copy_libraries(
 pub struct PackageOutcome {
     pub path: PathBuf,
     pub bytes: u64,
+    /// Files written, the manifest included; the directory entries beside them
+    /// are not counted.
     pub entries: usize,
     pub warnings: Vec<String>,
 }
@@ -750,7 +777,30 @@ fn write_jar<R: Read + Seek>(
         .path(output)?;
     let mut entries = 1;
 
+    // Directory entries, written before the first file under them: a directory
+    // name always sorts ahead of what it holds.
+    let directories = directories_of(
+        plan.keys()
+            .map(String::as_str)
+            .chain(std::iter::once("META-INF/MANIFEST.MF")),
+    );
+    let mut directories = directories.iter().peekable();
+    let mut write_directories_before =
+        |writer: &mut zip::ZipWriter<_>, limit: Option<&str>| -> Result<()> {
+            while directories
+                .peek()
+                .is_some_and(|dir| limit.is_none_or(|limit| dir.as_str() < limit))
+            {
+                let dir = directories.next().expect("peeked");
+                writer
+                    .add_directory(dir.as_str(), directory_options())
+                    .map_err(|e| JrsError::build(format!("{}: {e}", output.display())))?;
+            }
+            Ok(())
+        };
+
     for (name, entry) in plan {
+        write_directories_before(&mut writer, Some(name.as_str()))?;
         writer
             .start_file(name.as_str(), options)
             .map_err(|e| JrsError::build(format!("{}: {e}", output.display())))?;
@@ -819,6 +869,7 @@ fn write_jar<R: Read + Seek>(
         }
         entries += 1;
     }
+    write_directories_before(&mut writer, None)?;
 
     let inner = writer
         .finish()
@@ -973,11 +1024,50 @@ mod tests {
             entry_order(&out),
             vec![
                 "META-INF/MANIFEST.MF",
+                "META-INF/",
+                "a/",
                 "a/First.class",
+                "m/",
                 "m/Middle.class",
+                "z/",
                 "z/Last.class"
             ]
         );
+    }
+
+    /// Every package is an entry of its own, marked as a directory: a classpath
+    /// scanner asking for `com/example` finds nothing otherwise, and Spring's
+    /// component scan is exactly that question.
+    #[test]
+    fn packages_are_written_as_directory_entries() {
+        let tree = Tree::new("directories");
+        tree.write("classes/com/example/deep/App.class", b"app");
+        tree.write("classes/META-INF/services/com.example.Format", b"impl");
+
+        let out = tree.root.join("app.jar");
+        let outcome = write_thin_jar(&tree.root.join("classes"), &out, &JarManifest::default())
+            .expect("a jar");
+
+        let mut archive = zip::ZipArchive::new(std::fs::File::open(&out).unwrap()).unwrap();
+        let mut directories = Vec::new();
+        for i in 0..archive.len() {
+            let entry = archive.by_index(i).unwrap();
+            if entry.is_dir() {
+                directories.push(entry.name().to_string());
+            }
+        }
+        assert_eq!(
+            directories,
+            [
+                "META-INF/",
+                "META-INF/services/",
+                "com/",
+                "com/example/",
+                "com/example/deep/"
+            ]
+        );
+        // Directories are free of the count: three files went in.
+        assert_eq!(outcome.entries, 3);
     }
 
     #[test]
@@ -1740,6 +1830,9 @@ mod tests {
             entry_order(&first),
             [
                 "META-INF/MANIFEST.MF",
+                "META-INF/",
+                "com/",
+                "com/example/",
                 "com/example/App.java",
                 "com/example/BuildInfo.java",
                 "com/example/Util.kt"
@@ -1778,7 +1871,14 @@ mod tests {
         write_javadoc_jar(&tree.root.join("doc"), &out).unwrap();
         assert_eq!(
             entry_order(&out),
-            ["META-INF/MANIFEST.MF", "com/example/App.html", "index.html"]
+            [
+                "META-INF/MANIFEST.MF",
+                "META-INF/",
+                "com/",
+                "com/example/",
+                "com/example/App.html",
+                "index.html"
+            ]
         );
     }
 

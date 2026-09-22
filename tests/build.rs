@@ -2854,6 +2854,9 @@ fn sources_and_javadoc_jars_hold_what_the_build_compiled() {
         zip_names(&sources),
         [
             "META-INF/MANIFEST.MF",
+            "META-INF/",
+            "com/",
+            "com/example/",
             "com/example/App.java",
             "com/example/BuildInfo.java"
         ]

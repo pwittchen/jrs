@@ -148,7 +148,10 @@ regression, not a style nit.
 - **Determinism.** Directory traversal is sorted, jar entries are sorted with a fixed
   1980 timestamp and fixed permissions, and the classpath is ordered direct-then-
   transitive, each sorted by coordinate. Two builds of the same inputs produce
-  byte-identical jars; keep it that way.
+  byte-identical jars; keep it that way. Every package is also a directory entry
+  of its own (`package.rs`, `directories_of`), written before what it holds:
+  without it `ClassLoader.getResources("com/example")` finds nothing, and every
+  classpath scanner — Spring's component scan first among them — comes up empty.
 - **Argfiles, not command lines.** Sources and classpaths go to `target/.jrs/*.args`
   and are passed as `@argfile` — a few dozen dependencies blow past the OS argument
   limit otherwise.

@@ -529,6 +529,10 @@ Spring's `spring.factories` (key by key), `META-INF/spring/*.imports`,
 comes first. A duplicate class is reported by name, with both jars; with
 `[package.relocate]`, the fat jar can move a package out of the way instead.
 
+Every jar jrs writes carries a directory entry for each package, as `jar cf`
+does, so a framework that scans the classpath by asking the class loader for a
+package — Spring's component scan, among others — finds the classes inside it.
+
 `jrs add` and `jrs remove` edit `jrs.toml` in place, keeping its comments and
 order. An edit that jrs cannot make safely is refused, with a message saying to
 edit the file by hand. After each change the graph is resolved again, and if

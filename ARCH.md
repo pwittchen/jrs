@@ -665,7 +665,10 @@ set to `append=true`.
 ```
 
 All jars are **deterministic**: entries sorted, a fixed 1980 timestamp, fixed
-permissions, so two builds of the same inputs are byte-identical. The fat jar
+permissions, so two builds of the same inputs are byte-identical. Every package
+is also written as a directory entry of its own, ahead of what it holds — a
+classpath scanner that asks the class loader for `com/example` finds nothing
+otherwise, which is how Spring's component scan looks for beans. The fat jar
 is written straight from the dependency jars without a staging directory, and
 its merge rules are load-bearing: `META-INF/services/*` files are concatenated
 (overwriting them breaks `ServiceLoader` silently), Groovy extension-module
