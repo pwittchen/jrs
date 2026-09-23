@@ -308,6 +308,36 @@ table does not apply. jrs rewrites the names in each class's constant pool and
 nothing else, so no tool is downloaded for it. A class name in the middle of a
 longer string, or inside any other resource, is left as it is.
 
+### `[resources]`
+
+```toml
+[resources]
+expand = ["application.yml", "config/*.properties"]   # under project.resource-dir
+
+[resources.properties]                               # optional
+version = "{project.version}"
+group = "com.example"
+```
+
+Resources are copied into `target/classes` as they are, except the files
+`expand` names: in those, every `${name}` is replaced as the file is copied,
+the way Gradle's `processResources { expand(...) }` and Maven's resource
+filtering do. `${project.name}` and `${project.version}` are always known;
+`properties` adds more, and its values may use `{project.name}` and
+`{project.version}`. `\${name}` is a literal `${name}`, so a placeholder meant
+for Spring, such as `"\${DB_URL:}"`, survives the copy. Any other `$` is left
+alone.
+
+A `${name}` that is neither built in nor declared fails the build, naming the
+file and the line, rather than shipping a resource with the placeholder still
+in it. A pattern is a `/`-separated path under `resource-dir`, where `*` and
+`?` match within one directory and `**` across any number of them; a pattern
+that matches nothing is not an error. Only the main resources are expanded,
+and each expanded file is rewritten whenever its expanded content changes, so
+a new `project.version` reaches it without touching the file. There is no
+scripting: Gradle's `$name` without braces and its `<% %>` blocks are Groovy,
+and jrs runs no build code.
+
 ### `[obfuscate]`
 
 ```toml
@@ -695,11 +725,34 @@ the JDK it picked.
 | `--fail-fast` | Stop at the first failing test. |
 | `--retries <n>` | Run failing tests again up to `n` times; overrides `[test] retries`. |
 | `--forks <n>` | Split the test classes among `n` test JVMs run at once; overrides `[test] forks`. |
+| `--suite <name>` | Run the suite `[test.suites.<name>]` declares instead of the tests under `test-dir`. |
 
 JUnit XML reports land in `target/test-reports`, where CI systems look for
 them. `[test] jvm-args` sets the test JVM's arguments, and `[test] env` and
 `java-agents` its environment and agents (see
 [`[run]`, `[test]` and `[package]`](#run-test-and-package)).
+
+**Test suites.**
+
+```toml
+[test.suites.e2e]
+test-dir = "src/e2e/java"                    # required
+test-resource-dir = "src/e2e/resources"      # beside test-dir unless set
+jvm-args = ["--enable-preview", "-Dplaywright.headless=true"]
+env = { BASE_URL = "http://localhost:8080" }
+forks = 1                                    # optional, as [test]'s
+retries = 0                                  # optional, as [test]'s
+```
+
+A suite is a second set of tests with sources of its own — integration or
+end-to-end tests, Gradle's extra source set with a `Test` task over it.
+`jrs test --suite e2e` compiles it into `target/suites/e2e/classes` against
+the main classes, the default test classes and the test classpath, copies its
+resources beside them, and runs it with its own `jvm-args` and `env`, not
+`[test]`'s; `test.java-agents` and `test.jacoco-version` still apply. Its
+reports go to `target/suites/e2e/test-reports`, so `--rerun-failed` reruns
+the suite's failures. Plain `jrs test` never runs a suite, and the suites use
+the dev-dependencies: there is no per-suite dependency table.
 
 `[test] forks = n`, or `--forks n`, splits the test classes among `n` test
 JVMs that run at once, as Gradle's `maxParallelForks` does. Each JVM is dealt
@@ -989,11 +1042,34 @@ become `[hooks]`. A task with a `doLast { }` closure, another type such as
 `Copy`, or a value built from a variable is listed with the reason, to rewrite
 by hand as a `run`, `shell` or `script` task.
 
+A `Test` task whose `testClassesDirs` is another source set's output
+(`sourceSets.integration.output.classesDirs`) becomes `[test.suites]`: the
+source set's Java and resource directories, from `sourceSets { }` or Gradle's
+`src/<set>/java` convention, what `tasks.withType(Test)` sets, and the task's
+own `jvmArgs` and `systemProperty` — never the `test` task's. The suite is
+named after the task, less a leading `test`: `testE2e` becomes `e2e`,
+`integrationTest` becomes `integration-test`. `dependsOn` on `build`, `jar`,
+`assemble` or `bootJar` becomes a `pre-compile` hook, the earliest point
+before all of them, which `jrs test` and `jrs run` pass through too; on
+`bootRun` it becomes `pre-run`, or nothing if `pre-compile` has it already.
+The `jacoco` plugin's `toolVersion` becomes `test.jacoco-version`.
+
 `environment` and `workingDir` on Gradle's `run` and `test` tasks become
 `run.env`, `run.cwd` and `test.env` when they are literals. A `-javaagent:` in
 `jvmArgs` is a path into Gradle's cache, so it is reported, except for
 Mockito's own recipe, which becomes
 `test.java-agents = ["org.mockito:mockito-core"]`.
+
+`processResources { filesMatching(...) { expand(...) } }` becomes
+`[resources]`: the patterns become `expand`, and `expand(project.properties)`
+the properties such a file is likely to name — `version`, `name`, and the
+build's literal `group` and `description`. An `expand` given a map carries its
+entries over. `filter` and the rest of `ProcessResources` are reported.
+`options.compilerArgs` in `compileJava { }` or `tasks.withType(JavaCompile)`
+joins `java.javac-args`, and `jvmArgs` in `bootRun { }` or
+`tasks.withType(JavaExec)` joins `run.jvm-args`. A `version` Gradle computes,
+from a property or a git tag, is reported and defaulted, since it has no value
+until Gradle runs.
 
 A `jar { manifest { attributes(...) } }` block, and Maven's
 `<manifestEntries>`, become `[package.manifest]` when the values are literals

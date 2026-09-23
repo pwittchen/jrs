@@ -8,6 +8,7 @@ use std::time::SystemTime;
 
 use crate::compile::lang::Language;
 use crate::error::{IoResultExt, JrsError, Result};
+use crate::expand::Expansion;
 use crate::manifest::Manifest;
 
 /// Which compile unit sources feed.
@@ -100,6 +101,13 @@ impl<'a> Project<'a> {
     #[must_use]
     pub fn test_classes_dir(&self) -> PathBuf {
         self.target_dir().join("test-classes")
+    }
+
+    /// Where a `[test.suites]` suite's classes and reports go:
+    /// `target/suites/<name>`.
+    #[must_use]
+    pub fn suite_dir(&self, name: &str) -> PathBuf {
+        self.target_dir().join("suites").join(name)
     }
 
     /// jrs's own scratch space: argfiles, fingerprints, fat-jar staging.
@@ -244,6 +252,49 @@ impl<'a> Project<'a> {
         Ok(sources)
     }
 
+    /// The sources under one directory, as a test suite has them: Java and
+    /// the languages the manifest turns on, at most one of those besides Java.
+    ///
+    /// # Errors
+    ///
+    /// [`JrsError::Manifest`] for sources in a language that is not turned on,
+    /// or in two besides Java; [`JrsError::Io`] if `root` cannot be walked.
+    pub fn sources_under(&self, root: &Path) -> Result<Sources> {
+        let mut files = Vec::new();
+        if root.is_dir() {
+            walk(root, &mut |path| {
+                if Language::of(path).is_some() {
+                    files.push(path.to_path_buf());
+                }
+            })?;
+        }
+        files.sort();
+        let sources = Sources { files };
+        let present: Vec<Language> = Language::FOREIGN
+            .into_iter()
+            .filter(|l| sources.count(*l) > 0)
+            .collect();
+        if let Some(off) = present
+            .iter()
+            .find(|l| self.manifest.language(**l).is_none())
+        {
+            return Err(JrsError::manifest(format!(
+                "found .{} files under {}, but {} has no [{}] table",
+                off.extension(),
+                root.display(),
+                self.manifest.path.display(),
+                off.key()
+            )));
+        }
+        if present.len() > 1 {
+            return Err(JrsError::manifest(format!(
+                "the sources under {} mix more than one language besides Java",
+                root.display()
+            )));
+        }
+        Ok(sources)
+    }
+
     /// Remove `target/`. Returns whether there was anything to remove.
     ///
     /// # Errors
@@ -334,6 +385,12 @@ fn walk(dir: &Path, visit: &mut impl FnMut(&Path)) -> Result<()> {
 /// [`JrsError::Io`] if `from` cannot be walked, a file's metadata cannot be
 /// read, or a directory or file under `to` cannot be written.
 pub fn copy_tree(from: &Path, to: &Path) -> Result<usize> {
+    copy_tree_expanding(from, to, None)
+}
+
+/// [`copy_tree`], with the files `expansion` names expanded on the way
+/// (`[resources]`, `expand.rs`). Those are compared by content, not mtime.
+fn copy_tree_expanding(from: &Path, to: &Path, expansion: Option<&Expansion>) -> Result<usize> {
     if !from.is_dir() {
         return Ok(0);
     }
@@ -341,6 +398,12 @@ pub fn copy_tree(from: &Path, to: &Path) -> Result<usize> {
     for source in find_all(from)? {
         let relative = source.strip_prefix(from).unwrap_or(&source);
         let destination = to.join(relative);
+        if let Some(e) = expansion.filter(|e| e.applies_to(&slash_path(relative))) {
+            if e.copy(&source, &destination)? {
+                copied += 1;
+            }
+            continue;
+        }
         if up_to_date(&source, &destination)? {
             continue;
         }
@@ -371,8 +434,14 @@ pub struct Synced {
 /// # Errors
 ///
 /// [`JrsError::Io`] if a stale file cannot be removed (one already gone is
-/// fine), copying fails as in [`copy_tree`], or `record` cannot be written.
-pub fn sync_resources(from: &Path, to: &Path, record: &Path) -> Result<Synced> {
+/// fine), copying fails as in [`copy_tree`], or `record` cannot be written;
+/// [`JrsError::Build`] when a file `expansion` names does not expand.
+pub fn sync_resources(
+    from: &Path,
+    to: &Path,
+    record: &Path,
+    expansion: Option<&Expansion>,
+) -> Result<Synced> {
     let mut current: Vec<String> = if from.is_dir() {
         find_all(from)?
             .iter()
@@ -402,7 +471,7 @@ pub fn sync_resources(from: &Path, to: &Path, record: &Path) -> Result<Synced> {
         }
     }
 
-    let copied = copy_tree(from, to)?;
+    let copied = copy_tree_expanding(from, to, expansion)?;
 
     if current.is_empty() {
         let _ = std::fs::remove_file(record);
@@ -746,7 +815,7 @@ mod tests {
         let (from, to) = (tree.root.join("res"), tree.root.join("out"));
         let record = tree.root.join(".jrs/resources.list");
 
-        let first = sync_resources(&from, &to, &record).unwrap();
+        let first = sync_resources(&from, &to, &record, None).unwrap();
         assert_eq!(
             first,
             Synced {
@@ -756,7 +825,7 @@ mod tests {
         );
 
         std::fs::remove_file(from.join("nested/gone.properties")).unwrap();
-        let second = sync_resources(&from, &to, &record).unwrap();
+        let second = sync_resources(&from, &to, &record, None).unwrap();
         assert_eq!(
             second,
             Synced {
@@ -770,7 +839,7 @@ mod tests {
 
         // Removing the whole directory removes everything it contributed.
         std::fs::remove_dir_all(&from).unwrap();
-        let third = sync_resources(&from, &to, &record).unwrap();
+        let third = sync_resources(&from, &to, &record, None).unwrap();
         assert_eq!(third.removed, 1);
         assert!(!to.join("keep.properties").exists());
         assert!(to.join("Main.class").exists());
@@ -783,7 +852,13 @@ mod tests {
         let outside = tree.write("precious.txt", "keep me");
         let record = tree.write(".jrs/resources.list", "../precious.txt\n");
         std::fs::create_dir_all(tree.root.join("out")).unwrap();
-        sync_resources(&tree.root.join("res"), &tree.root.join("out"), &record).unwrap();
+        sync_resources(
+            &tree.root.join("res"),
+            &tree.root.join("out"),
+            &record,
+            None,
+        )
+        .unwrap();
         assert!(outside.exists());
     }
 

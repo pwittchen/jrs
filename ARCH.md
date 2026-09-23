@@ -80,6 +80,7 @@ src/
 ├── edit.rs            format-preserving line editor for `jrs add` / `jrs remove`
 ├── lockfile.rs        jrs.lock: read, write, manifest-checksum
 ├── project.rs         layout, source globbing, target/, resource sync, snapshots
+├── expand.rs          [resources]: ${name} expansion of resources as they are copied
 ├── toolchain.rs       finding the JDK; running subprocesses (captured/inherited)
 ├── compile/
 │   ├── mod.rs         CompileUnit: steps, fingerprint, staleness, argfiles
@@ -868,6 +869,7 @@ poisoning, which is documented under each function's `# Panics`.
      ├── native/                  --native-image
      ├── doc/                     jrs doc
      ├── test-reports/            JUnit XML, index.html; retry-<n>/ per retry
+     ├── suites/<name>/           jrs test --suite: classes/, test-reports/
      ├── coverage/  jacoco.exec   jrs test --coverage
      ├── generated/…              by convention, task output
      └── .jrs/                    jrs's own scratch space

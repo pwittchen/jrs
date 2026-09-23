@@ -1,0 +1,14 @@
+[project]
+name = "resources-demo"
+version = "0.1.0"
+
+[resources]
+expand = ["application.yml", "config/*.properties", "**/banner.txt"]
+
+[resources.properties]
+version = "{project.version}"
+name = "{project.name}"
+group = "com.example"
+description = "Resources demo"
+release = "{project.version}"
+owner = "ops"

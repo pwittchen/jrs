@@ -342,6 +342,38 @@ pub struct TestConfig {
     /// `test.coverage-minimum`: project-wide totals `jrs test --coverage`
     /// must reach, in declaration order. Ignored without `--coverage`.
     pub coverage_minimum: Vec<CoverageMinimum>,
+    /// `[test.suites.<name>]`, in declaration order: test sources of their
+    /// own, run by `jrs test --suite <name>` and never by plain `jrs test`.
+    pub suites: Vec<TestSuite>,
+}
+
+/// One `[test.suites.<name>]`: Gradle's extra source set with its own `Test`
+/// task (`integrationTest`, `e2e`). It compiles against the main classes, the
+/// default test classes and the test classpath, as a Gradle source set whose
+/// configurations extend `test`'s does, and runs in a JVM set up by its own
+/// keys rather than `[test]`'s.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TestSuite {
+    pub name: String,
+    /// The suite's sources, relative to the root. Required.
+    pub test_dir: PathBuf,
+    /// On the suite's classpath only; beside `test-dir` unless set.
+    pub test_resource_dir: PathBuf,
+    /// For the suite's JVM, instead of `test.jvm-args`.
+    pub jvm_args: Vec<String>,
+    /// Added to the environment the suite's JVM inherits.
+    pub env: Vec<(String, Template)>,
+    /// As `test.retries` and `test.forks`, for this suite; `0` when unset.
+    pub retries: u32,
+    pub forks: u32,
+}
+
+impl TestSuite {
+    /// How many test JVMs to run: `forks`, and one when it is not set.
+    #[must_use]
+    pub fn forks(&self) -> u32 {
+        self.forks.max(1)
+    }
 }
 
 impl TestConfig {
@@ -349,6 +381,12 @@ impl TestConfig {
     #[must_use]
     pub fn forks(&self) -> u32 {
         self.forks.max(1)
+    }
+
+    /// The suite `[test.suites.<name>]` declares.
+    #[must_use]
+    pub fn suite(&self, name: &str) -> Option<&TestSuite> {
+        self.suites.iter().find(|s| s.name == name)
     }
 }
 
@@ -448,6 +486,20 @@ pub struct PackageConfig {
     /// `[package.relocate]`: the packages a fat jar moves, in declaration
     /// order (SPEC §9.9).
     pub relocate: Vec<Relocation>,
+}
+
+/// `[resources]`: resource files expanded as they are copied into
+/// `target/classes` (SPEC §7.3), the answer to Gradle's
+/// `processResources { expand(...) }` and Maven's `<filtering>`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ResourcesConfig {
+    /// Paths under `project.resource-dir`, `/`-separated, in which `${name}`
+    /// is replaced. `*` matches within one path segment, `**` across them.
+    pub expand: Vec<String>,
+    /// The names a `${name}` may use besides `project.name` and
+    /// `project.version`, in declaration order. Values may use
+    /// `{project.name}` and `{project.version}`.
+    pub properties: Vec<(String, Template)>,
 }
 
 /// One `[package.relocate]` entry: a package, and every package under it,
@@ -936,6 +988,7 @@ pub struct Manifest {
     pub run: RunConfig,
     pub test: TestConfig,
     pub package: PackageConfig,
+    pub resources: ResourcesConfig,
     /// `[obfuscate]`, when the project turns it on; `None` leaves the plain jar
     /// unaffected and pins no obfuscator.
     pub obfuscate: Option<ObfuscateConfig>,
@@ -986,8 +1039,18 @@ const TEST_KEYS: &[&str] = &[
     "retries",
     "forks",
     "coverage-minimum",
+    "suites",
+];
+const SUITE_KEYS: &[&str] = &[
+    "test-dir",
+    "test-resource-dir",
+    "jvm-args",
+    "env",
+    "retries",
+    "forks",
 ];
 const PACKAGE_KEYS: &[&str] = &["add-modules", "manifest", "native-image-args", "relocate"];
+const RESOURCES_KEYS: &[&str] = &["expand", "properties"];
 const DEPENDENCY_KEYS: &[&str] = &[
     "version",
     "classifier",
@@ -1023,6 +1086,7 @@ const TOP_KEYS: &[&str] = &[
     "run",
     "test",
     "package",
+    "resources",
     "obfuscate",
     "kotlin",
     "scala",
@@ -1227,6 +1291,7 @@ impl Manifest {
                 retries: optional_count(t, "retries", "test")?,
                 forks: test_forks(t)?,
                 coverage_minimum: coverage_minimum(t, &mut warnings)?,
+                suites: parse_suites(t, &mut warnings)?,
             },
         };
         let package = match section(&table, "package", PACKAGE_KEYS, &mut warnings)? {
@@ -1237,6 +1302,10 @@ impl Manifest {
                 native_image_args: string_array(t, "native-image-args", "package")?,
                 relocate: parse_relocations(t, &mut warnings)?,
             },
+        };
+        let resources = match section(&table, "resources", RESOURCES_KEYS, &mut warnings)? {
+            None => ResourcesConfig::default(),
+            Some(t) => parse_resources(t)?,
         };
         let obfuscate = match section(&table, "obfuscate", OBFUSCATE_KEYS, &mut warnings)? {
             None => None,
@@ -1303,6 +1372,7 @@ impl Manifest {
             run,
             test,
             package,
+            resources,
             obfuscate,
             languages,
             dependencies,
@@ -1463,6 +1533,31 @@ impl Manifest {
             .collect()
     }
 
+    /// `[resources.properties]` with their placeholders expanded, after the
+    /// two every expansion knows: `project.name` and `project.version`.
+    ///
+    /// # Errors
+    ///
+    /// None in practice: parsing admits only those two placeholders.
+    pub fn resource_properties(&self) -> Result<Vec<(String, String)>> {
+        let mut out = vec![
+            ("project.name".to_string(), self.name.clone()),
+            ("project.version".to_string(), self.version.clone()),
+        ];
+        for (name, value) in &self.resources.properties {
+            let expanded = value.expand(|p| match p {
+                Placeholder::ProjectName => Ok(self.name.clone()),
+                Placeholder::ProjectVersion => Ok(self.version.clone()),
+                other => Err(JrsError::manifest(format!(
+                    "`resources.properties.{name}`: `{{{}}}` is not available here",
+                    other.name()
+                ))),
+            })?;
+            out.push((name.clone(), expanded));
+        }
+        Ok(out)
+    }
+
     /// Render this manifest back to TOML, optionally with a comment header.
     ///
     /// Used by `jrs init` and `jrs migrate`; the output is deliberately
@@ -1599,6 +1694,26 @@ impl Manifest {
                 let _ = writeln!(s, "coverage-minimum = {{ {} }}", entries.join(", "));
             }
         }
+        for suite in &self.test.suites {
+            let _ = writeln!(s, "\n[test.suites.{}]", suite.name);
+            let _ = writeln!(s, "test-dir = {}", quote(&to_slash(&suite.test_dir)));
+            let resources = to_slash(&suite.test_resource_dir);
+            if resources != to_slash(&default_test_resource_dir(&suite.test_dir)) {
+                let _ = writeln!(s, "test-resource-dir = {}", quote(&resources));
+            }
+            if !suite.jvm_args.is_empty() {
+                let _ = writeln!(s, "jvm-args = {}", quote_list(&suite.jvm_args));
+            }
+            if !suite.env.is_empty() {
+                let _ = writeln!(s, "env = {}", inline_env(&suite.env));
+            }
+            if suite.retries > 0 {
+                let _ = writeln!(s, "retries = {}", suite.retries);
+            }
+            if suite.forks > 0 {
+                let _ = writeln!(s, "forks = {}", suite.forks);
+            }
+        }
         if !self.package.add_modules.is_empty() || !self.package.native_image_args.is_empty() {
             let _ = writeln!(s, "\n[package]");
             if !self.package.add_modules.is_empty() {
@@ -1633,6 +1748,23 @@ impl Manifest {
                         quote(&r.to),
                         quote_list(&r.exclude)
                     );
+                }
+            }
+        }
+        if self.resources != ResourcesConfig::default() {
+            let _ = writeln!(s, "\n[resources]");
+            if !self.resources.expand.is_empty() {
+                let _ = writeln!(s, "expand = {}", quote_list(&self.resources.expand));
+            }
+            if !self.resources.properties.is_empty() {
+                let _ = writeln!(s, "\n[resources.properties]");
+                for (name, value) in &self.resources.properties {
+                    // A dotted name is quoted, or TOML would read a nested table.
+                    let bare = name
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
+                    let key = if bare { name.clone() } else { quote(name) };
+                    let _ = writeln!(s, "{key} = {}", quote(&value.raw));
                 }
             }
         }
@@ -1799,6 +1931,7 @@ pub fn blank(name: &str, version: &str, root: &Path) -> Manifest {
         run: RunConfig::default(),
         test: TestConfig::default(),
         package: PackageConfig::default(),
+        resources: ResourcesConfig::default(),
         obfuscate: None,
         languages: Vec::new(),
         dependencies: Vec::new(),
@@ -2699,6 +2832,71 @@ fn parse_jar_attributes(t: &toml::Table) -> Result<Vec<(String, Template)>> {
     Ok(out)
 }
 
+/// `[resources]`: which resource files are expanded, and the properties they
+/// may name. A pattern is relative to `project.resource-dir`; one that
+/// matches nothing is harmless, so a file can be added later.
+fn parse_resources(t: &toml::Table) -> Result<ResourcesConfig> {
+    let expand = string_array(t, "expand", "resources")?;
+    for pattern in &expand {
+        if pattern.is_empty()
+            || pattern.starts_with('/')
+            || pattern.contains('\\')
+            || pattern
+                .split('/')
+                .any(|c| c.is_empty() || c == "." || c == "..")
+        {
+            return Err(JrsError::manifest(format!(
+                "`resources.expand`: `{pattern}` must be a relative, `/`-separated path \
+                 under `project.resource-dir`, such as `application.yml` or `config/*.properties`"
+            )));
+        }
+    }
+    let mut properties: Vec<(String, Template)> = Vec::new();
+    if let Some(value) = t.get("properties") {
+        let table = value.as_table().ok_or_else(|| {
+            JrsError::manifest(
+                "`resources.properties` must be a table of names to strings, e.g.\n\n    \
+                 [resources]\n    properties = { version = \"{project.version}\" }",
+            )
+        })?;
+        for (name, value) in table {
+            let key = format!("resources.properties.{name}");
+            if !crate::expand::valid_property_name(name) {
+                return Err(JrsError::manifest(format!(
+                    "`{key}`: a property name is letters, digits, `.`, `-` and `_`"
+                )));
+            }
+            if name == "project.name" || name == "project.version" {
+                return Err(JrsError::manifest(format!(
+                    "`{key}`: `{name}` is always set, from `[project]`"
+                )));
+            }
+            let raw = value
+                .as_str()
+                .ok_or_else(|| JrsError::manifest(format!("`{key}` must be a string")))?;
+            let template =
+                Template::parse(raw).map_err(|e| JrsError::manifest(format!("`{key}`: {e}")))?;
+            if let Some(p) = template
+                .placeholders()
+                .find(|p| !matches!(p, Placeholder::ProjectName | Placeholder::ProjectVersion))
+            {
+                return Err(JrsError::manifest(format!(
+                    "`{key}`: `{{{}}}` is not known when resources are copied; a property \
+                     can use `{{project.name}}` and `{{project.version}}`",
+                    p.name()
+                )));
+            }
+            properties.push((name.clone(), template));
+        }
+    }
+    if expand.is_empty() && !properties.is_empty() {
+        return Err(JrsError::manifest(
+            "`resources.properties` is set, but `resources.expand` names no file to use them in",
+        ));
+    }
+    Ok(ResourcesConfig { expand, properties })
+}
+
 /// `[package.relocate]`: package names to the names they move to, in
 /// declaration order (SPEC §9.9). A value is the new name, or a table with
 /// `to` and `exclude` — the classes (`org.slf4j.Marker`) and packages
@@ -3094,6 +3292,70 @@ fn test_forks(t: &toml::Table) -> Result<u32> {
     }
 }
 
+/// `[test.suites.<name>]`, in declaration order. A suite's name is a task
+/// name's shape, since it is typed on the command line.
+fn parse_suites(t: &toml::Table, warnings: &mut Vec<String>) -> Result<Vec<TestSuite>> {
+    let Some(value) = t.get("suites") else {
+        return Ok(Vec::new());
+    };
+    let table = value.as_table().ok_or_else(|| {
+        JrsError::manifest(
+            "`test.suites` must hold one table per suite, e.g.\n\n    \
+             [test.suites.e2e]\n    test-dir = \"src/e2e/java\"",
+        )
+    })?;
+    let mut out = Vec::new();
+    for (name, value) in table {
+        let section = format!("test.suites.{name}");
+        let well_formed = name.starts_with(|c: char| c.is_ascii_lowercase())
+            && name
+                .chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-');
+        if !well_formed {
+            return Err(JrsError::manifest(format!(
+                "`{section}`: a suite name is lowercase letters, digits and `-`, starting \
+                 with a letter"
+            )));
+        }
+        let t = value
+            .as_table()
+            .ok_or_else(|| JrsError::manifest(format!("`{section}` must be a table")))?;
+        warn_unknown(t, SUITE_KEYS, &format!("{section}."), warnings);
+        if t.get("test-dir").is_none() {
+            return Err(JrsError::manifest(format!(
+                "`{section}.test-dir` is required: the directory holding the suite's sources"
+            )));
+        }
+        let test_dir = path_or(t, "test-dir", "", &section)?;
+        let test_resource_dir = match t.get("test-resource-dir") {
+            Some(_) => path_or(t, "test-resource-dir", "", &section)?,
+            None => default_test_resource_dir(&test_dir),
+        };
+        let forks = match t.get("forks") {
+            None => 0,
+            Some(v) => v
+                .as_integer()
+                .and_then(|n| u32::try_from(n).ok())
+                .filter(|n| *n >= 1)
+                .ok_or_else(|| {
+                    JrsError::manifest(format!(
+                        "`{section}.forks` must be a whole number of test JVMs, 1 or more"
+                    ))
+                })?,
+        };
+        out.push(TestSuite {
+            name: name.clone(),
+            test_dir,
+            test_resource_dir,
+            jvm_args: string_array(t, "jvm-args", &section)?,
+            env: parse_jvm_env(t, &section)?,
+            retries: optional_count(t, "retries", &section)?,
+            forks,
+        });
+    }
+    Ok(out)
+}
+
 /// `test.coverage-minimum = { line = 0.80, branch = 0.70 }`: a ratio from 0 to
 /// 1 per `JaCoCo` counter. An unknown counter is a warning, like any unknown
 /// key; a value that is not a ratio is an error naming its key.
@@ -3458,6 +3720,115 @@ version = "1"
             .iter()
             .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
             .collect()
+    }
+
+    #[test]
+    fn test_suites_parse_render_and_refuse_what_they_cannot_be() {
+        let m = parse(&format!(
+            "{DEMO}[test]\njvm-args = [\"-Dunit=1\"]\n\n[test.suites.e2e]\n\
+             test-dir = \"src/e2e/java\"\njvm-args = [\"-Dheadless=true\"]\n\
+             env = {{ MODE = \"{{project.version}}\" }}\nforks = 2\n\n\
+             [test.suites.integration]\ntest-dir = \"it/java\"\ntest-resource-dir = \"it/data\"\n"
+        ))
+        .unwrap();
+        assert!(m.warnings.is_empty(), "{:?}", m.warnings);
+        let e2e = m.test.suite("e2e").unwrap();
+        assert_eq!(e2e.test_dir, PathBuf::from("src/e2e/java"));
+        assert_eq!(e2e.test_resource_dir, PathBuf::from("src/e2e/resources"));
+        assert_eq!(e2e.jvm_args, vec!["-Dheadless=true"]);
+        assert_eq!(e2e.forks(), 2);
+        let it = m.test.suite("integration").unwrap();
+        assert_eq!(it.test_resource_dir, PathBuf::from("it/data"));
+        assert_eq!(it.forks(), 1);
+
+        let text = m.render(None);
+        assert!(
+            text.contains("\n[test.suites.e2e]\ntest-dir = \"src/e2e/java\"\n"),
+            "{text}"
+        );
+        assert!(
+            !text.contains("src/e2e/resources"),
+            "the default is not written: {text}"
+        );
+        assert_eq!(parse(&text).unwrap().test, m.test);
+
+        for (body, expected) in [
+            ("[test.suites.E2E]\ntest-dir = \"x\"", "a suite name is"),
+            (
+                "[test.suites.e2e]\njvm-args = []",
+                "`test.suites.e2e.test-dir` is required",
+            ),
+            (
+                "[test.suites.e2e]\ntest-dir = \"x\"\nforks = 0",
+                "whole number",
+            ),
+        ] {
+            let err = parse(&format!("{DEMO}{body}\n")).unwrap_err().to_string();
+            assert!(err.contains(expected), "{body}: {err}");
+        }
+    }
+
+    #[test]
+    fn resources_name_files_to_expand_and_their_properties() {
+        let m = parse(&format!(
+            "{DEMO}[resources]\nexpand = [\"application.yml\", \"config/**/*.properties\"]\n\
+             properties = {{ version = \"{{project.version}}\", \"app.group\" = \"com.example\" }}\n"
+        ))
+        .unwrap();
+        assert!(m.warnings.is_empty(), "{:?}", m.warnings);
+        assert_eq!(
+            m.resources.expand,
+            vec!["application.yml", "config/**/*.properties"]
+        );
+        assert_eq!(
+            m.resource_properties().unwrap(),
+            pairs(&[
+                ("project.name", "demo"),
+                ("project.version", "2.1.0"),
+                ("version", "2.1.0"),
+                ("app.group", "com.example"),
+            ])
+        );
+
+        // Rendered back, it reads the same.
+        let text = m.render(None);
+        assert!(
+            text.contains(
+                "\n[resources]\nexpand = [\"application.yml\", \"config/**/*.properties\"]\n"
+            ),
+            "{text}"
+        );
+        assert_eq!(parse(&text).unwrap().resources, m.resources);
+
+        // Without the table there is nothing to render.
+        assert!(!parse(DEMO).unwrap().render(None).contains("[resources]"));
+    }
+
+    #[test]
+    fn resources_refuse_what_cannot_be_expanded() {
+        for (body, expected) in [
+            ("expand = [\"../secrets.yml\"]", "must be a relative"),
+            ("expand = [\"/abs.yml\"]", "must be a relative"),
+            ("expand = [\"\"]", "must be a relative"),
+            (
+                "expand = [\"a.yml\"]\nproperties = { cp = \"{classpath}\" }",
+                "is not known when resources are copied",
+            ),
+            (
+                "expand = [\"a.yml\"]\nproperties = { \"project.version\" = \"1\" }",
+                "always set",
+            ),
+            (
+                "expand = [\"a.yml\"]\nproperties = { \"a b\" = \"1\" }",
+                "a property name is",
+            ),
+            ("properties = { v = \"1\" }", "names no file"),
+        ] {
+            let err = parse(&format!("{DEMO}[resources]\n{body}\n"))
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains(expected), "{body}: {err}");
+        }
     }
 
     #[test]

@@ -1035,7 +1035,14 @@ fn hook_for(target: &str, relation: Relation) -> Option<Hook> {
         (Relation::DependsOn, "test") => Hook::PreTest,
         (Relation::FinalizedBy, "test") => Hook::PostTest,
         (Relation::FinalizedBy, "jar" | "assemble") => Hook::PostPackage,
-        (Relation::DependsOn, "run") => Hook::PreRun,
+        (Relation::DependsOn, "run" | "bootRun") => Hook::PreRun,
+        // What the jar, or the whole build, needs is needed before the
+        // compile that every one of them starts with: a generator whose
+        // output is a resource must have run before resources are copied.
+        (Relation::DependsOn, "jar" | "assemble" | "build" | "bootJar" | "shadowJar") => {
+            Hook::PreCompile
+        }
+        (Relation::FinalizedBy, "bootJar" | "shadowJar") => Hook::PostPackage,
         _ => return None,
     })
 }
@@ -1052,6 +1059,11 @@ struct Tie {
 /// every task and every tie that could not be.
 pub(super) fn read(script: &str, out: &mut Manifest, report: &mut Report) {
     let top = statements(script);
+    let suites = read_suites(&top, out, report);
+    let top: Vec<Stmt> = top
+        .into_iter()
+        .filter(|s| !declaration(&s.head).is_some_and(|(g, _)| suites.contains(&g)))
+        .collect();
     let (mut declared, mut failed) = read_declarations(&top);
     let custom: Vec<String> = declared
         .iter()
@@ -1095,7 +1107,17 @@ pub(super) fn read(script: &str, out: &mut Manifest, report: &mut Report) {
             continue;
         }
         match hook_for(&tie.target, tie.relation) {
-            Some(hook) => hooked.extend(tie.refs.into_iter().map(|r| (hook, r, tie.text.clone()))),
+            Some(hook) => {
+                // Before the compile, where Gradle has it before the jar or the
+                // whole build: it now also runs for `jrs test` and `jrs run`.
+                let widened =
+                    hook == Hook::PreCompile && !COMPILE_TASKS.contains(&tie.target.as_str());
+                hooked.extend(
+                    tie.refs
+                        .into_iter()
+                        .map(|r| (hook, r, tie.text.clone(), widened)),
+                );
+            }
             None => report.skipped(format!(
                 "`{}` — jrs has no hook that runs where Gradle's `{}` does; run the task \
                  with `jrs task`, or hook it by hand",
@@ -1140,7 +1162,152 @@ pub(super) fn read(script: &str, out: &mut Manifest, report: &mut Report) {
     }
 }
 
-/// The script's task declarations, translated, and those that could not be,
+// ---- test suites ------------------------------------------------------------
+
+/// `Test` tasks over a source set of their own (`testClassesDirs =
+/// sourceSets.e2e.output.classesDirs`) → `[test.suites.<name>]`. Returns the
+/// Gradle names of the tasks it translated, which the task pass then leaves
+/// alone.
+fn read_suites(top: &[Stmt], out: &mut Manifest, report: &mut Report) -> Vec<String> {
+    // What `tasks.withType(Test)` sets reaches every `Test` task.
+    let mut shared: Vec<String> = Vec::new();
+    for stmt in top {
+        let compact: String = stmt.head.chars().filter(|c| !c.is_whitespace()).collect();
+        if compact.starts_with("tasks.withType(Test") || compact.starts_with("tasks.withType<Test>")
+        {
+            shared.extend(test_jvm_args(stmt.block.as_deref().unwrap_or_default()));
+        }
+    }
+
+    let mut translated = Vec::new();
+    for stmt in top {
+        let Some((gradle, Ok(header))) = declaration(&stmt.head) else {
+            continue;
+        };
+        if header.kind.as_deref() != Some("Test") {
+            continue;
+        }
+        let block = stmt.block.as_deref().unwrap_or_default();
+        let Some(source_set) = test_source_set(block) else {
+            continue;
+        };
+        let Ok(name) = task_name(&gradle) else {
+            continue;
+        };
+        let name = name
+            .strip_prefix("test-")
+            .map_or(name.clone(), str::to_string);
+        if out.test.suites.iter().any(|s| s.name == name) {
+            report.skipped(format!(
+                "task `{gradle}` — its suite name `{name}` is taken by another task"
+            ));
+            continue;
+        }
+        let (java, resources) = source_set_dirs(top, &source_set);
+        let mut jvm_args = shared.clone();
+        for arg in test_jvm_args(block) {
+            if !jvm_args.contains(&arg) {
+                jvm_args.push(arg);
+            }
+        }
+        let default_resources = java.parent().map_or_else(
+            || std::path::PathBuf::from("src/test/resources"),
+            |p| p.join("resources"),
+        );
+        report.migrated(format!(
+            "task `{gradle}` → [test.suites.{name}], the tests under {} (run with `jrs test \
+             --suite {name}`)",
+            java.display()
+        ));
+        out.test.suites.push(crate::manifest::TestSuite {
+            name,
+            test_dir: java,
+            test_resource_dir: resources.unwrap_or(default_resources),
+            jvm_args,
+            env: Vec::new(),
+            retries: 0,
+            forks: 0,
+        });
+        translated.push(gradle);
+    }
+    translated
+}
+
+/// The source set a `Test` task's `testClassesDirs` names.
+fn test_source_set(block: &str) -> Option<String> {
+    statements(block).iter().find_map(|s| {
+        let head = s.head.trim();
+        let rest = head.strip_prefix("testClassesDirs")?;
+        let rest = rest.trim_start().strip_prefix('=')?.trim();
+        let rest = rest.strip_prefix("sourceSets.")?;
+        // `sourceSets.e2e.output`, Kotlin's `sourceSets["e2e"].output`.
+        let name: String = rest
+            .trim_start_matches(['[', '"', '\''])
+            .chars()
+            .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+            .collect();
+        (!name.is_empty() && name != "main" && name != "test").then_some(name)
+    })
+}
+
+/// A source set's Java and resource directories, from `sourceSets { }`, or
+/// Gradle's `src/<name>/java` and `src/<name>/resources` convention.
+fn source_set_dirs(top: &[Stmt], name: &str) -> (std::path::PathBuf, Option<std::path::PathBuf>) {
+    let mut java = None;
+    let mut resources = None;
+    for stmt in top.iter().filter(|s| s.head.trim() == "sourceSets") {
+        for set in statements(stmt.block.as_deref().unwrap_or_default()) {
+            let head = set.head.trim();
+            let named = head == name
+                || [
+                    format!("create(\"{name}\")"),
+                    format!("register(\"{name}\")"),
+                    format!("create('{name}')"),
+                ]
+                .contains(&head.to_string());
+            if !named {
+                continue;
+            }
+            for part in statements(set.block.as_deref().unwrap_or_default()) {
+                let dirs: Vec<String> = statements(part.block.as_deref().unwrap_or_default())
+                    .iter()
+                    .filter(|d| d.head.trim_start().starts_with("srcDir"))
+                    .flat_map(|d| super::gradle::quoted(&d.head))
+                    .collect();
+                let first = dirs.into_iter().next().map(std::path::PathBuf::from);
+                match part.head.trim() {
+                    "java" => java = java.or(first),
+                    "resources" => resources = resources.or(first),
+                    _ => {}
+                }
+            }
+        }
+    }
+    let convention = std::path::PathBuf::from(format!("src/{name}"));
+    (
+        java.unwrap_or_else(|| convention.join("java")),
+        resources.or_else(|| Some(convention.join("resources"))),
+    )
+}
+
+/// `jvmArgs` and `systemProperty` in a `Test` block, as JVM flags.
+fn test_jvm_args(block: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for stmt in statements(block) {
+        let head = stmt.head.trim();
+        if head.starts_with("jvmArgs") {
+            out.extend(super::gradle::quoted(head));
+        } else if head.starts_with("systemProperty")
+            && !head.starts_with("systemProperties")
+            && let [key, value] = super::gradle::quoted(head).as_slice()
+        {
+            out.push(format!("-D{key}={value}"));
+        }
+    }
+    out
+}
+
+/// The script's task declarations, translated, and those that could not be,/// The script's task declarations, translated, and those that could not be,
 /// with why.
 fn read_declarations(top: &[Stmt]) -> (Vec<Declared>, Vec<(String, String)>) {
     let mut declared: Vec<Declared> = Vec::new();
@@ -1249,15 +1416,21 @@ fn link_depends_on(declared: &mut [Declared], report: &mut Report) {
 /// migrated or would do nothing there.
 fn apply_hooks(
     declared: &mut [Declared],
-    hooked: Vec<(Hook, String, String)>,
+    hooked: Vec<(Hook, String, String, bool)>,
     custom: &[String],
     out: &mut Manifest,
     report: &mut Report,
 ) {
-    for (hook, gradle, text) in hooked {
+    // Earliest hook first, so a task already hooked before the compile is
+    // not hooked again where it would only run a second time.
+    let mut hooked = hooked;
+    hooked.sort_by_key(|(h, _, _, _)| Hook::ALL.iter().position(|a| a == h));
+    for (hook, gradle, text, widened) in hooked {
         let Some(d) = declared.iter_mut().find(|d| d.gradle == gradle) else {
             let why = if custom.contains(&gradle) {
                 format!("`{gradle}` was not migrated")
+            } else if gradle == "jacocoTestReport" {
+                "`jrs test --coverage` writes the JaCoCo report itself".to_string()
             } else {
                 format!("`{gradle}` is Gradle's own task, and a jrs hook runs only tasks")
             };
@@ -1275,6 +1448,22 @@ fn apply_hooks(
             .cloned()
             .collect();
         let name = d.def.name.clone();
+        if matches!(hook, Hook::PreTest | Hook::PreRun)
+            && out.hooks.tasks(Hook::PreCompile).contains(&name)
+        {
+            report.migrated(format!(
+                "`{text}` — [tasks.{name}] already runs in hooks.pre-compile, which \
+                 `jrs {}` goes through first",
+                if hook == Hook::PreRun { "run" } else { "test" }
+            ));
+            continue;
+        }
+        if widened && !out.hooks.tasks(Hook::PreCompile).contains(&name) {
+            report.review(format!(
+                "hooks.pre-compile runs [tasks.{name}] on every build, `jrs test` and \
+                 `jrs run` included, as the earliest point that comes before `{text}`"
+            ));
+        }
         if kept.len() != d.def.depends_on.len() {
             if d.def.action.is_none() && kept.is_empty() {
                 report.skipped(format!(

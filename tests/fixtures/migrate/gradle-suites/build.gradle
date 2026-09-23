@@ -1,0 +1,57 @@
+plugins {
+    id 'java'
+    id 'jacoco'
+    id 'org.springframework.boot' version '3.5.16'
+    id 'io.spring.dependency-management' version '1.1.7'
+}
+
+version = '1.4.0'
+
+sourceSets {
+    integration {
+        java {
+            srcDir 'src/it/java'
+        }
+        compileClasspath += sourceSets.main.output + sourceSets.test.output
+        runtimeClasspath += sourceSets.main.output + sourceSets.test.output
+    }
+}
+
+jacoco {
+    toolVersion = "0.8.13"
+}
+
+dependencies {
+    implementation 'org.springframework.boot:spring-boot-starter-web'
+    testImplementation 'org.springframework.boot:spring-boot-starter-test'
+}
+
+tasks.withType(Test).configureEach {
+    jvmArgs '--enable-preview'
+}
+
+tasks.named('test') {
+    useJUnitPlatform()
+    systemProperty 'spring.profiles.active', 'test'
+    finalizedBy jacocoTestReport
+}
+
+tasks.register('integrationTest', Test) {
+    description = 'Runs the integration tests'
+    testClassesDirs = sourceSets.integration.output.classesDirs
+    classpath = sourceSets.integration.runtimeClasspath
+    useJUnitPlatform()
+    systemProperty 'it.mode', 'full'
+}
+
+tasks.register('generateAssets', Exec) {
+    commandLine 'sh', '-c', 'npm run build'
+}
+
+tasks.named('build') {
+    dependsOn 'generateAssets'
+}
+
+tasks.named('bootRun') {
+    dependsOn 'generateAssets'
+}

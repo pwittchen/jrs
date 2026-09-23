@@ -472,6 +472,7 @@ pre-compile = ["build-info"]</pre>
     <tr><td><a href="#run-config"><code>[run]</code></a></td><td>JVM flags, agents, environment and working directory for <code>jrs run</code>.</td></tr>
     <tr><td><a href="#test-config"><code>[test]</code></a></td><td>The test JVM, retries, forks, coverage minimums.</td></tr>
     <tr><td><a href="#package-config"><code>[package]</code></a></td><td>Image modules, native-image flags, manifest attributes, relocation.</td></tr>
+    <tr><td><a href="#resources-config"><code>[resources]</code></a></td><td><code>${name}</code> expansion in resource files.</td></tr>
     <tr><td><a href="#obfuscate-config"><code>[obfuscate]</code></a></td><td>ProGuard obfuscation of the packaged jar.</td></tr>
     <tr><td><a href="#tasks-config"><code>[tasks.&lt;name&gt;]</code> <code>[hooks]</code></a></td><td>Your own build steps, and when they run.</td></tr>
   </tbody>
@@ -845,7 +846,20 @@ env = { TZ = "UTC" }
 retries = 2
 forks = 4
 jacoco-version = "0.8.15"
-coverage-minimum = { line = 0.80, branch = 0.70 }</pre>
+coverage-minimum = { line = 0.80, branch = 0.70 }
+
+[test.suites.e2e]                            # jrs test --suite e2e
+test-dir = "src/e2e/java"
+jvm-args = ["-Dplaywright.headless=true"]</pre>
+<p>
+  A <code>[test.suites.&lt;name&gt;]</code> table declares a second set of tests with sources of
+  their own: <code>test-dir</code> (required), <code>test-resource-dir</code>, <code>jvm-args</code>,
+  <code>env</code>, <code>forks</code> and <code>retries</code>. <code>jrs test --suite &lt;name&gt;</code>
+  compiles it against the main classes, the default test classes and the test classpath into
+  <code>target/suites/&lt;name&gt;</code> and runs it with its own JVM settings; plain
+  <code>jrs test</code> never runs it. <code>jrs migrate</code> makes one from a Gradle
+  <code>Test</code> task over a source set of its own.
+</p>
 <p>Everything about running tests is in the <a href="#testing">Testing</a> guide.</p>
 </section>
 
@@ -898,6 +912,31 @@ Automatic-Module-Name = "com.example.app"
   does, so the jar carries a private copy of a library that cannot clash with another copy on the
   same classpath: for an agent, a plugin, or a job submitted to a cluster. See
   <a href="#packaging-relocating-packages">Relocating packages</a>.
+</p>
+</section>
+
+<section id="resources-config">
+<h2><code>[resources]</code></h2>
+<pre data-lang="toml">[resources]
+expand = ["application.yml", "config/*.properties"]   # under project.resource-dir
+
+[resources.properties]                               # optional
+version = "{project.version}"
+group = "com.example"</pre>
+<p>
+  Resources are copied as they are, except the files <code>expand</code> names: in those, every
+  <code>${name}</code> is replaced as the file is copied, as Gradle's
+  <code>processResources { expand(...) }</code> and Maven's resource filtering do.
+  <code>${project.name}</code> and <code>${project.version}</code> are always known, and
+  <code>properties</code> adds more. <code>\${name}</code> is a literal <code>${name}</code>, so a
+  placeholder meant for Spring survives the copy; any other <code>$</code> is left alone.
+</p>
+<p>
+  A name that is neither built in nor declared fails the build, naming the file and the line.
+  Patterns are <code>/</code>-separated paths under <code>resource-dir</code>: <code>*</code> and
+  <code>?</code> match within one directory, <code>**</code> across any number of them. Only the
+  main resources are expanded, and an expanded file is rewritten whenever its expanded content
+  changes, so a new <code>project.version</code> reaches it without touching the file.
 </p>
 </section>
 
@@ -1172,6 +1211,7 @@ jrs -q run -- input.txt &gt; output.txt   # only the program's output</pre>
     <tr><td><code>--fail-fast</code></td><td>Stop at the first failing test.</td></tr>
     <tr><td><code>--retries &lt;N&gt;</code></td><td>Run failing tests again up to <code>N</code> times; overrides <code>[test] retries</code>.</td></tr>
     <tr><td><code>--forks &lt;N&gt;</code></td><td>Split the test classes among <code>N</code> JVMs run at once; overrides <code>[test] forks</code>.</td></tr>
+    <tr><td><code>--suite &lt;NAME&gt;</code></td><td>Run the suite <code>[test.suites.&lt;NAME&gt;]</code> declares instead of the default tests.</td></tr>
     <tr><td><code>--timings</code></td><td>Print the phase timings after the run.</td></tr>
   </tbody>
 </table>
@@ -2563,6 +2603,11 @@ jrs migrate                # write jrs.toml; the original build file is untouche
     <tr><td class="wrap"><code>environment</code>, <code>workingDir</code> on <code>run</code> / <code>test</code></td><td class="wrap"><code>run.env</code>, <code>run.cwd</code>, <code>test.env</code></td></tr>
     <tr><td class="wrap"><code>maxParallelForks</code>, surefire's <code>&lt;forkCount&gt;</code></td><td class="wrap"><code>test.forks</code>, when a number</td></tr>
     <tr><td class="wrap"><code>jar { manifest { attributes(…) } }</code>, <code>&lt;manifestEntries&gt;</code></td><td class="wrap"><code>[package.manifest]</code></td></tr>
+    <tr><td class="wrap"><code>processResources { filesMatching(…) { expand(…) } }</code></td><td class="wrap"><code>[resources]</code></td></tr>
+    <tr><td class="wrap">A <code>Test</code> task over another source set (<code>testClassesDirs = sourceSets.e2e.output.classesDirs</code>)</td><td class="wrap"><code>[test.suites.&lt;name&gt;]</code></td></tr>
+    <tr><td class="wrap"><code>build</code> / <code>bootJar</code> / <code>bootRun</code> <code>dependsOn</code></td><td class="wrap"><code>hooks.pre-compile</code>, <code>hooks.pre-run</code></td></tr>
+    <tr><td class="wrap"><code>jacoco { toolVersion }</code></td><td class="wrap"><code>test.jacoco-version</code></td></tr>
+    <tr><td class="wrap"><code>options.compilerArgs</code> on <code>JavaCompile</code>, <code>jvmArgs</code> on <code>bootRun</code> / <code>JavaExec</code></td><td class="wrap"><code>java.javac-args</code>, <code>run.jvm-args</code>, when literals</td></tr>
     <tr><td class="wrap">Shade <code>&lt;relocations&gt;</code>, Shadow <code>relocate</code></td><td class="wrap"><code>[package.relocate]</code>, and <code>jrs package --fat</code></td></tr>
     <tr><td class="wrap"><code>proguard-maven-plugin</code>, <code>com.guardsquare.proguard</code></td><td class="wrap"><code>[obfuscate]</code></td></tr>
     <tr><td class="wrap">Kotlin plugin, <code>id 'scala'</code>, <code>id 'groovy'</code>, <code>kotlin-</code> / <code>scala-maven-plugin</code>, <code>gmavenplus-plugin</code></td><td class="wrap"><code>[kotlin]</code>, <code>[scala]</code>, <code>[groovy]</code></td></tr>

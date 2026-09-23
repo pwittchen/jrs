@@ -16,6 +16,7 @@ pub mod config;
 pub mod dist;
 pub mod edit;
 pub mod error;
+pub mod expand;
 pub mod image;
 pub mod lockfile;
 pub mod manifest;

@@ -16,7 +16,7 @@ use super::gradle_vars::{self, Unread, Variables};
 use super::{Migration, Report, Source};
 use crate::compile::lang::Language;
 use crate::error::{IoResultExt, Result};
-use crate::manifest::{self, Dependency, Exclusion, Manifest};
+use crate::manifest::{self, Dependency, Exclusion, Manifest, Placeholder};
 use crate::resolve::coord::Ga;
 
 const PREAMBLE: &str = "Gradle migration is approximate. jrs reads the declarative \
@@ -86,12 +86,26 @@ pub fn migrate(build_file: &Path, root: &Path) -> Result<Migration> {
         })
         .unwrap_or_else(|| "app".to_string());
 
-    let version = if let Some(v) = assignment(&script, "version") {
-        report.migrated(format!("project.version = {v}"));
-        v
-    } else {
-        report.review("project.version — no `version = ...` found; defaulted to 0.1.0".to_string());
-        "0.1.0".to_string()
+    let version = match assignment_expression(&script, "version").map(|e| vars.evaluate(&e)) {
+        Some(Ok((v, _))) => {
+            report.migrated(format!("project.version = {v}"));
+            v
+        }
+        Some(Err(why)) => {
+            // A version worked out when Gradle runs — from a property, a git
+            // tag — has no value until then; the first string literal on the
+            // line is more likely an argument than the version.
+            report.review(format!(
+                "project.version — {why}; defaulted to 0.1.0, set it in jrs.toml"
+            ));
+            "0.1.0".to_string()
+        }
+        None => {
+            report.review(
+                "project.version — no `version = ...` found; defaulted to 0.1.0".to_string(),
+            );
+            "0.1.0".to_string()
+        }
     };
 
     let mut out = manifest::blank(&name, &version, root);
@@ -118,12 +132,14 @@ pub fn migrate(build_file: &Path, root: &Path) -> Result<Migration> {
     read_jvm_args(&script, &mut out, &mut report);
     super::gradle_tasks::read_jvm_environment(&script, &mut out, &mut report);
     read_jar_manifest(&script, &mut out, &mut report);
+    read_resources(&script, &vars, &mut out, &mut report);
     read_proguard(&plugins, &mut out, &mut report);
     read_shadow(&script, &plugins, &mut out, &mut report);
     super::gradle_repos::read(&script, &mut out, &mut report);
     super::gradle_tasks::read(&script, &mut out, &mut report);
     vars.report(&mut report);
-    report_the_unreadable(&script, &settings, &plugins, &mut report);
+    read_jacoco(&script, &plugins, &mut out, &mut report);
+    report_the_unreadable(&script, &settings, &plugins, &out, &mut report);
 
     Ok(Migration {
         source: Source::Gradle,
@@ -890,6 +906,53 @@ fn read_jvm_args(script: &str, out: &mut Manifest, report: &mut Report) {
         }
     }
 
+    // `tasks.withType(JavaExec)` and `bootRun { }` start the program as
+    // `jrs run` does.
+    let mut run_args = Vec::new();
+    for line in blocks_where(script, is_run_block) {
+        let trimmed = line.trim();
+        if trimmed.starts_with("jvmArgs") {
+            run_args.extend(quoted(trimmed));
+        }
+    }
+    let run_agents = take_java_agents(&mut run_args);
+    let mut fresh: Vec<String> = Vec::new();
+    for arg in run_args {
+        if !out.run.jvm_args.contains(&arg) && !fresh.contains(&arg) {
+            fresh.push(arg);
+        }
+    }
+    let run_args = fresh;
+    if !run_args.is_empty() {
+        report.migrated(format!("run.jvm-args += {run_args:?}"));
+        out.run.jvm_args.extend(run_args);
+    }
+    for agent in run_agents {
+        translate_java_agent("run", &agent, out, report);
+    }
+
+    // `options.compilerArgs` in `compileJava { }` or
+    // `tasks.withType(JavaCompile)`: javac's own flags.
+    let mut javac_args = Vec::new();
+    for line in blocks_where(script, is_compile_block) {
+        let trimmed = line.trim();
+        if trimmed.contains("compilerArgs") {
+            let args = quoted(trimmed);
+            if args.is_empty() {
+                report.skipped(format!("`{trimmed}` — its value is computed"));
+            }
+            javac_args.extend(args);
+        }
+    }
+    for arg in javac_args {
+        if !out.java.javac_args.contains(&arg) {
+            report.migrated(format!(
+                "java.javac-args += {arg} (from `options.compilerArgs`)"
+            ));
+            out.java.javac_args.push(arg);
+        }
+    }
+
     let mut test_args = Vec::new();
     let mut test_agents = Vec::new();
     for line in blocks_where(script, is_test_block) {
@@ -1001,6 +1064,43 @@ fn translate_java_agent(section: &str, arg: &str, out: &mut Manifest, report: &m
     ));
 }
 
+/// `compileJava { }`, and the `tasks.compileJava` / `tasks.withType(JavaCompile)`
+/// spellings of it.
+fn is_compile_block(header: &str) -> bool {
+    let compact: String = header.chars().filter(|c| !c.is_whitespace()).collect();
+    [
+        "compileJava{",
+        "tasks.compileJava{",
+        "tasks.named('compileJava')",
+        "tasks.named(\"compileJava\")",
+        "tasks.named<JavaCompile>(\"compileJava\")",
+        "tasks.withType(JavaCompile)",
+        "tasks.withType<JavaCompile>",
+    ]
+    .iter()
+    .any(|h| compact.starts_with(h))
+}
+
+/// `bootRun { }`, the `application` plugin's `run { }`, and
+/// `tasks.withType(JavaExec)` — what starts the program.
+fn is_run_block(header: &str) -> bool {
+    let compact: String = header.chars().filter(|c| !c.is_whitespace()).collect();
+    [
+        "bootRun{",
+        "run{",
+        "tasks.bootRun{",
+        "tasks.run{",
+        "tasks.named('bootRun')",
+        "tasks.named(\"bootRun\")",
+        "tasks.named<BootRun>(\"bootRun\")",
+        "tasks.named<JavaExec>(\"run\")",
+        "tasks.withType(JavaExec)",
+        "tasks.withType<JavaExec>",
+    ]
+    .iter()
+    .any(|h| compact.starts_with(h))
+}
+
 /// `test { }`, and the `tasks.test` / `tasks.withType(Test)` spellings of it.
 fn is_test_block(header: &str) -> bool {
     let compact: String = header.chars().filter(|c| !c.is_whitespace()).collect();
@@ -1083,6 +1183,246 @@ fn read_jar_manifest(script: &str, out: &mut Manifest, report: &mut Report) {
             ));
         }
     }
+}
+
+/// `processResources { filesMatching(...) { expand(...) } }`, in either DSL,
+/// → `[resources]`.
+///
+/// `filesMatching` patterns become `resources.expand` as written, and an
+/// `expand` outside one expands every file, `**`. `expand(project.properties)`
+/// gives the properties such a resource is likely to name — `version`,
+/// `name`, and `group` and `description` when the build sets them literally;
+/// a map gives its own entries, `version` / `project.version` as
+/// `{project.version}`. `filter`, `from` and the rest of `ProcessResources`
+/// are reported: jrs copies the resource tree as it is.
+fn read_resources(script: &str, vars: &Variables, out: &mut Manifest, report: &mut Report) {
+    let lines = blocks_where(script, is_process_resources_block);
+    if lines.is_empty() {
+        return;
+    }
+    let text = lines.join("\n");
+    let mut patterns: Vec<String> = Vec::new();
+    for line in &lines {
+        let trimmed = line.trim();
+        let compact: String = trimmed.chars().filter(|c| !c.is_whitespace()).collect();
+        if compact.starts_with("filesMatching") {
+            let found = quoted(trimmed);
+            if found.is_empty() {
+                report.skipped(format!("`{trimmed}` — its patterns are computed"));
+            }
+            for p in found {
+                if !patterns.contains(&p) {
+                    patterns.push(p);
+                }
+            }
+        } else if !compact.starts_with("expand(")
+            && !compact.starts_with("filteringCharset")
+            && !compact.chars().all(|c| matches!(c, '{' | '}' | ')'))
+        {
+            report.skipped(format!(
+                "`processResources {{ {trimmed} }}` — jrs copies resources as they are, \
+                 expanding only what `[resources]` names"
+            ));
+        }
+    }
+    if !text.contains("expand(") {
+        return;
+    }
+    // An `expand` with no `filesMatching` around it expands every file.
+    if patterns.is_empty() {
+        patterns.push("**".to_string());
+    }
+
+    let mut properties: Vec<(String, manifest::Template)> = Vec::new();
+    let mut add = |name: &str, template: manifest::Template| {
+        if !properties.iter().any(|(n, _)| n == name) {
+            properties.push((name.to_string(), template));
+        }
+    };
+    let project_value = |expression: &str| -> Option<manifest::Template> {
+        let e = expression.trim();
+        match e {
+            "version" | "project.version" | "rootProject.version" => {
+                Some(placeholder(Placeholder::ProjectVersion))
+            }
+            "name" | "project.name" | "rootProject.name" => {
+                Some(placeholder(Placeholder::ProjectName))
+            }
+            _ => vars
+                .evaluate(e)
+                .ok()
+                .map(|(v, _)| manifest::Template::literal(&v)),
+        }
+    };
+    for call in expand_arguments(&text) {
+        let call = call.trim();
+        if matches!(
+            call,
+            "project.properties" | "properties" | "project.getProperties()"
+        ) {
+            add("version", placeholder(Placeholder::ProjectVersion));
+            add("name", placeholder(Placeholder::ProjectName));
+            for key in ["group", "description"] {
+                if let Some(Ok((v, _))) =
+                    assignment_expression(script, key).map(|e| vars.evaluate(&e))
+                {
+                    add(key, manifest::Template::literal(&v));
+                }
+            }
+            report.review(
+                "`expand(project.properties)` — resources.properties holds `version`, `name`, \
+                 `group` and `description`; add any other property the resources name"
+                    .to_string(),
+            );
+            continue;
+        }
+        for entry in split_top_level(call) {
+            // `version: project.version` (Groovy), `"version" to project.version` (Kotlin).
+            let (key, value) = if let Some((k, v)) = entry.split_once(" to ") {
+                (k, v)
+            } else if let Some((k, v)) = entry.split_once(':') {
+                (k, v)
+            } else {
+                report.skipped(format!(
+                    "`expand({call})` — `{}` is not a `name: value` pair",
+                    entry.trim()
+                ));
+                continue;
+            };
+            let key = key.trim().trim_matches(['"', '\'']);
+            match project_value(value) {
+                Some(t)
+                    if crate::expand::valid_property_name(key)
+                        && key != "project.name"
+                        && key != "project.version" =>
+                {
+                    add(key, t)
+                }
+                _ => report.skipped(format!(
+                    "`expand` property `{key}` — its value is computed (`{}`)",
+                    value.trim()
+                )),
+            }
+        }
+    }
+
+    report.migrated(format!(
+        "resources.expand = [{}] (from `processResources`)",
+        patterns.join(", ")
+    ));
+    out.resources.expand = patterns;
+    out.resources.properties = properties;
+    if out.resources.properties.is_empty() {
+        report.review(
+            "resources.expand — no property was read from `expand(...)`; only \
+             `${project.name}` and `${project.version}` are known"
+                .to_string(),
+        );
+    }
+}
+
+/// A template that is one placeholder, `{project.version}` say.
+fn placeholder(p: Placeholder) -> manifest::Template {
+    manifest::Template {
+        raw: format!("{{{}}}", p.name()),
+        segments: vec![manifest::Segment::Placeholder(p)],
+    }
+}
+
+/// `processResources { }`, and its `tasks.processResources` /
+/// `tasks.named('processResources')` / `tasks.withType(ProcessResources)`
+/// spellings.
+fn is_process_resources_block(header: &str) -> bool {
+    let compact: String = header.chars().filter(|c| !c.is_whitespace()).collect();
+    [
+        "processResources{",
+        "tasks.processResources{",
+        "tasks.named('processResources')",
+        "tasks.named(\"processResources\")",
+        "tasks.named<ProcessResources>(\"processResources\")",
+        "tasks.withType(ProcessResources)",
+        "tasks.withType<ProcessResources>",
+    ]
+    .iter()
+    .any(|h| compact.starts_with(h))
+}
+
+/// The argument of every `expand(...)` in `text`, brackets balanced.
+fn expand_arguments(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut rest = text;
+    while let Some(i) = rest.find("expand(") {
+        let after = &rest[i + "expand(".len()..];
+        let mut depth = 1usize;
+        let mut end = None;
+        for (j, c) in after.char_indices() {
+            match c {
+                '(' | '[' => depth += 1,
+                ')' | ']' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        end = Some(j);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        let Some(end) = end else { break };
+        out.push(after[..end].to_string());
+        rest = &after[end..];
+    }
+    out
+}
+
+/// `a, b(c, d), e` → `a`, `b(c, d)`, `e`.
+fn split_top_level(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut depth = 0usize;
+    let mut quote: Option<char> = None;
+    let mut current = String::new();
+    for c in text.chars() {
+        match (quote, c) {
+            (Some(q), _) if c == q => quote = None,
+            (Some(_), _) => {}
+            (None, '\'' | '"') => quote = Some(c),
+            (None, '(' | '[') => depth += 1,
+            (None, ')' | ']') => depth = depth.saturating_sub(1),
+            (None, ',') if depth == 0 => {
+                out.push(std::mem::take(&mut current));
+                continue;
+            }
+            _ => {}
+        }
+        current.push(c);
+    }
+    if !current.trim().is_empty() {
+        out.push(current);
+    }
+    out.into_iter().filter(|e| !e.trim().is_empty()).collect()
+}
+
+/// The `jacoco` plugin → `jrs test --coverage`, which needs no plugin, and
+/// `jacoco { toolVersion = "..." }` → `test.jacoco-version`.
+fn read_jacoco(script: &str, plugins: &[Plugin], out: &mut Manifest, report: &mut Report) {
+    if !plugins.iter().any(|p| p.id == "jacoco") {
+        return;
+    }
+    let version = block_lines(script, "jacoco")
+        .iter()
+        .find(|l| l.trim().starts_with("toolVersion"))
+        .and_then(|l| quoted(l).into_iter().next());
+    if let Some(v) = version {
+        report.migrated(format!(
+            "test.jacoco-version = {v} (from `jacoco {{ toolVersion }}`)"
+        ));
+        out.test.jacoco_version = Some(v);
+    }
+    report.review(
+        "plugin `jacoco` — coverage is a flag in jrs, not a task: `jrs test --coverage` \
+         writes the XML and HTML reports into target/coverage"
+            .to_string(),
+    );
 }
 
 /// `jar { }`, and the `tasks.jar` / `tasks.named('jar')` /
@@ -1291,6 +1631,7 @@ fn report_the_unreadable(
     script: &str,
     settings: &Settings,
     plugins: &[Plugin],
+    out: &Manifest,
     report: &mut Report,
 ) {
     if !settings.includes.is_empty() {
@@ -1314,6 +1655,10 @@ fn report_the_unreadable(
             "`sourceSets { }` — use project.source-dir instead",
         ),
     ] {
+        // Source sets a `Test` task runs have become [test.suites].
+        if needle == "sourceSets" && !out.test.suites.is_empty() {
+            continue;
+        }
         if script.lines().any(|l| l.trim().starts_with(needle)) {
             report.skipped(what.to_string());
         }
@@ -1331,6 +1676,7 @@ fn report_the_unreadable(
                 | "org.springframework.boot"
                 | "io.spring.dependency-management"
                 | "com.guardsquare.proguard"
+                | "jacoco"
         ) || SHADOW_PLUGINS.contains(&id)
             || language_plugin(id).is_some()
             || kotlin_compiler_plugin(id).is_some();
@@ -2009,6 +2355,16 @@ fn number_after(line: &str, needle: &str) -> Option<u32> {
         .take_while(char::is_ascii_digit)
         .collect();
     digits.parse().ok()
+}
+
+/// The right-hand side of the first top-level-looking `name = ...`
+/// assignment, as written, for [`Variables::evaluate`](super::gradle_vars).
+fn assignment_expression(script: &str, name: &str) -> Option<String> {
+    script.lines().find_map(|line| {
+        let rest = line.trim().strip_prefix(name)?.trim_start();
+        let rest = rest.strip_prefix('=')?.trim().trim_end_matches(';').trim();
+        (!rest.is_empty()).then(|| rest.to_string())
+    })
 }
 
 /// The value of a `name = <literal>` assignment anywhere in the script.
@@ -2755,6 +3111,40 @@ junit = "org.junit.jupiter:junit-jupiter:5.10.2"
             .manifest;
         assert_eq!(m.repositories.len(), 1);
         assert_eq!(m.repositories[0].url, manifest::CENTRAL_URL);
+    }
+
+    #[test]
+    fn compiler_args_and_java_exec_jvm_args_are_carried_over() {
+        let dir = Dir::new("compiler-args");
+        let migration = dir.migrate(
+            "tasks.withType(JavaCompile).configureEach {\n    \
+             options.compilerArgs += ['--enable-preview', '-Xlint:unchecked']\n}\n\
+             compileJava {\n    options.compilerArgs << '-Xlint:unchecked'\n}\n\
+             tasks.withType(JavaExec).configureEach {\n    jvmArgs '--enable-preview'\n}\n\
+             bootRun {\n    jvmArgs = ['-Xmx512m', '--enable-preview']\n}\n",
+        );
+        assert_eq!(
+            migration.manifest.java.javac_args,
+            ["--enable-preview", "-Xlint:unchecked"]
+        );
+        assert_eq!(
+            migration.manifest.run.jvm_args,
+            ["--enable-preview", "-Xmx512m"]
+        );
+    }
+
+    #[test]
+    fn a_computed_version_defaults_and_says_why() {
+        let dir = Dir::new("computed-version");
+        let migration =
+            dir.migrate("version = project.hasProperty('version') ? project.version : gitTag()\n");
+        assert_eq!(migration.manifest.version, "0.1.0");
+        let review = migration.report.needs_review.join("\n");
+        assert!(review.contains("is an expression"), "{review}");
+
+        let dir = Dir::new("variable-version");
+        let migration = dir.migrate("def v = '3.1.4'\nversion = v\n");
+        assert_eq!(migration.manifest.version, "3.1.4");
     }
 
     #[test]

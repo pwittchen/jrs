@@ -215,11 +215,14 @@ post-package = ["checksum"]
 | `test.env` | no | `{}` | As `run.env`, for the test JVM. |
 | `test.retries` | no | `0` | Run a failed test again up to this many times (§10.2). One that passes on a retry is reported as flaky, not as passed. `jrs test --retries <n>` overrides it. |
 | `test.forks` | no | `1` | Test JVMs a run's classes are split among, run at once (§10.2): Gradle's `maxParallelForks`, surefire's `<forkCount>`. `jrs test --forks <n>` overrides it. |
+| `test.suites.<name>.*` | no | — | A test suite (§10.2): `test-dir` (required), `test-resource-dir` (beside `test-dir`), `jvm-args`, `env`, `forks`, `retries`. Compiled against the main and default test classes and the test classpath into `target/suites/<name>/classes`, and run by `jrs test --suite <name>` only. |
 | `test.coverage-minimum` | no | `{}` | Ratios from 0 to 1 that `jrs test --coverage` must reach, per JaCoCo counter: `instruction`, `branch`, `line`, `complexity`, `method`, `class` — e.g. `{ line = 0.80, branch = 0.70 }` (§10.2). Ignored without `--coverage`. |
 | `package.add-modules` | no | `[]` | Modules a runtime image needs beyond what `jdeps` finds (§9.4). |
 | `package.manifest.*` | no | `{}` | Extra `MANIFEST.MF` main attributes, written after jrs's own in declaration order (§9.1). Values may use `{project.name}` and `{project.version}`; `Main-Class`, `Class-Path`, `Created-By`, `Manifest-Version` and `Name` are jrs's and refused. |
 | `package.native-image-args` | no | `[]` | Passed through verbatim to `native-image` by `--native-image` (§9.7). |
 | `package.relocate.*` | no | `{}` | Package → the name a fat jar moves it to, or `{ to, exclude }` with `exclude` the classes and `<package>.*` packages under it that stay put (§9.9). `jrs package --fat` applies it. |
+| `resources.expand` | no | `[]` | Paths under `project.resource-dir` (`*`, `?`, `**` globs) whose `${name}` placeholders are expanded as they are copied (§7.3). |
+| `resources.properties` | no | `{}` | Names `${...}` may use besides `project.name` and `project.version`; values may use `{project.name}` and `{project.version}`. Needs `resources.expand`. |
 | `obfuscate.*` | no | — | The table turns obfuscation on (§9.8): `version` (required, exact — the ProGuard release), `keep` (class names whose names must survive), `proguard-args` (passed to ProGuard verbatim). Opt-in; `jrs package --obfuscate` runs it. |
 | `kotlin.*`, `scala.*`, `groovy.*` | no | — | The table turns the language on (§7.7): `version` (required, exact), `source-dir` / `test-dir` (`src/main/<lang>` / `src/test/<lang>`), `kotlinc-args` / `scalac-args` / `groovyc-args`, `compiler-jvm-args`. |
 | `dependencies.*` | no | `{}` | Key is `group:artifact` or `group:artifact:classifier`; value is a version, or a table with `version` and optionally `classifier`, `exclusions` (`group:artifact` patterns, `*` allowed), and `compile-only` or `runtime-only`. A table without `version`, `{}` at its shortest, takes the version `[managed]` gives it (§8.9). A table with `path` instead is a local jar: the key is a name, the path is relative to the project root, and only `compile-only` / `runtime-only` go with it (§8.8). |
@@ -815,6 +818,17 @@ A resource deleted from the source tree is deleted from the output too. Since
 the output directory is shared with `javac`, jrs records the resources it
 copied (`target/.jrs/resources-main.list`, `resources-test.list`) and only ever
 removes paths from that record — never a class file or a processor's output.
+
+**Expansion.** The main resources `resources.expand` names are expanded as
+they are copied, not copied byte for byte (`expand.rs`): `${name}` becomes the
+property's value, `\${` a literal `${`, and any other `$` is text. The
+properties are `project.name`, `project.version` and `resources.properties`.
+An unknown name, an unclosed `${` or a file that is not UTF-8 fails the build
+with the file and line. An expanded file is compared by content rather than
+mtime, since its output also depends on `jrs.toml`: a new version must reach
+it though the file is unchanged. This is the declarative half of Gradle's
+`processResources { expand(...) }` and Maven's `<filtering>`; the Groovy
+template half (`$name`, `<% %>`) is build code and stays out.
 
 ### 7.4 Documentation
 
@@ -1688,6 +1702,17 @@ files, and all it touches is names.
   `--rerun-failed`), `--fail-fast`, which stops the whole run, and `--debug`,
   which waits for one debugger, run in one JVM. There is no `forkEvery`: each
   JVM runs its whole share.
+- `[test.suites.<name>]` declares a second set of tests with sources of
+  their own, and `jrs test --suite <name>` runs it instead of the default
+  ones: a compile unit `suite-<name>` into `target/suites/<name>/classes`,
+  whose classpath is the default test classes, the main classes and the test
+  classpath, and whose fingerprint holds the API of both class directories;
+  its resources synced beside it; one launcher run with the suite's own
+  `jvm-args`, `env`, `forks` and `retries` (`test.java-agents` and JaCoCo
+  still apply), reporting into `target/suites/<name>/test-reports`. A suite has
+  no dependencies of its own, which keeps the lockfile one graph: Gradle's
+  `e2eImplementation.extendsFrom testImplementation` is the common case, and a
+  suite-only library goes in `[dev-dependencies]`.
 - `test.coverage-minimum = { line = 0.80, branch = 0.70 }` makes
   `jrs test --coverage` exit `1` when a project-wide total in `jacoco.xml` is
   below its minimum, and the error names both numbers. The counters are
@@ -1817,6 +1842,26 @@ the conventional declarative subset, and is explicit about the fact:
   computed value, usually worked out from `availableProcessors()`, is
   reported, and so is `forkEvery`: jrs never restarts a test JVM part of the
   way through its share.
+- `processResources { filesMatching(...) { expand(...) } }` (also
+  `tasks.processResources`, `tasks.named('processResources')`) →
+  `[resources]`: the patterns as `expand` (a bare `expand` is `**`), and
+  `expand(project.properties)` as `version`, `name` and the literal `group`
+  and `description`; a map's literal and project entries carry over. `filter`
+  and the rest of the block are reported.
+- A `Test` task whose `testClassesDirs` is another source set's output →
+  `[test.suites.<name>]`, the name the task's less a leading `test`, the
+  directories from `sourceSets { }` or the `src/<set>/…` convention, the JVM
+  flags from `tasks.withType(Test)` and the task itself. `dependsOn` on
+  `build`, `jar`, `assemble`, `bootJar` or `shadowJar` → `hooks.pre-compile`
+  (reviewed, since `jrs test` and `jrs run` now run it too); on `bootRun` →
+  `hooks.pre-run`, dropped when `pre-compile` already has the task. The
+  `jacoco` plugin's `toolVersion` → `test.jacoco-version`.
+- `options.compilerArgs` in `compileJava { }` / `tasks.withType(JavaCompile)`
+  → `java.javac-args`; `jvmArgs` in `bootRun { }`, `run { }` or
+  `tasks.withType(JavaExec)` → `run.jvm-args`.
+- `version = <expression>` that is not a literal or a variable jrs can follow
+  (a property lookup, a git tag) is reported and defaulted to `0.1.0`, never
+  read off the first string literal on the line.
 - `jar { manifest { attributes(...) } }` (also `tasks.jar`, Kotlin's
   `mapOf(...)` and `attributes["..."] = ...`) with literal values →
   `[package.manifest]`; `version` / `project.version` → `{project.version}`,

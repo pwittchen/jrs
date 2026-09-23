@@ -388,6 +388,59 @@ fn the_gradle_jar_fixture_translates_exactly() {
     );
 }
 
+/// `processResources { filesMatching(...) { expand(...) } }` as `[resources]`,
+/// and a version Gradle computes defaulted and reported rather than read off
+/// the first string literal on its line.
+#[test]
+fn the_gradle_resources_fixture_translates_exactly() {
+    let (migration, dir) = migrate_fixture("gradle-resources");
+    assert_eq!(migration.manifest.render(None), expected(&dir));
+
+    let review = migration.report.needs_review.join("\n");
+    assert!(
+        review.contains("project.version — `project.hasProperty('version')"),
+        "{review}"
+    );
+    assert!(review.contains("`expand(project.properties)`"), "{review}");
+    let skipped = migration.report.not_migrated.join("\n");
+    assert!(skipped.contains("`expand` property `built`"), "{skipped}");
+    assert!(skipped.contains("filter { line"), "{skipped}");
+}
+
+/// A `Test` task over a source set of its own as `[test.suites]`, with what
+/// `tasks.withType(Test)` sets and its own flags but not the `test` task's;
+/// `build.dependsOn` and `bootRun.dependsOn` as one `pre-compile` hook; and
+/// the `jacoco` plugin as `test.jacoco-version`.
+#[test]
+fn the_gradle_suites_fixture_translates_exactly() {
+    let (migration, dir) = migrate_fixture("gradle-suites");
+    assert_eq!(migration.manifest.render(None), expected(&dir));
+
+    let migrated = migration.report.migrated.join("\n");
+    assert!(
+        migrated.contains("task `integrationTest` → [test.suites.integration-test]"),
+        "{migrated}"
+    );
+    assert!(
+        migrated.contains("already runs in hooks.pre-compile, which `jrs run` goes through"),
+        "{migrated}"
+    );
+    let skipped = migration.report.not_migrated.join("\n");
+    assert!(!skipped.contains("integrationTest"), "{skipped}");
+    assert!(!skipped.contains("sourceSets"), "{skipped}");
+    assert!(!skipped.contains("plugin `jacoco`"), "{skipped}");
+    assert!(
+        skipped.contains("`jrs test --coverage` writes the JaCoCo report"),
+        "{skipped}"
+    );
+    let review = migration.report.needs_review.join("\n");
+    assert_eq!(
+        review.matches("hooks.pre-compile runs").count(),
+        1,
+        "{review}"
+    );
+}
+
 /// `files()` and `fileTree()` as local jars, `runtimeOnly`, and `content` /
 /// `exclusiveContent` as `groups`. The jars are made here, as empty files,
 /// since migration only lists them and nothing binary is committed.
@@ -566,6 +619,8 @@ fn every_expected_manifest_is_a_manifest_jrs_can_read() {
         "gradle-tasks",
         "gradle-env",
         "gradle-jar",
+        "gradle-resources",
+        "gradle-suites",
         "spring-boot-gradle",
         "spring-boot-kts",
         "spring-boot-maven",

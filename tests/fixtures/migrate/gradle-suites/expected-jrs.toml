@@ -1,0 +1,30 @@
+[project]
+name = "suites-demo"
+version = "1.4.0"
+
+[java]
+javac-args = ["-parameters"]
+
+[test]
+jvm-args = ["--enable-preview", "-Dspring.profiles.active=test"]
+jacoco-version = "0.8.13"
+
+[test.suites.integration-test]
+test-dir = "src/it/java"
+test-resource-dir = "src/integration/resources"
+jvm-args = ["--enable-preview", "-Dit.mode=full"]
+
+[managed]
+"org.springframework.boot:spring-boot-dependencies" = { version = "3.5.16", bom = true }
+
+[dependencies]
+"org.springframework.boot:spring-boot-starter-web" = {}
+
+[dev-dependencies]
+"org.springframework.boot:spring-boot-starter-test" = {}
+
+[tasks.generate-assets]
+run = ["sh", "-c", "npm run build"]
+
+[hooks]
+pre-compile = ["generate-assets"]

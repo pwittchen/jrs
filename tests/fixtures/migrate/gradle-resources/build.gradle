@@ -1,0 +1,21 @@
+plugins {
+    id 'java'
+}
+
+group = 'com.example'
+version = project.hasProperty('version') && project.version != 'unspecified' ? project.version : gitVersion()
+description = 'Resources demo'
+
+static def gitVersion() {
+    return 'git describe --tags'.execute().text.trim() ?: '0.0.1-SNAPSHOT'
+}
+
+processResources {
+    filesMatching('application.yml') {
+        expand(project.properties)
+    }
+    filesMatching(['config/*.properties', '**/banner.txt']) {
+        expand(release: project.version, owner: 'ops', built: System.currentTimeMillis())
+    }
+    filter { line -> line.replace('@year@', '2026') }
+}

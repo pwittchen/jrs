@@ -436,6 +436,10 @@ pub struct TestArgs {
     /// `[test] forks`.
     #[arg(long, value_name = "N", value_parser = clap::value_parser!(u32).range(1..))]
     pub forks: Option<u32>,
+    /// Run the suite `[test.suites.<NAME>]` declares instead of the tests
+    /// under `project.test-dir`.
+    #[arg(long, value_name = "NAME")]
+    pub suite: Option<String>,
 }
 
 #[derive(Debug, Default, Args)]
@@ -820,6 +824,10 @@ impl<'a> Session<'a> {
         for config in &self.manifest.languages {
             paths.push(self.manifest.root.join(&config.source_dir));
             paths.push(self.manifest.root.join(&config.test_dir));
+        }
+        for suite in &self.manifest.test.suites {
+            paths.push(self.manifest.root.join(&suite.test_dir));
+            paths.push(self.manifest.root.join(&suite.test_resource_dir));
         }
         paths.extend(task::watched_inputs(&self.manifest));
         paths
@@ -1476,10 +1484,35 @@ impl<'a> Session<'a> {
                   library call; the extra lines are their --timings rows"
     )]
     fn test(&self, args: &TestArgs) -> Result<Option<junit::TestOutcome>> {
+        let suite = match &args.suite {
+            None => None,
+            Some(name) => Some(self.manifest.test.suite(name).ok_or_else(|| {
+                let known: Vec<String> = self
+                    .manifest
+                    .test
+                    .suites
+                    .iter()
+                    .map(|s| format!("`{}`", s.name))
+                    .collect();
+                JrsError::usage(if known.is_empty() {
+                    format!("there is no test suite `{name}`: jrs.toml declares no [test.suites]")
+                } else {
+                    format!(
+                        "there is no test suite `{name}` in jrs.toml (declared: {})",
+                        known.join(", ")
+                    )
+                })
+            })?),
+        };
+        let project = self.project();
+        let reports_dir = match suite {
+            None => project.target_dir().join("test-reports"),
+            Some(s) => project.suite_dir(&s.name).join("test-reports"),
+        };
         // `--rerun-failed` reads the last run's reports before anything else:
         // this run is about to replace them.
         let rerun = if args.rerun_failed {
-            match self.last_failures()? {
+            match self.last_failures(&reports_dir)? {
                 Some(rerun) => Some(rerun),
                 None => return Ok(None),
             }
@@ -1488,12 +1521,12 @@ impl<'a> Session<'a> {
         };
         let built = self.build()?;
         self.hook(Hook::PreTest)?;
-        let project = self.project();
         let toolchain = self.toolchain()?;
 
         let generated = task::generated(&self.manifest, Hook::PreTest)?;
         let sources = project.sources(Unit::Test, &generated.sources)?;
-        if sources.is_empty() {
+        // A suite compiles against the default tests, which may be none.
+        if sources.is_empty() && suite.is_none() {
             self.ui.phase(
                 "Testing",
                 format!(
@@ -1508,37 +1541,58 @@ impl<'a> Session<'a> {
         // Kotlin tests may use the main module's `internal` declarations.
         let mut classpath = vec![project.classes_dir()];
         classpath.extend(built.resolution.classpath(Classpath::Test));
-        let mut unit = self.compile_unit(
-            "test",
-            &sources,
-            project.test_classes_dir(),
-            classpath.clone(),
-            vec![project.classes_dir()],
-        )?;
-        let checking = Instant::now();
-        // Compile avoidance: the tests see the main classes' API, not their
-        // bytes, so a changed method body leaves them fresh (SPEC §7.2).
-        unit.main_api = Some(compile::api_digest(&project.classes_dir())?);
-        if compile::is_stale(&unit)? {
-            let what = sources.describe("test sources");
-            self.ui.phase("Compiling", &what);
-            let scope = self.ui.spinner("Compiling", &what);
-            let mut steps = Vec::new();
-            let result = compile::compile_timed(&toolchain, &unit, self.ui, &mut steps);
-            scope.finish();
-            self.record_steps("test", &steps);
-            self.report_recompiled(&unit, &result?);
-        } else {
-            self.timings.since("compile test (fresh)", checking);
+        if !sources.is_empty() {
+            self.compile_tests(&project, &toolchain, &sources, &classpath)?;
         }
         let syncing = Instant::now();
         project::sync_resources(
             &self.manifest.test_resource_path(),
             &project.test_classes_dir(),
             &project.work_dir().join("resources-test.list"),
+            None,
         )?;
         self.sync_generated(&generated.resources, &project.test_classes_dir(), "test")?;
         self.timings.since("resources test", syncing);
+
+        // What runs: the default tests, or a suite compiled on top of them.
+        let (sources, classpath, scan_dir) = match suite {
+            None => (sources, classpath, project.test_classes_dir()),
+            Some(suite) => {
+                let (sources, classpath) =
+                    self.compile_suite(&project, &toolchain, suite, classpath)?;
+                if sources.is_empty() {
+                    self.ui.phase(
+                        "Testing",
+                        format!(
+                            "no tests found under {}",
+                            self.manifest.root.join(&suite.test_dir).display()
+                        ),
+                    );
+                    return Ok(None);
+                }
+                (
+                    sources,
+                    classpath,
+                    project.suite_dir(&suite.name).join("classes"),
+                )
+            }
+        };
+        let (jvm_args, env, forks, retries, section) = match suite {
+            None => (
+                &self.manifest.test.jvm_args,
+                &self.manifest.test.env,
+                self.manifest.test.forks(),
+                self.manifest.test.retries,
+                "test".to_string(),
+            ),
+            Some(s) => (
+                &s.jvm_args,
+                &s.env,
+                s.forks(),
+                s.retries,
+                format!("test.suites.{}", s.name),
+            ),
+        };
 
         // The launcher, and JaCoCo when coverage is on, are internal
         // dependencies: resolved by jrs, never on the user's own classpath.
@@ -1556,14 +1610,14 @@ impl<'a> Session<'a> {
         }
         let fetched = self.fetch_internal(&internal)?;
 
-        let mut test_classpath = vec![project.test_classes_dir()];
+        let mut test_classpath = vec![scan_dir.clone()];
         test_classpath.extend(junit::without_bundled_launcher(
             classpath,
             &built.resolution,
         ));
         test_classpath.push(fetched[0].clone());
 
-        let mut jvm_args = self.manifest.test.jvm_args.clone();
+        let mut jvm_args = jvm_args.clone();
         let exec = project.target_dir().join("jacoco.exec");
         if args.coverage {
             let _ = std::fs::remove_file(&exec);
@@ -1575,28 +1629,28 @@ impl<'a> Session<'a> {
         let mut run = junit::TestRun {
             jvm_args,
             classpath: test_classpath,
-            scan_dir: project.test_classes_dir(),
+            scan_dir,
             filter: junit::class_name_filter(args.filter.as_deref(), sources.foreign().is_some()),
             include_tags: args.include_tag.clone(),
             exclude_tags: args.exclude_tag.clone(),
             methods: args.method.clone(),
-            reports_dir: Some(project.target_dir().join("test-reports")),
+            reports_dir: Some(reports_dir),
             color: self.ui.color(),
             ascii: self.ui.glyphs().charset == ui::Charset::Ascii,
             launcher_version: launcher.version.clone(),
             work_dir: project.work_dir(),
-            environment: self.jvm_environment("test", &self.manifest.test.env, None)?,
+            environment: self.jvm_environment(&section, env, None)?,
             unique_ids: Vec::new(),
             classes: Vec::new(),
             fail_fast: args.fail_fast,
         };
-        let forks = self.forks(&run, args, rerun.is_some())?;
+        let forks = self.forks(&run, args, forks, rerun.is_some())?;
         self.announce_tests(&mut run, rerun.as_ref(), &sources, forks.len());
         let started = Instant::now();
         let outcome = self
             .launch_tests(&toolchain, &run, &forks, args.debug.as_ref())
             .and_then(|mut outcome| {
-                self.conclude_tests(&toolchain, &run, args, &mut outcome)?;
+                self.conclude_tests(&toolchain, &run, args, retries, &mut outcome)?;
                 Ok(outcome)
             });
         self.timings.since("test JVM", started);
@@ -1617,6 +1671,97 @@ impl<'a> Session<'a> {
         Ok(Some(outcome))
     }
 
+    /// Compile the default test sources into `target/test-classes`, unless
+    /// they are fresh.
+    fn compile_tests(
+        &self,
+        project: &Project<'_>,
+        toolchain: &Toolchain,
+        sources: &Sources,
+        classpath: &[PathBuf],
+    ) -> Result<()> {
+        let mut unit = self.compile_unit(
+            "test",
+            sources,
+            project.test_classes_dir(),
+            classpath.to_vec(),
+            vec![project.classes_dir()],
+        )?;
+        let checking = Instant::now();
+        // Compile avoidance: the tests see the main classes' API, not their
+        // bytes, so a changed method body leaves them fresh (SPEC §7.2).
+        unit.main_api = Some(compile::api_digest(&project.classes_dir())?);
+        if compile::is_stale(&unit)? {
+            let what = sources.describe("test sources");
+            self.ui.phase("Compiling", &what);
+            let scope = self.ui.spinner("Compiling", &what);
+            let mut steps = Vec::new();
+            let result = compile::compile_timed(toolchain, &unit, self.ui, &mut steps);
+            scope.finish();
+            self.record_steps("test", &steps);
+            self.report_recompiled(&unit, &result?);
+        } else {
+            self.timings.since("compile test (fresh)", checking);
+        }
+        Ok(())
+    }
+
+    /// Compile a `[test.suites]` suite into `target/suites/<name>/classes`
+    /// against the main classes, the default test classes and the test
+    /// classpath, and copy its resources beside it. Returns its sources and
+    /// the classpath it runs with, less its own classes.
+    fn compile_suite(
+        &self,
+        project: &Project<'_>,
+        toolchain: &Toolchain,
+        suite: &manifest::TestSuite,
+        test_classpath: Vec<PathBuf>,
+    ) -> Result<(Sources, Vec<PathBuf>)> {
+        let sources = project.sources_under(&self.manifest.root.join(&suite.test_dir))?;
+        let dir = project.suite_dir(&suite.name);
+        let classes = dir.join("classes");
+        let mut classpath = vec![project.test_classes_dir()];
+        classpath.extend(test_classpath);
+        if sources.is_empty() {
+            return Ok((sources, classpath));
+        }
+        let label = format!("suite-{}", suite.name);
+        let mut unit = self.compile_unit(
+            &label,
+            &sources,
+            classes.clone(),
+            classpath.clone(),
+            vec![project.classes_dir(), project.test_classes_dir()],
+        )?;
+        let checking = Instant::now();
+        // What the suite can see of the main and the default test classes.
+        unit.main_api = Some(format!(
+            "{}\n{}",
+            compile::api_digest(&project.classes_dir())?,
+            compile::api_digest(&project.test_classes_dir())?
+        ));
+        if compile::is_stale(&unit)? {
+            let what = sources.describe(&format!("{} sources", suite.name));
+            self.ui.phase("Compiling", &what);
+            let scope = self.ui.spinner("Compiling", &what);
+            let mut steps = Vec::new();
+            let result = compile::compile_timed(toolchain, &unit, self.ui, &mut steps);
+            scope.finish();
+            self.record_steps(&label, &steps);
+            self.report_recompiled(&unit, &result?);
+        } else {
+            self.timings
+                .since(format!("compile {label} (fresh)"), checking);
+        }
+        project::sync_resources(
+            &self.manifest.root.join(&suite.test_resource_dir),
+            &classes,
+            &project.work_dir().join(format!("resources-{label}.list")),
+            None,
+        )?;
+        Ok((sources, classpath))
+    }
+
     /// What goes ahead of the test JVM's other arguments: the debugger's
     /// agent under `--debug`, then `test.java-agents`, from the test
     /// classpath or pinned apart from it.
@@ -1635,9 +1780,10 @@ impl<'a> Session<'a> {
         &self,
         run: &junit::TestRun,
         args: &TestArgs,
+        configured: u32,
         rerun: bool,
     ) -> Result<Vec<(junit::TestRun, usize)>> {
-        let forks = args.forks.unwrap_or_else(|| self.manifest.test.forks());
+        let forks = args.forks.unwrap_or(configured);
         if forks < 2 || rerun || !run.methods.is_empty() || args.debug.is_some() || args.fail_fast {
             return Ok(Vec::new());
         }
@@ -1742,6 +1888,7 @@ impl<'a> Session<'a> {
         toolchain: &Toolchain,
         run: &junit::TestRun,
         args: &TestArgs,
+        configured_retries: u32,
         outcome: &mut junit::TestOutcome,
     ) -> Result<()> {
         if outcome.stopped_early && run.fail_fast_mode() == junit::FailFast::Stop {
@@ -1756,7 +1903,7 @@ impl<'a> Session<'a> {
         let retries = if args.debug.is_some() {
             0
         } else {
-            args.retries.unwrap_or(self.manifest.test.retries)
+            args.retries.unwrap_or(configured_retries)
         };
         if !outcome.ok() && !outcome.stopped_early && retries > 0 {
             self.retry_failures(toolchain, run, retries, outcome)?;
@@ -1770,9 +1917,8 @@ impl<'a> Session<'a> {
     ///
     /// No reports at all is an error, not nothing to do: a run that ended
     /// before the launcher wrote any did not pass.
-    fn last_failures(&self) -> Result<Option<(usize, test_report::Selection)>> {
-        let reports = self.project().target_dir().join("test-reports");
-        let Some(results) = test_report::load(&reports)? else {
+    fn last_failures(&self, reports: &Path) -> Result<Option<(usize, test_report::Selection)>> {
+        let Some(results) = test_report::load(reports)? else {
             return Err(JrsError::usage(format!(
                 "there is no test run to rerun: {} holds no JUnit XML\n\nrun `jrs test` first",
                 reports.display()
@@ -2685,10 +2831,12 @@ impl<'a> Session<'a> {
         };
 
         let syncing = Instant::now();
+        let expansion = crate::expand::Expansion::from_manifest(&self.manifest)?;
         let synced = project::sync_resources(
             &self.manifest.resource_path(),
             &project.classes_dir(),
             &project.work_dir().join("resources-main.list"),
+            expansion.as_ref(),
         )?;
         if synced.copied > 0 {
             self.ui
@@ -2722,7 +2870,7 @@ impl<'a> Session<'a> {
         let work_dir = self.project().work_dir();
         for (i, dir) in dirs.iter().enumerate() {
             let record = work_dir.join(format!("resources-{unit}-generated-{i}.list"));
-            let synced = project::sync_resources(dir, to, &record)?;
+            let synced = project::sync_resources(dir, to, &record, None)?;
             if synced.copied + synced.removed > 0 {
                 self.ui.verbose(format!(
                     "{}: copied {}, removed {}",

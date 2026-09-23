@@ -716,6 +716,66 @@ fn cleaning_removes_only_the_target_directory() {
     assert!(manifest.path.is_file());
 }
 
+// ---- [resources] expansion (SPEC §7.3) --------------------------------------
+
+#[test]
+fn resources_named_in_expand_are_expanded_and_follow_the_manifest() {
+    let _toolchain = require_jdk!();
+    let scratch = Scratch::new("build-resources-expand");
+    scratch.write(
+        "app/src/main/java/com/example/App.java",
+        "package com.example;\n\npublic class App {\n    public static void main(String[] args) {}\n}\n",
+    );
+    scratch.write(
+        "app/src/main/resources/application.yml",
+        "app:\n  version: ${version}\n  name: ${project.name}\n  secret: \"\\${APP_SECRET:}\"\n",
+    );
+    scratch.write("app/src/main/resources/static/raw.txt", "left ${alone}\n");
+    let manifest = |version: &str| {
+        format!(
+            "[project]\nname = \"app\"\nversion = \"{version}\"\n\n[resources]\n\
+             expand = [\"application.yml\"]\nproperties = {{ version = \"{{project.version}}\" }}\n"
+        )
+    };
+    scratch.write("app/jrs.toml", &manifest("1.0.0"));
+    let root = scratch.join("app");
+    let classes = root.join("target/classes");
+
+    let (code, _, stderr) = jrs(&root, &["build"]);
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(
+        std::fs::read_to_string(classes.join("application.yml")).unwrap(),
+        "app:\n  version: 1.0.0\n  name: app\n  secret: \"${APP_SECRET:}\"\n"
+    );
+    // A file `expand` does not name is copied byte for byte.
+    assert_eq!(
+        std::fs::read_to_string(classes.join("static/raw.txt")).unwrap(),
+        "left ${alone}\n"
+    );
+
+    // A new version reaches the copy, though the resource itself is unchanged.
+    scratch.write("app/jrs.toml", &manifest("1.1.0"));
+    let (code, _, stderr) = jrs(&root, &["build"]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(
+        std::fs::read_to_string(classes.join("application.yml"))
+            .unwrap()
+            .contains("version: 1.1.0\n")
+    );
+
+    // A property nobody declared fails the build, naming the file and line.
+    scratch.write(
+        "app/src/main/resources/application.yml",
+        "a: 1\nb: ${db.url}\n",
+    );
+    let (code, _, stderr) = jrs(&root, &["build"]);
+    assert_eq!(code, 1, "{stderr}");
+    assert!(
+        stderr.contains("application.yml: line 2: unknown property `db.url`"),
+        "{stderr}"
+    );
+}
+
 // ---- tasks and hooks (TASKS.md) --------------------------------------------
 //
 // These drive whole commands through `cli::run_with`, as the binary would,
@@ -3288,6 +3348,69 @@ fn jrs_test_recompiles_the_tests_only_for_a_new_main_api() {
     let (code, _, stderr) = p.jrs(&["test"]);
     assert_eq!(code, 0, "{stderr}");
     assert!(stderr.contains("Compiling 1 test sources"), "{stderr}");
+}
+
+const SUITE_TEST: &str = "package com.example;\n\nimport org.junit.jupiter.api.Test;\n\n\
+    class EndToEndTest {\n    @Test\n    void seesMainTestsAndItsOwnSetup() {\n        \
+    if (Helper.two() != 2) throw new AssertionError(\"helper\");\n        \
+    if (!\"yes\".equals(System.getProperty(\"suite.flag\"))) throw new AssertionError(\"flag\");\n        \
+    if (System.getProperty(\"marker.dir\") != null) throw new AssertionError(\"test.jvm-args\");\n        \
+    if (!\"e2e\".equals(System.getenv(\"SUITE\"))) throw new AssertionError(\"env\");\n        \
+    if (EndToEndTest.class.getResource(\"/e2e.txt\") == null) throw new AssertionError(\"resource\");\n    \
+    }\n}\n";
+
+#[test]
+fn a_test_suite_runs_apart_from_the_tests_on_top_of_them() {
+    let toolchain = require_jdk!();
+    let scratch = Scratch::new("test-suites");
+    let p = junit_project(
+        &scratch,
+        &toolchain,
+        FAKE_LAUNCHER_6,
+        "\n[test.suites.e2e]\ntest-dir = \"src/e2e/java\"\n\
+         jvm-args = [\"-Dsuite.flag=yes\"]\nenv = { SUITE = \"e2e\" }\n",
+        &[
+            ("AddTest.java", ADD_TEST),
+            (
+                "Helper.java",
+                "package com.example;\n\nclass Helper {\n    static int two() {\n        \
+                 return Calc.add(1, 1);\n    }\n}\n",
+            ),
+        ],
+    );
+    scratch.write("app/src/e2e/java/com/example/EndToEndTest.java", SUITE_TEST);
+    scratch.write("app/src/e2e/resources/e2e.txt", "present\n");
+
+    // Plain `jrs test` leaves the suite alone.
+    let (code, stdout, stderr) = p.jrs(&["test"]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(!stdout.contains("EndToEndTest"), "{stdout}");
+
+    let (code, stdout, stderr) = p.jrs(&["test", "--suite", "e2e"]);
+    assert_eq!(code, 0, "{stdout}\n{stderr}");
+    assert!(stderr.contains("Compiling 1 e2e sources"), "{stderr}");
+    assert!(stdout.contains("seesMainTestsAndItsOwnSetup"), "{stdout}");
+    assert!(!stdout.contains("adds()"), "only the suite ran: {stdout}");
+    let suite = p.root.join("target/suites/e2e");
+    assert!(
+        suite
+            .join("classes/com/example/EndToEndTest.class")
+            .is_file()
+    );
+    assert!(suite.join("classes/e2e.txt").is_file());
+    assert!(suite.join("test-reports").is_dir());
+
+    // Fresh the second time.
+    let (code, _, stderr) = p.jrs(&["test", "--suite", "e2e"]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(!stderr.contains("Compiling 1 e2e sources"), "{stderr}");
+
+    let (code, _, stderr) = p.jrs(&["test", "--suite", "nope"]);
+    assert_eq!(code, 2, "{stderr}");
+    assert!(
+        stderr.contains("there is no test suite `nope` in jrs.toml (declared: `e2e`)"),
+        "{stderr}"
+    );
 }
 
 /// Every launch of the fake launcher, as the argument line it starts with.
