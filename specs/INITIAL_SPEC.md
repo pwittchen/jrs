@@ -207,7 +207,7 @@ post-package = ["checksum"]
 | `java.jdk` | no | — | JDK feature version to build with (§7.1). |
 | `run.jvm-args` | no | `[]` | `java` flags for `jrs run`, before `-cp`. |
 | `run.java-agents` | no | `[]` | Agents passed as `-javaagent:<jar>` ahead of `run.jvm-args`, from the jars `jrs.lock` pins: `group:artifact` for one on the runtime classpath, `group:artifact:version[:classifier]` for one resolved alone, apart from the graph, and pinned as a `[[tool]]` (§4.4); baked into `--jlink` / `--jpackage` / `--dist` launchers (§9.4, §9.6). |
-| `run.env` | no | `{}` | Environment variables for the program, name → string. A task's placeholders (§7.6), except `{jar}` and `{classpath-argfile}`; `JRS_*` names are refused. |
+| `run.env` | no | `{}` | Environment variables for the program, name → string. A task's placeholders (§7.6), except `{jar}` and `{classpath-argfile}`, and `{free-port.<name>}`: a free TCP port, one per name for the whole command; `JRS_*` names are refused. |
 | `run.cwd` | no | jrs's own | The program's working directory, relative to the root; placeholders as `run.env`, but no classpath. |
 | `test.jvm-args` | no | `[]` | `java` flags for the test JVM. |
 | `test.jacoco-version` | no | jrs's default | JaCoCo release for `jrs test --coverage` (§10.2). |

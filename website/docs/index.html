@@ -795,6 +795,12 @@ cwd = "work"</pre>
   <code>{classpath-argfile}</code>, and <code>cwd</code> takes no classpath. They belong to
   <code>jrs run</code>, so an image's launchers do not use them.
 </p>
+<p>
+  An <code>env</code> value may also name <code>{free-port.&lt;name&gt;}</code>: a TCP port nothing
+  listens on, picked when the command starts and the same for every value that names it, so a
+  test server's port and the URL built from it agree:
+  <code>PORT = "{free-port.web}"</code>, <code>URL = "http://localhost:{free-port.web}"</code>.
+</p>
 
 <h3>Java agents</h3>
 <p>

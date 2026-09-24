@@ -277,7 +277,11 @@ directory, relative to the project root; without it the program runs where
 jrs was started. Both take the placeholders a task does (`{target}`,
 `{project.version}`, `{runtime-classpath}`, … — see
 [Tasks and hooks](#tasks-and-hooks)), except `{jar}` and
-`{classpath-argfile}`, which only a task has. There is no `test.cwd`: the test
+`{classpath-argfile}`, which only a task has. An `env` value may also name
+`{free-port.<name>}`: a TCP port nothing listens on, picked when the command
+starts and the same for every value that names it, so a test server's port
+and the URL built from it agree (`PORT = "{free-port.web}"`,
+`URL = "http://localhost:{free-port.web}"`). There is no `test.cwd`: the test
 JVM runs where jrs does. `env` and `cwd` belong to `jrs run` and `jrs test`,
 so an image's launchers do not take them.
 
@@ -960,7 +964,7 @@ without them always runs.
 
 Placeholders such as `{root}`, `{target}`, `{classes}`, `{project.version}`,
 `{classpath}` (what `jrs classpath` prints) and `{jar}` are expanded in `run`,
-`args`, `cwd` and `env`. `shell` strings use environment variables instead:
+`args`, `cwd` and `env`; `args` and `env` also take `{free-port.<name>}`. `shell` strings use environment variables instead:
 `JRS_ROOT`, `JRS_CLASSPATH`, `JRS_JAR` and the rest, with `JAVA_HOME` set to
 the project's JDK; a `shell` task's `args` arrive as `$1`, `$2`…. The full
 list is in [SPEC §7.6](specs/INITIAL_SPEC.md#76-tasks-and-hooks).

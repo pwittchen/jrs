@@ -628,6 +628,47 @@ impl Placeholder {
 pub enum Segment {
     Text(String),
     Placeholder(Placeholder),
+    /// `{free-port.<name>}`: a TCP port nothing listens on, the same one for
+    /// every value that names it during one jrs command.
+    FreePort(String),
+}
+
+/// The prefix of `{free-port.<name>}`.
+const FREE_PORT: &str = "free-port.";
+
+/// The ports `{free-port.<name>}` stood for so far, by name. One per name for
+/// the whole command, so `TEST_PORT` and a URL built from the same name agree.
+static FREE_PORTS: std::sync::Mutex<Vec<(String, u16)>> = std::sync::Mutex::new(Vec::new());
+
+/// The port `{free-port.<name>}` stands for: asked of the OS the first time a
+/// name is expanded, by binding port 0 on the loopback interface and letting
+/// go of it, and remembered after that. Two names never share a port.
+///
+/// # Errors
+///
+/// [`JrsError::Build`] when no port can be bound.
+///
+/// # Panics
+///
+/// If a thread panicked while holding the table, poisoning its lock.
+pub fn free_port(name: &str) -> Result<u16> {
+    let mut ports = FREE_PORTS.lock().unwrap();
+    if let Some((_, port)) = ports.iter().find(|(n, _)| n == name) {
+        return Ok(*port);
+    }
+    for _ in 0..32 {
+        let port = std::net::TcpListener::bind(("127.0.0.1", 0))
+            .and_then(|l| l.local_addr())
+            .map_err(|e| JrsError::build(format!("`{{free-port.{name}}}`: no free port: {e}")))?
+            .port();
+        if !ports.iter().any(|(_, p)| *p == port) {
+            ports.push((name.to_string(), port));
+            return Ok(port);
+        }
+    }
+    Err(JrsError::build(format!(
+        "`{{free-port.{name}}}`: the OS kept handing out ports already taken"
+    )))
 }
 
 /// A string that may hold placeholders, parsed once when the manifest loads
@@ -673,6 +714,23 @@ impl Template {
                             }
                         }
                     }
+                    if let Some(port) = name.strip_prefix(FREE_PORT) {
+                        let well_formed = !port.is_empty()
+                            && port
+                                .chars()
+                                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
+                        if !well_formed {
+                            return Err(format!(
+                                "`{{{name}}}` needs a name of letters, digits, `-` and `_` \
+                                 after `{FREE_PORT}`"
+                            ));
+                        }
+                        if !text.is_empty() {
+                            segments.push(Segment::Text(std::mem::take(&mut text)));
+                        }
+                        segments.push(Segment::FreePort(port.to_string()));
+                        continue;
+                    }
                     let placeholder = Placeholder::ALL
                         .into_iter()
                         .find(|p| p.name() == name)
@@ -682,7 +740,8 @@ impl Template {
                                 .map(|p| format!("`{{{}}}`", p.name()))
                                 .collect();
                             format!(
-                                "unknown placeholder `{{{name}}}` (known: {})",
+                                "unknown placeholder `{{{name}}}` (known: {}, and \
+                                 `{{free-port.<name>}}`)",
                                 known.join(", ")
                             )
                         })?;
@@ -725,8 +784,17 @@ impl Template {
     pub fn placeholders(&self) -> impl Iterator<Item = Placeholder> + '_ {
         self.segments.iter().filter_map(|s| match s {
             Segment::Placeholder(p) => Some(*p),
-            Segment::Text(_) => None,
+            Segment::Text(_) | Segment::FreePort(_) => None,
         })
+    }
+
+    /// Whether a `{free-port.<name>}` is in it, which only a value handed to
+    /// a process — an `env` entry or an argument — can use.
+    #[must_use]
+    pub fn has_free_port(&self) -> bool {
+        self.segments
+            .iter()
+            .any(|s| matches!(s, Segment::FreePort(_)))
     }
 
     /// Substitute every placeholder with what `value` says it is.
@@ -740,6 +808,7 @@ impl Template {
             match segment {
                 Segment::Text(t) => out.push_str(t),
                 Segment::Placeholder(p) => out.push_str(&value(*p)?),
+                Segment::FreePort(name) => out.push_str(&free_port(name)?.to_string()),
             }
         }
         Ok(out)
@@ -2156,6 +2225,12 @@ fn parse_tasks(table: &toml::Table, warnings: &mut Vec<String>) -> Result<Vec<Ta
                     p.name()
                 )));
             }
+            if t.has_free_port() {
+                return Err(JrsError::manifest(format!(
+                    "`{section}.{key}`: `{{free-port.<name>}}` is a port, not a path; it \
+                     belongs in `env` or `args`"
+                )));
+            }
         }
         out.push(task);
     }
@@ -2253,6 +2328,12 @@ fn parse_jvm_cwd(t: &toml::Table, section: &str) -> Result<Option<Template>> {
     let template =
         Template::parse(&raw).map_err(|e| JrsError::manifest(format!("`{section}.cwd`: {e}")))?;
     refuse_task_placeholders(&template, &format!("{section}.cwd"))?;
+    if template.has_free_port() {
+        return Err(JrsError::manifest(format!(
+            "`{section}.cwd`: `{{free-port.<name>}}` is a port, not a directory; it belongs \
+             in `env`"
+        )));
+    }
     if let Some(p) = template.placeholders().find(|p| p.is_classpath()) {
         return Err(JrsError::manifest(format!(
             "`{section}.cwd`: `{{{}}}` is a classpath, not a path; it cannot name a directory",
@@ -2876,6 +2957,11 @@ fn parse_resources(t: &toml::Table) -> Result<ResourcesConfig> {
                 .ok_or_else(|| JrsError::manifest(format!("`{key}` must be a string")))?;
             let template =
                 Template::parse(raw).map_err(|e| JrsError::manifest(format!("`{key}`: {e}")))?;
+            if template.has_free_port() {
+                return Err(JrsError::manifest(format!(
+                    "`{key}`: `{{free-port.<name>}}` is not known when resources are copied"
+                )));
+            }
             if let Some(p) = template
                 .placeholders()
                 .find(|p| !matches!(p, Placeholder::ProjectName | Placeholder::ProjectVersion))
@@ -3034,6 +3120,11 @@ pub fn jar_attribute(name: &str, raw: &str) -> Result<Template> {
         )));
     }
     let template = Template::parse(raw).map_err(|e| JrsError::manifest(format!("`{key}`: {e}")))?;
+    if template.has_free_port() {
+        return Err(JrsError::manifest(format!(
+            "`{key}`: `{{free-port.<name>}}` is not known when a jar is written"
+        )));
+    }
     if let Some(p) = template
         .placeholders()
         .find(|p| !matches!(p, Placeholder::ProjectName | Placeholder::ProjectVersion))
@@ -4778,6 +4869,30 @@ post-package = ["checksum"]
     }
 
     #[test]
+    fn a_free_port_is_one_port_per_name_and_only_where_a_process_reads_it() {
+        let m = with(
+            "[test]\nenv = { PORT = '{free-port.web}', URL = 'http://localhost:{free-port.web}/x', \
+             API = '{free-port.api}' }\n",
+        )
+        .unwrap();
+        let value = |key: &str| {
+            let (_, t) = m.test.env.iter().find(|(k, _)| k == key).unwrap();
+            t.expand(|_| unreachable!()).unwrap()
+        };
+        let port = value("PORT");
+        assert!(port.parse::<u16>().is_ok_and(|p| p > 0), "{port}");
+        assert_eq!(value("URL"), format!("http://localhost:{port}/x"));
+        assert_ne!(value("API"), port, "two names, two ports");
+
+        let err = with("[tasks.t]\nshell = 'x'\noutputs = ['{free-port.a}']\n").unwrap_err();
+        assert!(err.to_string().contains("is a port, not a path"), "{err}");
+        let err = with("[run]\ncwd = '{free-port.a}'\n").unwrap_err();
+        assert!(err.to_string().contains("not a directory"), "{err}");
+        let err = with("[test]\nenv = { P = '{free-port.}' }\n").unwrap_err();
+        assert!(err.to_string().contains("needs a name"), "{err}");
+    }
+
+    #[test]
     fn placeholders_are_checked_when_the_manifest_loads() {
         let err = with("[tasks.t]\nshell = 'x'\nargs = ['{tagret}/out']\n").unwrap_err();
         assert!(
@@ -4811,6 +4926,7 @@ post-package = ["checksum"]
         );
         assert_eq!(t.raw, "{root}/a-{{b}}-{jar}");
         let plain = Template::parse("no braces").unwrap();
+        assert!(!plain.has_free_port());
         assert_eq!(plain.segments, [Segment::Text("no braces".into())]);
     }
 
