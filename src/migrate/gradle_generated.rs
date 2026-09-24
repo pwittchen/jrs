@@ -199,8 +199,10 @@ fn text_path(argument: &str) -> Option<String> {
             text = ".".to_string();
         }
     }
-    let path = std::path::Path::new(&text);
-    if path.is_absolute() || text.contains('\\') {
+    // The script's own notion of absolute, not the host's: `/x` is absolute
+    // on Windows too, and `C:/x` on Unix.
+    let drive = text.as_bytes().get(1) == Some(&b':');
+    if text.starts_with('/') || drive || text.contains('\\') {
         return None;
     }
     Some(join(".", &text))
@@ -916,6 +918,7 @@ openApiGenerate {
         );
         assert_eq!(paths.path("System.getenv(\"X\")"), None);
         assert_eq!(paths.path("\"/abs/path\""), None);
+        assert_eq!(paths.path("\"C:/abs/path\""), None);
         assert_eq!(paths.path("\"$other/x\""), None);
 
         let block = "val outputDir = layout.buildDirectory.dir(\"mine\")\n";
