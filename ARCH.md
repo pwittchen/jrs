@@ -94,6 +94,7 @@ src/
 │   ├── coord.rs       coordinates, scopes, Maven version ordering
 │   ├── pom.rs         POM XML → effective model (parents, BOMs, properties)
 │   ├── metadata.rs    maven-metadata.xml: version lists, snapshot builds
+│   ├── gradle_module.rs  .module files: a Multiplatform library's JVM artifact
 │   ├── repo.rs        Fetcher: cache → repositories, checksums, retries
 │   └── cache.rs       the local store: layout, atomic writes, pruning
 ├── test.rs            the JUnit Platform console launcher, one or several; JaCoCo
@@ -118,7 +119,7 @@ src/
 ├── completions.rs     bash/zsh/fish scripts generated from the clap definition
 ├── timings.rs         --timings: the per-phase recorder, and timings.txt
 ├── model.rs           the project model `jrs metadata` prints
-├── json.rs            a small JSON writer (no serde_json), for the model
+├── json.rs            a small JSON writer (no serde_json), for the model, and a reader
 └── ui/
     ├── mod.rs         Ui handle: mode detection, phase lines, live scopes
     ├── progress.rs    Live state and the pure functions that turn it into lines
@@ -391,6 +392,13 @@ fetches go out together on a `rayon` pool sized to `--jobs`:
                                  ▼
           Resolution { packages sorted by coordinate, roots, warnings }
 ```
+
+A POM that says it was published with Gradle module metadata beside it
+(`published-with-gradle-metadata`) gets its `.module` file read
+(`resolve/gradle_module.rs`): when the file's JVM variant is `available-at`
+another artifact, as a Kotlin Multiplatform root's is, the node becomes a
+`pom` that depends on that artifact alone. Nothing else in the file is
+read; its rich versions and constraints would not fit nearest-wins.
 
 Version ranges are rejected with an error, never guessed at. The classpath jrs
 hands to `javac` is ordered direct dependencies first, then transitive ones,

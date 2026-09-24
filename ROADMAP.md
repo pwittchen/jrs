@@ -139,4 +139,4 @@ listed so the discussion has a home, not because they are planned.
 | TestNG | SPEC §13.7: the JUnit Platform only (Jupiter and Vintage) |
 | Version ranges | SPEC §8.2 rejects them rather than guessing |
 | Highest-wins mediation (opt-in) | SPEC §13.6 chose nearest-wins. It is Gradle's default, so migrated Gradle builds can resolve to different versions; the migration report could flag where the two strategies disagree |
-| Gradle Module Metadata (`.module` files) | Its rich versions (`strictly`, `prefer`, `reject`, ranges), dependency constraints and capabilities do not fit nearest-wins and the no-ranges rule (SPEC §8.2); honouring them means a different resolver. Reading `.module` files also needs a JSON parser |
+| Gradle Module Metadata (`.module` files) beyond the JVM variant | jrs reads a `.module` only to follow a Multiplatform library's root to its JVM artifact (`resolve/gradle_module.rs`). Its rich versions (`strictly`, `prefer`, `reject`, ranges), dependency constraints and capabilities do not fit nearest-wins and the no-ranges rule (SPEC §8.2); honouring them means a different resolver |

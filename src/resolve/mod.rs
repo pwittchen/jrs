@@ -6,6 +6,7 @@
 
 pub mod cache;
 pub mod coord;
+pub mod gradle_module;
 pub mod metadata;
 pub mod pom;
 pub mod repo;
@@ -797,12 +798,16 @@ impl Context<'_> {
         let mut chain: Vec<Pom> = Vec::new();
         let mut current = coord.clone();
         let mut seen: HashSet<Coord> = HashSet::new();
+        let mut announced = false;
         loop {
             if !seen.insert(current.clone()) {
                 self.warn(format!("`{coord}` has a cyclic <parent> chain; truncated"));
                 break;
             }
             let bytes = self.fetcher.pom(&current)?;
+            if chain.is_empty() {
+                announced = gradle_module::announced(&bytes);
+            }
             let parsed =
                 Pom::parse(&bytes).map_err(|e| JrsError::resolve(format!("{current}: {e}")))?;
             let parent = parsed.parent.clone();
@@ -826,7 +831,36 @@ impl Context<'_> {
                 }
             }
         }
+        if announced && let Some(jvm) = self.jvm_artifact(coord)? {
+            // A Multiplatform root: what its POM lists is its common code's
+            // dependencies, and its jar holds no JVM classes. It stands for
+            // its JVM artifact instead, as it does in Gradle.
+            eff.packaging = "pom".to_string();
+            eff.dependencies = vec![PomDependency {
+                group: jvm.group,
+                artifact: jvm.artifact,
+                version: Some(jvm.version),
+                scope: None,
+                optional: false,
+                kind: "jar".to_string(),
+                classifier: None,
+                exclusions: Vec::new(),
+            }];
+        }
         Ok(eff)
+    }
+
+    /// The artifact `coord`'s Gradle module metadata says holds its JVM
+    /// classes, when that is another artifact.
+    fn jvm_artifact(&self, coord: &Coord) -> Result<Option<Coord>> {
+        let Some(module) = self.fetcher.gradle_module(coord)? else {
+            return Ok(None);
+        };
+        gradle_module::jvm_variant(&module, coord).map_err(|e| {
+            JrsError::resolve(format!(
+                "{coord}: its Gradle module metadata cannot be read: {e}"
+            ))
+        })
     }
 }
 

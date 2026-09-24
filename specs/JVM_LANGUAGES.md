@@ -543,7 +543,7 @@ an input build paired with its expected `jrs.toml`.
 | `jrs outdated` | Lists `<lang>.version` against the compiler artifact's `maven-metadata.xml`. |
 | `jrs add` | Warns when a `_2.13`/`_3` suffix does not match the Scala line in `[scala]`. It does not rewrite the suffix. |
 | Resolution warnings | A `kotlin-stdlib-jdk7`/`-jdk8` older than 1.8 beside a Kotlin 2 stdlib duplicates classes. The warning names the fix, which is to declare it at `kotlin.version` so nearest-wins picks that. jrs does not align versions implicitly, since that would be a second mediation rule. |
-| Kotlin Multiplatform libraries | Their root artifact's POM may not point at the `-jvm` variant, because Gradle Module Metadata does that. The spike found both kinds (§15): `kotlinx-coroutines-core`'s root POM is `pom`-packaged and depends on `-jvm`, so it resolves as is, while `kotlinx-datetime`'s does not. Documented: when a root does not resolve to classes, declare the `-jvm` artifact. The general fix is ROADMAP §3's `.module` row. |
+| Kotlin Multiplatform libraries | Their root artifact's POM may not point at the `-jvm` variant, because Gradle Module Metadata does that. The spike found both kinds (§15): `kotlinx-coroutines-core`'s root POM is `pom`-packaged and depends on `-jvm`, so it resolves as is, while `kotlinx-datetime`'s does not. Documented: when a root does not resolve to classes, declare the `-jvm` artifact. **Since then** jrs reads the `.module` file such a POM announces, and follows its JVM variant's `available-at` to the `-jvm` artifact, so the root resolves as it does in Gradle. |
 
 ---
 

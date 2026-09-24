@@ -122,6 +122,18 @@ impl FixtureRepo {
         .unwrap();
     }
 
+    /// Publish Gradle module metadata beside `coord`'s POM.
+    pub fn publish_module(&self, coord: &Coord, json: &str) {
+        let path = self.root.join(coord.repo_path("module"));
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, json).unwrap();
+        std::fs::write(
+            path.with_extension("module.sha1"),
+            repo::sha1_hex(json.as_bytes()),
+        )
+        .unwrap();
+    }
+
     pub fn repositories(&self) -> Vec<Repository> {
         vec![Repository::new("fixture", repo::file_url(&self.root))]
     }

@@ -220,6 +220,41 @@ impl Fetcher {
         std::fs::read(&path).path(&path)
     }
 
+    /// The Gradle module metadata published beside a POM (`<artifact>.module`),
+    /// or `None` when no repository has one. Only asked for when the POM says
+    /// it was published with one.
+    ///
+    /// # Errors
+    ///
+    /// [`JrsError::Resolve`] when it is not cached and `--offline` was given,
+    /// a repository fails or refuses the request, or its checksum does not
+    /// match; [`JrsError::Io`] when the cache cannot be read or written.
+    pub fn gradle_module(&self, coord: &Coord) -> Result<Option<Vec<u8>>> {
+        let coord = coord.pom_coord();
+        let cached = self.cache.path_for(&coord, "module");
+        if cached.is_file() {
+            super::cache::mark_used(&cached);
+            return std::fs::read(&cached).path(&cached).map(Some);
+        }
+        if self.offline {
+            return Err(JrsError::resolve(format!(
+                "`{coord}` (module) is not in the local cache and --offline was given\n\
+                 expected at {}",
+                cached.display()
+            )));
+        }
+        for repo in repositories_for(&self.repos, &coord.group) {
+            let remote = coord.repo_path_as("module", &coord.version);
+            let Some(bytes) = self.fetch_one(repo, &remote, false, 0)? else {
+                continue;
+            };
+            self.verify(repo, &coord, "module", &remote, &bytes)?;
+            self.cache.store(&coord, "module", &bytes)?;
+            return Ok(Some(bytes));
+        }
+        Ok(None)
+    }
+
     /// A jar's cached path, downloading it with progress if it is not there yet.
     ///
     /// # Errors

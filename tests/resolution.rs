@@ -57,6 +57,80 @@ fn a_transitive_graph_resolves_from_a_local_repository() {
     }
 }
 
+/// A Kotlin Multiplatform library, as Gradle publishes one: a root whose POM
+/// announces module metadata and lists its common code's dependencies, and a
+/// `-jvm` artifact that holds the classes. The root is declared; the `-jvm`
+/// artifact is what ends up on the classpath, with its own dependencies.
+#[test]
+fn a_multiplatform_root_resolves_to_its_jvm_artifact() {
+    let scratch = Scratch::new("resolve-multiplatform");
+    let fixture = FixtureRepo::new(&scratch);
+    let root = Coord::new("org.kmp", "kit", "1.0.0");
+    let jvm = Coord::new("org.kmp", "kit-jvm", "1.0.0");
+    fixture.publish_pom(
+        &root,
+        "<project>\n  <!-- do_not_remove: published-with-gradle-metadata -->\n  \
+         <modelVersion>4.0.0</modelVersion>\n  <groupId>org.kmp</groupId>\n  \
+         <artifactId>kit</artifactId>\n  <version>1.0.0</version>\n  <dependencies>\n    \
+         <dependency><groupId>org.kmp</groupId><artifactId>common-only</artifactId>\
+         <version>9.9</version><scope>runtime</scope></dependency>\n  </dependencies>\n\
+         </project>\n",
+    );
+    fixture.publish_jar(&root, b"kotlin metadata, no JVM classes");
+    fixture.publish_module(
+        &root,
+        r#"{"formatVersion": "1.1", "variants": [
+          {"name": "jvmRuntimeElements-published",
+           "attributes": {"org.gradle.category": "library", "org.gradle.usage": "java-runtime",
+                          "org.jetbrains.kotlin.platform.type": "jvm"},
+           "available-at": {"url": "../../kit-jvm/1.0.0/kit-jvm-1.0.0.module",
+                            "group": "org.kmp", "module": "kit-jvm", "version": "1.0.0"}}]}"#,
+    );
+    fixture.publish_pom(
+        &jvm,
+        "<project>\n  <modelVersion>4.0.0</modelVersion>\n  <groupId>org.kmp</groupId>\n  \
+         <artifactId>kit-jvm</artifactId>\n  <version>1.0.0</version>\n  <dependencies>\n    \
+         <dependency><groupId>org.kmp</groupId><artifactId>leaf</artifactId>\
+         <version>1.0.0</version></dependency>\n  </dependencies>\n</project>\n",
+    );
+    fixture.publish_jar(&jvm, b"the JVM classes");
+    let leaf = Coord::new("org.kmp", "leaf", "1.0.0");
+    fixture.publish_pom(
+        &leaf,
+        "<project><modelVersion>4.0.0</modelVersion><groupId>org.kmp</groupId>\
+         <artifactId>leaf</artifactId><version>1.0.0</version></project>\n",
+    );
+    fixture.publish_jar(&leaf, b"a leaf");
+
+    let manifest = manifest(&fixture, "[dependencies]\n\"org.kmp:kit\" = \"1.0.0\"");
+    let fetcher = fixture.fetcher();
+    let mut resolution = resolve::resolve(&manifest, &fetcher, 4).unwrap();
+    resolve::fetch_jars(&mut resolution, &fetcher, 4).unwrap();
+
+    assert_eq!(
+        names(&resolution),
+        [
+            "org.kmp:kit-jvm:1.0.0",
+            "org.kmp:kit:1.0.0",
+            "org.kmp:leaf:1.0.0"
+        ],
+        "the common-only dependency is not the JVM's"
+    );
+    let compile = resolution.classpath(Classpath::Compile);
+    assert_eq!(
+        compile.len(),
+        2,
+        "the root has no jar to link against: {compile:?}"
+    );
+    assert!(compile.iter().any(|p| p.ends_with("kit-jvm-1.0.0.jar")));
+    let kit = resolution
+        .packages
+        .iter()
+        .find(|p| p.coord.artifact == "kit")
+        .unwrap();
+    assert_eq!(kit.packaging, "pom");
+}
+
 #[test]
 fn a_cyclic_graph_terminates() {
     // The fixture is deliberately cyclic: lib -> core -> lib.

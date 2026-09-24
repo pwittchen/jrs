@@ -1,4 +1,5 @@
-//! A small JSON writer, for `jrs metadata`.
+//! A small JSON writer, for `jrs metadata`, and a small reader, for the
+//! Gradle module metadata a Kotlin Multiplatform library is published with.
 //!
 //! The document jrs writes is small and its shape is fixed, so a value tree
 //! and a pretty-printer cover it; `serde_json` would be a new crate for what
@@ -39,6 +40,52 @@ impl Json {
     /// An object from `(key, value)` pairs, in the order given.
     pub fn object<'a>(pairs: impl IntoIterator<Item = (&'a str, Json)>) -> Json {
         Json::Object(pairs.into_iter().map(|(k, v)| (k.to_string(), v)).collect())
+    }
+
+    /// Read a JSON document (RFC 8259). A number that is not an integer is
+    /// kept as its text, in a `Str`: what jrs reads never computes with one.
+    ///
+    /// # Errors
+    ///
+    /// A message with the byte offset where the text stops being JSON.
+    pub fn parse(text: &str) -> std::result::Result<Json, String> {
+        let mut reader = Reader {
+            bytes: text.as_bytes(),
+            at: 0,
+            depth: 0,
+        };
+        let value = reader.value()?;
+        reader.space();
+        if reader.at != reader.bytes.len() {
+            return Err(reader.fail("text after the document"));
+        }
+        Ok(value)
+    }
+
+    /// The value under `key`, when this is an object that has one.
+    #[must_use]
+    pub fn get(&self, key: &str) -> Option<&Json> {
+        match self {
+            Json::Object(pairs) => pairs.iter().find(|(k, _)| k == key).map(|(_, v)| v),
+            _ => None,
+        }
+    }
+
+    #[must_use]
+    pub fn as_str(&self) -> Option<&str> {
+        match self {
+            Json::Str(s) => Some(s),
+            _ => None,
+        }
+    }
+
+    /// The items, when this is an array; nothing otherwise.
+    #[must_use]
+    pub fn items(&self) -> &[Json] {
+        match self {
+            Json::Array(items) => items,
+            _ => &[],
+        }
     }
 
     /// The document, pretty-printed with two-space indentation and a trailing
@@ -86,6 +133,206 @@ impl Json {
                 out.push('}');
             }
         }
+    }
+}
+
+/// How deep arrays and objects may nest before the reader gives up, so a
+/// hostile document cannot overflow the stack.
+const MAX_DEPTH: usize = 128;
+
+struct Reader<'a> {
+    bytes: &'a [u8],
+    at: usize,
+    depth: usize,
+}
+
+impl Reader<'_> {
+    fn fail(&self, what: &str) -> String {
+        format!("{what} at byte {}", self.at)
+    }
+
+    fn space(&mut self) {
+        while self
+            .bytes
+            .get(self.at)
+            .is_some_and(|b| matches!(b, b' ' | b'\t' | b'\n' | b'\r'))
+        {
+            self.at += 1;
+        }
+    }
+
+    fn eat(&mut self, byte: u8) -> std::result::Result<(), String> {
+        self.space();
+        if self.bytes.get(self.at) == Some(&byte) {
+            self.at += 1;
+            Ok(())
+        } else {
+            Err(self.fail(&format!("expected `{}`", char::from(byte))))
+        }
+    }
+
+    fn value(&mut self) -> std::result::Result<Json, String> {
+        self.space();
+        match self.bytes.get(self.at) {
+            Some(b'{') => self.nested(|r| r.object()),
+            Some(b'[') => self.nested(|r| r.array()),
+            Some(b'"') => self.string().map(Json::Str),
+            Some(b't') => self.word("true", Json::Bool(true)),
+            Some(b'f') => self.word("false", Json::Bool(false)),
+            Some(b'n') => self.word("null", Json::Null),
+            Some(b'-' | b'0'..=b'9') => Ok(self.number()),
+            Some(_) => Err(self.fail("unexpected character")),
+            None => Err(self.fail("unexpected end")),
+        }
+    }
+
+    fn nested(
+        &mut self,
+        read: impl FnOnce(&mut Self) -> std::result::Result<Json, String>,
+    ) -> std::result::Result<Json, String> {
+        self.depth += 1;
+        if self.depth > MAX_DEPTH {
+            return Err(self.fail("nested too deeply"));
+        }
+        let value = read(self);
+        self.depth -= 1;
+        value
+    }
+
+    fn object(&mut self) -> std::result::Result<Json, String> {
+        self.eat(b'{')?;
+        let mut pairs = Vec::new();
+        self.space();
+        if self.bytes.get(self.at) == Some(&b'}') {
+            self.at += 1;
+            return Ok(Json::Object(pairs));
+        }
+        loop {
+            self.space();
+            if self.bytes.get(self.at) != Some(&b'"') {
+                return Err(self.fail("expected a key"));
+            }
+            let key = self.string()?;
+            self.eat(b':')?;
+            pairs.push((key, self.value()?));
+            self.space();
+            match self.bytes.get(self.at) {
+                Some(b',') => self.at += 1,
+                Some(b'}') => {
+                    self.at += 1;
+                    return Ok(Json::Object(pairs));
+                }
+                _ => return Err(self.fail("expected `,` or `}`")),
+            }
+        }
+    }
+
+    fn array(&mut self) -> std::result::Result<Json, String> {
+        self.eat(b'[')?;
+        let mut items = Vec::new();
+        self.space();
+        if self.bytes.get(self.at) == Some(&b']') {
+            self.at += 1;
+            return Ok(Json::Array(items));
+        }
+        loop {
+            items.push(self.value()?);
+            self.space();
+            match self.bytes.get(self.at) {
+                Some(b',') => self.at += 1,
+                Some(b']') => {
+                    self.at += 1;
+                    return Ok(Json::Array(items));
+                }
+                _ => return Err(self.fail("expected `,` or `]`")),
+            }
+        }
+    }
+
+    fn word(&mut self, word: &str, value: Json) -> std::result::Result<Json, String> {
+        if self.bytes[self.at..].starts_with(word.as_bytes()) {
+            self.at += word.len();
+            Ok(value)
+        } else {
+            Err(self.fail("unexpected character"))
+        }
+    }
+
+    fn number(&mut self) -> Json {
+        let start = self.at;
+        while self
+            .bytes
+            .get(self.at)
+            .is_some_and(|b| matches!(b, b'-' | b'+' | b'.' | b'e' | b'E' | b'0'..=b'9'))
+        {
+            self.at += 1;
+        }
+        let text = String::from_utf8_lossy(&self.bytes[start..self.at]).into_owned();
+        text.parse().map_or(Json::Str(text), Json::Int)
+    }
+
+    fn string(&mut self) -> std::result::Result<String, String> {
+        self.at += 1;
+        let mut out: Vec<u8> = Vec::new();
+        loop {
+            let Some(&byte) = self.bytes.get(self.at) else {
+                return Err(self.fail("unterminated string"));
+            };
+            self.at += 1;
+            match byte {
+                b'"' => break,
+                b'\\' => {
+                    let Some(&escaped) = self.bytes.get(self.at) else {
+                        return Err(self.fail("unterminated string"));
+                    };
+                    self.at += 1;
+                    let c = match escaped {
+                        b'"' => '"',
+                        b'\\' => '\\',
+                        b'/' => '/',
+                        b'b' => '\u{8}',
+                        b'f' => '\u{c}',
+                        b'n' => '\n',
+                        b'r' => '\r',
+                        b't' => '\t',
+                        b'u' => self.unicode()?,
+                        _ => return Err(self.fail("unknown escape")),
+                    };
+                    let mut buffer = [0; 4];
+                    out.extend_from_slice(c.encode_utf8(&mut buffer).as_bytes());
+                }
+                _ => out.push(byte),
+            }
+        }
+        String::from_utf8(out).map_err(|_| self.fail("a string that is not UTF-8"))
+    }
+
+    /// The character after `\u`, a surrogate pair's second half included.
+    fn unicode(&mut self) -> std::result::Result<char, String> {
+        let high = self.hex4()?;
+        let code = if (0xD800..0xDC00).contains(&high) && self.bytes[self.at..].starts_with(b"\\u")
+        {
+            self.at += 2;
+            let low = self.hex4()?;
+            if !(0xDC00..0xE000).contains(&low) {
+                return Err(self.fail("a lone surrogate"));
+            }
+            0x10000 + ((high - 0xD800) << 10) + (low - 0xDC00)
+        } else {
+            high
+        };
+        char::from_u32(code).ok_or_else(|| self.fail("a lone surrogate"))
+    }
+
+    fn hex4(&mut self) -> std::result::Result<u32, String> {
+        let digits = self
+            .bytes
+            .get(self.at..self.at + 4)
+            .and_then(|d| std::str::from_utf8(d).ok())
+            .and_then(|d| u32::from_str_radix(d, 16).ok())
+            .ok_or_else(|| self.fail("a bad `\\u` escape"))?;
+        self.at += 4;
+        Ok(digits)
     }
 }
 
@@ -180,6 +427,48 @@ mod tests {
                 "  }\n",
                 "}\n",
             )
+        );
+    }
+
+    #[test]
+    fn documents_read_back_as_they_were_written() {
+        let doc = Json::object([
+            ("name", Json::string("a \"b\" \\ zażółć 😀\n")),
+            ("n", Json::Int(-12)),
+            ("list", Json::Array(vec![Json::Null, Json::Bool(true)])),
+            ("empty", Json::Object(Vec::new())),
+        ]);
+        assert_eq!(Json::parse(&doc.render()).unwrap(), doc);
+    }
+
+    #[test]
+    fn the_reader_takes_escapes_and_keeps_fractions_as_text() {
+        let doc = Json::parse(r#" {"a": "\u0041\ud83d\ude00\/", "f": 1.5e3, "e": []} "#).unwrap();
+        assert_eq!(doc.get("a").and_then(Json::as_str), Some("A😀/"));
+        assert_eq!(doc.get("f"), Some(&Json::string("1.5e3")));
+        assert!(doc.get("e").unwrap().items().is_empty());
+        assert_eq!(doc.get("missing"), None);
+    }
+
+    #[test]
+    fn the_reader_refuses_what_is_not_json() {
+        for bad in [
+            "",
+            "{",
+            "{\"a\" 1}",
+            "[1,]",
+            "\"open",
+            "tru",
+            "{} x",
+            "\"\\ud800\"",
+        ] {
+            assert!(Json::parse(bad).is_err(), "{bad:?} should not parse");
+        }
+        let deep = "[".repeat(MAX_DEPTH + 1);
+        assert!(
+            Json::parse(&deep)
+                .unwrap_err()
+                .contains("nested too deeply")
         );
     }
 
