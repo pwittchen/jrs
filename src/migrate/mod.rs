@@ -324,6 +324,7 @@ fn enable_language(
         test_dir: PathBuf::from(format!("src/test/{key}")),
         compiler_args: Vec::new(),
         compiler_jvm_args: Vec::new(),
+        plugins: Vec::new(),
     });
     out.languages.sort_by_key(|c| c.language);
     report.migrated(format!("[{key}] version = {version} (from {from})"));
@@ -368,10 +369,37 @@ fn enable_from_library(out: &mut Manifest, language: Language, from: &str, repor
 }
 
 /// A Kotlin compiler plugin, by the short name kotlin-maven-plugin's
-/// `<compilerPlugins>` or Gradle's `kotlin("plugin.<name>")` gives it. jrs does
-/// not pass compiler plugins to kotlinc yet (`JVM_LANGUAGES.md` §14.2), so each
-/// is reported with what goes missing without it.
-fn report_compiler_plugin(name: &str, from: &str, report: &mut Report) {
+/// `<compilerPlugins>` or Gradle's `kotlin("plugin.<name>")` gives it. One
+/// that needs nothing but its name goes into `[kotlin] plugins`; `allopen`
+/// and `noarg` without a preset need annotations of the build's own, and
+/// kapt is not a plugin jrs can run, so those are reported with what goes
+/// missing without them.
+fn migrate_compiler_plugin(out: &mut Manifest, name: &str, from: &str, report: &mut Report) {
+    let plugin = match name {
+        "kotlinx-serialization" | "serialization" => Some("serialization"),
+        "spring" => Some("spring"),
+        "jpa" => Some("jpa"),
+        "power-assert" => Some("power-assert"),
+        _ => None,
+    };
+    if let Some(plugin) = plugin {
+        match out
+            .languages
+            .iter_mut()
+            .find(|c| c.language == Language::Kotlin)
+        {
+            Some(kotlin) => {
+                if !kotlin.plugins.iter().any(|p| p == plugin) {
+                    kotlin.plugins.push(plugin.to_string());
+                }
+                report.migrated(format!("[kotlin] plugins += \"{plugin}\" (from {from})"));
+            }
+            None => report.skipped(format!(
+                "{from} — no [kotlin] table was written to turn it on in"
+            )),
+        }
+        return;
+    }
     let consequence = match name {
         "all-open" | "allopen" | "spring" => {
             "Kotlin classes stay final, so frameworks that subclass them, such as \
@@ -386,10 +414,17 @@ fn report_compiler_plugin(name: &str, from: &str, report: &mut Report) {
         "kapt" => "annotation processors do not run over Kotlin sources",
         _ => "whatever it generates is missing",
     };
-    report.skipped(format!(
-        "{from} — Kotlin compiler plugins are not supported yet (JVM_LANGUAGES.md \
-         §14.2): {consequence}"
-    ));
+    let why = match name {
+        "kapt" => "jrs does not run kapt".to_string(),
+        "all-open" | "allopen" | "no-arg" | "noarg" => format!(
+            "it needs the build's own annotations: add \"{}\" to [kotlin] plugins and \
+             `-P plugin:org.jetbrains.kotlin.{}:annotation=<class>` to kotlinc-args",
+            name.replace('-', ""),
+            name.replace('-', "")
+        ),
+        _ => "jrs does not know this compiler plugin".to_string(),
+    };
+    report.skipped(format!("{from} — {why}: {consequence}"));
 }
 
 /// Take out the runtime libraries the build declared by hand that a language

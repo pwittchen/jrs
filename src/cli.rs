@@ -2924,12 +2924,16 @@ impl<'a> Session<'a> {
                         JrsError::build(format!("the {language} compiler was not resolved"))
                     })?;
                 let name = &self.manifest.name;
+                let plugin_args =
+                    crate::compile::lang::plugin_flags(&config.plugins, &tool.resolution)
+                        .map_err(JrsError::build)?;
                 Some(ForeignCompiler {
                     language,
                     version: config.version.clone(),
                     classpath: tool.resolution.runtime_classpath(),
                     jvm_args: config.compiler_jvm_args.clone(),
                     extra_args: config.compiler_args.clone(),
+                    plugin_args,
                     module_name: if label == "test" {
                         format!("{name}_test")
                     } else {
@@ -3612,10 +3616,11 @@ impl<'a> Session<'a> {
         let resolution = resolve::resolve(&self.manifest, fetcher, self.jobs)?;
         let mut tools = Vec::new();
         for config in &self.manifest.languages {
-            if let Some(compiler) = config.language.compiler(&config.version) {
+            let roots = crate::compile::lang::compiler_roots(config);
+            if !roots.is_empty() {
                 tools.push(Tool {
                     language: config.language,
-                    resolution: resolve::resolve_tool(&[compiler.coord], fetcher, self.jobs)?,
+                    resolution: resolve::resolve_tool(&roots, fetcher, self.jobs)?,
                 });
             }
         }
@@ -4714,6 +4719,7 @@ fn init(
             test_dir: PathBuf::from(format!("src/test/{key}")),
             compiler_args: Vec::new(),
             compiler_jvm_args: Vec::new(),
+            plugins: Vec::new(),
         });
     }
     manifest.dev_dependencies = starter.dev_dependencies;

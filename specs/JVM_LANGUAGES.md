@@ -705,7 +705,11 @@ The layers:
    the compiler's tool graph. But it edges toward the plugin-configuration
    non-goal. Proposed: not in L1. Revisit it before calling Kotlin
    production-ready, since Kotlin on Spring is a large share of Kotlin on the
-   server.
+   server. **Resolved:** `[kotlin] plugins` names them — `serialization`,
+   `spring`, `jpa`, `power-assert`, `allopen`, `noarg` — and each is
+   resolved into the compiler's graph at the compiler's version and passed
+   as `-Xplugin`, with a preset's `-P` option. A plugin's own options stay
+   in `kotlinc-args`, so there is still no plugin configuration.
 3. **Cross-version keys.** sbt writes `"org.typelevel" %% "cats-core"` and fills
    in `_3`. A `"org.typelevel::cats-core"` key would do the same in jrs, but it
    touches key parsing, `edit.rs`, the lockfile and migration. Proposed: no;

@@ -10,6 +10,7 @@ javac-args = ["-parameters"]
 [kotlin]
 version = "2.2.21"
 kotlinc-args = ["-Xjsr305=strict", "-Xannotation-default-target=param-property"]
+plugins = ["spring"]
 
 [managed]
 "org.springframework.boot:spring-boot-dependencies" = { version = "4.1.1", bom = true }

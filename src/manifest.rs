@@ -559,6 +559,9 @@ pub struct LanguageConfig {
     pub compiler_args: Vec<String>,
     /// `java` flags for the JVM the compiler runs in: heap and stack size.
     pub compiler_jvm_args: Vec<String>,
+    /// Kotlin compiler plugins, by name (`serialization`, `spring`, …),
+    /// resolved into the compiler's own graph.
+    pub plugins: Vec<String>,
 }
 
 /// A `{placeholder}` in a task's value, expanded by jrs before the process
@@ -1727,6 +1730,9 @@ impl Manifest {
                     quote_list(&config.compiler_jvm_args)
                 );
             }
+            if !config.plugins.is_empty() {
+                let _ = writeln!(s, "plugins = {}", quote_list(&config.plugins));
+            }
         }
         if self.run != RunConfig::default() {
             let _ = writeln!(s, "\n[run]");
@@ -2023,13 +2029,16 @@ fn parse_languages(table: &toml::Table, warnings: &mut Vec<String>) -> Result<Ve
     for language in Language::FOREIGN {
         let key = language.key();
         let args_key = language.args_key();
-        let known = [
+        let mut known = vec![
             "version",
             "source-dir",
             "test-dir",
             args_key.as_str(),
             "compiler-jvm-args",
         ];
+        if language == Language::Kotlin {
+            known.push("plugins");
+        }
         let Some(t) = section(table, key, &known, warnings)? else {
             continue;
         };
@@ -2063,12 +2072,27 @@ fn parse_languages(table: &toml::Table, warnings: &mut Vec<String>) -> Result<Ve
         language
             .check_version(&version)
             .map_err(|e| JrsError::manifest(format!("`{key}.version` is {version}: {e}")))?;
+        let plugins = string_array(t, "plugins", key)?;
+        for name in &plugins {
+            if crate::compile::lang::kotlin_plugin(name).is_none() {
+                let known: Vec<String> = crate::compile::lang::KOTLIN_PLUGINS
+                    .iter()
+                    .map(|p| format!("`{}`", p.name))
+                    .collect();
+                return Err(JrsError::manifest(format!(
+                    "`{key}.plugins` names `{name}`, which is not a compiler plugin jrs knows \
+                     (known: {})",
+                    known.join(", ")
+                )));
+            }
+        }
         out.push(LanguageConfig {
             language,
             source_dir: path_or(t, "source-dir", &format!("src/main/{key}"), key)?,
             test_dir: path_or(t, "test-dir", &format!("src/test/{key}"), key)?,
             compiler_args: string_array(t, &args_key, key)?,
             compiler_jvm_args: string_array(t, "compiler-jvm-args", key)?,
+            plugins,
             version,
         });
     }
@@ -4890,6 +4914,28 @@ post-package = ["checksum"]
         assert!(err.to_string().contains("not a directory"), "{err}");
         let err = with("[test]\nenv = { P = '{free-port.}' }\n").unwrap_err();
         assert!(err.to_string().contains("needs a name"), "{err}");
+    }
+
+    #[test]
+    fn kotlin_compiler_plugins_are_named_and_checked() {
+        let m =
+            with("[kotlin]\nversion = '2.4.20'\nplugins = ['serialization', 'spring']\n").unwrap();
+        assert_eq!(m.languages[0].plugins, ["serialization", "spring"]);
+        assert!(
+            m.render(None)
+                .contains("plugins = [\"serialization\", \"spring\"]")
+        );
+        let err = with("[kotlin]\nversion = '2.4.20'\nplugins = ['kapt']\n").unwrap_err();
+        assert!(
+            err.to_string().contains("not a compiler plugin jrs knows"),
+            "{err}"
+        );
+        let scala = with("[scala]\nversion = '3.9.0'\nplugins = ['serialization']\n").unwrap();
+        assert!(
+            scala.warnings.iter().any(|w| w.contains("plugins")),
+            "{:?}",
+            scala.warnings
+        );
     }
 
     #[test]

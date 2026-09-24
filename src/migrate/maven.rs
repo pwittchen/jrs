@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 
 use super::{
     Migration, Report, Source, drop_implied_libraries, enable_from_library, enable_language,
-    maven_profiles, report_compiler_plugin,
+    maven_profiles, migrate_compiler_plugin,
 };
 use crate::compile::lang::Language;
 use crate::error::{IoResultExt, JrsError, Result};
@@ -1454,7 +1454,8 @@ fn read_kotlin(
         .filter(|n| !n.is_empty())
     {
         if !seen.contains(&name) {
-            report_compiler_plugin(
+            migrate_compiler_plugin(
+                out,
                 &name,
                 &format!("kotlin-maven-plugin compiler plugin `{name}`"),
                 report,
@@ -1468,7 +1469,7 @@ fn read_kotlin(
             .any(|g| g.text.trim() == "kapt")
     });
     if kapt {
-        report_compiler_plugin("kapt", "kotlin-maven-plugin's `kapt` goal", report);
+        migrate_compiler_plugin(out, "kapt", "kotlin-maven-plugin's `kapt` goal", report);
     }
 
     read_kotlinc_args(&configurations, effective, out, report);

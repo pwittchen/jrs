@@ -8,6 +8,7 @@ jdk = 21
 
 [kotlin]
 version = "2.2.0"
+plugins = ["spring"]
 
 [dependencies]
 "org.jetbrains.kotlin:kotlin-reflect" = "2.2.0"

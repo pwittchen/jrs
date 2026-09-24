@@ -82,6 +82,9 @@ pub struct ForeignCompiler {
     /// Kotlin: class directories whose `internal` declarations the unit may
     /// use, which is how tests see the main module's.
     pub friend_paths: Vec<PathBuf>,
+    /// Kotlin: `-Xplugin=` and `-P` flags for `[kotlin] plugins`, from
+    /// [`lang::plugin_flags`].
+    pub plugin_args: Vec<String>,
     /// Whether diagnostics may be coloured. It changes nothing compiled, so
     /// it is not part of the fingerprint.
     pub color: bool,
@@ -458,6 +461,7 @@ mod tests {
             extra_args: Vec::new(),
             module_name: "app".into(),
             friend_paths: Vec::new(),
+            plugin_args: Vec::new(),
             color: false,
         }
     }

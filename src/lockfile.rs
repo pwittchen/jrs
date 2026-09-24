@@ -490,7 +490,13 @@ pub fn manifest_checksum(manifest: &Manifest) -> String {
         canonical.push('\n');
     }
     for c in &manifest.languages {
-        let _ = writeln!(canonical, "lang {} {}", c.language.key(), c.version);
+        // A compiler plugin is resolved into the compiler's graph. A table
+        // without plugins adds nothing, keeping its lockfile byte for byte.
+        let _ = write!(canonical, "lang {} {}", c.language.key(), c.version);
+        if !c.plugins.is_empty() {
+            let _ = write!(canonical, " plugins={}", c.plugins.join(","));
+        }
+        canonical.push('\n');
     }
     // The obfuscator's version decides which ProGuard graph is resolved and
     // pinned; its `keep` and `proguard-args` change the run, not the graph, so

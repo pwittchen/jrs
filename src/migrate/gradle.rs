@@ -1898,8 +1898,13 @@ fn read_kotlin(script: &str, plugins: &[Plugin], out: &mut Manifest, report: &mu
                     unread_version(plugin)
                 )),
             }
-        } else if let Some(name) = kotlin_compiler_plugin(&plugin.id) {
-            super::report_compiler_plugin(name, &from, report);
+        }
+    }
+    // After the table: a compiler plugin may be applied before the Kotlin one.
+    for plugin in plugins {
+        if let Some(name) = kotlin_compiler_plugin(&plugin.id) {
+            let from = format!("plugin `{}`", plugin.id);
+            super::migrate_compiler_plugin(out, name, &from, report);
         }
     }
 
@@ -3343,9 +3348,9 @@ junit = "org.junit.jupiter:junit-jupiter:5.10.2"
             "Kotlin's toolchain pins the JDK, not the release"
         );
         assert!(m.dependencies.is_empty(), "the stdlib is implied");
+        assert_eq!(m.language(Language::Kotlin).unwrap().plugins, ["jpa"]);
         let skipped = migration.report.not_migrated.join("\n");
-        assert!(skipped.contains("plugin.jpa"), "{skipped}");
-        assert!(skipped.contains("JPA"), "{skipped}");
+        assert!(!skipped.contains("plugin.jpa"), "{skipped}");
         assert!(!skipped.contains("no plugin system"), "{skipped}");
     }
 

@@ -285,6 +285,119 @@ impl Language {
     }
 }
 
+/// A Kotlin compiler plugin jrs can turn on by name (`[kotlin] plugins`): the
+/// artifact beside the compiler that holds it, and the options a preset
+/// passes it. It is resolved into the compiler's graph, at the compiler's
+/// version, since a plugin is built against one compiler release.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct KotlinPlugin {
+    pub name: &'static str,
+    /// `kotlin-serialization-compiler-plugin-embeddable`, in
+    /// `org.jetbrains.kotlin`.
+    pub artifact: &'static str,
+    /// `-P plugin:<id>:<key>=<value>` pairs, for the presets.
+    pub options: &'static [&'static str],
+}
+
+/// The plugins that need nothing but their name: those the Kotlin Gradle and
+/// Maven plugins apply as `kotlin("plugin.<name>")` with no configuration.
+/// `allopen` and `noarg` need annotations of your own, which go in
+/// `kotlinc-args` as `-P plugin:org.jetbrains.kotlin.allopen:annotation=…`.
+pub const KOTLIN_PLUGINS: &[KotlinPlugin] = &[
+    KotlinPlugin {
+        name: "serialization",
+        artifact: "kotlin-serialization-compiler-plugin-embeddable",
+        options: &[],
+    },
+    KotlinPlugin {
+        name: "spring",
+        artifact: "kotlin-allopen-compiler-plugin-embeddable",
+        options: &["plugin:org.jetbrains.kotlin.allopen:preset=spring"],
+    },
+    KotlinPlugin {
+        name: "jpa",
+        artifact: "kotlin-noarg-compiler-plugin-embeddable",
+        options: &["plugin:org.jetbrains.kotlin.noarg:preset=jpa"],
+    },
+    KotlinPlugin {
+        name: "allopen",
+        artifact: "kotlin-allopen-compiler-plugin-embeddable",
+        options: &[],
+    },
+    KotlinPlugin {
+        name: "noarg",
+        artifact: "kotlin-noarg-compiler-plugin-embeddable",
+        options: &[],
+    },
+    KotlinPlugin {
+        name: "power-assert",
+        artifact: "kotlin-power-assert-compiler-plugin-embeddable",
+        options: &[],
+    },
+];
+
+/// The plugin `[kotlin] plugins` names `name`.
+#[must_use]
+pub fn kotlin_plugin(name: &str) -> Option<&'static KotlinPlugin> {
+    KOTLIN_PLUGINS.iter().find(|p| p.name == name)
+}
+
+/// The roots of a language's compiler graph: the compiler, then each compiler
+/// plugin's artifact at the compiler's version.
+#[must_use]
+pub fn compiler_roots(config: &crate::manifest::LanguageConfig) -> Vec<Coord> {
+    let Some(compiler) = config.language.compiler(&config.version) else {
+        return Vec::new();
+    };
+    let mut roots = vec![compiler.coord];
+    for plugin in config.plugins.iter().filter_map(|name| kotlin_plugin(name)) {
+        let coord = Coord::new("org.jetbrains.kotlin", plugin.artifact, &config.version);
+        if !roots.contains(&coord) {
+            roots.push(coord);
+        }
+    }
+    roots
+}
+
+/// The plugin jars in a resolved compiler graph and the options they are
+/// given, as `kotlinc` flags: `-Xplugin=<jar>` and `-P <option>`.
+///
+/// # Errors
+///
+/// A message naming the plugin whose jar the graph does not hold.
+pub fn plugin_flags(
+    plugins: &[String],
+    graph: &Resolution,
+) -> std::result::Result<Vec<String>, String> {
+    let mut flags = Vec::new();
+    let mut jars = Vec::new();
+    for name in plugins {
+        let plugin = kotlin_plugin(name).ok_or_else(|| format!("unknown plugin `{name}`"))?;
+        let jar = graph
+            .packages
+            .iter()
+            .find(|p| {
+                p.coord.group == "org.jetbrains.kotlin" && p.coord.artifact == plugin.artifact
+            })
+            .and_then(|p| p.jar.clone())
+            .ok_or_else(|| {
+                format!(
+                    "the `{name}` compiler plugin (`{}`) is not in the Kotlin compiler's graph; \
+                     run `jrs update`",
+                    plugin.artifact
+                )
+            })?;
+        if !jars.contains(&jar) {
+            flags.push(format!("-Xplugin={}", jar.display()));
+            jars.push(jar);
+        }
+        for option in plugin.options {
+            flags.extend(["-P".to_string(), (*option).to_string()]);
+        }
+    }
+    Ok(flags)
+}
+
 impl std::fmt::Display for Language {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.name())
@@ -375,6 +488,7 @@ pub fn flags(
                 args.push(format!("-Xjdk-release={}", java_version(unit.release)));
             }
             args.extend(["-module-name".into(), compiler.module_name.clone()]);
+            args.extend(compiler.plugin_args.iter().cloned());
             if !compiler.friend_paths.is_empty() {
                 let friends: Vec<String> = compiler
                     .friend_paths
@@ -617,6 +731,7 @@ mod tests {
             extra_args: vec!["-verbose-flag".into()],
             module_name: "app".into(),
             friend_paths: Vec::new(),
+            plugin_args: Vec::new(),
             color: false,
         }
     }
@@ -661,6 +776,81 @@ mod tests {
             !flags.contains(&"-Xlint:all".to_string()),
             "javac-args are javac's"
         );
+    }
+
+    #[test]
+    fn compiler_plugins_join_the_compilers_graph_and_its_command_line() {
+        let config = crate::manifest::LanguageConfig {
+            language: Language::Kotlin,
+            version: "2.4.20".into(),
+            source_dir: PathBuf::from("src/main/kotlin"),
+            test_dir: PathBuf::from("src/test/kotlin"),
+            compiler_args: Vec::new(),
+            compiler_jvm_args: Vec::new(),
+            plugins: vec!["serialization".into(), "spring".into(), "allopen".into()],
+        };
+        let roots: Vec<String> = compiler_roots(&config)
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+        assert_eq!(
+            roots,
+            [
+                "org.jetbrains.kotlin:kotlin-compiler-embeddable:2.4.20",
+                "org.jetbrains.kotlin:kotlin-serialization-compiler-plugin-embeddable:2.4.20",
+                "org.jetbrains.kotlin:kotlin-allopen-compiler-plugin-embeddable:2.4.20",
+            ],
+            "one jar for spring and allopen, at the compiler's version"
+        );
+
+        let package = |artifact: &str| ResolvedPackage {
+            coord: Coord::new("org.jetbrains.kotlin", artifact, "2.4.20"),
+            classpath: Classpath::Compile,
+            packaging: "jar".into(),
+            depth: 1,
+            direct: true,
+            dependencies: Vec::new(),
+            jar: Some(PathBuf::from(format!("/c/{artifact}.jar"))),
+            checksum: None,
+            mediated: false,
+            managed: false,
+        };
+        let graph = Resolution {
+            packages: vec![
+                package("kotlin-compiler-embeddable"),
+                package("kotlin-serialization-compiler-plugin-embeddable"),
+                package("kotlin-allopen-compiler-plugin-embeddable"),
+            ],
+            roots: Vec::new(),
+            test_roots: Vec::new(),
+            warnings: Vec::new(),
+            downloaded: 0,
+            local: Vec::new(),
+        };
+        let plugin_args = plugin_flags(&config.plugins, &graph).unwrap();
+        assert_eq!(
+            plugin_args,
+            [
+                "-Xplugin=/c/kotlin-serialization-compiler-plugin-embeddable.jar",
+                "-Xplugin=/c/kotlin-allopen-compiler-plugin-embeddable.jar",
+                "-P",
+                "plugin:org.jetbrains.kotlin.allopen:preset=spring",
+            ]
+        );
+        let mut kotlinc = compiler(Language::Kotlin, "2.4.20");
+        kotlinc.plugin_args = plugin_args;
+        let flags = flags(&unit(), &kotlinc, false).unwrap();
+        assert!(
+            flags.contains(&"-Xplugin=/c/kotlin-allopen-compiler-plugin-embeddable.jar".into())
+        );
+        assert_eq!(
+            flags.last().unwrap(),
+            "-verbose-flag",
+            "kotlinc-args still come last"
+        );
+
+        let missing = plugin_flags(&["power-assert".into()], &graph).unwrap_err();
+        assert!(missing.contains("jrs update"), "{missing}");
     }
 
     #[test]

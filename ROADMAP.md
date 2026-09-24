@@ -133,7 +133,7 @@ listed so the discussion has a home, not because they are planned.
 | Annotation-processor path in the manifest | Non-goal: no annotation-processor configuration. Processors on the compile classpath, as `compile-only` dependencies with `-proc:full`, work today. Error Prone, NullAway and other `javac` plugins need a processor path too |
 | JPMS (`module-info.java`, module path) | Non-goal |
 | JVM languages beyond Kotlin, Scala and Groovy; Kotlin Multiplatform | Non-goal (SPEC §1.2) |
-| Kotlin compiler plugins (`allopen`, `spring`, `serialization`), kapt/KSP | Non-goal: compiler-plugin configuration ([JVM_LANGUAGES.md §14.2](specs/JVM_LANGUAGES.md#14-open-questions)). Kotlin on Spring needs `allopen`, so this is the first to revisit: a Spring Boot build in Kotlin migrates (`spring-boot-kotlin`), but does not build as Spring expects |
+| Kotlin compiler plugins with configuration, kapt/KSP | `[kotlin] plugins` turns on the plugins that need only their name (`serialization`, `spring`, `jpa`, `power-assert`, and `allopen`/`noarg` with their options in `kotlinc-args`). A plugin block of its own (`allOpen { annotation(...) }`) is plugin configuration ([JVM_LANGUAGES.md §14.2](specs/JVM_LANGUAGES.md#14-open-questions)); kapt and KSP run processors over Kotlin and need a processor path |
 | Dokka | A plugin host with its own configuration (JVM_LANGUAGES.md §14.4). `jrs doc` runs Scaladoc and Groovydoc, but a Kotlin unit's Kotlin sources are still left out of its `javadoc`, with a warning |
 | sbt-style `%%` cross-version keys | New key syntax, touching `edit.rs`, the lockfile and migration (JVM_LANGUAGES.md §14.3) |
 | TestNG | SPEC §13.7: the JUnit Platform only (Jupiter and Vintage) |

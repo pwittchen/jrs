@@ -233,7 +233,7 @@ fn the_gradle_kotlin_fixture_translates_exactly() {
 
 /// kotlin-maven-plugin at `${kotlin.version}`: the stdlib it implies is left
 /// out, `<jvmTarget>` becomes java.source, `src/main/kotlin` stays Kotlin's
-/// own root, and the Spring compiler plugin is reported.
+/// own root, and the Spring compiler plugin goes into `[kotlin] plugins`.
 #[test]
 fn the_maven_kotlin_fixture_translates_exactly() {
     let (migration, dir) = migrate_fixture("maven-kotlin");
@@ -252,12 +252,12 @@ fn the_maven_kotlin_fixture_translates_exactly() {
         "{migrated}"
     );
 
-    let skipped = migration.report.not_migrated.join("\n");
-    assert!(skipped.contains("`spring`"), "{skipped}");
     assert!(
-        skipped.contains("compiler plugins are not supported yet"),
-        "{skipped}"
+        migrated.contains("[kotlin] plugins += \"spring\" (from kotlin-maven-plugin"),
+        "{migrated}"
     );
+    let skipped = migration.report.not_migrated.join("\n");
+    assert!(!skipped.contains("spring"), "{skipped}");
     assert!(!skipped.contains("no plugin system"), "{skipped}");
 }
 
@@ -296,12 +296,14 @@ fn the_gradle_kotlin_language_fixture_translates_exactly() {
     assert!(review.contains("kotlin-test-junit5"), "{review}");
     assert!(review.contains("capability"), "{review}");
 
-    let skipped = migration.report.not_migrated.join("\n");
-    assert!(skipped.contains("plugin.spring"), "{skipped}");
     assert!(
-        skipped.contains("compiler plugins are not supported yet"),
-        "{skipped}"
+        migrated.contains(
+            "[kotlin] plugins += \"spring\" (from plugin `org.jetbrains.kotlin.plugin.spring`)"
+        ),
+        "{migrated}"
     );
+    let skipped = migration.report.not_migrated.join("\n");
+    assert!(!skipped.contains("plugin.spring"), "{skipped}");
     assert!(!skipped.contains("no plugin system"), "{skipped}");
 }
 
@@ -490,8 +492,8 @@ fn the_gradle_local_fixture_translates_exactly() {
 
 /// start.spring.io's Kotlin build, taken unchanged: Boot's BOM, the
 /// `freeCompilerArgs` as kotlinc's, `DemoApplicationKt` as the main class —
-/// and the `spring` compiler plugin reported, since without it Spring cannot
-/// proxy Kotlin's final classes (JVM_LANGUAGES.md §14.2).
+/// and the `spring` compiler plugin in `[kotlin] plugins`, since without it
+/// Spring cannot proxy Kotlin's final classes (JVM_LANGUAGES.md §14.2).
 #[test]
 fn the_spring_boot_kotlin_fixture_translates_exactly() {
     let (migration, dir) = migrate_fixture("spring-boot-kotlin");
@@ -509,10 +511,12 @@ fn the_spring_boot_kotlin_fixture_translates_exactly() {
         migrated.contains("[kotlin] kotlinc-args = [\"-Xjsr305=strict\""),
         "{migrated}"
     );
+    assert!(
+        migrated.contains("[kotlin] plugins += \"spring\""),
+        "{migrated}"
+    );
     let skipped = &migration.report.not_migrated;
-    assert_eq!(skipped.len(), 1, "{skipped:?}");
-    assert!(skipped[0].contains("plugin.spring"), "{skipped:?}");
-    assert!(skipped[0].contains("Spring's proxies"), "{skipped:?}");
+    assert!(skipped.is_empty(), "{skipped:?}");
 }
 
 /// `maxParallelForks` becomes `test.forks`; `forkEvery` is reported, since

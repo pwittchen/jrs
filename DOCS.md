@@ -200,6 +200,7 @@ does not try to build a manifest it may not understand.
 version = "2.4.20"                    # the compiler, and the implied kotlin-stdlib
 kotlinc-args = ["-Xjsr305=strict"]    # optional, appended verbatim
 compiler-jvm-args = ["-Xmx2g"]        # optional, for the compiler's JVM
+plugins = ["serialization"]           # optional, Kotlin compiler plugins
 ```
 
 A table turns the language on. See [Kotlin, Scala and Groovy](#kotlin-scala-and-groovy).
@@ -211,6 +212,7 @@ A table turns the language on. See [Kotlin, Scala and Groovy](#kotlin-scala-and-
 | `test-dir` | `src/test/<lang>` | Another test source root. |
 | `kotlinc-args` / `scalac-args` / `groovyc-args` | `[]` | Extra compiler flags, passed through verbatim. |
 | `compiler-jvm-args` | `[]` | Flags for the JVM the compiler runs in, such as `-Xmx2g` or `-Xss4m`. |
+| `plugins` | `[]` | Kotlin only: compiler plugins by name — `serialization`, `spring`, `jpa`, `allopen`, `noarg`, `power-assert`. |
 
 ### `[run]`, `[test]` and `[package]`
 
@@ -852,10 +854,20 @@ src/test/kotlin/com/example/MainTest.kt
 - `jrs doc` runs Scaladoc for Scala and Groovydoc for Groovy, each over the
   Java sources beside it too, except Scala 3's scaladoc, which reads the
   compiled classes and leaves Java out. Kotlin sources are left out of
-  `javadoc`, since Dokka is not supported. Compiler plugins (Kotlin's
-  `allopen`, `spring`, `serialization`), kapt/KSP and Kotlin Multiplatform
-  projects are not supported. A Multiplatform library whose root artifact
-  does not resolve to classes needs its `-jvm` artifact declared instead.
+  `javadoc`, since Dokka is not supported. kapt/KSP and Kotlin Multiplatform
+  projects are not supported.
+- **Compiler plugins.** `[kotlin] plugins = ["serialization"]` turns on the
+  plugins that need nothing but their name: `serialization`, `spring` and
+  `jpa` (the `allopen` and `noarg` presets), and `power-assert`. Each is
+  resolved into the compiler's graph at the compiler's version and handed to
+  `kotlinc` as `-Xplugin`. `allopen` and `noarg` on their own need your
+  annotations, as `kotlinc-args = ["-P",
+  "plugin:org.jetbrains.kotlin.allopen:annotation=com.example.Open"]`.
+- **Multiplatform libraries.** A Kotlin Multiplatform library is declared by
+  its root coordinate, `io.ktor:ktor-server-core`, as in Gradle. Its POM
+  lists only its common code's dependencies, so jrs reads the Gradle module
+  metadata (`.module`) published beside it, and follows the JVM variant to
+  the artifact that holds the classes, `ktor-server-core-jvm`.
 
 The design is [specs/JVM_LANGUAGES.md](specs/JVM_LANGUAGES.md).
 

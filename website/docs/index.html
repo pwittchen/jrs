@@ -107,7 +107,7 @@
     still work from the classpath, see <a href="#annotation-processors">Annotation processors</a>),
     and no IDE project files.
   </li>
-  <li>For Kotlin, Scala and Groovy: nothing off the JVM (Multiplatform, JS, Native), no compiler plugins, no kapt or KSP.</li>
+  <li>For Kotlin, Scala and Groovy: nothing off the JVM (Multiplatform projects, JS, Native), no compiler-plugin configuration beyond <code>[kotlin] plugins</code>, no kapt or KSP.</li>
   <li>
     No building from <code>pom.xml</code> or <code>build.gradle</code>. They are read once, by
     <a href="#cmd-migrate"><code>jrs migrate</code></a>, and never treated as a build input.
@@ -964,7 +964,8 @@ proguard-args = ["-dontwarn org.foo.**"]   # passed to ProGuard verbatim; option
 <pre data-lang="toml">[kotlin]
 version = "2.4.20"                    # the compiler, and the implied kotlin-stdlib
 kotlinc-args = ["-Xjsr305=strict"]    # optional, appended verbatim
-compiler-jvm-args = ["-Xmx2g"]        # optional, for the compiler's JVM</pre>
+compiler-jvm-args = ["-Xmx2g"]        # optional, for the compiler's JVM
+plugins = ["serialization"]           # optional, Kotlin compiler plugins</pre>
 <table>
   <thead><tr><th>Key</th><th>Default</th><th>Meaning</th></tr></thead>
   <tbody>
@@ -973,6 +974,7 @@ compiler-jvm-args = ["-Xmx2g"]        # optional, for the compiler's JVM</pre>
     <tr><td><code>test-dir</code></td><td><code>src/test/&lt;lang&gt;</code></td><td>The language's test source root.</td></tr>
     <tr><td><code>kotlinc-args</code> / <code>scalac-args</code> / <code>groovyc-args</code></td><td><code>[]</code></td><td>Extra compiler flags, passed through verbatim.</td></tr>
     <tr><td><code>compiler-jvm-args</code></td><td><code>[]</code></td><td>Flags for the JVM the compiler runs in, such as <code>-Xmx2g</code> or <code>-Xss4m</code>.</td></tr>
+    <tr><td><code>plugins</code></td><td><code>[]</code></td><td>Kotlin only: compiler plugins by name — <code>serialization</code>, <code>spring</code>, <code>jpa</code>, <code>allopen</code>, <code>noarg</code>, <code>power-assert</code>.</td></tr>
   </tbody>
 </table>
 <p>How the languages compile together is in <a href="#languages">Kotlin, Scala and Groovy</a>.</p>
@@ -2054,13 +2056,20 @@ src/test/kotlin/com/example/MainTest.kt</pre>
 <ul>
   <li>Kotlin tests see the main code's <code>internal</code> declarations.</li>
   <li>A file-level <code>main</code> in <code>Main.kt</code> compiles to <code>MainKt</code>; <code>jrs run</code> says so when <code>main-class</code> names <code>Main</code>.</li>
-  <li>A Multiplatform library whose root artifact does not resolve to classes needs its <code>-jvm</code> artifact declared instead, such as <code>kotlinx-coroutines-core-jvm</code>.</li>
+  <li>A Multiplatform library is declared by its root coordinate, <code>io.ktor:ktor-server-core</code>, as in Gradle: jrs reads the Gradle module metadata published beside its POM and follows the JVM variant to <code>ktor-server-core-jvm</code>, which holds the classes.</li>
+  <li>
+    Compiler plugins: <code>[kotlin] plugins = ["serialization"]</code> turns on
+    <code>serialization</code>, <code>spring</code> and <code>jpa</code> (the <code>allopen</code>
+    and <code>noarg</code> presets) and <code>power-assert</code>, resolved into the compiler's
+    graph at its version and passed as <code>-Xplugin</code>. <code>allopen</code> and
+    <code>noarg</code> on their own take your annotations through <code>kotlinc-args</code>:
+    <code>["-P", "plugin:org.jetbrains.kotlin.allopen:annotation=com.example.Open"]</code>.
+  </li>
 </ul>
 
 <h3>Not supported</h3>
 <p>
-  Compiler plugins (Kotlin's <code>allopen</code>, <code>spring</code>,
-  <code>serialization</code>), kapt and KSP, Kotlin Multiplatform projects, Dokka, and incremental
+  kapt and KSP, Kotlin Multiplatform projects, Dokka, and incremental
   compilation or daemons for these languages. Units with them are compiled whole.
 </p>
 </section>
