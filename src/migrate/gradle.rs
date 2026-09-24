@@ -111,7 +111,7 @@ pub fn migrate(build_file: &Path, root: &Path) -> Result<Migration> {
     let mut out = manifest::blank(&name, &version, root);
     report.migrated(format!("project.name = {name}"));
 
-    let plugins = read_plugins(&script, &mut vars);
+    let plugins = read_plugins(&script, &catalog, &mut vars);
     read_java(&script, &mut out, &mut report);
     // Before the dependencies: `kotlin("reflect")` takes [kotlin]'s version.
     read_kotlin(&script, &plugins, &mut out, &mut report);
@@ -130,16 +130,67 @@ pub fn migrate(build_file: &Path, root: &Path) -> Result<Migration> {
     // After them: `groovy` and `scala` take their library's version.
     read_library_languages(&plugins, &mut out, &mut report);
     read_jvm_args(&script, &mut out, &mut report);
-    super::gradle_tasks::read_jvm_environment(&script, &mut out, &mut report);
+    super::gradle_tasks::read_jvm_environment(&script, &vars, &mut out, &mut report);
     read_jar_manifest(&script, &mut out, &mut report);
     read_resources(&script, &vars, &mut out, &mut report);
     read_proguard(&plugins, &mut out, &mut report);
     read_shadow(&script, &plugins, &mut out, &mut report);
     super::gradle_repos::read(&script, &mut out, &mut report);
-    super::gradle_tasks::read(&script, &mut out, &mut report);
+    let paths = super::gradle_generated::Paths::read(&script);
+    let openapi = plugins
+        .iter()
+        .find(|p| p.id == super::gradle_generated::OPENAPI_PLUGIN)
+        .and_then(|p| {
+            super::gradle_generated::openapi(&script, p.version.as_deref(), &paths, &mut report)
+        });
+    let openapi_translated = openapi.is_some();
+    let bridge = super::gradle_tasks::Bridge {
+        plugin_tasks: openapi
+            .map(|def| {
+                (
+                    "openApiGenerate".to_string(),
+                    "the OpenAPI Generator's CLI".to_string(),
+                    def,
+                )
+            })
+            .into_iter()
+            .collect(),
+        wrapper: root.join("gradlew").is_file(),
+        paths: paths.clone(),
+        build_files: [
+            build_file
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned()),
+            Some("settings.gradle".to_string()),
+            Some("settings.gradle.kts".to_string()),
+            Some("gradle.properties".to_string()),
+        ]
+        .into_iter()
+        .flatten()
+        .filter(|name| root.join(name).is_file())
+        .fold(Vec::new(), |mut names, name| {
+            if !names.contains(&name) {
+                names.push(name);
+            }
+            names
+        }),
+    };
+    super::gradle_tasks::read(&script, bridge, &mut out, &mut report);
+    let source_sets_read =
+        super::gradle_generated::read_source_sets(&script, &paths, &mut out, &mut report);
     vars.report(&mut report);
     read_jacoco(&script, &plugins, &mut out, &mut report);
-    report_the_unreadable(&script, &settings, &plugins, &out, &mut report);
+    report_the_unreadable(
+        &script,
+        &settings,
+        &plugins,
+        Understood {
+            openapi: openapi_translated,
+            source_sets: source_sets_read,
+        },
+        &out,
+        &mut report,
+    );
 
     Ok(Migration {
         source: Source::Gradle,
@@ -183,20 +234,47 @@ fn read_settings(root: &Path, report: &mut Report) -> Settings {
 
 // ---- version catalog -------------------------------------------------------
 
-/// `alias` → `group:artifact:version`, read from `gradle/libs.versions.toml`.
+/// `alias` → `group:artifact:version`, read from `gradle/libs.versions.toml`,
+/// with its `[bundles]` and `[plugins]`.
 #[derive(Debug, Default)]
 struct Catalog {
     entries: BTreeMap<String, Dependency>,
+    /// A bundle's name → the aliases of the libraries in it, in order.
+    bundles: BTreeMap<String, Vec<String>>,
+    /// A plugin's alias → its id, and its version when the catalog gives one.
+    plugins: BTreeMap<String, (String, Option<String>)>,
+}
+
+/// Gradle's accessors replace `-`, `_` and `.` with `.`, so `libs.commons.lang3`
+/// and the alias `commons-lang3` are the same thing.
+fn catalog_lookup<'a, T>(map: &'a BTreeMap<String, T>, reference: &str) -> Option<&'a T> {
+    let normalised = reference.replace(['-', '_', '.'], ".");
+    map.iter()
+        .find_map(|(alias, v)| (alias.replace(['-', '_', '.'], ".") == normalised).then_some(v))
 }
 
 impl Catalog {
-    /// Gradle's accessors replace `-`, `_` and `.` with `.`, so `libs.commons.lang3`
-    /// and the alias `commons-lang3` are the same thing.
     fn get(&self, reference: &str) -> Option<&Dependency> {
-        let normalised = reference.replace(['-', '_', '.'], ".");
-        self.entries.iter().find_map(|(alias, dep)| {
-            (alias.replace(['-', '_', '.'], ".") == normalised).then_some(dep)
-        })
+        catalog_lookup(&self.entries, reference)
+    }
+
+    /// `libs.bundles.<name>`'s libraries, or why it cannot be expanded.
+    fn bundle(&self, name: &str) -> std::result::Result<Vec<Dependency>, String> {
+        let aliases = catalog_lookup(&self.bundles, name)
+            .ok_or_else(|| format!("no bundle `{name}` in the version catalog"))?;
+        aliases
+            .iter()
+            .map(|alias| {
+                self.get(alias).cloned().ok_or_else(|| {
+                    format!("its alias `{alias}` is not a library the catalog versions")
+                })
+            })
+            .collect()
+    }
+
+    /// `libs.plugins.<alias>`: the plugin's id and version.
+    fn plugin(&self, reference: &str) -> Option<&(String, Option<String>)> {
+        catalog_lookup(&self.plugins, reference)
     }
 }
 
@@ -280,13 +358,69 @@ fn read_catalog(root: &Path, report: &mut Report) -> Catalog {
         entries.insert(alias.clone(), Dependency::new(group, artifact, version));
     }
 
+    let mut bundles = BTreeMap::new();
+    let bundle_table = table.get("bundles").and_then(|v| v.as_table());
+    for (name, value) in bundle_table.into_iter().flatten() {
+        let aliases: Option<Vec<String>> = value.as_array().map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str().map(str::to_string))
+                .collect()
+        });
+        match aliases {
+            Some(aliases) => {
+                bundles.insert(name.clone(), aliases);
+            }
+            None => report.skipped(format!("catalog bundle `{name}` — not a list of aliases")),
+        }
+    }
+
+    // `[plugins]`: `alias = "id:version"`, or a table with `id` and a
+    // `version`, `version.ref` or `version = { ref = … }`.
+    let mut plugins = BTreeMap::new();
+    let plugin_table = table.get("plugins").and_then(|v| v.as_table());
+    for (alias, value) in plugin_table.into_iter().flatten() {
+        let plugin = match value {
+            toml::Value::String(s) => s.split_once(':').map_or((s.clone(), None), |(id, v)| {
+                (id.to_string(), Some(v.to_string()))
+            }),
+            toml::Value::Table(t) => {
+                let Some(id) = t.get("id").and_then(|v| v.as_str()) else {
+                    continue;
+                };
+                let version = match t.get("version") {
+                    Some(toml::Value::String(v)) => Some(v.clone()),
+                    Some(toml::Value::Table(v)) => v
+                        .get("ref")
+                        .and_then(|r| r.as_str())
+                        .and_then(|r| versions.get(r).cloned())
+                        .or_else(|| {
+                            v.get("require")
+                                .and_then(|r| r.as_str())
+                                .map(str::to_string)
+                        }),
+                    _ => t
+                        .get("version.ref")
+                        .and_then(|r| r.as_str())
+                        .and_then(|r| versions.get(r).cloned()),
+                };
+                (id.to_string(), version)
+            }
+            _ => continue,
+        };
+        plugins.insert(alias.clone(), plugin);
+    }
+
     if !entries.is_empty() {
         report.migrated(format!(
             "gradle/libs.versions.toml — {} catalog entries read",
             entries.len()
         ));
     }
-    Catalog { entries }
+    Catalog {
+        entries,
+        bundles,
+        plugins,
+    }
 }
 
 // ---- the build script ------------------------------------------------------
@@ -407,6 +541,38 @@ fn read_dependencies(
         if let Some(jars) = super::gradle_files::read(trimmed, &out.root, report) {
             for dep in jars {
                 push_local(out, target, dep, report, config.as_str());
+            }
+            continue;
+        }
+        // `libs.bundles.<name>`: every library in the bundle, one by one.
+        if let Some(bundle) = catalog_reference(declaration)
+            .as_deref()
+            .and_then(|r| r.strip_prefix("bundles."))
+            .map(str::to_string)
+        {
+            match catalog.bundle(&bundle) {
+                Ok(deps) => {
+                    report.migrated(format!(
+                        "`{config} libs.bundles.{bundle}` — {} libraries from the catalog's \
+                         bundle",
+                        deps.len()
+                    ));
+                    for dep in deps {
+                        if dep.is_managed() && !managed {
+                            report.skipped(format!(
+                                "`{}` in bundle `{bundle}` — it has no version, and nothing \
+                                 in the build manages one",
+                                dep.key()
+                            ));
+                            continue;
+                        }
+                        push(out, target, dep, report, config.as_str());
+                    }
+                }
+                Err(why) => report.skipped(format!(
+                    "`{config} libs.bundles.{bundle}` — {why}; add its libraries to jrs.toml \
+                     by hand"
+                )),
             }
             continue;
         }
@@ -817,12 +983,71 @@ fn read_managed(
             ));
         }
     }
+    read_forced(script, catalog, vars, out, report, &mut pinned);
     if pinned > 0 {
         let s = if pinned == 1 { "" } else { "s" };
         report.migrated(format!(
             "[managed] — {pinned} version{s} from the build's dependency management and \
              constraints"
         ));
+    }
+}
+
+/// `resolutionStrategy { force(...) }`, in `configurations.all { }` or one
+/// configuration's block: a version the whole graph is held to, which is what
+/// `[managed]` does. Each argument is a catalog reference or a literal
+/// `group:artifact:version`.
+fn read_forced(
+    script: &str,
+    catalog: &Catalog,
+    vars: &mut Variables,
+    out: &mut Manifest,
+    report: &mut Report,
+    pinned: &mut usize,
+) {
+    for line in blocks_where(script, |header| header.starts_with("resolutionStrategy")) {
+        let trimmed = line.trim();
+        let Some(args) = trimmed
+            .strip_prefix("force")
+            .map(str::trim_start)
+            .and_then(|r| r.strip_prefix('('))
+            .and_then(|r| r.trim_end().strip_suffix(')'))
+        else {
+            continue;
+        };
+        for arg in split_top_level(args) {
+            let arg = arg.trim();
+            let forced = if let Some(reference) = catalog_reference(arg) {
+                catalog
+                    .get(&reference)
+                    .filter(|d| !d.is_managed())
+                    .cloned()
+                    .ok_or_else(|| format!("`libs.{reference}` is no versioned catalog library"))
+            } else {
+                match literal_gav(arg, vars) {
+                    Ok(Some((dep, names))) => {
+                        vars.used_by_dependency(&names);
+                        Ok(dep)
+                    }
+                    Ok(None) => Err("it is not a group:artifact:version".to_string()),
+                    Err(why) => Err(why),
+                }
+            };
+            match forced {
+                Ok(dep) => {
+                    if super::add_managed(out, &dep.group, &dep.artifact, &dep.version) {
+                        *pinned += 1;
+                        report.migrated(format!(
+                            "`force({arg})` → [managed] {}:{} = {}",
+                            dep.group, dep.artifact, dep.version
+                        ));
+                    }
+                }
+                Err(why) => {
+                    report.skipped(format!("`{trimmed}` — {why}; pin it in [managed] by hand"))
+                }
+            }
+        }
     }
 }
 
@@ -1217,6 +1442,10 @@ fn read_resources(script: &str, vars: &Variables, out: &mut Manifest, report: &m
             }
         } else if !compact.starts_with("expand(")
             && !compact.starts_with("filteringCharset")
+            // A tie to another task is the task pass's, which reports it.
+            && !compact.starts_with("dependsOn")
+            && !compact.starts_with("mustRunAfter")
+            && !compact.starts_with("finalizedBy")
             && !compact.chars().all(|c| matches!(c, '{' | '}' | ')'))
         {
             report.skipped(format!(
@@ -1627,10 +1856,20 @@ fn attribute_value(expression: &str) -> Option<String> {
     (whole && !interpolated).then(|| manifest::Template::literal(&literal).raw)
 }
 
+/// What the passes before [`report_the_unreadable`] translated, which it
+/// would otherwise report.
+struct Understood {
+    /// The OpenAPI Generator plugin's `openApiGenerate { }`.
+    openapi: bool,
+    /// Every `srcDir` in `sourceSets { }`.
+    source_sets: bool,
+}
+
 fn report_the_unreadable(
     script: &str,
     settings: &Settings,
     plugins: &[Plugin],
+    understood: Understood,
     out: &Manifest,
     report: &mut Report,
 ) {
@@ -1655,8 +1894,9 @@ fn report_the_unreadable(
             "`sourceSets { }` — use project.source-dir instead",
         ),
     ] {
-        // Source sets a `Test` task runs have become [test.suites].
-        if needle == "sourceSets" && !out.test.suites.is_empty() {
+        // Source sets a `Test` task runs have become [test.suites], and
+        // generated directories their task's outputs.
+        if needle == "sourceSets" && (!out.test.suites.is_empty() || understood.source_sets) {
             continue;
         }
         if script.lines().any(|l| l.trim().starts_with(needle)) {
@@ -1679,7 +1919,8 @@ fn report_the_unreadable(
                 | "jacoco"
         ) || SHADOW_PLUGINS.contains(&id)
             || language_plugin(id).is_some()
-            || kotlin_compiler_plugin(id).is_some();
+            || kotlin_compiler_plugin(id).is_some()
+            || (understood.openapi && id == super::gradle_generated::OPENAPI_PLUGIN);
         if !understood {
             report.skipped(format!("plugin `{id}` — jrs has no plugin system"));
         }
@@ -1711,10 +1952,10 @@ impl Plugin {
 /// `id 'x' version 'v'`, `id("x") version "v"`, `kotlin("jvm") version "v"`,
 /// and the Kotlin DSL's bare `java` or `groovy`; then the older `apply
 /// plugin: 'x'`, at the version its `buildscript { }` classpath names.
-fn read_plugins(script: &str, vars: &mut Variables) -> Vec<Plugin> {
+fn read_plugins(script: &str, catalog: &Catalog, vars: &mut Variables) -> Vec<Plugin> {
     let mut plugins: Vec<Plugin> = block_lines(script, "plugins")
         .into_iter()
-        .filter_map(|line| read_plugin(line, vars))
+        .filter_map(|line| read_plugin(line, catalog, vars))
         .collect();
     for id in applied_plugins(script) {
         if !plugins.iter().any(|p| p.id == id) {
@@ -1725,8 +1966,19 @@ fn read_plugins(script: &str, vars: &mut Variables) -> Vec<Plugin> {
     plugins
 }
 
-fn read_plugin(line: &str, vars: &mut Variables) -> Option<Plugin> {
+fn read_plugin(line: &str, catalog: &Catalog, vars: &mut Variables) -> Option<Plugin> {
     let trimmed = line.trim();
+    // `alias(libs.plugins.kotlin.jvm)`, from the version catalog's [plugins].
+    if let Some(args) = trimmed.strip_prefix("alias(") {
+        let reference = catalog_reference(args)?;
+        let alias = reference.strip_prefix("plugins.")?;
+        let (id, version) = catalog.plugin(alias)?;
+        return Some(Plugin {
+            id: id.clone(),
+            version: version.clone(),
+            unread: None,
+        });
+    }
     // `kotlin("jvm")` is Gradle's shorthand for `id("org.jetbrains.kotlin.jvm")`.
     if let Some(args) = trimmed.strip_prefix("kotlin(") {
         let (name, rest) = first_literal(args)?;
@@ -1961,6 +2213,21 @@ fn read_kotlinc_args(script: &str, out: &mut Manifest, report: &mut Report) {
         }
         args.extend(literals);
     }
+    // Compiler options that are switches, set to `true` in `compilerOptions { }`
+    // or `kotlinOptions { }`.
+    for (option, flag) in [
+        ("javaParameters", "-java-parameters"),
+        ("allWarningsAsErrors", "-Werror"),
+        ("progressiveMode", "-progressive"),
+    ] {
+        let set = lines.iter().any(|l| {
+            let compact: String = l.chars().filter(|c| !c.is_whitespace()).collect();
+            compact == format!("{option}=true") || compact == format!("{option}.set(true)")
+        });
+        if set && !args.iter().any(|a| a == flag) {
+            args.push(flag.to_string());
+        }
+    }
     if args.is_empty() {
         return;
     }
@@ -1975,7 +2242,7 @@ fn read_kotlinc_args(script: &str, out: &mut Manifest, report: &mut Report) {
         return;
     };
     report.migrated(format!(
-        "[kotlin] kotlinc-args = {args:?} (from freeCompilerArgs)"
+        "[kotlin] kotlinc-args = {args:?} (from the Kotlin compiler options)"
     ));
     kotlin.compiler_args.extend(args);
 }
@@ -3401,7 +3668,7 @@ junit = "org.junit.jupiter:junit-jupiter:5.10.2"
     #[test]
     fn plugin_lines_are_read_in_every_spelling() {
         let read = |line: &str| {
-            let p = read_plugin(line, &mut Variables::default()).unwrap();
+            let p = read_plugin(line, &Catalog::default(), &mut Variables::default()).unwrap();
             (p.id, p.version)
         };
         let some = |s: &str| Some(s.to_string());
@@ -3419,7 +3686,30 @@ junit = "org.junit.jupiter:junit-jupiter:5.10.2"
             read("kotlin(\"jvm\") version kotlinVersion"),
             ("org.jetbrains.kotlin.jvm".into(), None)
         );
-        assert!(read_plugin("alias(libs.plugins.x)", &mut Variables::default()).is_none());
+        assert!(
+            read_plugin(
+                "alias(libs.plugins.x)",
+                &Catalog::default(),
+                &mut Variables::default()
+            )
+            .is_none(),
+            "an alias the catalog does not have"
+        );
+        let mut catalog = Catalog::default();
+        catalog.plugins.insert(
+            "kotlin-jvm".to_string(),
+            ("org.jetbrains.kotlin.jvm".to_string(), some("2.4.20")),
+        );
+        let p = read_plugin(
+            "alias(libs.plugins.kotlin.jvm)",
+            &catalog,
+            &mut Variables::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            (p.id.as_str(), p.version),
+            ("org.jetbrains.kotlin.jvm", some("2.4.20"))
+        );
     }
 
     #[test]

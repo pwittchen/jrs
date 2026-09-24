@@ -307,6 +307,43 @@ fn the_gradle_kotlin_language_fixture_translates_exactly() {
     assert!(!skipped.contains("no plugin system"), "{skipped}");
 }
 
+/// A Kotlin build as a version catalog writes it, that generates code: the
+/// catalog's bundles and plugin aliases, a Kotlin compiler plugin, `force`,
+/// test environment values that are numbers, variables and a random port,
+/// the OpenAPI Generator's task as its CLI, two tasks of Gradle code left to
+/// the wrapper, and the `sourceSets` directories they write.
+#[test]
+fn the_gradle_generated_code_fixture_translates_exactly() {
+    let (migration, dir) = migrate_fixture("gradle-generated");
+    assert_eq!(migration.source, Source::Gradle);
+    assert_eq!(migration.manifest.render(None), expected(&dir));
+
+    let migrated = migration.report.migrated.join("\n");
+    assert!(
+        migrated.contains("`implementation libs.bundles.main` — 2 libraries"),
+        "{migrated}"
+    );
+    assert!(
+        migrated.contains("task `generateUrls` → run by Gradle, in [tasks.gradle]"),
+        "{migrated}"
+    );
+    assert!(
+        migrated.contains("task `openApiGenerate` → [tasks.open-api-generate]"),
+        "{migrated}"
+    );
+    let review = migration.report.needs_review.join("\n");
+    assert!(
+        review.contains("project.target-dir = \"build\""),
+        "{review}"
+    );
+    assert!(review.contains("Gradle picked a random port"), "{review}");
+    assert!(
+        migration.report.not_migrated.is_empty(),
+        "{:?}",
+        migration.report.not_migrated
+    );
+}
+
 /// Groovy for Spock tests only: the version comes from the test dependency,
 /// and that dependency stays, since it is what keeps Groovy off the runtime.
 #[test]

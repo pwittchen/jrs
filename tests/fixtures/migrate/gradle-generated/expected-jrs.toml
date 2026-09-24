@@ -1,0 +1,48 @@
+[project]
+name = "catalog-app"
+version = "1.2.0"
+main-class = "com.example.AppKt"
+target-dir = "build"
+
+[java]
+jdk = 21
+
+[kotlin]
+version = "2.4.20"
+kotlinc-args = ["-java-parameters"]
+plugins = ["serialization"]
+
+[test]
+env = { "TEST_PORT" = "{free-port.test-port}", "API_URL" = "http://localhost:{free-port.test-port}/api", "PAGE_SIZE" = "13", "LIMIT" = "10000", "SIGN_KEY" = "0123abcd" }
+
+[managed]
+"io.github.oshai:kotlin-logging" = "7.0.13"
+
+[dependencies]
+"io.ktor:ktor-server-core" = "3.6.0"
+"io.ktor:ktor-server-netty" = "3.6.0"
+
+[dev-dependencies]
+"io.kotest:kotest-runner-junit5" = "6.2.5"
+
+[tasks.open-api-generate]
+description = "Generate code from the OpenAPI spec (the Gradle plugin's openApiGenerate, run as the OpenAPI Generator CLI 7.21.0)"
+main = "org.openapitools.codegen.OpenAPIGenerator"
+args = ["generate", "-g", "kotlin", "-i", "{root}/api/spec.yml", "-o", "{target}/generated/sources/openapi", "--model-package", "com.example.api", "--global-property", "models=,apis=false", "--additional-properties", "serializationLibrary=kotlinx_serialization"]
+inputs = ["api/spec.yml"]
+outputs = ["{target}/generated/sources/openapi"]
+source-outputs = ["{target}/generated/sources/openapi/src/main/kotlin"]
+
+[tasks.open-api-generate.dependencies]
+"org.openapitools:openapi-generator-cli" = "7.21.0"
+
+[tasks.gradle]
+description = "Run the Gradle tasks jrs cannot translate: generateUrls, styles"
+run = ["./gradlew", "--quiet", "generateUrls", "styles"]
+inputs = ["build.gradle.kts", "settings.gradle.kts", "gradle/libs.versions.js.toml", "src"]
+outputs = ["{target}/generated/sources/urls/kotlin/com/example", "{target}/generated/resources/styles/app.css"]
+source-outputs = ["{target}/generated/sources/urls/kotlin"]
+resource-outputs = ["{target}/generated/resources/styles"]
+
+[hooks]
+pre-compile = ["gradle", "open-api-generate"]

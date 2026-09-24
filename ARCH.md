@@ -113,6 +113,7 @@ src/
 │   ├── maven_profiles.rs  the <profiles> a plain `mvn` build activates, merged in
 │   ├── gradle.rs      build.gradle[.kts] → Manifest (pattern extraction)
 │   ├── gradle_files.rs  files() / fileTree() → local jars, literal ones only
+│   ├── gradle_generated.rs  openApiGenerate, sourceSets srcDirs, tasks left to ./gradlew
 │   ├── gradle_repos.rs  repositories { }, content filters → groups
 │   ├── gradle_tasks.rs  Gradle tasks → [tasks] and [hooks], literal ones only
 │   └── gradle_vars.rs   version variables: ext, def, val, gradle.properties

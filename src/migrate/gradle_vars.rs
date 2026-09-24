@@ -283,6 +283,79 @@ impl Variables {
         }
     }
 
+    /// An environment variable's value as a `jrs.toml` template: a string
+    /// literal (interpolated), a number or boolean, or a variable — and a
+    /// random port, `nextInt(8100, 8999)` written in place or in the variable,
+    /// as `{free-port.<name>}`, which is what a random port in a range was
+    /// for: one nothing else is listening on. `key` is the variable's name,
+    /// which names the port when nothing else does. The template, and the
+    /// variables it named.
+    pub(super) fn env_template(
+        &self,
+        expression: &str,
+        key: &str,
+    ) -> Result<(String, Vec<String>), Unread> {
+        let expression = expression.trim();
+        let braces = |text: &str| text.replace('{', "{{").replace('}', "}}");
+        if is_number(expression) || matches!(expression, "true" | "false") {
+            return Ok((expression.replace('_', ""), Vec::new()));
+        }
+        if random_port(expression, key) {
+            return Ok((format!("{{free-port.{}}}", kebab(key)), Vec::new()));
+        }
+        let Some((quote, text)) = whole_literal(expression) else {
+            let name = reference(expression).ok_or_else(|| {
+                format!("`{expression}` is an expression, which jrs does not evaluate")
+            })?;
+            return Ok((self.env_variable(&name, &braces)?, vec![name]));
+        };
+        if quote != '"' {
+            return Ok((braces(&text), Vec::new()));
+        }
+        let chars: Vec<char> = text.chars().collect();
+        let mut out = String::new();
+        let mut names = Vec::new();
+        let mut i = 0;
+        while i < chars.len() {
+            match chars[i] {
+                '\\' if i + 1 < chars.len() => {
+                    out.push_str(&braces(&chars[i + 1].to_string()));
+                    i += 2;
+                }
+                '$' => {
+                    let Some((inner, next)) = interpolation(&chars, i, self.kotlin) else {
+                        out.push('$');
+                        i += 1;
+                        continue;
+                    };
+                    let name = reference(&inner).ok_or_else(|| {
+                        format!("`{inner}` is an expression, which jrs does not evaluate")
+                    })?;
+                    out.push_str(&self.env_variable(&name, &braces)?);
+                    names.push(name);
+                    i = next;
+                }
+                c => {
+                    out.push_str(&braces(&c.to_string()));
+                    i += 1;
+                }
+            }
+        }
+        Ok((out, names))
+    }
+
+    /// A variable in an environment value: its literal, braces escaped, or
+    /// the free port it stands for when it holds a random one.
+    fn env_variable(&self, name: &str, braces: &dyn Fn(&str) -> String) -> Result<String, Unread> {
+        if let Some([one]) = self.assignments.get(name).map(Vec::as_slice)
+            && let Value::Expression(e) = &one.value
+            && random_port(e, name)
+        {
+            return Ok(format!("{{free-port.{}}}", kebab(name)));
+        }
+        Ok(braces(&self.resolve(name)?.0))
+    }
+
     /// Note that a dependency took a value from each of `names`.
     pub(super) fn used_by_dependency(&mut self, names: &[String]) {
         for name in names {
@@ -608,6 +681,64 @@ fn reference(expression: &str) -> Option<String> {
     None
 }
 
+/// A Kotlin or Groovy integer literal: `4`, `-1`, `10_000`, `8L`.
+fn is_number(text: &str) -> bool {
+    let digits = text.strip_prefix('-').unwrap_or(text);
+    let digits = digits.strip_suffix(['L', 'l']).unwrap_or(digits);
+    digits.starts_with(|c: char| c.is_ascii_digit())
+        && digits.chars().all(|c| c.is_ascii_digit() || c == '_')
+}
+
+/// `nextInt(8100, 8999)` — Kotlin's `Random`, Java's `ThreadLocalRandom` —
+/// between two port numbers, for something `name`d a port: a build picking a
+/// port for a server its tests start.
+fn random_port(expression: &str, name: &str) -> bool {
+    let e: String = expression.chars().filter(|c| !c.is_whitespace()).collect();
+    let Some(args) = e
+        .rsplit_once("nextInt(")
+        .filter(|(receiver, _)| {
+            receiver.is_empty()
+                || receiver.ends_with("Random.")
+                || receiver.ends_with("Random.Default.")
+                || receiver.ends_with("ThreadLocalRandom.current().")
+        })
+        .and_then(|(_, args)| args.strip_suffix(')'))
+    else {
+        return false;
+    };
+    let port = |n: &str| {
+        n.replace('_', "")
+            .parse::<u32>()
+            .is_ok_and(|p| (1024..=65535).contains(&p))
+    };
+    let bounds = args
+        .split_once(',')
+        .is_some_and(|(a, b)| port(a) && port(b));
+    bounds && name.to_ascii_lowercase().contains("port")
+}
+
+/// `testPort` or `TEST_PORT` → `test-port`: the name of a `{free-port.<name>}`.
+fn kebab(name: &str) -> String {
+    let mut out = String::new();
+    let mut previous: Option<char> = None;
+    for c in name.chars() {
+        if c == '_' || c == '.' || c == '-' {
+            if !out.ends_with('-') && !out.is_empty() {
+                out.push('-');
+            }
+        } else if c.is_ascii_uppercase() {
+            if previous.is_some_and(|p| p.is_ascii_lowercase()) {
+                out.push('-');
+            }
+            out.push(c.to_ascii_lowercase());
+        } else if c.is_ascii_alphanumeric() {
+            out.push(c);
+        }
+        previous = Some(c);
+    }
+    out.trim_matches('-').to_string()
+}
+
 /// The expression a `$` at `at` interpolates, and the index past it:
 /// `${expression}`, or `$name` — which in Groovy runs on over `.name`.
 fn interpolation(chars: &[char], at: usize, kotlin: bool) -> Option<(String, usize)> {
@@ -839,6 +970,52 @@ mod tests {
 
     fn value(vars: &Variables, name: &str) -> Result<String, Unread> {
         vars.resolve(name).map(|(v, _)| v)
+    }
+
+    #[test]
+    fn an_environment_value_becomes_a_template_and_a_random_port_a_free_one() {
+        let vars = kotlin(
+            "val signKey = \"abc{1}\"\ntasks.test {\n  val testPort = nextInt(8100, 8999)\n  \
+             val seed = nextInt(1, 10)\n}\n",
+        );
+        let template = |e: &str, key: &str| vars.env_template(e, key).map(|(t, _)| t);
+        assert_eq!(template("4", "LIMIT").as_deref(), Ok("4"));
+        assert_eq!(template("10_000", "LIMIT").as_deref(), Ok("10000"));
+        assert_eq!(template("true", "ON").as_deref(), Ok("true"));
+        assert_eq!(
+            template("signKey", "KEY").as_deref(),
+            Ok("abc{{1}}"),
+            "braces escaped"
+        );
+        assert_eq!(
+            template("testPort", "TEST_PORT").as_deref(),
+            Ok("{free-port.test-port}")
+        );
+        assert_eq!(
+            template("\"http://localhost:$testPort/x\"", "URL").as_deref(),
+            Ok("http://localhost:{free-port.test-port}/x")
+        );
+        assert_eq!(
+            template("nextInt(8100, 8999)", "API_PORT").as_deref(),
+            Ok("{free-port.api-port}")
+        );
+        assert_eq!(
+            template("Random.nextInt(8100, 8999)", "HTTP_PORT").as_deref(),
+            Ok("{free-port.http-port}")
+        );
+        assert!(
+            template("seed", "SEED").is_err(),
+            "a random number that is no port"
+        );
+        assert!(
+            template("nextInt(1, 10)", "SOME_PORT").is_err(),
+            "not a port range"
+        );
+        assert!(
+            template("nextInt(8100, 8999)", "WORKERS").is_err(),
+            "not named a port"
+        );
+        assert!(template("System.getenv(\"X\")", "X").is_err());
     }
 
     #[test]

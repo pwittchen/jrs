@@ -2626,7 +2626,14 @@ jrs migrate                # write jrs.toml; the original build file is untouche
     <tr><td class="wrap">Shade <code>&lt;relocations&gt;</code>, Shadow <code>relocate</code></td><td class="wrap"><code>[package.relocate]</code>, and <code>jrs package --fat</code></td></tr>
     <tr><td class="wrap"><code>proguard-maven-plugin</code>, <code>com.guardsquare.proguard</code></td><td class="wrap"><code>[obfuscate]</code></td></tr>
     <tr><td class="wrap">Kotlin plugin, <code>id 'scala'</code>, <code>id 'groovy'</code>, <code>kotlin-</code> / <code>scala-maven-plugin</code>, <code>gmavenplus-plugin</code></td><td class="wrap"><code>[kotlin]</code>, <code>[scala]</code>, <code>[groovy]</code></td></tr>
-    <tr><td class="wrap"><code>freeCompilerArgs</code>, Maven's Kotlin <code>&lt;args&gt;</code></td><td class="wrap"><code>kotlinc-args</code>, when literals</td></tr>
+    <tr><td class="wrap"><code>freeCompilerArgs</code>, <code>compilerOptions { javaParameters = true }</code>, Maven's Kotlin <code>&lt;args&gt;</code></td><td class="wrap"><code>kotlinc-args</code>, when literals</td></tr>
+    <tr><td class="wrap"><code>kotlin("plugin.serialization")</code>, <code>plugin.spring</code>, <code>plugin.jpa</code>, Maven's <code>&lt;compilerPlugins&gt;</code></td><td class="wrap"><code>[kotlin] plugins</code></td></tr>
+    <tr><td class="wrap">Version catalog <code>libs.bundles.&lt;name&gt;</code>, <code>alias(libs.plugins.&lt;name&gt;)</code></td><td class="wrap">The bundle's libraries; the plugin at the catalog's version</td></tr>
+    <tr><td class="wrap"><code>resolutionStrategy { force(…) }</code></td><td class="wrap"><code>[managed]</code></td></tr>
+    <tr><td class="wrap">A random port for a test server, <code>nextInt(8100, 8999)</code></td><td class="wrap"><code>{free-port.&lt;name&gt;}</code> in <code>test.env</code></td></tr>
+    <tr><td class="wrap">The OpenAPI Generator's <code>openApiGenerate { }</code></td><td class="wrap">A <code>main</code> task over the generator's CLI, hooked before the compile</td></tr>
+    <tr><td class="wrap">A task the compile depends on that is Gradle code (<code>doLast { }</code>), with <code>gradlew</code> in the project</td><td class="wrap"><code>[tasks.gradle]</code>, running <code>./gradlew</code> over them; <code>project.target-dir = "build"</code></td></tr>
+    <tr><td class="wrap"><code>sourceSets { main { kotlin { srcDir(…) } } }</code> under <code>build/</code></td><td class="wrap">The generating task's <code>source-outputs</code> / <code>resource-outputs</code></td></tr>
     <tr><td class="wrap"><code>withSourcesJar()</code>, <code>withJavadocJar()</code></td><td class="wrap">Reported: <code>jrs package --sources</code> and <code>--javadoc</code></td></tr>
   </tbody>
 </table>

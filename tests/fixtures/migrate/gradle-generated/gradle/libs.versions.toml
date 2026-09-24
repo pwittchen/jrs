@@ -1,0 +1,20 @@
+[versions]
+kotlin = "2.4.20"
+ktor = "3.6.0"
+kotest = "6.2.5"
+openapi = "7.21.0"
+
+[libraries]
+ktor-server-core = { module = "io.ktor:ktor-server-core", version.ref = "ktor" }
+ktor-server-netty = { module = "io.ktor:ktor-server-netty", version.ref = "ktor" }
+kotest-junit = { module = "io.kotest:kotest-runner-junit5", version.ref = "kotest" }
+kotlin-logging = { module = "io.github.oshai:kotlin-logging", version = "7.0.13" }
+
+[bundles]
+main = ["ktor-server-core", "ktor-server-netty"]
+test = ["kotest-junit"]
+
+[plugins]
+kotlin-jvm = { id = "org.jetbrains.kotlin.jvm", version.ref = "kotlin" }
+kotlin-plugin-serialization = { id = "org.jetbrains.kotlin.plugin.serialization", version.ref = "kotlin" }
+openapi = { id = "org.openapi.generator", version.ref = "openapi" }

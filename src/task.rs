@@ -733,10 +733,19 @@ fn task_path(ctx: &Context<'_>) -> OsString {
 }
 
 /// A `run` program: taken relative to the root when it has a path separator,
-/// looked up on the task's `PATH` otherwise.
+/// looked up on the task's `PATH` otherwise. On Windows, a script named
+/// without its extension, such as `./gradlew`, is its `.bat` or `.cmd`.
 fn locate_program(task: &str, program: &str, root: &Path, path: &OsString) -> Result<PathBuf> {
     if program.contains(['/', '\\']) {
         let located = root.join(program);
+        if cfg!(windows) && located.extension().is_none() {
+            for extension in ["bat", "cmd", "exe"] {
+                let script = located.with_extension(extension);
+                if script.is_file() {
+                    return Ok(script);
+                }
+            }
+        }
         if located.is_file() {
             return Ok(located);
         }

@@ -1138,8 +1138,32 @@ Kotlin, Scala and Groovy builds migrate too. The Kotlin Gradle plugin,
 `scala-maven-plugin` and `gmavenplus-plugin` become language tables. An
 explicit standard-library dependency is dropped, since it is implied now.
 Kotlin compiler flags — Gradle's `freeCompilerArgs`, Maven's `<args>` —
-become `kotlinc-args` when they are literals. Compiler plugins are reported
-as not migrated.
+become `kotlinc-args` when they are literals, and so do the switches of
+`compilerOptions { }` (`javaParameters`, `allWarningsAsErrors`). The compiler
+plugins `[kotlin] plugins` knows — `kotlin("plugin.serialization")`,
+`plugin.spring`, `plugin.jpa`, Maven's `<compilerPlugins>` — go there; kapt
+and a bare `allopen` or `noarg` are reported.
+
+A version catalog's `libs.bundles.<name>` becomes the libraries in the
+bundle, and `alias(libs.plugins.<name>)` the plugin the catalog names, at
+its version. `resolutionStrategy { force(...) }` becomes `[managed]`.
+
+`environment` values on the `test` and `run` tasks may be numbers, and
+variables set to a literal. A port a build picks at random for the server its
+tests start, `nextInt(8100, 8999)` in something named a port, becomes
+`{free-port.<name>}`, and a string built from it uses the same one.
+
+Code generation migrates with the task that does it. The OpenAPI Generator
+plugin's `openApiGenerate { }` becomes a `main` task over the generator's
+command-line tool, at the plugin's version, with each setting as the tool's
+option. A task of the build's own that the compile or the tests depend on,
+and that is Gradle code — a `doLast { }` — is left to Gradle when the
+project has the wrapper: one `[tasks.gradle]` runs `./gradlew` over all of
+them before the compile, with the `inputs` and `outputs` they declare, and
+`project.target-dir` becomes `build`, where Gradle writes. The
+`sourceSets { main { … srcDir(…) } }` directories they write become the
+tasks' `source-outputs` and `resource-outputs`. Rewriting those tasks as jrs
+tasks is what drops Gradle from the build.
 
 ## Development
 

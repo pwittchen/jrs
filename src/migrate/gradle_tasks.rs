@@ -21,14 +21,14 @@ use crate::manifest::{
 // ---- lexing ----------------------------------------------------------------
 
 /// A Groovy or Kotlin string literal.
-struct Literal {
-    text: String,
+pub(super) struct Literal {
+    pub(super) text: String,
     /// `"$x"` or `"${x}"`: a template jrs cannot evaluate.
-    interpolated: bool,
+    pub(super) interpolated: bool,
 }
 
 /// `elem` when it is exactly one string literal, escapes decoded.
-fn literal(elem: &str) -> Option<Literal> {
+pub(super) fn literal(elem: &str) -> Option<Literal> {
     let elem = elem.trim();
     let quote = elem.chars().next().filter(|c| matches!(c, '\'' | '"'))?;
     if elem.len() < 2
@@ -62,7 +62,7 @@ fn literal(elem: &str) -> Option<Literal> {
 
 /// The characters of `line` outside string literals, with their byte offsets.
 /// Braces, brackets, commas and semicolons only count there.
-fn unquoted(line: &str) -> Vec<(usize, char)> {
+pub(super) fn unquoted(line: &str) -> Vec<(usize, char)> {
     let mut out = Vec::new();
     let mut quote: Option<char> = None;
     let mut escaped = false;
@@ -105,7 +105,7 @@ fn last_close(line: &str) -> Option<usize> {
 }
 
 /// Split `text` on `sep` where it stands outside quotes and brackets.
-fn split_top(text: &str, sep: char) -> Vec<&str> {
+pub(super) fn split_top(text: &str, sep: char) -> Vec<&str> {
     let mut parts = Vec::new();
     let mut depth = 0i64;
     let mut start = 0;
@@ -126,14 +126,14 @@ fn split_top(text: &str, sep: char) -> Vec<&str> {
 
 /// One statement of a script or of a block: its head, and the text of the
 /// block it opens, when it opens one.
-struct Stmt {
-    head: String,
-    block: Option<String>,
+pub(super) struct Stmt {
+    pub(super) head: String,
+    pub(super) block: Option<String>,
 }
 
 /// The statements of `text` at its own level; nested blocks stay inside the
 /// statement that opens them.
-fn statements(text: &str) -> Vec<Stmt> {
+pub(super) fn statements(text: &str) -> Vec<Stmt> {
     let mut out = Vec::new();
     let mut lines = text.lines();
     while let Some(line) = lines.next() {
@@ -183,7 +183,7 @@ fn statements(text: &str) -> Vec<Stmt> {
 
 /// `(inner)` or `[inner]` at the start of `s`: the inner text, and what
 /// follows the closing bracket.
-fn bracketed(s: &str) -> Option<(&str, &str)> {
+pub(super) fn bracketed(s: &str) -> Option<(&str, &str)> {
     let open = s.chars().next().filter(|c| matches!(c, '(' | '['))?;
     let close = if open == '(' { ')' } else { ']' };
     let mut depth = 0i64;
@@ -342,7 +342,7 @@ fn task_ref(e: &str) -> Option<String> {
 
 /// What a task's declaration says about it, besides its name.
 #[derive(Default)]
-struct Header {
+pub(super) struct Header {
     /// `Exec`, `JavaExec`, ...; `None` for a plain task.
     kind: Option<String>,
     /// Groovy's `task x(dependsOn: ...)`.
@@ -353,7 +353,7 @@ struct Header {
 
 /// The Gradle name a declaration gives its task, and what else it says, or
 /// why that cannot be read. `None` when `head` declares no task.
-fn declaration(head: &str) -> Option<(String, Result<Header, String>)> {
+pub(super) fn declaration(head: &str) -> Option<(String, Result<Header, String>)> {
     let head = head.trim();
     let head = head.strip_prefix("project.").unwrap_or(head);
 
@@ -875,7 +875,12 @@ fn review_notes(name: &str, body: &Body) -> Vec<String> {
 /// `environment` and `workingDir` in the blocks that configure Gradle's own
 /// `run` and `test` tasks, as `run.env`, `run.cwd` and `test.env`. Literals
 /// translate; anything else is reported, as in a task.
-pub(super) fn read_jvm_environment(script: &str, out: &mut Manifest, report: &mut Report) {
+pub(super) fn read_jvm_environment(
+    script: &str,
+    vars: &super::gradle_vars::Variables,
+    out: &mut Manifest,
+    report: &mut Report,
+) {
     for stmt in statements(script) {
         let Some(block) = stmt.block.as_deref() else {
             continue;
@@ -895,7 +900,7 @@ pub(super) fn read_jvm_environment(script: &str, out: &mut Manifest, report: &mu
                 .unwrap_or(text.len());
             let (key, rest) = text.split_at(end);
             match (key.strip_suffix(".set").unwrap_or(key), section) {
-                ("environment", _) => read_environment(section, text, rest, out, report),
+                ("environment", _) => read_environment(section, text, rest, vars, out, report),
                 ("workingDir", "run") => read_working_dir(text, rest, out, report),
                 ("workingDir", _) => report.skipped(format!(
                     "`{text}` in the `test` task — jrs starts the test JVM where jrs itself \
@@ -908,34 +913,59 @@ pub(super) fn read_jvm_environment(script: &str, out: &mut Manifest, report: &mu
 }
 
 /// `environment 'NAME', 'value'` into `<section>.env`; a name set twice keeps
-/// its last value, as in Gradle.
+/// its last value, as in Gradle. The value may be a literal, a number, a
+/// variable set to one, or a random port (see
+/// [`Variables::env_template`](super::gradle_vars::Variables::env_template)).
 fn read_environment(
     section: &str,
     text: &str,
     rest: &str,
+    vars: &super::gradle_vars::Variables,
     out: &mut Manifest,
     report: &mut Report,
 ) {
-    let pair = strings(rest).and_then(|values| match values.as_slice() {
-        [name, value] if name.is_empty() || name.contains(['=', '\0']) => {
-            Err(format!("`{name}` is not an environment variable name"))
-        }
-        [name, _] if name.to_ascii_uppercase().starts_with("JRS_") => Err(format!(
-            "`{name}` starts with `JRS_`, which jrs keeps for itself"
-        )),
-        [name, value] => Ok((name.clone(), value.clone())),
+    let args: Vec<&str> = split_top(unwrap(argument(rest)), ',')
+        .into_iter()
+        .map(str::trim)
+        .filter(|e| !e.is_empty())
+        .collect();
+    let pair = match args.as_slice() {
+        [name, value] => string(name).and_then(|name| match name {
+            _ if name.is_empty() || name.contains(['=', '\0']) => {
+                Err(format!("`{name}` is not an environment variable name"))
+            }
+            _ if name.to_ascii_uppercase().starts_with("JRS_") => Err(format!(
+                "`{name}` starts with `JRS_`, which jrs keeps for itself"
+            )),
+            _ => vars
+                .env_template(value, &name)
+                .map(|(template, _)| (name, template))
+                .map_err(|why| format!("{why} without running Gradle")),
+        }),
         _ => Err("it is not one name and one value".to_string()),
+    };
+    let template = pair.and_then(|(name, raw)| {
+        Template::parse(&raw)
+            .map(|t| (name, t))
+            .map_err(|e| format!("`{raw}` is not a value jrs can write: {e}"))
     });
-    match pair {
-        Ok((name, value)) => {
+    match template {
+        Ok((name, template)) => {
             let env = if section == "run" {
                 &mut out.run.env
             } else {
                 &mut out.test.env
             };
             env.retain(|(k, _)| *k != name);
-            env.push((name.clone(), Template::literal(&value)));
-            report.migrated(format!("{section}.env.{name} = {value:?}"));
+            if template.has_free_port() {
+                report.review(format!(
+                    "{section}.env.{name} = {:?} — Gradle picked a random port; jrs picks \
+                     one nothing listens on, the same for every value that names it",
+                    template.raw
+                ));
+            }
+            report.migrated(format!("{section}.env.{name} = {:?}", template.raw));
+            env.push((name, template));
         }
         Err(why) => report.skipped(format!("`{text}` in the `{section}` task — {why}")),
     }
@@ -1055,9 +1085,23 @@ struct Tie {
     text: String,
 }
 
+/// What the rest of the migration hands the task pass: Gradle's own tasks
+/// that a plugin adds and jrs translated, and whether the tasks jrs cannot
+/// translate can be left to the Gradle wrapper.
+#[derive(Default)]
+pub(super) struct Bridge {
+    /// By the Gradle name the build's `dependsOn` uses: `openApiGenerate`.
+    pub(super) plugin_tasks: Vec<(String, String, TaskDef)>,
+    /// The project has `gradlew`.
+    pub(super) wrapper: bool,
+    pub(super) paths: super::gradle_generated::Paths,
+    /// The files that are the delegated tasks' code.
+    pub(super) build_files: Vec<String>,
+}
+
 /// Translate the script's tasks into `out.tasks` and `out.hooks`, reporting
 /// every task and every tie that could not be.
-pub(super) fn read(script: &str, out: &mut Manifest, report: &mut Report) {
+pub(super) fn read(script: &str, bridge: Bridge, out: &mut Manifest, report: &mut Report) {
     let top = statements(script);
     let suites = read_suites(&top, out, report);
     let top: Vec<Stmt> = top
@@ -1126,6 +1170,22 @@ pub(super) fn read(script: &str, out: &mut Manifest, report: &mut Report) {
         }
     }
 
+    // A plugin's task the compile depends on, translated by the plugin's own
+    // pass: it is hooked like one of the build's.
+    for (gradle, kind, def) in bridge.plugin_tasks {
+        let wanted = hooked.iter().any(|(_, r, _, _)| *r == gradle);
+        if wanted && !declared.iter().any(|d| d.gradle == gradle) {
+            declared.push(Declared {
+                gradle,
+                kind,
+                def,
+                depends_on: Vec::new(),
+                implied: Vec::new(),
+                review: Vec::new(),
+            });
+        }
+    }
+
     // A task that depends on one left out goes too, and so on up.
     while let Some((gradle, missing)) = declared.iter().find_map(|d| {
         d.depends_on
@@ -1140,6 +1200,17 @@ pub(super) fn read(script: &str, out: &mut Manifest, report: &mut Report) {
         };
         fail(&mut declared, &gradle, why);
     }
+    delegate(
+        &top,
+        &bridge.paths,
+        &bridge.build_files,
+        bridge.wrapper,
+        &mut declared,
+        &mut failed,
+        &mut hooked,
+        out,
+        report,
+    );
     for (gradle, why) in &failed {
         report.skipped(format!("task `{gradle}` — {why}"));
     }
@@ -1160,6 +1231,101 @@ pub(super) fn read(script: &str, out: &mut Manifest, report: &mut Report) {
             out.tasks.clear();
         }
     }
+}
+
+/// The tasks the compile or the tests need that jrs could not translate,
+/// handed to the Gradle wrapper: one jrs task runs them all in one call, and
+/// is hooked where they were. Gradle writes into `build/`, so jrs's
+/// `target-dir` becomes `build/` too, where generated code has to live.
+#[allow(clippy::too_many_arguments)]
+fn delegate(
+    top: &[Stmt],
+    paths: &super::gradle_generated::Paths,
+    build_files: &[String],
+    wrapper: bool,
+    declared: &mut Vec<Declared>,
+    failed: &mut Vec<(String, String)>,
+    hooked: &mut Vec<(Hook, String, String, bool)>,
+    out: &mut Manifest,
+    report: &mut Report,
+) {
+    let wanted: Vec<String> = failed
+        .iter()
+        .map(|(g, _)| g.clone())
+        .filter(|g| hooked.iter().any(|(_, r, _, _)| r == g))
+        .collect();
+    if wanted.is_empty() {
+        return;
+    }
+    if !wrapper {
+        report.review(format!(
+            "{} — Gradle code jrs cannot translate, which the compile needs; with the Gradle \
+             wrapper (`gradlew`) in the project, jrs would run {} with it",
+            wanted
+                .iter()
+                .map(|g| format!("`{g}`"))
+                .collect::<Vec<_>>()
+                .join(", "),
+            if wanted.len() == 1 { "it" } else { "them" }
+        ));
+        return;
+    }
+    let blocks: Vec<Option<String>> = wanted
+        .iter()
+        .map(|g| {
+            top.iter()
+                .find(|s| declaration(&s.head).is_some_and(|(name, _)| name == *g))
+                .and_then(|s| s.block.clone())
+        })
+        .collect();
+    let taken: Vec<String> = declared.iter().map(|d| d.def.name.clone()).collect();
+    let name = super::gradle_generated::delegate_name(&taken);
+    let def = super::gradle_generated::delegate(&name, &wanted, &blocks, paths, build_files);
+    for (gradle, why) in failed.iter().filter(|(g, _)| wanted.contains(g)) {
+        report.migrated(format!(
+            "task `{gradle}` → run by Gradle, in [tasks.{name}] ({why})"
+        ));
+    }
+    failed.retain(|(g, _)| !wanted.contains(g));
+    report.review(format!(
+        "[tasks.{name}] runs `./gradlew {}` — Gradle code jrs cannot translate; the build \
+         needs the Gradle wrapper and a JDK it runs on until they are rewritten as jrs tasks",
+        wanted.join(" ")
+    ));
+    if def.outputs.is_empty() {
+        report.review(format!(
+            "[tasks.{name}] runs on every build: not every task it runs says what it reads \
+             and writes (`inputs` / `outputs`)"
+        ));
+    }
+    if out.target_dir != std::path::Path::new("build") {
+        out.target_dir = std::path::PathBuf::from("build");
+        report.review(format!(
+            "project.target-dir = \"build\" — Gradle's output directory, where [tasks.{name}] \
+             writes; jrs's own output goes there too, and `jrs clean` removes it"
+        ));
+    }
+    // The hooks that named the delegated tasks now name the task that runs them.
+    let mut seen: Vec<(Hook, String)> = Vec::new();
+    hooked.retain_mut(|(hook, gradle, _, _)| {
+        if wanted.contains(gradle) {
+            gradle.clone_from(&name);
+        }
+        let key = (*hook, gradle.clone());
+        if seen.contains(&key) {
+            return false;
+        }
+        seen.push(key);
+        true
+    });
+    declared.push(Declared {
+        gradle: name,
+        kind: "Gradle, through the wrapper".to_string(),
+        def,
+        depends_on: Vec::new(),
+        implied: Vec::new(),
+        review: Vec::new(),
+    });
 }
 
 // ---- test suites ------------------------------------------------------------
@@ -1499,7 +1665,7 @@ mod tests {
     fn migrate(script: &str) -> (Manifest, Report) {
         let mut out = crate::manifest::blank("app", "1.0.0", Path::new("/p"));
         let mut report = Report::default();
-        read(script, &mut out, &mut report);
+        read(script, Bridge::default(), &mut out, &mut report);
         // Whatever comes out must be a manifest jrs loads.
         Manifest::parse(&out.render(None), Path::new("/p/jrs.toml"), Path::new("/p")).unwrap();
         (out, report)
