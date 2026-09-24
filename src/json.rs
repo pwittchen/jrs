@@ -174,8 +174,8 @@ impl Reader<'_> {
     fn value(&mut self) -> std::result::Result<Json, String> {
         self.space();
         match self.bytes.get(self.at) {
-            Some(b'{') => self.nested(|r| r.object()),
-            Some(b'[') => self.nested(|r| r.array()),
+            Some(b'{') => self.nested(Self::object),
+            Some(b'[') => self.nested(Self::array),
             Some(b'"') => self.string().map(Json::Str),
             Some(b't') => self.word("true", Json::Bool(true)),
             Some(b'f') => self.word("false", Json::Bool(false)),

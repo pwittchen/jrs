@@ -2,7 +2,7 @@
 //! Gradle tasks jrs hands back to Gradle.
 //!
 //! A build that generates code says so in three places: a task that writes it
-//! (a plugin's, such as the OpenAPI Generator's `openApiGenerate`, or one of
+//! (a plugin's, such as the `OpenAPI` Generator's `openApiGenerate`, or one of
 //! the build's own), a `dependsOn` from the compile task on that task, and a
 //! `sourceSets { main { kotlin { srcDir(...) } } }` entry that compiles what it
 //! wrote. The first becomes a `pre-compile` task, the second its hook, and the
@@ -452,7 +452,7 @@ fn openapi_block(top: &[Stmt]) -> Option<&str> {
     })
 }
 
-/// `openApiGenerate { }` → a `main` task over the OpenAPI Generator's CLI at
+/// `openApiGenerate { }` → a `main` task over the `OpenAPI` Generator's CLI at
 /// the plugin's `version`, which does what the plugin's task does: every
 /// setting jrs knows becomes the CLI's option. `None`, reported, when the
 /// block names something jrs cannot work out.
@@ -490,15 +490,7 @@ pub(super) fn openapi(
                 return None;
             };
             args.push(Template::literal(option));
-            args.push(if under_build(&path) {
-                template(&path)
-            } else {
-                Template::parse(&format!(
-                    "{{root}}/{}",
-                    path.replace('{', "{{").replace('}', "}}")
-                ))
-                .unwrap_or_else(|_| Template::literal(&path))
-            });
+            args.push(path_argument(&path));
             match key {
                 "outputDir" => outputs.push(template(&path)),
                 "inputSpec" | "templateDir" | "configFile" => inputs.push(template(&path)),
@@ -532,16 +524,7 @@ pub(super) fn openapi(
                 args.push(Template::literal(option));
             }
         } else if key == "languageSpecificPrimitives" {
-            let list: Option<Vec<String>> = bracketed(
-                value.trim_start_matches(|c: char| c.is_alphabetic()),
-            )
-            .map(|(inner, _)| {
-                split_top(inner, ',')
-                    .into_iter()
-                    .filter_map(scalar)
-                    .collect()
-            });
-            match list {
+            match literal_list(value) {
                 Some(list) if !list.is_empty() => {
                     args.push(Template::literal("--language-specific-primitives"));
                     args.push(Template::literal(&list.join(",")));
@@ -562,6 +545,40 @@ pub(super) fn openapi(
         args.push(Template::literal(option));
         args.push(Template::literal(&entries.join(",")));
     }
+    Some(openapi_task(version, args, inputs, outputs))
+}
+
+/// A path as the generator's CLI argument: under `{target}` when Gradle
+/// would write it into the build directory, under `{root}` otherwise.
+fn path_argument(path: &str) -> Template {
+    if under_build(path) {
+        template(path)
+    } else {
+        Template::parse(&format!(
+            "{{root}}/{}",
+            path.replace('{', "{{").replace('}', "}}")
+        ))
+        .unwrap_or_else(|_| Template::literal(path))
+    }
+}
+
+/// `listOf("a", "b")`, `setOf(...)` or `["a", "b"]`: the literals in it.
+fn literal_list(value: &str) -> Option<Vec<String>> {
+    bracketed(value.trim_start_matches(|c: char| c.is_alphabetic())).map(|(inner, _)| {
+        split_top(inner, ',')
+            .into_iter()
+            .filter_map(scalar)
+            .collect()
+    })
+}
+
+/// The `[tasks.open-api-generate]` that runs the generator's CLI at `version`.
+fn openapi_task(
+    version: &str,
+    args: Vec<Template>,
+    inputs: Vec<Template>,
+    outputs: Vec<Template>,
+) -> TaskDef {
     let mut def = TaskDef {
         name: "open-api-generate".to_string(),
         description: Some(format!(
@@ -583,7 +600,7 @@ pub(super) fn openapi(
     if def.outputs.is_empty() {
         def.inputs.clear();
     }
-    Some(def)
+    def
 }
 
 // ---- tasks left to Gradle ------------------------------------------------------

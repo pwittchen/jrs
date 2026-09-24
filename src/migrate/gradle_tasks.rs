@@ -1064,7 +1064,7 @@ fn hook_for(target: &str, relation: Relation) -> Option<Hook> {
         (Relation::FinalizedBy, _) if compile => Hook::PostCompile,
         (Relation::DependsOn, "test") => Hook::PreTest,
         (Relation::FinalizedBy, "test") => Hook::PostTest,
-        (Relation::FinalizedBy, "jar" | "assemble") => Hook::PostPackage,
+        (Relation::FinalizedBy, "jar" | "assemble" | "bootJar" | "shadowJar") => Hook::PostPackage,
         (Relation::DependsOn, "run" | "bootRun") => Hook::PreRun,
         // What the jar, or the whole build, needs is needed before the
         // compile that every one of them starts with: a generator whose
@@ -1072,7 +1072,6 @@ fn hook_for(target: &str, relation: Relation) -> Option<Hook> {
         (Relation::DependsOn, "jar" | "assemble" | "build" | "bootJar" | "shadowJar") => {
             Hook::PreCompile
         }
-        (Relation::FinalizedBy, "bootJar" | "shadowJar") => Hook::PostPackage,
         _ => return None,
     })
 }
@@ -1150,41 +1149,10 @@ pub(super) fn read(script: &str, bridge: Bridge, out: &mut Manifest, report: &mu
         if tie.relation == Relation::RunsAfter {
             continue;
         }
-        match hook_for(&tie.target, tie.relation) {
-            Some(hook) => {
-                // Before the compile, where Gradle has it before the jar or the
-                // whole build: it now also runs for `jrs test` and `jrs run`.
-                let widened =
-                    hook == Hook::PreCompile && !COMPILE_TASKS.contains(&tie.target.as_str());
-                hooked.extend(
-                    tie.refs
-                        .into_iter()
-                        .map(|r| (hook, r, tie.text.clone(), widened)),
-                );
-            }
-            None => report.skipped(format!(
-                "`{}` — jrs has no hook that runs where Gradle's `{}` does; run the task \
-                 with `jrs task`, or hook it by hand",
-                tie.text, tie.target
-            )),
-        }
+        hook_tie(tie, &mut hooked, report);
     }
 
-    // A plugin's task the compile depends on, translated by the plugin's own
-    // pass: it is hooked like one of the build's.
-    for (gradle, kind, def) in bridge.plugin_tasks {
-        let wanted = hooked.iter().any(|(_, r, _, _)| *r == gradle);
-        if wanted && !declared.iter().any(|d| d.gradle == gradle) {
-            declared.push(Declared {
-                gradle,
-                kind,
-                def,
-                depends_on: Vec::new(),
-                implied: Vec::new(),
-                review: Vec::new(),
-            });
-        }
-    }
+    adopt_plugin_tasks(bridge.plugin_tasks, &hooked, &mut declared);
 
     // A task that depends on one left out goes too, and so on up.
     while let Some((gradle, missing)) = declared.iter().find_map(|d| {
@@ -1229,6 +1197,50 @@ pub(super) fn read(script: &str, bridge: Bridge, out: &mut Manifest, report: &mu
         if let Err(e) = crate::task::check(out) {
             report.skipped(format!("[tasks] — {e}; left out"));
             out.tasks.clear();
+        }
+    }
+}
+
+/// Hook the tasks a tie on one of Gradle's own tasks names where jrs runs
+/// the same step, or report that it has no such place.
+fn hook_tie(tie: Tie, hooked: &mut Vec<(Hook, String, String, bool)>, report: &mut Report) {
+    match hook_for(&tie.target, tie.relation) {
+        Some(hook) => {
+            // Before the compile, where Gradle has it before the jar or the
+            // whole build: it now also runs for `jrs test` and `jrs run`.
+            let widened = hook == Hook::PreCompile && !COMPILE_TASKS.contains(&tie.target.as_str());
+            hooked.extend(
+                tie.refs
+                    .into_iter()
+                    .map(|r| (hook, r, tie.text.clone(), widened)),
+            );
+        }
+        None => report.skipped(format!(
+            "`{}` — jrs has no hook that runs where Gradle's `{}` does; run the task \
+             with `jrs task`, or hook it by hand",
+            tie.text, tie.target
+        )),
+    }
+}
+
+/// A plugin's task the compile depends on, translated by the plugin's own
+/// pass: it is hooked like one of the build's.
+fn adopt_plugin_tasks(
+    plugin_tasks: Vec<(String, String, TaskDef)>,
+    hooked: &[(Hook, String, String, bool)],
+    declared: &mut Vec<Declared>,
+) {
+    for (gradle, kind, def) in plugin_tasks {
+        let wanted = hooked.iter().any(|(_, r, _, _)| *r == gradle);
+        if wanted && !declared.iter().any(|d| d.gradle == gradle) {
+            declared.push(Declared {
+                gradle,
+                kind,
+                def,
+                depends_on: Vec::new(),
+                implied: Vec::new(),
+                review: Vec::new(),
+            });
         }
     }
 }

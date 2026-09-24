@@ -1644,7 +1644,7 @@ impl<'a> Session<'a> {
             classes: Vec::new(),
             fail_fast: args.fail_fast,
         };
-        let forks = self.forks(&run, args, forks, rerun.is_some())?;
+        let forks = Self::forks(&run, args, forks, rerun.is_some())?;
         self.announce_tests(&mut run, rerun.as_ref(), &sources, forks.len());
         let started = Instant::now();
         let outcome = self
@@ -1777,7 +1777,6 @@ impl<'a> Session<'a> {
     /// and so does a run under `--debug`, which waits for one debugger, or
     /// `--fail-fast`, which stops the whole run at its first failure.
     fn forks(
-        &self,
         run: &junit::TestRun,
         args: &TestArgs,
         configured: u32,

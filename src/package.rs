@@ -804,69 +804,7 @@ fn write_jar<R: Read + Seek>(
         writer
             .start_file(name.as_str(), options)
             .map_err(|e| JrsError::build(format!("{}: {e}", output.display())))?;
-        match entry {
-            Entry::File(path) => {
-                let mut bytes = std::fs::read(path).path(path)?;
-                if is_class(name) {
-                    bytes = relocator.class_file(bytes).map_err(|why| {
-                        JrsError::build(format!("{}: cannot relocate: {why}", path.display()))
-                    })?;
-                }
-                writer.write_all(&bytes).path(output)?;
-            }
-            Entry::Jar(archive, index) => {
-                let mut source = archives[*archive]
-                    .by_index(*index)
-                    .map_err(|e| JrsError::build(format!("{}: {e}", output.display())))?;
-                if relocator.is_empty() || !is_class(name) {
-                    std::io::copy(&mut source, &mut writer).path(output)?;
-                } else {
-                    let mut bytes = Vec::new();
-                    source.read_to_end(&mut bytes).path(output)?;
-                    let bytes = relocator.class_file(bytes).map_err(|why| {
-                        JrsError::build(format!("{name}: cannot relocate: {why}"))
-                    })?;
-                    writer.write_all(&bytes).path(output)?;
-                }
-            }
-            Entry::Merged(kind, sources) => {
-                let mut copies = Vec::with_capacity(sources.len());
-                for source in sources {
-                    copies.push(match source {
-                        Source::File(path) => std::fs::read(path).path(path)?,
-                        Source::Jar(archive, index) => {
-                            let mut source = archives[*archive].by_index(*index).map_err(|e| {
-                                JrsError::build(format!("{}: {e}", output.display()))
-                            })?;
-                            let mut bytes = Vec::new();
-                            source.read_to_end(&mut bytes).path(output)?;
-                            bytes
-                        }
-                    });
-                }
-                writer
-                    .write_all(&relocator.text(merge(*kind, &copies)))
-                    .path(output)?;
-            }
-            Entry::ExtensionModules(files, sources) => {
-                let mut merged = ExtensionModule::default();
-                for path in files {
-                    let bytes = std::fs::read(path).path(path)?;
-                    merged.add(&String::from_utf8_lossy(&bytes));
-                }
-                for (archive, index) in sources {
-                    let mut source = archives[*archive]
-                        .by_index(*index)
-                        .map_err(|e| JrsError::build(format!("{}: {e}", output.display())))?;
-                    let mut bytes = Vec::new();
-                    source.read_to_end(&mut bytes).path(output)?;
-                    merged.add(&String::from_utf8_lossy(&bytes));
-                }
-                writer
-                    .write_all(&relocator.text(merged.render().into_bytes()))
-                    .path(output)?;
-            }
-        }
+        write_entry(&mut writer, name, entry, &mut archives, relocator, output)?;
         entries += 1;
     }
     write_directories_before(&mut writer, None)?;
@@ -885,6 +823,81 @@ fn write_jar<R: Read + Seek>(
         entries,
         warnings,
     })
+}
+
+/// Write the bytes of one planned entry, whose header is already written.
+fn write_entry<R: Read + Seek>(
+    writer: &mut zip::ZipWriter<std::io::BufWriter<std::fs::File>>,
+    name: &str,
+    entry: &Entry,
+    archives: &mut [zip::ZipArchive<R>],
+    relocator: &Relocator,
+    output: &Path,
+) -> Result<()> {
+    match entry {
+        Entry::File(path) => {
+            let mut bytes = std::fs::read(path).path(path)?;
+            if is_class(name) {
+                bytes = relocator.class_file(bytes).map_err(|why| {
+                    JrsError::build(format!("{}: cannot relocate: {why}", path.display()))
+                })?;
+            }
+            writer.write_all(&bytes).path(output)?;
+        }
+        Entry::Jar(archive, index) => {
+            let mut source = archives[*archive]
+                .by_index(*index)
+                .map_err(|e| JrsError::build(format!("{}: {e}", output.display())))?;
+            if relocator.is_empty() || !is_class(name) {
+                std::io::copy(&mut source, writer).path(output)?;
+            } else {
+                let mut bytes = Vec::new();
+                source.read_to_end(&mut bytes).path(output)?;
+                let bytes = relocator
+                    .class_file(bytes)
+                    .map_err(|why| JrsError::build(format!("{name}: cannot relocate: {why}")))?;
+                writer.write_all(&bytes).path(output)?;
+            }
+        }
+        Entry::Merged(kind, sources) => {
+            let mut copies = Vec::with_capacity(sources.len());
+            for source in sources {
+                copies.push(match source {
+                    Source::File(path) => std::fs::read(path).path(path)?,
+                    Source::Jar(archive, index) => {
+                        let mut source = archives[*archive]
+                            .by_index(*index)
+                            .map_err(|e| JrsError::build(format!("{}: {e}", output.display())))?;
+                        let mut bytes = Vec::new();
+                        source.read_to_end(&mut bytes).path(output)?;
+                        bytes
+                    }
+                });
+            }
+            writer
+                .write_all(&relocator.text(merge(*kind, &copies)))
+                .path(output)?;
+        }
+        Entry::ExtensionModules(files, sources) => {
+            let mut merged = ExtensionModule::default();
+            for path in files {
+                let bytes = std::fs::read(path).path(path)?;
+                merged.add(&String::from_utf8_lossy(&bytes));
+            }
+            for (archive, index) in sources {
+                let mut source = archives[*archive]
+                    .by_index(*index)
+                    .map_err(|e| JrsError::build(format!("{}: {e}", output.display())))?;
+                let mut bytes = Vec::new();
+                source.read_to_end(&mut bytes).path(output)?;
+                merged.add(&String::from_utf8_lossy(&bytes));
+            }
+            writer
+                .write_all(&relocator.text(merged.render().into_bytes()))
+                .path(output)?;
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]

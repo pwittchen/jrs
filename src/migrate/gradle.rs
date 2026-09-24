@@ -86,27 +86,7 @@ pub fn migrate(build_file: &Path, root: &Path) -> Result<Migration> {
         })
         .unwrap_or_else(|| "app".to_string());
 
-    let version = match assignment_expression(&script, "version").map(|e| vars.evaluate(&e)) {
-        Some(Ok((v, _))) => {
-            report.migrated(format!("project.version = {v}"));
-            v
-        }
-        Some(Err(why)) => {
-            // A version worked out when Gradle runs — from a property, a git
-            // tag — has no value until then; the first string literal on the
-            // line is more likely an argument than the version.
-            report.review(format!(
-                "project.version — {why}; defaulted to 0.1.0, set it in jrs.toml"
-            ));
-            "0.1.0".to_string()
-        }
-        None => {
-            report.review(
-                "project.version — no `version = ...` found; defaulted to 0.1.0".to_string(),
-            );
-            "0.1.0".to_string()
-        }
-    };
+    let version = read_version(&script, &vars, &mut report);
 
     let mut out = manifest::blank(&name, &version, root);
     report.migrated(format!("project.name = {name}"));
@@ -144,7 +124,67 @@ pub fn migrate(build_file: &Path, root: &Path) -> Result<Migration> {
             super::gradle_generated::openapi(&script, p.version.as_deref(), &paths, &mut report)
         });
     let openapi_translated = openapi.is_some();
-    let bridge = super::gradle_tasks::Bridge {
+    let bridge = bridge(build_file, root, openapi, &paths);
+    super::gradle_tasks::read(&script, bridge, &mut out, &mut report);
+    let source_sets_read =
+        super::gradle_generated::read_source_sets(&script, &paths, &mut out, &mut report);
+    vars.report(&mut report);
+    read_jacoco(&script, &plugins, &mut out, &mut report);
+    report_the_unreadable(
+        &script,
+        &settings,
+        &plugins,
+        &Understood {
+            openapi: openapi_translated,
+            source_sets: source_sets_read,
+        },
+        &out,
+        &mut report,
+    );
+
+    Ok(Migration {
+        source: Source::Gradle,
+        source_file: build_file.to_path_buf(),
+        manifest: out,
+        report,
+    })
+}
+
+/// `project.version`, when the script assigns one that has a value before
+/// Gradle runs; `0.1.0`, reported, otherwise.
+fn read_version(script: &str, vars: &Variables, report: &mut Report) -> String {
+    match assignment_expression(script, "version").map(|e| vars.evaluate(&e)) {
+        Some(Ok((v, _))) => {
+            report.migrated(format!("project.version = {v}"));
+            v
+        }
+        Some(Err(why)) => {
+            // A version worked out when Gradle runs — from a property, a git
+            // tag — has no value until then; the first string literal on the
+            // line is more likely an argument than the version.
+            report.review(format!(
+                "project.version — {why}; defaulted to 0.1.0, set it in jrs.toml"
+            ));
+            "0.1.0".to_string()
+        }
+        None => {
+            report.review(
+                "project.version — no `version = ...` found; defaulted to 0.1.0".to_string(),
+            );
+            "0.1.0".to_string()
+        }
+    }
+}
+
+/// What the task pass needs from the rest: the plugin task translated, if
+/// any, whether the wrapper is there, and the files that are build code.
+fn bridge(
+    build_file: &Path,
+    root: &Path,
+    openapi: Option<manifest::TaskDef>,
+    paths: &super::gradle_generated::Paths,
+) -> super::gradle_tasks::Bridge {
+    super::gradle_tasks::Bridge {
         plugin_tasks: openapi
             .map(|def| {
                 (
@@ -174,30 +214,7 @@ pub fn migrate(build_file: &Path, root: &Path) -> Result<Migration> {
             }
             names
         }),
-    };
-    super::gradle_tasks::read(&script, bridge, &mut out, &mut report);
-    let source_sets_read =
-        super::gradle_generated::read_source_sets(&script, &paths, &mut out, &mut report);
-    vars.report(&mut report);
-    read_jacoco(&script, &plugins, &mut out, &mut report);
-    report_the_unreadable(
-        &script,
-        &settings,
-        &plugins,
-        Understood {
-            openapi: openapi_translated,
-            source_sets: source_sets_read,
-        },
-        &out,
-        &mut report,
-    );
-
-    Ok(Migration {
-        source: Source::Gradle,
-        source_file: build_file.to_path_buf(),
-        manifest: out,
-        report,
-    })
+    }
 }
 
 // ---- settings.gradle -------------------------------------------------------
@@ -332,24 +349,7 @@ fn read_catalog(root: &Path, report: &mut Report) -> Catalog {
             entries.insert(alias.clone(), Dependency::new(group, artifact, ""));
             continue;
         }
-        let version = match entry.get("version") {
-            Some(toml::Value::String(v)) => Some(v.clone()),
-            Some(toml::Value::Table(t)) => t
-                .get("ref")
-                .and_then(|v| v.as_str())
-                .and_then(|r| versions.get(r).cloned())
-                .or_else(|| {
-                    t.get("require")
-                        .and_then(|v| v.as_str())
-                        .map(str::to_string)
-                }),
-            _ => entry
-                .get("version.ref")
-                .and_then(|v| v.as_str())
-                .and_then(|r| versions.get(r).cloned()),
-        };
-
-        let Some(version) = version else {
+        let Some(version) = catalog_version(entry, &versions) else {
             report.skipped(format!(
                 "catalog alias `{alias}` — its version could not be resolved"
             ));
@@ -358,6 +358,45 @@ fn read_catalog(root: &Path, report: &mut Report) -> Catalog {
         entries.insert(alias.clone(), Dependency::new(group, artifact, version));
     }
 
+    let bundles = read_catalog_bundles(&table, report);
+    let plugins = read_catalog_plugins(&table, &versions);
+
+    if !entries.is_empty() {
+        report.migrated(format!(
+            "gradle/libs.versions.toml — {} catalog entries read",
+            entries.len()
+        ));
+    }
+    Catalog {
+        entries,
+        bundles,
+        plugins,
+    }
+}
+
+/// A catalog entry's version: `version = "1.0"`, `version.ref = "x"`, or
+/// `version = { ref = "x" }` / `{ require = "1.0" }`.
+fn catalog_version(entry: &toml::Table, versions: &BTreeMap<String, String>) -> Option<String> {
+    match entry.get("version") {
+        Some(toml::Value::String(v)) => Some(v.clone()),
+        Some(toml::Value::Table(t)) => t
+            .get("ref")
+            .and_then(|v| v.as_str())
+            .and_then(|r| versions.get(r).cloned())
+            .or_else(|| {
+                t.get("require")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string)
+            }),
+        _ => entry
+            .get("version.ref")
+            .and_then(|v| v.as_str())
+            .and_then(|r| versions.get(r).cloned()),
+    }
+}
+
+/// `[bundles]`: a name → the aliases of the libraries in it.
+fn read_catalog_bundles(table: &toml::Table, report: &mut Report) -> BTreeMap<String, Vec<String>> {
     let mut bundles = BTreeMap::new();
     let bundle_table = table.get("bundles").and_then(|v| v.as_table());
     for (name, value) in bundle_table.into_iter().flatten() {
@@ -373,9 +412,15 @@ fn read_catalog(root: &Path, report: &mut Report) -> Catalog {
             None => report.skipped(format!("catalog bundle `{name}` — not a list of aliases")),
         }
     }
+    bundles
+}
 
-    // `[plugins]`: `alias = "id:version"`, or a table with `id` and a
-    // `version`, `version.ref` or `version = { ref = … }`.
+/// `[plugins]`: `alias = "id:version"`, or a table with `id` and a
+/// `version`, `version.ref` or `version = { ref = … }`.
+fn read_catalog_plugins(
+    table: &toml::Table,
+    versions: &BTreeMap<String, String>,
+) -> BTreeMap<String, (String, Option<String>)> {
     let mut plugins = BTreeMap::new();
     let plugin_table = table.get("plugins").and_then(|v| v.as_table());
     for (alias, value) in plugin_table.into_iter().flatten() {
@@ -387,40 +432,13 @@ fn read_catalog(root: &Path, report: &mut Report) -> Catalog {
                 let Some(id) = t.get("id").and_then(|v| v.as_str()) else {
                     continue;
                 };
-                let version = match t.get("version") {
-                    Some(toml::Value::String(v)) => Some(v.clone()),
-                    Some(toml::Value::Table(v)) => v
-                        .get("ref")
-                        .and_then(|r| r.as_str())
-                        .and_then(|r| versions.get(r).cloned())
-                        .or_else(|| {
-                            v.get("require")
-                                .and_then(|r| r.as_str())
-                                .map(str::to_string)
-                        }),
-                    _ => t
-                        .get("version.ref")
-                        .and_then(|r| r.as_str())
-                        .and_then(|r| versions.get(r).cloned()),
-                };
-                (id.to_string(), version)
+                (id.to_string(), catalog_version(t, versions))
             }
             _ => continue,
         };
         plugins.insert(alias.clone(), plugin);
     }
-
-    if !entries.is_empty() {
-        report.migrated(format!(
-            "gradle/libs.versions.toml — {} catalog entries read",
-            entries.len()
-        ));
-    }
-    Catalog {
-        entries,
-        bundles,
-        plugins,
-    }
+    plugins
 }
 
 // ---- the build script ------------------------------------------------------
@@ -508,22 +526,12 @@ fn read_dependencies(
         let Some(config) = leading_word(trimmed) else {
             continue;
         };
-        let target = if MAIN_CONFIGS.contains(&config.as_str()) {
-            Target::Main
-        } else if COMPILE_ONLY_CONFIGS.contains(&config.as_str()) {
-            Target::CompileOnly
-        } else if RUNTIME_ONLY_CONFIGS.contains(&config.as_str()) {
-            Target::RuntimeOnly
-        } else if PROCESSOR_CONFIGS.contains(&config.as_str()) {
-            Target::Processor
-        } else if TEST_CONFIGS.contains(&config.as_str()) {
-            Target::Test
-        } else if REPORTED_CONFIGS.contains(&config.as_str()) {
-            report.skipped(format!(
-                "`{trimmed}` — the `{config}` configuration has no equivalent in jrs.toml"
-            ));
-            continue;
-        } else {
+        let Some(target) = config_target(&config) else {
+            if REPORTED_CONFIGS.contains(&config.as_str()) {
+                report.skipped(format!(
+                    "`{trimmed}` — the `{config}` configuration has no equivalent in jrs.toml"
+                ));
+            }
             continue;
         };
 
@@ -545,35 +553,7 @@ fn read_dependencies(
             continue;
         }
         // `libs.bundles.<name>`: every library in the bundle, one by one.
-        if let Some(bundle) = catalog_reference(declaration)
-            .as_deref()
-            .and_then(|r| r.strip_prefix("bundles."))
-            .map(str::to_string)
-        {
-            match catalog.bundle(&bundle) {
-                Ok(deps) => {
-                    report.migrated(format!(
-                        "`{config} libs.bundles.{bundle}` — {} libraries from the catalog's \
-                         bundle",
-                        deps.len()
-                    ));
-                    for dep in deps {
-                        if dep.is_managed() && !managed {
-                            report.skipped(format!(
-                                "`{}` in bundle `{bundle}` — it has no version, and nothing \
-                                 in the build manages one",
-                                dep.key()
-                            ));
-                            continue;
-                        }
-                        push(out, target, dep, report, config.as_str());
-                    }
-                }
-                Err(why) => report.skipped(format!(
-                    "`{config} libs.bundles.{bundle}` — {why}; add its libraries to jrs.toml \
-                     by hand"
-                )),
-            }
+        if push_bundle(declaration, &config, target, managed, catalog, out, report) {
             continue;
         }
         let Some(mut dep) = read_declaration(
@@ -617,6 +597,68 @@ fn read_dependencies(
             }
         ));
     }
+}
+
+/// Where a dependency declared in Gradle's `config` goes in `jrs.toml`.
+fn config_target(config: &str) -> Option<Target> {
+    if MAIN_CONFIGS.contains(&config) {
+        Some(Target::Main)
+    } else if COMPILE_ONLY_CONFIGS.contains(&config) {
+        Some(Target::CompileOnly)
+    } else if RUNTIME_ONLY_CONFIGS.contains(&config) {
+        Some(Target::RuntimeOnly)
+    } else if PROCESSOR_CONFIGS.contains(&config) {
+        Some(Target::Processor)
+    } else if TEST_CONFIGS.contains(&config) {
+        Some(Target::Test)
+    } else {
+        None
+    }
+}
+
+/// `libs.bundles.<name>` in `declaration`: push every library in the bundle,
+/// and say whether it was one.
+fn push_bundle(
+    declaration: &str,
+    config: &str,
+    target: Target,
+    managed: bool,
+    catalog: &Catalog,
+    out: &mut Manifest,
+    report: &mut Report,
+) -> bool {
+    let Some(bundle) = catalog_reference(declaration)
+        .as_deref()
+        .and_then(|r| r.strip_prefix("bundles."))
+        .map(str::to_string)
+    else {
+        return false;
+    };
+    match catalog.bundle(&bundle) {
+        Ok(deps) => {
+            report.migrated(format!(
+                "`{config} libs.bundles.{bundle}` — {} libraries from the catalog's \
+                 bundle",
+                deps.len()
+            ));
+            for dep in deps {
+                if dep.is_managed() && !managed {
+                    report.skipped(format!(
+                        "`{}` in bundle `{bundle}` — it has no version, and nothing \
+                         in the build manages one",
+                        dep.key()
+                    ));
+                    continue;
+                }
+                push(out, target, dep, report, config);
+            }
+        }
+        Err(why) => report.skipped(format!(
+            "`{config} libs.bundles.{bundle}` — {why}; add its libraries to jrs.toml \
+             by hand"
+        )),
+    }
+    true
 }
 
 /// One dependency declaration, without its closure: a catalog reference, a
@@ -1044,7 +1086,7 @@ fn read_forced(
                     }
                 }
                 Err(why) => {
-                    report.skipped(format!("`{trimmed}` — {why}; pin it in [managed] by hand"))
+                    report.skipped(format!("`{trimmed}` — {why}; pin it in [managed] by hand"));
                 }
             }
         }
@@ -1426,34 +1468,7 @@ fn read_resources(script: &str, vars: &Variables, out: &mut Manifest, report: &m
         return;
     }
     let text = lines.join("\n");
-    let mut patterns: Vec<String> = Vec::new();
-    for line in &lines {
-        let trimmed = line.trim();
-        let compact: String = trimmed.chars().filter(|c| !c.is_whitespace()).collect();
-        if compact.starts_with("filesMatching") {
-            let found = quoted(trimmed);
-            if found.is_empty() {
-                report.skipped(format!("`{trimmed}` — its patterns are computed"));
-            }
-            for p in found {
-                if !patterns.contains(&p) {
-                    patterns.push(p);
-                }
-            }
-        } else if !compact.starts_with("expand(")
-            && !compact.starts_with("filteringCharset")
-            // A tie to another task is the task pass's, which reports it.
-            && !compact.starts_with("dependsOn")
-            && !compact.starts_with("mustRunAfter")
-            && !compact.starts_with("finalizedBy")
-            && !compact.chars().all(|c| matches!(c, '{' | '}' | ')'))
-        {
-            report.skipped(format!(
-                "`processResources {{ {trimmed} }}` — jrs copies resources as they are, \
-                 expanding only what `[resources]` names"
-            ));
-        }
-    }
+    let mut patterns = resource_patterns(&lines, report);
     if !text.contains("expand(") {
         return;
     }
@@ -1525,7 +1540,7 @@ fn read_resources(script: &str, vars: &Variables, out: &mut Manifest, report: &m
                         && key != "project.name"
                         && key != "project.version" =>
                 {
-                    add(key, t)
+                    add(key, t);
                 }
                 _ => report.skipped(format!(
                     "`expand` property `{key}` — its value is computed (`{}`)",
@@ -1548,6 +1563,40 @@ fn read_resources(script: &str, vars: &Variables, out: &mut Manifest, report: &m
                 .to_string(),
         );
     }
+}
+
+/// The `filesMatching` patterns in `processResources { }`'s lines, reporting
+/// what else is there: jrs copies resources as they are.
+fn resource_patterns(lines: &[&str], report: &mut Report) -> Vec<String> {
+    let mut patterns: Vec<String> = Vec::new();
+    for line in lines {
+        let trimmed = line.trim();
+        let compact: String = trimmed.chars().filter(|c| !c.is_whitespace()).collect();
+        if compact.starts_with("filesMatching") {
+            let found = quoted(trimmed);
+            if found.is_empty() {
+                report.skipped(format!("`{trimmed}` — its patterns are computed"));
+            }
+            for p in found {
+                if !patterns.contains(&p) {
+                    patterns.push(p);
+                }
+            }
+        } else if !compact.starts_with("expand(")
+            && !compact.starts_with("filteringCharset")
+            // A tie to another task is the task pass's, which reports it.
+            && !compact.starts_with("dependsOn")
+            && !compact.starts_with("mustRunAfter")
+            && !compact.starts_with("finalizedBy")
+            && !compact.chars().all(|c| matches!(c, '{' | '}' | ')'))
+        {
+            report.skipped(format!(
+                "`processResources {{ {trimmed} }}` — jrs copies resources as they are, \
+                 expanding only what `[resources]` names"
+            ));
+        }
+    }
+    patterns
 }
 
 /// A template that is one placeholder, `{project.version}` say.
@@ -1613,7 +1662,6 @@ fn split_top_level(text: &str) -> Vec<String> {
     for c in text.chars() {
         match (quote, c) {
             (Some(q), _) if c == q => quote = None,
-            (Some(_), _) => {}
             (None, '\'' | '"') => quote = Some(c),
             (None, '(' | '[') => depth += 1,
             (None, ')' | ']') => depth = depth.saturating_sub(1),
@@ -1859,7 +1907,7 @@ fn attribute_value(expression: &str) -> Option<String> {
 /// What the passes before [`report_the_unreadable`] translated, which it
 /// would otherwise report.
 struct Understood {
-    /// The OpenAPI Generator plugin's `openApiGenerate { }`.
+    /// The `OpenAPI` Generator plugin's `openApiGenerate { }`.
     openapi: bool,
     /// Every `srcDir` in `sourceSets { }`.
     source_sets: bool,
@@ -1869,7 +1917,7 @@ fn report_the_unreadable(
     script: &str,
     settings: &Settings,
     plugins: &[Plugin],
-    understood: Understood,
+    understood: &Understood,
     out: &Manifest,
     report: &mut Report,
 ) {
