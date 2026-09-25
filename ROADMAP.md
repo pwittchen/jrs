@@ -44,7 +44,7 @@ Spring Boot** and **Kotlin with Ktor**.
     `tests/build.rs`, never a test that reaches for Maven Central;
   - *a migration gap* — a new row in `jrs migrate` and a fixture in
     `tests/fixtures/migrate/`, as every other migration rule has;
-  - *a non-goal in the way* — the project is cited in section 4, next to the
+  - *a non-goal in the way* — the project is cited in section 5, next to the
     idea it needs. Several rows there wait for exactly this evidence (the
     annotation-processor path, kapt and KSP, Gradle Module Metadata's rich
     versions and constraints, the compiler daemon).
@@ -149,7 +149,60 @@ Gradle or Maven plugin, and those arrive with their `jrs migrate` row.
   `aarch64-pc-windows-msvc` build in the `dist` matrix, and a `setup-jrs`
   GitHub Action, so CI does not have to `curl | sh`.
 
-## 4. Needs a spec decision first
+## 4. An IntelliJ plugin
+
+Today IntelliJ IDEA does not recognise a jrs project. Someone who opens one
+gets a folder of `.java` files with no source roots, no JDK and no libraries,
+unless they keep a `pom.xml` or a Gradle build beside `jrs.toml` for the IDE
+alone. A plugin that imports a jrs project the way IntelliJ imports a Maven or
+Gradle one closes that gap. It needs no daemon: `jrs metadata` (SPEC §5.4) is
+already the project model an editor plugin needs, and was written for this.
+
+- **Import and sync.** Opening a directory with a `jrs.toml` offers to import
+  it. The plugin runs `jrs metadata` and builds one IntelliJ module from the
+  JSON: the main and test source roots for each language, the generated
+  sources and resources, the output directories, the JDK from `jdk.home`,
+  and one library per classpath entry, with its `-sources.jar` attached when
+  `jrs fetch --sources` has cached it. Compile-only and runtime-only
+  dependencies get the matching IntelliJ scope, and the test classpath goes to
+  the test scope. A change to `jrs.toml` or `jrs.lock` shows the usual "Load
+  jrs changes" prompt, and a `jrs metadata --no-deps` pass sets up the source
+  roots before the first resolution has finished.
+- **Kotlin, Scala and Groovy.** The module's language levels and compiler
+  settings come from the metadata's `languages` and the `[kotlin]`,
+  `[scala]` and `[groovy]` tables, so the IDE's own Kotlin, Scala and Groovy
+  plugins analyse the code with the compiler version the build uses. Where
+  `jrs metadata` does not yet carry a setting the IDE needs, such as the
+  compiler arguments or `[kotlin] plugins`, the key is added to the JSON
+  within its current `version`, as SPEC §5.4 allows.
+- **Build and run through jrs.** Build Project delegates to `jrs build`, as
+  IntelliJ delegates to Gradle, so the IDE and the terminal produce the same
+  `target/classes`. Run configurations cover `jrs run`, `jrs test` (a
+  class run from the gutter becomes `--filter`; a single method needs a
+  selector jrs does not have yet), `jrs package` and `jrs task
+  <name>`, with `--debug` wired to the IDE's debugger. Test results come from
+  the JUnit XML in `target/test-reports` into the test runner tree, and the
+  build's output keeps jrs's plain transcript (`--progress never`), with
+  `javac`'s diagnostics linked back to the source.
+- **A jrs tool window.** The tasks from `jrs task --list` and the hooks that run
+  them, the dependency graph from `jrs tree`, and actions for `jrs update`,
+  `jrs outdated`, `jrs verify` and `jrs clean`.
+- **Editing `jrs.toml`.** Completion and validation for the manifest's tables
+  and keys, and the same unknown-key warnings the manifest parser gives. Adding
+  or removing a dependency goes through `jrs add` and `jrs remove`, so
+  `edit.rs` stays the one place that rewrites the manifest.
+- **Migration from the IDE.** An action on a Maven or Gradle project runs
+  `jrs migrate`, shows its report, and imports the result.
+- **Where it lives.** A separate repository, written in Kotlin against the
+  IntelliJ Platform SDK and built with the IntelliJ Platform Gradle Plugin,
+  since that is the only supported way to build one. It is published to the
+  JetBrains Marketplace and tested with the platform's own test framework,
+  against a `jrs` binary on `PATH`. It adds no crate to jrs: what the plugin
+  needs from jrs goes into `jrs metadata` and the commands' existing flags.
+  If a long-lived process turns out to be needed after all, that is the Build
+  Server Protocol row in section 5.
+
+## 5. Needs a spec decision first
 
 These cross a line drawn in SPEC §1.2 or §13 (or the dependency list). They are
 listed so the discussion has a home, not because they are planned.
