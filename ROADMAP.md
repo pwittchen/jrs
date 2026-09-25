@@ -191,6 +191,12 @@ already the project model an editor plugin needs, and was written for this.
   and keys, and the same unknown-key warnings the manifest parser gives. Adding
   or removing a dependency goes through `jrs add` and `jrs remove`, so
   `edit.rs` stays the one place that rewrites the manifest.
+- **A file icon for `jrs.toml` and `jrs.lock`.** Both files show the jrs icon
+  in the project view and the editor tabs, as `pom.xml` and `build.gradle`
+  show Maven's and Gradle's. The icon is drawn from `logo.png` and checked in
+  to this repository before the plugin work starts — an SVG, with the 16×16
+  light and `_dark` variants the IntelliJ Platform expects — so the plugin
+  takes it from here rather than keeping a copy of its own.
 - **Migration from the IDE.** An action on a Maven or Gradle project runs
   `jrs migrate`, shows its report, and imports the result.
 - **Where it lives.** A separate repository, written in Kotlin against the
