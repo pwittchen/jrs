@@ -1104,6 +1104,7 @@ checksum = "sha1:…"</pre>
     <tr><td><a href="#cmd-init"><code>init</code></a></td><td>Scaffold a new project.</td></tr>
     <tr><td><a href="#cmd-migrate"><code>migrate</code></a></td><td>Generate <code>jrs.toml</code> from Maven or Gradle.</td></tr>
     <tr><td><a href="#cmd-completions"><code>completions</code></a></td><td>Print a shell completion script.</td></tr>
+    <tr><td><a href="#cmd-self"><code>self</code></a></td><td>Check for a newer jrs, or update to it.</td></tr>
   </tbody>
 </table>
 <p><code>jrs --help</code> lists the commands, and <code>jrs &lt;command&gt; --help</code> a command's flags.</p>
@@ -1560,6 +1561,26 @@ jrs init --check</pre>
 source &lt;(jrs completions zsh)           # in ~/.zshrc, after compinit
 jrs completions fish | source           # in ~/.config/fish/config.fish</pre>
 <p>Task names are not completed: nothing calls back into jrs at completion time.</p>
+</section>
+
+<section id="cmd-self">
+<h2><code>jrs self</code></h2>
+<pre data-lang="plain">jrs self check
+jrs self update</pre>
+<table>
+  <thead><tr><th>Command</th><th>Effect</th></tr></thead>
+  <tbody>
+    <tr><td><code>jrs self check</code></td><td>Say whether this jrs is the latest release on GitHub, and which release is.</td></tr>
+    <tr><td><code>jrs self update</code></td><td>When a newer release exists, install it over this jrs.</td></tr>
+  </tbody>
+</table>
+<p>
+  <code>jrs self update</code> downloads the release's binary for the machine, checks it against the
+  release's <code>SHA256SUMS</code>, makes sure it runs, and renames it over the running
+  <code>jrs</code>, so a failed update leaves the old binary in place. Both commands reach GitHub,
+  through the configured proxy when there is one, and refuse <code>--offline</code>. A jrs installed
+  with <code>cargo install</code> is better updated the same way it came.
+</p>
 </section>
 
 </div>
@@ -2277,7 +2298,7 @@ post-compile = ["check"]</pre>
     <code>jrs.toml</code> before building it if you do not trust it. <code>tree</code>,
     <code>classpath</code>, <code>update</code>, <code>verify</code>, <code>outdated</code>,
     <code>add</code>, <code>remove</code>, <code>cache</code>, <code>init</code>,
-    <code>migrate</code>, <code>completions</code> and <code>clean</code> never run a task, so
+    <code>migrate</code>, <code>completions</code>, <code>self</code> and <code>clean</code> never run a task, so
     inspecting a project with them is always safe.
   </p>
 </div>

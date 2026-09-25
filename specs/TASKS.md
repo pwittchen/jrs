@@ -225,7 +225,7 @@ Skipping work is the task's own business, through `inputs`/`outputs` (§6);
 jrs does not guess from whether compilation happened.
 
 No hook runs for `tree`, `classpath`, `update`, `verify`, `outdated`, `add`,
-`remove`, `cache`, `init`, `migrate`, `completions` or `clean`. None of them
+`remove`, `cache`, `init`, `migrate`, `completions`, `self` or `clean`. None of them
 builds, and none should execute project code.
 
 ### 4.4 Validation

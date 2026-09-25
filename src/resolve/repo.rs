@@ -116,7 +116,7 @@ fn build_agent(proxy: Option<&ProxyConfig>) -> Result<ureq::Agent> {
     Ok(ureq::Agent::new_with_config(config.build()))
 }
 
-fn build_proxy(proxy: &ProxyConfig) -> Result<ureq::Proxy> {
+pub(crate) fn build_proxy(proxy: &ProxyConfig) -> Result<ureq::Proxy> {
     // The URL may carry a password, so it is never echoed back.
     let bad = |e: ureq::Error| JrsError::usage(format!("the configured proxy is not usable: {e}"));
     let parsed = ureq::Proxy::new(&proxy.url).map_err(bad)?;

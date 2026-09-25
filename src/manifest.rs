@@ -1196,6 +1196,7 @@ pub const RESERVED_TASK_NAMES: &[&str] = &[
     "help",
     "metadata",
     "fetch",
+    "self",
 ];
 
 impl Manifest {

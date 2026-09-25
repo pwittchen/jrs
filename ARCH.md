@@ -106,6 +106,7 @@ src/
 ├── obfuscate.rs       --obfuscate: ProGuard over the assembled jar, by config file
 ├── relocate.rs        [package.relocate]: a fat jar's packages moved, constant pools rewritten
 ├── runner.rs          `jrs run`: the user's program gets the terminal
+├── selfupdate.rs      `jrs self check|update`: GitHub releases, checksum, binary swap
 ├── task.rs            [tasks] and [hooks]: plan, cycles, placeholders, freshness
 ├── migrate/
 │   ├── mod.rs         detection, report, manifest emission

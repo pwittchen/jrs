@@ -28,6 +28,7 @@ pub mod project;
 pub mod relocate;
 pub mod resolve;
 pub mod runner;
+pub mod selfupdate;
 pub mod task;
 pub mod test;
 pub mod test_report;

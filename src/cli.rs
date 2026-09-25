@@ -41,6 +41,7 @@ use crate::resolve::metadata;
 use crate::resolve::repo::{Fetcher, Network};
 use crate::resolve::{self, Classpath, Resolution, UiReporter};
 use crate::runner;
+use crate::selfupdate::{self, Releases, Standing};
 use crate::task;
 use crate::test as junit;
 use crate::test_report;
@@ -364,6 +365,13 @@ pub enum Command {
         #[arg(long)]
         sources: bool,
     },
+
+    /// Check for a newer jrs release, or update jrs to it.
+    #[command(name = "self")]
+    SelfCmd {
+        #[command(subcommand)]
+        action: SelfCommand,
+    },
 }
 
 #[derive(Debug, Args)]
@@ -503,6 +511,14 @@ pub enum CacheCommand {
     },
 }
 
+#[derive(Debug, Subcommand)]
+pub enum SelfCommand {
+    /// Say whether this jrs is the latest release, and which release is.
+    Check,
+    /// Replace this jrs with the latest release, when it is newer.
+    Update,
+}
+
 impl Command {
     /// Whether the command was given `--timings`, which `build`, `test`,
     /// `run` and `package` take.
@@ -602,6 +618,7 @@ fn dispatch(cli: &Cli, ui: &Ui) -> Result<i32> {
         }
         Command::Completions { shell } => return completions_command(ui, shell),
         Command::Cache { action } => return cache_command(cli, ui, action),
+        Command::SelfCmd { action } => return self_command(cli, ui, action),
         Command::Add {
             coordinates,
             dev,
@@ -646,6 +663,7 @@ fn dispatch(cli: &Cli, ui: &Ui) -> Result<i32> {
         | Command::Migrate { .. }
         | Command::Completions { .. }
         | Command::Cache { .. }
+        | Command::SelfCmd { .. }
         | Command::Add { .. }
         | Command::Remove { .. } => unreachable!("handled above"),
     }
@@ -4287,6 +4305,88 @@ fn cache_command(cli: &Cli, ui: &Ui, action: &CacheCommand) -> Result<i32> {
             Ok(exit::SUCCESS)
         }
     }
+}
+
+/// `jrs self check` and `jrs self update`, against the GitHub releases.
+fn self_command(cli: &Cli, ui: &Ui, action: &SelfCommand) -> Result<i32> {
+    if cli.global.offline {
+        return Err(JrsError::usage(
+            "`jrs self` asks GitHub for the latest release, which --offline rules out",
+        ));
+    }
+    let config = Config::load()?;
+    for warning in &config.warnings {
+        ui.warn(warning);
+    }
+    let releases = Releases::new(config.proxy.as_ref())?;
+    let current = selfupdate::current_version();
+
+    ui.phase(
+        "Checking",
+        format!("{} for the latest jrs", selfupdate::RELEASES),
+    );
+    let scope = ui.spinner("Checking", "the latest release");
+    let latest = releases.latest();
+    scope.finish();
+    let latest = latest?;
+
+    let standing = selfupdate::standing(&current, &latest);
+    if matches!(action, SelfCommand::Check) || standing != Standing::Outdated {
+        let msg = match standing {
+            Standing::UpToDate => format!("jrs {current} is the latest release"),
+            Standing::Ahead => {
+                format!("jrs {current} is newer than the latest release, {latest}")
+            }
+            Standing::Outdated => format!(
+                "jrs {current} is outdated; the latest release is {latest}, \
+                 `jrs self update` installs it"
+            ),
+        };
+        ui.phase("Finished", msg);
+        return Ok(exit::SUCCESS);
+    }
+
+    let target = selfupdate::target().ok_or_else(|| {
+        JrsError::usage(format!(
+            "no jrs release is built for {} on {}; build it from source, see \
+             https://getjrs.dev/#install",
+            std::env::consts::OS,
+            std::env::consts::ARCH
+        ))
+    })?;
+    let exe = selfupdate::current_exe()?;
+    let asset = selfupdate::asset_name(target);
+    ui.phase("Downloading", format!("{asset} ({latest})"));
+    let scope = ui.spinner("Downloading", &asset);
+    let archive = releases.download(&latest, target);
+    scope.finish();
+    let archive = archive?;
+
+    let scratch = std::env::temp_dir().join(format!("jrs-self-update-{}", std::process::id()));
+    let installed = (|| {
+        let binary = selfupdate::unpack(&archive, target, &scratch)?;
+        let version = selfupdate::probe(&binary)?;
+        selfupdate::replace(&binary, &exe).map_err(|e| match e {
+            JrsError::Io { source, .. }
+                if source.kind() == std::io::ErrorKind::PermissionDenied =>
+            {
+                JrsError::usage(format!(
+                    "{} is not writable by this user\n\nrun `jrs self update` as a \
+                     user that can write there, or reinstall jrs somewhere you own",
+                    exe.display()
+                ))
+            }
+            e => e,
+        })?;
+        Ok(version)
+    })();
+    let _ = std::fs::remove_dir_all(&scratch);
+    let installed = installed?;
+    ui.phase(
+        "Installed",
+        format!("{installed} to {} (was {current})", exe.display()),
+    );
+    Ok(exit::SUCCESS)
 }
 
 /// Every version directory a known project's `jrs.lock` names.

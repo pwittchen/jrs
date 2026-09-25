@@ -85,6 +85,21 @@ cargo install --path .
 
 This places the `jrs` binary in `~/.cargo/bin`.
 
+### Updating
+
+```
+jrs self check      # is this the latest release, and which is?
+jrs self update     # install the latest release over this jrs
+```
+
+`jrs self update` downloads the latest release's binary for the machine, checks
+it against the release's `SHA256SUMS`, makes sure it runs, and renames it over
+the running `jrs` (through a symlink, the file it points at), so a failed
+update leaves the old binary in place. A jrs that is already the latest, or
+newer, is left alone. Both reach GitHub, through the proxy in the
+[config file](#user-configuration) when one is set, and refuse `--offline`. A
+jrs installed with `cargo install` is better updated the same way it came.
+
 ## Uninstallation
 
 Delete the binary — `rm ~/.local/bin/jrs` for a prebuilt one, or
@@ -514,6 +529,7 @@ for any repository.
 | `jrs init [--lib] [--lang <java\|kotlin\|scala\|groovy>] [--check] [--name <name>] [path]` | Scaffold `jrs.toml`, a starter class and its test; `--check` adds a PMD `check` task in the `post-compile` hook. |
 | `jrs migrate` | Generate `jrs.toml` from an existing `pom.xml` or Gradle build. |
 | `jrs completions <bash\|zsh\|fish>` | Print a shell completion script. See [Shell completions](#shell-completions). |
+| `jrs self check` / `jrs self update` | Say whether jrs is the latest release, or update it to that release. See [Updating](#updating). |
 | `jrs task <name> [--watch] [-- args...]` | Run a task from `jrs.toml`, and whatever it depends on. See [Tasks and hooks](#tasks-and-hooks). |
 | `jrs task --list` | List the tasks, their descriptions and the hooks that run them. |
 | `jrs metadata [--no-deps]` | Print the project model as JSON, for editors and tools. |
@@ -994,7 +1010,7 @@ returns the program's.
 `[hooks]` name, as `gradle build` or `npm install` would. Read a project's
 `jrs.toml` before building it if you do not trust it. `tree`, `classpath`,
 `update`, `verify`, `outdated`, `add`, `remove`, `cache`, `init`, `migrate`,
-`completions` and `clean` never run a task, so inspecting a project with them
+`completions`, `self` and `clean` never run a task, so inspecting a project with them
 is always safe.
 
 ## Annotation processors

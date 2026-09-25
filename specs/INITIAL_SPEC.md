@@ -935,7 +935,7 @@ compile hooks, `test`, `package` and `run` add their own, and `doc` fires
 `pre-compile`, since it documents generated sources too. A hook runs every time
 its point is reached, whether or not `javac` had work to do; skipping work is
 the task's own business. `tree`, `classpath`, `update`, `verify`, `outdated`,
-`add`, `remove`, `cache`, `init`, `migrate`, `completions` and `clean` never
+`add`, `remove`, `cache`, `init`, `migrate`, `completions`, `self` and `clean` never
 run a task. That is a guarantee: inspecting a freshly cloned project is safe.
 
 **Ordering.** Tasks run serially, and each runs at most once per invocation.
