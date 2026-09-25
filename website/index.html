@@ -241,7 +241,7 @@ cargo install --path .</code></pre>
           <p class="note">Needs a Rust toolchain with edition 2024 support. The binary lands in <code>~/.cargo/bin</code>.</p>
         </div>
 
-        <p class="note">Each <a href="https://github.com/pwittchen/jrs/releases">release</a> also ships a <code>SHA256SUMS</code> file for verifying the downloads, which <a href="install.sh">the install script</a> checks for you.</p>
+        <p class="note">Each <a href="https://github.com/pwittchen/jrs/releases">release</a> also ships a <code>SHA256SUMS</code> file for verifying the downloads, which <a href="install.sh">the install script</a> checks for you. From then on, <code>jrs self check</code> tells you whether a newer release is out and <code>jrs self update</code> installs it in place, checksum verified.</p>
 
         <h3>Then</h3>
         <div class="shell">
