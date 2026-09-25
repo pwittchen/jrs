@@ -44,28 +44,27 @@ Spring Boot** and **Kotlin with Ktor**.
     `tests/build.rs`, never a test that reaches for Maven Central;
   - *a migration gap* — a new row in `jrs migrate` and a fixture in
     `tests/fixtures/migrate/`, as every other migration rule has;
-  - *a non-goal in the way* — the project is cited in section 3, next to the
-    idea it needs. Several rows there wait for exactly this evidence (Kotlin
-    compiler plugins for Spring's `allopen` and `kotlinx.serialization`, the
-    annotation-processor path, Gradle Module Metadata, the compiler daemon).
+  - *a non-goal in the way* — the project is cited in section 4, next to the
+    idea it needs. Several rows there wait for exactly this evidence (the
+    annotation-processor path, kapt and KSP, Gradle Module Metadata's rich
+    versions and constraints, the compiler daemon).
 - **Java and Spring Boot, what to check.** The Spring Boot BOM through
   `[managed]` and the starters' deep graphs, including optional and
   `provided` dependencies; Lombok, MapStruct and
   `spring-boot-configuration-processor` as processors on the compile
   classpath; `application.yml` and profile resources; `@SpringBootTest`
-  contexts, Mockito's agent on JDK 21 and later, Testcontainers; the fat jar's
-  Spring registry merge against a real application's auto-configuration, and
-  whether `jrs package` has to answer Boot's nested-jar layout
-  (`BOOT-INF/`) or a flat fat jar is enough.
-- **Kotlin and Ktor, what to check.** Ktor and kotlinx publish Kotlin
-  Multiplatform artifacts, and far more of them than `examples/orders` uses.
-  Some root POMs depend on their `-jvm` artifact and resolve as they are;
-  others, like `kotlinx-datetime`'s, do not, and today the user has to declare
-  the `-jvm` artifact by hand ([JVM_LANGUAGES.md](specs/JVM_LANGUAGES.md)).
-  `jrs migrate` should do that, or say which ones need it; `io.ktor.server.netty.EngineMain` as the main
+  contexts, Testcontainers; the fat jar's Spring registry merge against an
+  application with more auto-configuration than `examples/bookmarks`, which
+  shows a flat fat jar is enough for Boot — no `BOOT-INF/` layout — and
+  Mockito loaded as an agent from `[test] java-agents`.
+- **Kotlin and Ktor, what to check.** Multiplatform roots now resolve to
+  their `-jvm` artifact through the `.module` file; what is left to check is
+  the long tail of Ktor and kotlinx artifacts real projects use beyond
+  `examples/orders`. `io.ktor.server.netty.EngineMain` as the main
   class with `application.conf` or `application.yaml`; `ktor-server-test-host`
   tests; Logback and `META-INF/services` in the fat jar; mixed Kotlin and Java
-  sources; `kotlinc` arguments and `jvmToolchain` read from the Gradle build.
+  sources; `kotlinc` arguments and `jvmToolchain` read from the Gradle build;
+  `[kotlin] plugins` (`spring`, `serialization`) as `jrs migrate` writes them.
 - **Keep it running.** The corpus needs the network and a JDK, so it lives
   outside the default `cargo test`, like `tests/network.rs`: a harness that
   clones the pinned commits into a scratch directory with its own
@@ -112,7 +111,45 @@ and testing the same projects, with the results written up in a report.
   a tool that is not installed, as `require_jdk!` does. It adds no crate to jrs.
   A manually triggered CI workflow can regenerate the report on a fixed runner.
 
-## 3. Needs a spec decision first
+## 3. Smaller gaps
+
+Each of these fits SPEC §1.2 and the crate list as they stand. Most answer a
+Gradle or Maven plugin, and those arrive with their `jrs migrate` row.
+
+- **`jrs run --watch`.** `--watch` rebuilds for `build`, `test` and `task`,
+  but not for `run`. Restarting the application after a rebuild is what
+  Spring's devtools and a Ktor `-t` build give a developer, and what
+  `examples/bookmarks` says jrs does not do.
+- **An SBOM.** A CycloneDX JSON document of the runtime graph, written by
+  `jrs package --sbom` beside the jar: every coordinate, its checksum from
+  `jrs.lock`, its licence and its place in the graph. `json.rs` already
+  writes JSON. Migration maps the CycloneDX Gradle and Maven plugins onto it.
+- **A licence report.** `jrs licenses` lists each dependency's licence from
+  the `<licenses>` its POM (or its parent's) declares, and flags the ones
+  with none — what `license-maven-plugin` and Gradle's license-report plugin
+  give today.
+- **Platform classifiers.** Netty's native transports, `netty-tcnative`,
+  JavaFX and LWJGL pick their native jar by an OS classifier, which Maven
+  builds get from `os-maven-plugin`'s `${os.detected.classifier}`. A
+  `{os-classifier}` in a dependency's classifier, expanded to the host's,
+  with the lockfile recording the unexpanded key so it stays portable.
+- **Test sharding.** `jrs test --shard <i>/<n>` runs a stable slice of the
+  test classes, so CI can spread one suite over several machines. The split
+  `test.forks` already makes among local JVMs is the same problem.
+- **Formatters and linters.** `jrs init --check` scaffolds a PMD task;
+  google-java-format, ktfmt, Checkstyle and SpotBugs are the same shape — a
+  tool graph in `[tasks.<name>.dependencies]` hooked `post-compile`.
+  `jrs migrate` reports Spotless and friends as not migrated today; it could
+  write those tasks instead.
+- **A reproducibility check.** Byte-identical jars are load-bearing, but only
+  unit tests guard them. A CI job that builds each `examples/` project twice,
+  in two directories, and compares the jars would catch a regression the
+  unit tests miss.
+- **Distribution.** A Homebrew tap, Scoop and winget manifests, an
+  `aarch64-pc-windows-msvc` build in the `dist` matrix, and a `setup-jrs`
+  GitHub Action, so CI does not have to `curl | sh`.
+
+## 4. Needs a spec decision first
 
 These cross a line drawn in SPEC §1.2 or §13 (or the dependency list). They are
 listed so the discussion has a home, not because they are planned.
@@ -138,5 +175,9 @@ listed so the discussion has a home, not because they are planned.
 | sbt-style `%%` cross-version keys | New key syntax, touching `edit.rs`, the lockfile and migration (JVM_LANGUAGES.md §14.3) |
 | TestNG | SPEC §13.7: the JUnit Platform only (Jupiter and Vintage) |
 | Version ranges | SPEC §8.2 rejects them rather than guessing |
+| Container images (Jib, Boot's `bootBuildImage`) | A layered OCI image written without Docker, pushed to a registry: a host that is not a Maven repository, registry credentials, and tar layers. `jrs package --jlink` already builds the runtime such an image would hold |
+| A vulnerability audit (`jrs audit`, OWASP Dependency-Check) | Queries a host that is not a Maven repository (OSV, GitHub advisories). `jrs.lock` holds exactly the coordinates to ask about, and `jrs outdated` already says what to upgrade to |
+| Incremental Kotlin compilation (the Kotlin Build Tools API) | `compile/incremental.rs` compiles a Java-only unit file by file; a Kotlin unit is compiled whole. Kotlin's own incremental compiler keeps caches of its own and wants to run in-process, which is close to the compiler-daemon non-goal |
+| `jrs self update` | jrs would download and replace executables, as the wrapper row. Today `install.sh` does it |
 | Highest-wins mediation (opt-in) | SPEC §13.6 chose nearest-wins. It is Gradle's default, so migrated Gradle builds can resolve to different versions; the migration report could flag where the two strategies disagree |
 | Gradle Module Metadata (`.module` files) beyond the JVM variant | jrs reads a `.module` only to follow a Multiplatform library's root to its JVM artifact (`resolve/gradle_module.rs`). Its rich versions (`strictly`, `prefer`, `reject`, ranges), dependency constraints and capabilities do not fit nearest-wins and the no-ranges rule (SPEC §8.2); honouring them means a different resolver |

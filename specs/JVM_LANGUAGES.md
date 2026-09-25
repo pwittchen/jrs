@@ -47,7 +47,7 @@ the three named languages, **on the JVM only**, and keeps the rest:
 
 | Still out | Why |
 | --- | --- |
-| Kotlin Multiplatform, Kotlin/JS, Kotlin/Native, Scala.js, Scala Native, Android | Not the JVM. Different toolchains, different outputs, often Gradle Module Metadata (ROADMAP §3). |
+| Kotlin Multiplatform, Kotlin/JS, Kotlin/Native, Scala.js, Scala Native, Android | Not the JVM. Different toolchains, different outputs, often Gradle Module Metadata (ROADMAP §4). |
 | `kapt`, KSP, Compose, macro-paradise style setups | Annotation-processor or compiler-plugin *configuration*, already a non-goal. Java annotation processing in a mixed project keeps working (it is `javac`'s). |
 | Incremental compilation (Zinc, Kotlin IC) | A unit with another language is compiled whole (SPEC §7.2). Only a Java-only unit compiles file by file, since jrs can read its class files' API. |
 | Compiler daemons (Kotlin daemon, Bloop) | A long-lived process jrs would have to manage. See §14.1. |
