@@ -12,6 +12,82 @@ decision (see the last section) — it needs a spec change before it needs code.
 
 ---
 
+## Where jrs is aimed
+
+jrs will not out-feature Gradle, and a smaller build tool for Java is a crowded
+idea (Mill, bld, JeKa, Amper, jbang, mvnd, Declarative Gradle). What sets it
+apart is a set of defaults the incumbents can only reach by configuration, or
+not at all: a native binary with no daemon, a lockfile with a checksum for
+every jar, byte-identical jars, and a build that runs no code of the
+project's own inside the tool. The [Why jrs](https://getjrs.dev/why/) page and
+the README's "Why jrs" section make that case; this section is the plan for
+backing it with evidence and for aiming the work at the people it fits.
+
+**Who it is for.** In order of how well jrs fits them today:
+
+1. **Single-module services.** A Spring Boot or Ktor service in a repository
+   of its own is the shape jrs was built for. Section 1 is about exactly these
+   projects.
+2. **Command-line tools and desktop apps.** The fat jar, `--jlink`,
+   `--jpackage`, `--native-image` and `--obfuscate` are built in; in Maven or
+   Gradle each is a plugin with its own configuration.
+3. **Teams for whom the JVM is a guest language.** Teams working mostly in Rust,
+   Go or TypeScript, with a Java or Kotlin service or two. They know Cargo, npm
+   and `go.mod`, and have nobody who owns a Gradle build.
+4. **Builds with supply-chain requirements.** A lockfile, checksums,
+   reproducible jars and no build scripts are auditable by reading two files.
+   An SBOM and a licence report (section 3) and a vulnerability audit
+   (section 5) complete the picture.
+5. **Coding agents.** A declarative TOML manifest, `jrs add` and `jrs
+   remove`, plain output with `--progress never`, `jrs metadata` as JSON and
+   a fast edit–build–test loop are what an agent needs from a build, and what
+   a Gradle build makes slow and error-prone.
+6. **Learning and first projects.** The step up from a single file or a jbang
+   script to a real project, without learning Maven first.
+
+It is not for multi-module builds, libraries published to Maven Central,
+Android, or builds that need Gradle's plugin ecosystem (section 5 says why).
+
+**The claims, and the evidence each needs.** Every claim on the Why page has to
+be one a sceptical reader can check. Where the evidence does not exist yet,
+the page says what jrs does and leaves out how it compares:
+
+| Claim | Evidence | Where |
+| --- | --- | --- |
+| Fast start, no daemon | No-op and incremental rebuild times against Maven and Gradle (warm daemon and `--no-daemon`) | Section 2 |
+| It builds real projects | The corpus's compatibility table | Section 1 |
+| Reproducible by default | Two builds of every example compared byte for byte in CI | Section 3 |
+| Auditable supply chain | `jrs package --sbom`, `jrs licenses` | Section 3 |
+| Works in the IDE | The IntelliJ plugin | Section 4 |
+
+**Order of work.** The plan follows from the table: first what stops people
+from trying jrs at all, then what proves the claims, then what widens the
+audience.
+
+1. **Section 1, the real-project corpus.** A user's first project has to
+   build; nothing else matters until it does.
+2. **Section 4, the IntelliJ plugin.** Without it, a jrs project is a folder of
+   files in the IDE most JVM developers use, and nobody works that way every day.
+3. **Section 2, benchmarks.** They turn "fast" from a promise into a table,
+   and the Why page and README link to the report once it exists.
+4. **Section 3's supply-chain items:** the SBOM, the licence report and the
+   reproducibility check, then distribution (Homebrew, Scoop, winget, a
+   `setup-jrs` action), so trying jrs costs one command on every platform.
+5. **One spec decision, taken early: `jrs install`** (section 5, publishing).
+   Installing a jar into `~/.m2` is the smallest step past one module: it
+   lets a team split a library out of a service without a reactor, which is
+   the most common reason a project cannot try jrs.
+6. **A guide for coding agents** in `DOCS.md` and on the website: which
+   commands to run, which flags give stable output, and how to read
+   `jrs metadata`. It needs no code, only documentation of what exists.
+
+**How it is measured.** Adoption is not something this repository can count,
+since jrs sends no telemetry. What it can track is the number
+of corpus projects that build end to end, the benchmark report, and the rows
+`jrs migrate` still reports as not migrated.
+
+---
+
 ## 1. Hardening against real projects
 
 The `examples/` projects and the `tests/fixtures/migrate/` fixtures are small
