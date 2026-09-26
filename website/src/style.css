@@ -99,19 +99,43 @@ code {
 
 /* ---- hero -------------------------------------------------------------- */
 
+/* Logo beside the headline; the release pill under the logo sits on the
+   buttons' first line, centred on it even when the buttons wrap. */
 .hero {
   display: grid;
   grid-template-columns: 15rem 1fr;
+  grid-template-areas:
+    "logo    text"
+    "version cta";
   align-items: center;
-  gap: 3rem;
+  gap: 2rem 3rem;
   padding-block: 5rem 3rem;
 }
 
+/* Drawn lower than its cell, towards the pill beneath it, without moving
+   the pill off the buttons' line. */
 .hero-logo {
+  grid-area: logo;
   width: 15rem;
+  translate: 0 2rem;
 }
 
-/* Stretched to the height of the buttons beside it, by the .cta flex row. */
+.hero-text {
+  grid-area: text;
+}
+
+.hero .version {
+  --button-h: calc(2 * 0.65rem + 0.92rem * 1.65 + 2px);
+  --pill-h: calc(2 * 0.4rem + 0.85rem + 2px);
+  grid-area: version;
+  justify-self: center;
+  align-self: start;
+  margin-top: calc((var(--button-h) - var(--pill-h)) / 2);
+  line-height: 1;
+  border-radius: 999px;
+  padding: 0.4rem 0.9rem;
+}
+
 .version {
   display: inline-flex;
   align-items: center;
@@ -154,6 +178,13 @@ h1 {
   flex-wrap: wrap;
   gap: 0.75rem;
   margin-top: 2rem;
+}
+
+/* In the hero the grid's row gap spaces the buttons instead. */
+.hero .cta {
+  grid-area: cta;
+  align-self: start;
+  margin-top: 0;
 }
 
 .button {
@@ -599,12 +630,22 @@ h3 {
 @media (max-width: 52rem) {
   .hero {
     grid-template-columns: 1fr;
+    grid-template-areas: "logo" "version" "text" "cta";
     gap: 1.5rem;
     padding-block: 2rem 2.5rem;
   }
 
+  /* Centred under the 9rem logo: its left edge at the logo's middle, then
+     back by half its own width. */
+  .hero .version {
+    justify-self: start;
+    margin: -0.75rem 0 0 4.5rem;
+    translate: -50%;
+  }
+
   .hero-logo {
     width: 9rem;
+    translate: none;
   }
 
   .split {
