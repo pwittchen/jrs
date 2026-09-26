@@ -2,14 +2,9 @@
    sticky top bar, a sidebar with search, and a reading column. Prose is set
    in IBM Plex Sans; code, headings and labels keep the monospace faces. */
 @import "./style.css";
+@import "./topbar.css";
 
-@font-face {
-  font-family: "IBM Plex Sans";
-  font-style: normal;
-  font-display: swap;
-  font-weight: 400;
-  src: url("../node_modules/@fontsource/ibm-plex-sans/files/ibm-plex-sans-latin-400-normal.woff2") format("woff2");
-}
+/* Plex Sans 400 and --sans come with topbar.css. */
 
 @font-face {
   font-family: "IBM Plex Sans";
@@ -34,7 +29,6 @@
   --gutter: clamp(1.25rem, 4.5vw, 4rem);
   --measure: 50rem;
   --prose: color-mix(in srgb, var(--text) 86%, var(--muted));
-  --sans: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
 }
 
 body {
@@ -49,26 +43,15 @@ kbd,
 .eyebrow,
 .toc-group,
 .doc-body th,
-.doc-body .code figcaption span,
-.topnav .version {
+.doc-body .code figcaption span {
   font-family: var(--mono);
 }
 
 /* ---- top bar ----------------------------------------------------------- */
 
-/* The bar's background and rule run edge to edge; its contents sit on the
-   same grid as the page below: the logo over the sidebar's search box, the
-   menu ending where the reading column ends. */
-.topbar {
-  position: sticky;
-  top: 0;
-  z-index: 30;
-  background: color-mix(in srgb, var(--bg) 90%, transparent);
-  backdrop-filter: blur(8px);
-  -webkit-backdrop-filter: blur(8px);
-  border-bottom: 1px solid var(--line);
-}
-
+/* The bar itself is in topbar.css. Its background and rule run edge to edge;
+   its contents sit on the same grid as the page below: the logo over the
+   sidebar's search box, the menu ending where the reading column ends. */
 .topbar-inner {
   display: grid;
   grid-template-columns: var(--side) minmax(0, 1fr);
@@ -106,75 +89,8 @@ kbd,
   }
 }
 
-.brand {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.6rem;
-  height: 2.25rem;
-  color: var(--text);
-  text-decoration: none;
-  font-family: var(--display);
-  font-stretch: 112.5%;
-  font-weight: 760;
-  font-size: 1.05rem;
-  line-height: 1;
-}
-
-.brand img {
-  display: block;
-  width: 2rem;
-  height: 2rem;
-}
-
-.brand-page {
-  color: var(--muted);
-  font-family: var(--display);
-  font-weight: 500;
-  font-size: 0.95rem;
-  line-height: 1;
-}
-
-.brand-page::before {
-  content: "/";
-  margin-right: 0.6rem;
-  color: var(--line);
-}
-
 .topnav {
-  display: flex;
-  align-items: center;
-  justify-content: flex-end;
-  gap: 0.15rem;
-  width: 100%;
   max-width: var(--measure);
-}
-
-.topnav a {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.45rem;
-  color: var(--muted);
-  text-decoration: none;
-  font-size: 0.9rem;
-  line-height: 1;
-  padding: 0.5rem 0.7rem;
-  border-radius: 6px;
-}
-
-.topnav a:hover,
-.topnav a[aria-current="page"] {
-  color: var(--text);
-}
-
-.topnav a[aria-current="page"] .icon {
-  color: var(--accent);
-}
-
-.topnav .version {
-  margin-left: 0.5rem;
-  padding: 0.45rem 0.8rem;
-  color: var(--accent);
-  font-size: 0.8rem;
 }
 
 /* Icon-only, the logo's height, so the two sit on one centred line. */
@@ -744,19 +660,6 @@ h3:hover .anchor,
 @media (max-width: 30rem) {
   .topbar-side {
     gap: 0.6rem;
-  }
-
-  .brand-page,
-  .topnav .version,
-  .topnav .label {
-    display: none;
-  }
-
-  /* With the bordered version badge gone, the GitHub mark is the bar's last
-     glyph: pull it out by its padding so the mark, not the padding, meets the
-     content's right edge. The tap target keeps its size. */
-  .topnav a[aria-label="GitHub"] {
-    margin-right: -0.7rem;
   }
 }
 

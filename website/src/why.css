@@ -1,76 +1,24 @@
 /* The "Why jrs" page: the landing page's palette, fonts and components, plus
-   a slim top bar, the side-by-side build comparison and the fit cards. */
+   the docs page's top bar, the side-by-side build comparison and the fit cards. */
 @import "./style.css";
+@import "./topbar.css";
 
 /* ---- top bar ----------------------------------------------------------- */
 
-.bar {
-  position: sticky;
-  top: 0;
-  z-index: 10;
-  background: color-mix(in srgb, var(--bg) 90%, transparent);
-  backdrop-filter: blur(8px);
-  -webkit-backdrop-filter: blur(8px);
-  border-bottom: 1px solid var(--line);
-}
-
-.bar-inner {
+/* The docs page's bar (topbar.css), its contents on this page's column. */
+.topbar-inner {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 1rem;
-  min-height: 3.5rem;
+  height: 3.5rem;
 }
 
-.brand {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.6rem;
-  color: var(--text);
-  text-decoration: none;
-  font-family: var(--display);
-  font-stretch: 112.5%;
-  font-weight: 760;
-  font-size: 1.05rem;
-}
-
-.brand img {
-  display: block;
-  width: 2rem;
-  height: 2rem;
-}
-
-.nav {
+.topbar-side {
   display: flex;
-  flex-wrap: wrap;
+  flex: none;
   align-items: center;
-  justify-content: flex-end;
-  gap: 0.15rem;
-}
-
-.nav a {
-  color: var(--muted);
-  text-decoration: none;
-  font-size: 0.88rem;
-  padding: 0.45rem 0.65rem;
-  border-radius: 6px;
-}
-
-.nav a:hover,
-.nav a[aria-current="page"] {
-  color: var(--text);
-}
-
-.nav a[aria-current="page"] {
-  box-shadow: inset 0 -2px 0 var(--accent);
-  border-radius: 0;
-}
-
-.nav .version {
-  margin-left: 0.4rem;
-  padding: 0.35rem 0.75rem;
-  color: var(--accent);
-  font-size: 0.8rem;
+  gap: 0.75rem;
 }
 
 /* ---- intro ------------------------------------------------------------- */
@@ -222,12 +170,13 @@
     grid-template-columns: minmax(0, 1fr);
   }
 
-  .nav .version {
+  /* No drawer here to hold the menu, so it keeps its links as icons. */
+  .topnav .version,
+  .topnav .label {
     display: none;
   }
 
-  .nav a {
-    padding-inline: 0.45rem;
-    font-size: 0.82rem;
+  .topnav a[aria-label="GitHub"] {
+    margin-right: -0.7rem;
   }
 }

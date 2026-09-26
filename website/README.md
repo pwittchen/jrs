@@ -42,6 +42,10 @@ version. It can also be run by hand from the Actions tab.
   same reason `docs.css` does, and `src/why.ts` wires up only the shared
   chrome. Its claims follow `ROADMAP.md`'s "Where jrs is aimed"; keep the two
   in step, and link the benchmark report from it once one exists.
+- `src/topbar.css` is the sticky top bar the docs and "Why jrs" pages share,
+  imported by both `docs.css` and `why.css`; each lays out `.topbar-inner` on
+  its own grid. Since both also import `style.css`, a landing-page-only rule
+  there belongs under `.hero` or another landing selector.
 - The docs follow the repository's `DOCS.md` and `specs/`. A change to
   jrs's behaviour, a flag or a manifest key belongs in them too.
 - `install.sh` is the installer behind `curl -fsSL https://getjrs.dev/install.sh | sh`.

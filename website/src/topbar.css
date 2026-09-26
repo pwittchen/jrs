@@ -1,0 +1,113 @@
+/* The sticky top bar the docs and "Why jrs" pages share: the logo and page
+   name on the left, the site menu with icons on the right. Each page lays out
+   .topbar-inner on its own grid. The menu is set in IBM Plex Sans, the docs
+   page's prose face, on both. */
+
+@font-face {
+  font-family: "IBM Plex Sans";
+  font-style: normal;
+  font-display: swap;
+  font-weight: 400;
+  src: url("../node_modules/@fontsource/ibm-plex-sans/files/ibm-plex-sans-latin-400-normal.woff2") format("woff2");
+}
+
+:root {
+  --sans: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+}
+
+.topbar {
+  position: sticky;
+  top: 0;
+  z-index: 30;
+  background: color-mix(in srgb, var(--bg) 90%, transparent);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  border-bottom: 1px solid var(--line);
+}
+
+.brand {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.6rem;
+  height: 2.25rem;
+  color: var(--text);
+  text-decoration: none;
+  font-family: var(--display);
+  font-stretch: 112.5%;
+  font-weight: 760;
+  font-size: 1.05rem;
+  line-height: 1;
+}
+
+.brand img {
+  display: block;
+  width: 2rem;
+  height: 2rem;
+}
+
+.brand-page {
+  color: var(--muted);
+  font-family: var(--display);
+  font-weight: 500;
+  font-size: 0.95rem;
+  line-height: 1;
+}
+
+.brand-page::before {
+  content: "/";
+  margin-right: 0.6rem;
+  color: var(--line);
+}
+
+.topnav {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 0.15rem;
+  width: 100%;
+}
+
+.topnav a {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  color: var(--muted);
+  text-decoration: none;
+  font-family: var(--sans);
+  font-size: 0.9rem;
+  line-height: 1;
+  padding: 0.5rem 0.7rem;
+  border-radius: 6px;
+}
+
+.topnav a:hover,
+.topnav a[aria-current="page"] {
+  color: var(--text);
+}
+
+.topnav a[aria-current="page"] .icon {
+  color: var(--accent);
+}
+
+.topnav .version {
+  margin-left: 0.5rem;
+  padding: 0.45rem 0.8rem;
+  color: var(--accent);
+  font-family: var(--mono);
+  font-size: 0.8rem;
+}
+
+@media (max-width: 30rem) {
+  .brand-page,
+  .topnav .version,
+  .topnav .label {
+    display: none;
+  }
+
+  /* With the bordered version badge gone, the GitHub mark is the bar's last
+     glyph: pull it out by its padding so the mark, not the padding, meets the
+     content's right edge. The tap target keeps its size. */
+  .topnav a[aria-label="GitHub"] {
+    margin-right: -0.7rem;
+  }
+}
