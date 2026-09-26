@@ -1,0 +1,233 @@
+/* The "Why jrs" page: the landing page's palette, fonts and components, plus
+   a slim top bar, the side-by-side build comparison and the fit cards. */
+@import "./style.css";
+
+/* ---- top bar ----------------------------------------------------------- */
+
+.bar {
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  background: color-mix(in srgb, var(--bg) 90%, transparent);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  border-bottom: 1px solid var(--line);
+}
+
+.bar-inner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  min-height: 3.5rem;
+}
+
+.brand {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.6rem;
+  color: var(--text);
+  text-decoration: none;
+  font-family: var(--display);
+  font-stretch: 112.5%;
+  font-weight: 760;
+  font-size: 1.05rem;
+}
+
+.brand img {
+  display: block;
+  width: 2rem;
+  height: 2rem;
+}
+
+.nav {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 0.15rem;
+}
+
+.nav a {
+  color: var(--muted);
+  text-decoration: none;
+  font-size: 0.88rem;
+  padding: 0.45rem 0.65rem;
+  border-radius: 6px;
+}
+
+.nav a:hover,
+.nav a[aria-current="page"] {
+  color: var(--text);
+}
+
+.nav a[aria-current="page"] {
+  box-shadow: inset 0 -2px 0 var(--accent);
+  border-radius: 0;
+}
+
+.nav .version {
+  margin-left: 0.4rem;
+  padding: 0.35rem 0.75rem;
+  color: var(--accent);
+  font-size: 0.8rem;
+}
+
+/* ---- intro ------------------------------------------------------------- */
+
+.intro {
+  padding-block: 4.5rem 0.5rem;
+}
+
+.eyebrow {
+  margin: 0 0 1rem;
+  color: var(--accent);
+  font-size: 0.78rem;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.intro h1 {
+  max-width: 20ch;
+}
+
+/* ---- comparison -------------------------------------------------------- */
+
+/* The jrs column is narrower on purpose: the difference in size is the point. */
+.compare {
+  display: grid;
+  grid-template-columns: minmax(0, 0.8fr) minmax(0, 1.2fr);
+  gap: 1.25rem;
+  align-items: start;
+}
+
+.compare .code:first-child {
+  border-color: color-mix(in srgb, var(--accent) 55%, var(--line));
+}
+
+.compare figcaption {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 0.25rem 1rem;
+}
+
+.compare figcaption span:first-child {
+  color: var(--text);
+}
+
+.compare .count {
+  font-variant-numeric: tabular-nums;
+}
+
+.compare .run {
+  margin: 0;
+  padding: 0.6rem 1.1rem;
+  border-top: 1px solid var(--line);
+  font-size: 0.82rem;
+  overflow-x: auto;
+  white-space: nowrap;
+}
+
+.compare .run::before {
+  content: "$ ";
+  color: var(--accent);
+}
+
+/* ---- fits -------------------------------------------------------------- */
+
+.fits {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 1px;
+  background: var(--line);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.fits article {
+  padding: 1.4rem 1.5rem 1.5rem;
+  background: var(--raised);
+}
+
+.fits h3 {
+  margin: 0 0 0.6rem;
+  color: var(--latte);
+  font-size: 0.95rem;
+}
+
+.fits p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.92rem;
+}
+
+/* ---- limits ------------------------------------------------------------ */
+
+.experimental {
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.limits {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  max-width: 72ch;
+}
+
+.limits li {
+  position: relative;
+  padding: 0.75rem 0 0.75rem 1.6rem;
+  border-top: 1px solid var(--line);
+  color: var(--muted);
+}
+
+.limits li:last-child {
+  border-bottom: 1px solid var(--line);
+}
+
+.limits li::before {
+  content: "×";
+  position: absolute;
+  left: 0.2rem;
+  top: 0.75rem;
+  color: var(--accent);
+}
+
+.limits strong {
+  color: var(--text);
+  font-weight: 600;
+}
+
+/* ---- narrow screens ---------------------------------------------------- */
+
+@media (max-width: 52rem) {
+  .compare {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .fits {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 36rem) {
+  .intro {
+    padding-block: 2.5rem 0;
+  }
+
+  .fits {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .nav .version {
+    display: none;
+  }
+
+  .nav a {
+    padding-inline: 0.45rem;
+    font-size: 0.82rem;
+  }
+}

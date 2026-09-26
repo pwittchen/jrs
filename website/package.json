@@ -3,8 +3,8 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "bun --port 3000 ./index.html ./docs/index.html",
-    "build": "rm -rf dist && bun build ./index.html ./docs/index.html --outdir dist --minify && cp install.sh dist/",
+    "dev": "bun --port 3000 ./index.html ./docs/index.html ./why/index.html",
+    "build": "rm -rf dist && bun build ./index.html ./docs/index.html ./why/index.html --outdir dist --minify && cp install.sh dist/",
     "preview": "bun run build && bun ./preview.ts"
   },
   "devDependencies": {

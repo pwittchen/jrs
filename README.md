@@ -28,6 +28,29 @@ subprocesses at fixed points in its lifecycle, which they cannot replace or
 reorder. It is offered as-is under the Apache 2.0 licence; evaluate it against
 your own requirements before adopting it for production builds.
 
+## Why jrs
+
+- **One native binary, no daemon.** The build tool itself starts in
+  milliseconds; the JVM starts only to run `javac`, your tests and your
+  application.
+- **Pinned and reproducible by default.** Every version and checksum sits in a
+  committed `jrs.lock`, and two builds of the same inputs produce
+  byte-identical jars, with no configuration.
+- **No build script to audit.** `jrs.toml` is data, and there are no
+  plugins. Nothing a project writes runs inside jrs; custom steps are tasks,
+  run as subprocesses.
+- **Packaging built in.** Fat jars with correctly merged service and Spring
+  registries, `jlink` runtimes, `jpackage` installers, GraalVM native
+  executables and ProGuard, without a plugin each.
+- **Easy for people and for agents.** A manifest you can read in one screen,
+  `jrs add` / `jrs remove`, plain output and `jrs metadata` as JSON.
+
+It fits single-module services (Spring Boot, Ktor), command-line tools, teams
+for whom the JVM is not their main language, and builds with supply-chain
+requirements. It does not fit multi-module builds, library publishing or
+Android. The longer case, and where jrs is not the right choice, is at
+[getjrs.dev/why](https://getjrs.dev/why/).
+
 ## Features
 
 - Dependency resolution from Maven Central and other repositories, with

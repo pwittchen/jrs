@@ -1,6 +1,6 @@
 # jrs website
 
-The project's website: a landing page and a documentation page, static HTML
+The project's website: a landing page, a "Why jrs" page and a documentation page, static HTML
 bundled with [Bun](https://bun.sh).
 
 ```
@@ -36,6 +36,12 @@ version. It can also be run by hand from the Actions tab.
   colouring and the copy buttons. A `<pre data-lang="toml">` is coloured as
   TOML, `plain` not at all, anything else by its `#` comments; in the docs a
   `data-file` attribute gives the block a caption.
+- `why/index.html` is the "Why jrs" page, served at `getjrs.dev/why/`, and
+  the third entry point: what jrs gives a project by default, who it fits and
+  when to stay with Maven or Gradle. `src/why.css` imports `style.css` for the
+  same reason `docs.css` does, and `src/why.ts` wires up only the shared
+  chrome. Its claims follow `ROADMAP.md`'s "Where jrs is aimed"; keep the two
+  in step, and link the benchmark report from it once one exists.
 - The docs follow the repository's `DOCS.md` and `specs/`. A change to
   jrs's behaviour, a flag or a manifest key belongs in them too.
 - `install.sh` is the installer behind `curl -fsSL https://getjrs.dev/install.sh | sh`.

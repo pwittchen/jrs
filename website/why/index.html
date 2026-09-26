@@ -1,0 +1,276 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Why jrs</title>
+    <meta
+      name="description"
+      content="What jrs gives a JVM project that Maven and Gradle do not by default, who it fits, and when to stay with Maven or Gradle."
+    />
+    <meta name="theme-color" content="#16110d" />
+    <link rel="icon" type="image/png" href="../../logo.png" />
+    <link rel="stylesheet" href="../src/why.css" />
+    <script type="module" src="../src/why.ts"></script>
+  </head>
+  <body>
+    <header class="bar">
+      <div class="wrap bar-inner">
+        <a class="brand" href="../"><img src="../../logo.png" alt="" width="32" height="32" />jrs</a>
+        <nav class="nav" aria-label="Site">
+          <a href="../">Home</a>
+          <a href="./" aria-current="page">Why jrs</a>
+          <a href="../docs/">Docs</a>
+          <a href="../#install">Install</a>
+          <a href="https://github.com/pwittchen/jrs">GitHub</a>
+          <a class="version" data-version href="https://github.com/pwittchen/jrs/releases" title="Release notes"></a>
+        </nav>
+      </div>
+    </header>
+
+    <main>
+      <section class="wrap intro">
+        <p class="eyebrow">Why jrs</p>
+        <h1>The same build, in a file you can read.</h1>
+        <p class="lede">
+          Maven and Gradle can build anything, and a single-module project pays for that: a
+          wrapper, a DSL or a plugin block for every job, and a JVM that starts before any work
+          is done. jrs covers a narrower set of projects and makes the safe choices the default
+          ones.
+        </p>
+      </section>
+
+      <section class="wrap section" aria-labelledby="compare">
+        <h2 id="compare">One project, two builds</h2>
+        <p class="section-lede">
+          A Java 21 application with Guava, JUnit 5 tests and a runnable fat jar with a pinned,
+          reproducible dependency graph. On the left, everything jrs needs. On the right, the
+          Gradle build that does the same.
+        </p>
+        <div class="compare">
+          <figure class="code">
+            <figcaption><span>jrs.toml</span><span class="count">13 lines · 1 file</span></figcaption>
+<pre data-lang="toml">[project]
+name = "my-app"
+version = "1.0.0"
+main-class = "com.example.Main"
+
+[java]
+source = 21
+
+[dependencies]
+"com.google.guava:guava" = "33.0.0-jre"
+
+[dev-dependencies]
+"org.junit.jupiter:junit-jupiter" = "5.10.2"</pre>
+            <p class="run"><code>jrs package --fat</code></p>
+          </figure>
+          <figure class="code">
+            <figcaption><span>build.gradle.kts</span><span class="count">+ settings.gradle.kts, gradlew, gradle/wrapper/</span></figcaption>
+<pre data-lang="plain">plugins {
+    java
+    application
+    id("com.gradleup.shadow") version "8.3.5"
+}
+
+group = "com.example"
+version = "1.0.0"
+
+repositories { mavenCentral() }
+
+dependencies {
+    implementation("com.google.guava:guava:33.0.0-jre")
+    testImplementation("org.junit.jupiter:junit-jupiter:5.10.2")
+    testRuntimeOnly("org.junit.platform:junit-platform-launcher")
+}
+
+application { mainClass = "com.example.Main" }
+
+tasks.compileJava { options.release = 21 }
+tasks.test { useJUnitPlatform() }
+
+dependencyLocking { lockAllConfigurations() }
+
+tasks.withType&lt;AbstractArchiveTask&gt;().configureEach {
+    isPreserveFileTimestamps = false
+    isReproducibleFileOrder = true
+}</pre>
+            <p class="run"><code>./gradlew dependencies --write-locks shadowJar</code></p>
+          </figure>
+        </div>
+        <p class="note">
+          The last two blocks are the ones most Gradle builds leave out: without them there is no
+          lockfile and the jar differs from build to build. In jrs they are not settings.
+        </p>
+      </section>
+
+      <section class="wrap section" aria-labelledby="defaults">
+        <h2 id="defaults">What you get without asking</h2>
+        <dl class="phases">
+          <div>
+            <dt>Starting</dt>
+            <dd>
+              jrs is one native binary with no daemon to keep warm. A JVM starts only for the work
+              that needs one: <code>javac</code>, your tests and your application. Nothing
+              stays running between builds.
+            </dd>
+          </div>
+          <div>
+            <dt>Pinning</dt>
+            <dd>
+              The first resolution writes <code>jrs.lock</code> with every version and checksum
+              in the graph, the Kotlin, Scala and Groovy compilers included. Commit it and
+              every machine builds the same graph. A released jar whose bytes change under the same
+              version fails the build.
+            </dd>
+          </div>
+          <div>
+            <dt>Reproducing</dt>
+            <dd>
+              Jar entries are sorted, timestamped 1980-01-01 and given fixed permissions, so two
+              builds of the same inputs produce byte-identical jars. Nothing to switch on.
+            </dd>
+          </div>
+          <div>
+            <dt>Auditing</dt>
+            <dd>
+              <code>jrs.toml</code> is data, and jrs has no plugins. Nothing a project or a
+              dependency writes runs inside the build tool. Your own steps are
+              <a href="../docs/#tasks">tasks</a>: commands run as subprocesses at fixed points,
+              which can add to the build but never reorder it. Reviewing a build means reading two
+              files.
+            </dd>
+          </div>
+          <div>
+            <dt>Packaging</dt>
+            <dd>
+              Plain, portable and fat jars, with <code>META-INF/services</code> and Spring's
+              registries merged instead of overwritten. <code>jlink</code> runtimes,
+              <code>jpackage</code> installers, GraalVM native executables and ProGuard, each one
+              flag of <code>jrs package</code> instead of one plugin each.
+            </dd>
+          </div>
+          <div>
+            <dt>Mixing</dt>
+            <dd>
+              Kotlin, Scala or Groovy beside Java, calling each other both ways. Each compiler is
+              fetched from Maven Central, pinned and run on your JDK, in a graph of its own that
+              never mediates against your dependencies.
+            </dd>
+          </div>
+          <div>
+            <dt>Migrating</dt>
+            <dd>
+              <code>jrs migrate</code> writes a <code>jrs.toml</code> from a <code>pom.xml</code>
+              or a Gradle build, Spring Boot included, and lists what it could not carry over. Your
+              Maven or Gradle build stays in place until you delete it.
+            </dd>
+          </div>
+        </dl>
+      </section>
+
+      <section class="wrap section" aria-labelledby="fits">
+        <h2 id="fits">Who it fits</h2>
+        <div class="fits">
+          <article>
+            <h3>Single-module services</h3>
+            <p>
+              A Spring Boot or Ktor service in its own repository. The Spring Boot BOM goes in
+              <code>[managed]</code>, and the fat jar starts with <code>java -jar</code>, no
+              <code>BOOT-INF/</code> layout needed.
+            </p>
+          </article>
+          <article>
+            <h3>Command-line tools</h3>
+            <p>
+              A fast build tool for small programs. <code>--jlink</code> ships a trimmed runtime,
+              <code>--native-image</code> a single executable, <code>--jpackage</code> a
+              <code>.dmg</code>, <code>.deb</code> or <code>.msi</code>.
+            </p>
+          </article>
+          <article>
+            <h3>Teams new to the JVM</h3>
+            <p>
+              Teams working mostly in Rust, Go or TypeScript, with a Java or Kotlin service or two.
+              If you know <code>Cargo.toml</code> and <code>Cargo.lock</code>, you already know
+              <code>jrs.toml</code> and <code>jrs.lock</code>.
+            </p>
+          </article>
+          <article>
+            <h3>Supply-chain requirements</h3>
+            <p>
+              Every released artifact pinned by checksum, reproducible output, <code>--offline</code> builds
+              from the cache alone, and a build definition with no code in it to review.
+            </p>
+          </article>
+          <article>
+            <h3>Coding agents</h3>
+            <p>
+              A manifest an agent edits with <code>jrs add</code> and <code>jrs remove</code>,
+              plain output with <code>--progress never</code>, the project model as JSON from
+              <code>jrs metadata</code>, and a short edit, build and test loop.
+            </p>
+          </article>
+          <article>
+            <h3>First projects</h3>
+            <p>
+              <code>jrs init</code> scaffolds a main class and its test. The step from a single
+              Java file to a project with dependencies and tests, without learning a build DSL
+              first.
+            </p>
+          </article>
+        </div>
+      </section>
+
+      <section class="wrap section" aria-labelledby="stay">
+        <h2 id="stay">When to stay with Maven or Gradle</h2>
+        <p class="section-lede">
+          jrs is <strong class="experimental">experimental</strong> and deliberately narrow. These
+          are the cases it does not cover today; the
+          <a href="https://github.com/pwittchen/jrs/blob/master/ROADMAP.md">roadmap</a> says which
+          of them may change.
+        </p>
+        <ul class="limits">
+          <li><strong>Multi-module builds.</strong> One <code>jrs.toml</code> is one module. There is no reactor and no composite build.</li>
+          <li><strong>Libraries you publish.</strong> jrs builds sources and Javadoc jars but does not sign or deploy to a repository.</li>
+          <li><strong>Android.</strong> Out of scope, as is Kotlin Multiplatform beyond the JVM target.</li>
+          <li><strong>Build plugins you depend on.</strong> kapt and KSP, an annotation-processor path, JPMS modules, TestNG and container images from the build are not supported.</li>
+          <li><strong>IDE import.</strong> IntelliJ IDEA does not import a jrs project yet. The plugin is planned; <code>jrs metadata</code> is the model it will read.</li>
+          <li><strong>A shared build cache.</strong> jrs recompiles only what changed, but does not share compiled outputs across machines the way Gradle's remote cache does.</li>
+        </ul>
+      </section>
+
+      <section class="wrap section" aria-labelledby="try">
+        <h2 id="try">Try it on your own project</h2>
+        <p class="section-lede">
+          <code>jrs migrate</code> only adds files, so trying jrs beside an existing build costs
+          nothing. If something does not build, an
+          <a href="https://github.com/pwittchen/jrs/issues">issue</a> with the project is the most
+          useful report there is.
+        </p>
+        <div class="shell">
+<pre><code>cd my-project       <span class="c"># next to pom.xml or build.gradle(.kts)</span>
+jrs migrate         <span class="c"># writes jrs.toml and a report of what to review</span>
+jrs test
+jrs package --fat</code></pre>
+          <button class="copy" type="button">Copy</button>
+        </div>
+        <p class="note">
+          Timings against Maven and Gradle on the same projects are
+          <a href="https://github.com/pwittchen/jrs/blob/master/ROADMAP.md#2-benchmarks-against-maven-and-gradle">on the roadmap</a>.
+          This page will link to the report once it is published, including the cases where jrs is
+          slower.
+        </p>
+        <div class="cta">
+          <a class="button primary" href="../#install">Install jrs</a>
+          <a class="button" href="../docs/">Read the docs</a>
+        </div>
+      </section>
+    </main>
+
+    <footer class="wrap foot">
+      <span>Apache License 2.0</span>
+      <span><a href="../">Home</a> · <a href="../docs/">Documentation</a> · <a href="https://github.com/pwittchen/jrs">github.com/pwittchen/jrs</a></span>
+    </footer>
+  </body>
+</html>
