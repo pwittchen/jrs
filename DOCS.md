@@ -605,7 +605,7 @@ numbers go to `target/.jrs/timings.txt` as tab-separated columns, even under
 language, the output directories, the compile, runtime and test classpaths
 (each jar with its coordinate), the JDK and `--release`, the main class and
 the tasks. It resolves the dependencies but never compiles. `--no-deps` skips
-resolution. [SPEC §5.4](specs/SPEC.md#54-the-project-model-jrs-metadata-and-jrs-fetch)
+resolution. [SPEC §5.4](SPEC.md#54-the-project-model-jrs-metadata-and-jrs-fetch)
 has the full schema. `jrs fetch` downloads everything a build needs without
 building, the tools of its tasks included, which warms a CI cache for
 `--offline` runs. `jrs fetch --sources`
@@ -995,7 +995,7 @@ Placeholders such as `{root}`, `{target}`, `{classes}`, `{project.version}`,
 `args`, `cwd` and `env`; `args` and `env` also take `{free-port.<name>}`. `shell` strings use environment variables instead:
 `JRS_ROOT`, `JRS_CLASSPATH`, `JRS_JAR` and the rest, with `JAVA_HOME` set to
 the project's JDK; a `shell` task's `args` arrive as `$1`, `$2`…. The full
-list is in [SPEC §7.6](specs/SPEC.md#76-tasks-and-hooks).
+list is in [SPEC §7.6](SPEC.md#76-tasks-and-hooks).
 
 Generated sources and resources must live under `target-dir`, since `jrs
 clean` must never delete anything you wrote and watch mode must not rebuild on
@@ -1016,7 +1016,7 @@ is always safe.
 ## Annotation processors
 
 jrs has no separate processor path. Configuring processors is a
-[non-goal](specs/SPEC.md#12-non-goals). But `javac` runs any processor it finds on
+[non-goal](SPEC.md#12-non-goals). But `javac` runs any processor it finds on
 the compile classpath, so Lombok, MapStruct, Dagger and the like work as
 compile-only dependencies:
 

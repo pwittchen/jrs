@@ -4,13 +4,13 @@ Design proposal for user-defined tasks and build hooks, in the spirit of
 Gradle's `tasks.register` / `dependsOn` / `doLast`, but declarative and small.
 
 Status: **T1, T2 and T3 (tool dependencies, §8) implemented.** This
-crossed a line drawn in [SPEC §1.2](SPEC.md#12-non-goals) ("plugin
+crossed a line drawn in [SPEC §1.2](../SPEC.md#12-non-goals) ("plugin
 systems, custom task graphs, or a build DSL"), so per
 [ROADMAP §5](../ROADMAP.md#5-needs-a-spec-decision-first) it needed an
 SPEC.md change before it needed code. §2 below is that argument; §10
 lists the SPEC.md edits, which have been made. This document is kept as
 the design record, corrected where the implementation settled a detail
-differently; [SPEC §7.6](SPEC.md#76-tasks-and-hooks) is the condensed
+differently; [SPEC §7.6](../SPEC.md#76-tasks-and-hooks) is the condensed
 contract.
 
 ---

@@ -23,7 +23,7 @@ it, never the other way round.
 - **Respect what each document is** (see the table below). The specs are design
   records with their own rules; `ROADMAP.md` lists only what is left; example
   READMEs describe their own example.
-- **Don't "fix" the deliberate divergences.** `specs/SPEC.md` §12.1
+- **Don't "fix" the deliberate divergences.** `SPEC.md` §12.1
   lists where the code intentionally differs from the spec. A mismatch covered
   there is correct as it stands.
 - **Keep the voice.** British spelling (*behaviour*, *licence*, *organised*),
@@ -45,7 +45,7 @@ it, never the other way round.
 | `ARCH.md` | The architecture map: source map, module layers, `Session` spine, resolution, compile units, output layer, files on disk, invariants. | The `src/` tree (`find src -name '*.rs' \| sort`), `mod` declarations in `src/lib.rs` and each `mod.rs`, `use` statements (which module depends on which), the functions and types it names, the files actually written under `target/` and `target/.jrs/`, `tests/`. |
 | `CLAUDE.md` | Guidance for Claude Code: commands, CI, architecture summary, invariants, test layout, crate list. | `Cargo.toml` (dependencies, features, benches), `.github/workflows/rust.yml` (jobs, OSes, `paths-ignore`, release steps), `tests/*.rs` and `tests/fixtures/`, `benches/`, the `require_jdk!` macro. Keep it consistent with `ARCH.md`, which it summarises. |
 | `ROADMAP.md` | What is **left** to do, and nothing else — it keeps no list of what has landed. | Grep the code for each remaining item. An item that has been implemented is removed; don't mark it done in place or record it elsewhere in the roadmap. A landed piece of a larger item goes too, leaving only the context the open part needs. Adding new items is the user's call — suggest, don't add. |
-| `specs/SPEC.md` | The design contract the code follows; module doc comments cite it by section. | Only update: milestone status in §12, cross-references, file and module names, and statements the code has plainly superseded in a way already reflected elsewhere (ARCH.md, DOCS.md). A behavioural mismatch that §12.1 doesn't cover is a **finding** — report it with both sides; don't silently rewrite the spec or add a §12.1 entry. Never renumber sections: code cites them. |
+| `SPEC.md` | The design contract the code follows; module doc comments cite it by section. | Only update: milestone status in §12, cross-references, file and module names, and statements the code has plainly superseded in a way already reflected elsewhere (ARCH.md, DOCS.md). A behavioural mismatch that §12.1 doesn't cover is a **finding** — report it with both sides; don't silently rewrite the spec or add a §12.1 entry. Never renumber sections: code cites them. |
 | `specs/JVM_LANGUAGES.md`, `specs/TASKS.md` | Design records, "corrected where the implementation settled a detail differently". | Their `Status:` line (what is and isn't built), and details the implementation settled differently — those may be corrected in place, as the documents themselves say. Leave the problem statements, arguments and spike notes alone. |
 | `examples/*/README.md` | What each example exercises and how to try it. | That example's `jrs.toml`, `jrs.lock`, sources and tests: versions, dependency coordinates, file and class names, test counts (count the test methods), commands shown. |
 

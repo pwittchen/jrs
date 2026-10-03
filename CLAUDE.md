@@ -12,7 +12,7 @@ Java (`specs/JVM_LANGUAGES.md`, SPEC §7.7): their compilers are resolved from M
 Central as isolated tool graphs, pinned in `jrs.lock`'s `[[tool]]` blocks, and
 run on the project's JDK — still a driver.
 
-`specs/SPEC.md` is the design document the implementation follows, and module
+`SPEC.md` is the design document the implementation follows, and module
 doc comments cite it by section (`SPEC §8.2`). Read the relevant section before changing
 behaviour; **§12.1 lists the four places where the code deliberately diverges from the
 spec** — those divergences are intentional, don't "fix" them back.

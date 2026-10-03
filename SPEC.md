@@ -1,7 +1,7 @@
 # jrs — Design Specification
 
 Working design document for `jrs`, a Java build system written in Rust.
-It expands the capability list from [README.md](../README.md) into a concrete scope,
+It expands the capability list from [README.md](README.md) into a concrete scope,
 so that implementation can start from agreed contracts instead of ad-hoc decisions.
 
 Status: **implemented** — every milestone in the [Roadmap](#12-roadmap) has
@@ -1037,7 +1037,7 @@ sources are all generated still builds.
 
 Kotlin, Scala and Groovy compile alongside Java, on the JVM only. The design,
 the alternatives, and what the spike before it found are in
-[JVM_LANGUAGES.md](JVM_LANGUAGES.md); this is the contract.
+[JVM_LANGUAGES.md](specs/JVM_LANGUAGES.md); this is the contract.
 
 **Turning one on.** A `[kotlin]`, `[scala]` or `[groovy]` table turns the
 language on and pins its compiler. `version` is required and exact: at least
@@ -1782,7 +1782,7 @@ parent chains and `<dependencyManagement>` already work.
 | `maven-jar-plugin` → `<mainClass>`, `maven-shade-plugin`'s transformer, `spring-boot-maven-plugin`'s `<mainClass>` or `start-class`; for Spring Boot, else the `@SpringBootApplication` class | `project.main-class` |
 | `maven-jar-plugin` → `<archive><manifestEntries>` | `[package.manifest]`; `${project.version}` and `${project.artifactId}` become placeholders, any other property is reported |
 | `maven-shade-plugin` → `<relocations>`, in the plugin's configuration or an execution's | `[package.relocate]` (§9.9): `<pattern>` → `<shadedPattern>`, `<excludes>` as classes and `x.*` packages (`x.**` too). `<includes>`, a `<rawString>` relocation and any other wildcard are reported; a review line says `jrs package --fat` builds the shaded jar |
-| `exec-maven-plugin` executions | `[tasks]` and `[hooks]`: `exec` → a `run` task, `java` → `java @{classpath-argfile} <main>`, or a `main` task over the plugin's `<dependencies>` with `includePluginDependencies`; the `<phase>` → the hook at the same point ([TASKS.md §12](TASKS.md#12-open-questions) item 5). With no execution, its `<mainClass>` → `project.main-class` |
+| `exec-maven-plugin` executions | `[tasks]` and `[hooks]`: `exec` → a `run` task, `java` → `java @{classpath-argfile} <main>`, or a `main` task over the plugin's `<dependencies>` with `includePluginDependencies`; the `<phase>` → the hook at the same point ([TASKS.md §12](specs/TASKS.md#12-open-questions) item 5). With no execution, its `<mainClass>` → `project.main-class` |
 | `<profiles>` a plain `mvn` build activates: each whose `<activation>` holds with no `-P` and no `-D` — its conditions all negated properties (`!skipDocs`) — else the `<activeByDefault>` ones | merged into their POM before anything is read, as Maven injects them, the profile dominant: properties by name, dependencies and repositories by key, plugins by key with `<configuration>` merged element by element, executions by `<id>`. A default profile gets a review line when another profile could activate on some machine and turn it off |
 | `maven-surefire-plugin` `<argLine>`, `<systemPropertyVariables>` | `test.jvm-args` |
 | `maven-surefire-plugin` `<forkCount>`, a number | `test.forks` |
@@ -1919,7 +1919,7 @@ Anything jrs cannot read confidently is skipped and reported — never guessed:
 - Plugins, `subprojects { }` / `allprojects { }`, and multi-project
   `settings.gradle` includes (listed, not migrated).
 - Custom tasks, except those that say everything in literals (§7.6,
-  [TASKS.md §12](TASKS.md#12-open-questions) item 5): an `Exec` task becomes
+  [TASKS.md §12](specs/TASKS.md#12-open-questions) item 5): an `Exec` task becomes
   a `run` task, a `JavaExec` over `sourceSets.main.runtimeClasspath` becomes
   `java @{classpath-argfile} <main>` depending on `build`, and a task with only
   `dependsOn` becomes an aggregate. `compileJava.dependsOn`, `test.dependsOn`,
@@ -2034,7 +2034,7 @@ produces something runnable.
   Java tools from Maven Central resolved as a graph of the task's own and
   pinned in `jrs.lock`, and `jrs tree --task` (T3)
 - Added after M1–M6 had landed; the design, and the argument for narrowing
-  §1.2, is in [TASKS.md](TASKS.md). §7.6 is the condensed contract. T3 waited
+  §1.2, is in [TASKS.md](specs/TASKS.md). §7.6 is the condensed contract. T3 waited
   until T1 and T2 had seen use, since it changes the lockfile's inputs.
 
 ### M8 — JVM languages
@@ -2045,7 +2045,7 @@ produces something runnable.
 - ☑ `jrs init --lang`, the `jrs migrate` rows, `jrs outdated` for compiler
   versions and `jrs tree --tool` (L4)
 - Added after M7; the design, and the argument for narrowing §1.2, is in
-  [JVM_LANGUAGES.md](JVM_LANGUAGES.md), and §7.7 is the condensed contract.
+  [JVM_LANGUAGES.md](specs/JVM_LANGUAGES.md), and §7.7 is the condensed contract.
   Scaladoc and Groovydoc for `jrs doc` came later (§7.4); Kotlin's Dokka is
   still out.
 
@@ -2162,7 +2162,7 @@ still the interesting part; the **decision** lines record what was settled on.
     classpath. Embedded scripting (Rhai, Lua), native or WASM plugins, and a
     Java plugin API were the other candidates; each is a DSL or a plugin system
     by another name.
-    **Decision:** tasks as subprocesses (§7.6, designed in [TASKS.md](TASKS.md)).
+    **Decision:** tasks as subprocesses (§7.6, designed in [TASKS.md](specs/TASKS.md)).
     A task is a TOML table naming a command, which is what jrs already does
     with `javac`, and it attaches only at fixed lifecycle points. There is still
     no DSL, no plugin API, and no way to rewire the built-in pipeline; build
@@ -2177,7 +2177,7 @@ still the interesting part; the **decision** lines record what was settled on.
     with no manifest key, and delegating to Gradle, Maven or sbt were the
     alternatives.
     **Decision:** one table per language (§7.7, designed in
-    [JVM_LANGUAGES.md](JVM_LANGUAGES.md)). The compiler is pinned in the
+    [JVM_LANGUAGES.md](specs/JVM_LANGUAGES.md)). The compiler is pinned in the
     manifest and in `jrs.lock`, resolved as a graph of its own and run on the
     project's JDK, as `javac` and the JUnit launcher are. This built the
     isolated tool graph and the `[[tool]]` lockfile blocks that tool

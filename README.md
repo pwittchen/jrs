@@ -123,7 +123,7 @@ Kotlin, Scala and Groovy.
   tasks, JVM languages, configuration and migration; also on the web at
   [getjrs.dev/docs](https://getjrs.dev/docs/)
 - [ARCH.md](ARCH.md) — how the code is put together
-- [specs/SPEC.md](specs/SPEC.md) — the design behind it
+- [SPEC.md](SPEC.md) — the design behind it
 - [ROADMAP.md](ROADMAP.md) — known gaps and what comes next
 
 ## Development

@@ -35,7 +35,7 @@ release jobs `bump`, `dist`, `release`, `website` on `v*` tags) and
 - **Keep the project's invariants** (`CLAUDE.md`): no `println!`/`eprintln!`
   outside `ui/`, no `unwrap()` outside `#[cfg(test)]`, errors stay `JrsError`
   values, determinism is not touched, no new dependencies. Don't "fix" the
-  deliberate spec divergences in `specs/SPEC.md` §12.1.
+  deliberate spec divergences in `SPEC.md` §12.1.
 - **Don't edit the workflows to make a failure go away.** Change
   `.github/workflows/*.yml` only when the workflow itself is the broken thing
   (a removed action version, a renamed runner image, a wrong path) — and say so

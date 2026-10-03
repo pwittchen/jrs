@@ -1,13 +1,13 @@
 # jrs — Roadmap
 
-Every milestone in [SPEC §12](specs/SPEC.md#12-roadmap) has landed. This
+Every milestone in [SPEC §12](SPEC.md#12-roadmap) has landed. This
 document lists only what is still open. Much of it closes a gap with Gradle, and those items
 name the Gradle feature they answer. jrs is not trying to become Gradle
 (SPEC §1.2), so each one is the single-module, declarative version of what a
 Gradle build gets from a plugin or a DSL block, and it arrives with its row in
 `jrs migrate` and a fixture in `tests/fixtures/migrate/`, as `test.forks` did
 for `maxParallelForks` (`gradle-forks`). Anything that touches a
-[non-goal](specs/SPEC.md#12-non-goals) or adds a crate is a spec-level
+[non-goal](SPEC.md#12-non-goals) or adds a crate is a spec-level
 decision (see the last section) — it needs a spec change before it needs code.
 
 ---

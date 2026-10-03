@@ -3,9 +3,9 @@
 Design proposal for compiling Kotlin, Scala and Groovy sources alongside Java,
 in the same single-module project and from the same `jrs.toml`.
 
-Status: **implemented**, as milestone M8 of [SPEC §12](SPEC.md#12-roadmap);
-[SPEC §7.7](SPEC.md#77-other-jvm-languages) is the condensed contract.
-This removed a line drawn in [SPEC §1.2](SPEC.md#12-non-goals)
+Status: **implemented**, as milestone M8 of [SPEC §12](../SPEC.md#12-roadmap);
+[SPEC §7.7](../SPEC.md#77-other-jvm-languages) is the condensed contract.
+This removed a line drawn in [SPEC §1.2](../SPEC.md#12-non-goals)
 ("Non-Java JVM languages (Kotlin, Scala, Groovy)"), so it needed an
 SPEC.md change before it needed code. §2 below is that argument; §12
 lists the SPEC.md edits it implied, which have been made.
