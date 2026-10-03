@@ -3,12 +3,12 @@
 Design proposal for compiling Kotlin, Scala and Groovy sources alongside Java,
 in the same single-module project and from the same `jrs.toml`.
 
-Status: **implemented**, as milestone M8 of [SPEC §12](INITIAL_SPEC.md#12-roadmap);
-[SPEC §7.7](INITIAL_SPEC.md#77-other-jvm-languages) is the condensed contract.
-This removed a line drawn in [SPEC §1.2](INITIAL_SPEC.md#12-non-goals)
+Status: **implemented**, as milestone M8 of [SPEC §12](SPEC.md#12-roadmap);
+[SPEC §7.7](SPEC.md#77-other-jvm-languages) is the condensed contract.
+This removed a line drawn in [SPEC §1.2](SPEC.md#12-non-goals)
 ("Non-Java JVM languages (Kotlin, Scala, Groovy)"), so it needed an
-INITIAL_SPEC.md change before it needed code. §2 below is that argument; §12
-lists the INITIAL_SPEC.md edits it implied, which have been made.
+SPEC.md change before it needed code. §2 below is that argument; §12
+lists the SPEC.md edits it implied, which have been made.
 
 Where this document states how a third-party compiler behaves, the claim was
 checked by the L0 spike (§13.2) before code depended on it. What the spike
@@ -547,7 +547,7 @@ an input build paired with its expected `jrs.toml`.
 
 ---
 
-## 12. INITIAL_SPEC.md changes
+## 12. SPEC.md changes
 
 1. **§1.2**, replace "Non-Java JVM languages (Kotlin, Scala, Groovy)" with:
    > - JVM languages beyond Java, Kotlin, Scala and Groovy; and for those three,
@@ -611,7 +611,7 @@ terminals, only `ui/` prints, and phase lines come from `cli.rs`.
 
 **L1 — Kotlin.** `[kotlin]`, the implied stdlib, kotlinc invocation, mixed
 Kotlin/Java both ways, the test unit with friend paths, the `MainKt` hint, the
-UTF-8 warning, the network test, and the INITIAL_SPEC.md changes. Kotlin comes first
+UTF-8 warning, the network test, and the SPEC.md changes. Kotlin comes first
 because it is the most asked-for.
 
 **L2 — Groovy.** `[groovy]`, joint compilation, the fat-jar descriptor merge,

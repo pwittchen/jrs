@@ -3,7 +3,7 @@
 This document describes how jrs is put together: the modules, the way a command
 flows through them, and the invariants the code is organised around. It is a map
 of the code as it is. The design the code follows is
-[specs/INITIAL_SPEC.md](specs/INITIAL_SPEC.md), with
+[specs/SPEC.md](specs/SPEC.md), with
 [specs/JVM_LANGUAGES.md](specs/JVM_LANGUAGES.md) for Kotlin, Scala and Groovy and
 [specs/TASKS.md](specs/TASKS.md) for tasks and hooks. Module doc comments cite
 those by section (`SPEC §8.2`), and SPEC §12.1 lists the four places where the

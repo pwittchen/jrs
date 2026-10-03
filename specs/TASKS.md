@@ -4,13 +4,13 @@ Design proposal for user-defined tasks and build hooks, in the spirit of
 Gradle's `tasks.register` / `dependsOn` / `doLast`, but declarative and small.
 
 Status: **T1, T2 and T3 (tool dependencies, §8) implemented.** This
-crossed a line drawn in [SPEC §1.2](INITIAL_SPEC.md#12-non-goals) ("plugin
+crossed a line drawn in [SPEC §1.2](SPEC.md#12-non-goals) ("plugin
 systems, custom task graphs, or a build DSL"), so per
 [ROADMAP §5](../ROADMAP.md#5-needs-a-spec-decision-first) it needed an
-INITIAL_SPEC.md change before it needed code. §2 below is that argument; §10
-lists the INITIAL_SPEC.md edits, which have been made. This document is kept as
+SPEC.md change before it needed code. §2 below is that argument; §10
+lists the SPEC.md edits, which have been made. This document is kept as
 the design record, corrected where the implementation settled a detail
-differently; [SPEC §7.6](INITIAL_SPEC.md#76-tasks-and-hooks) is the condensed
+differently; [SPEC §7.6](SPEC.md#76-tasks-and-hooks) is the condensed
 contract.
 
 ---
@@ -538,7 +538,7 @@ project with `jrs tree` or `jrs classpath` is always safe.
 
 ---
 
-## 10. INITIAL_SPEC.md changes
+## 10. SPEC.md changes
 
 Applied along with T1 and T2. §1.2's code-generation bullet was also narrowed
 to "built-in code generators", since a generator can now run as a task; §5.1
@@ -589,7 +589,7 @@ without a TTY, as `resolve/` is. `ui` keeps depending on nothing.
 **T1 — Tasks and hooks.** `[tasks]` with `run` / `shell` / `script`, `args`,
 `env`, `cwd`, `description`, `depends-on` (tasks and built-ins), `[hooks]`,
 placeholders and environment, `jrs task` and `jrs task --list`, serial
-execution, streamed output, the INITIAL_SPEC.md changes. Tasks always run.
+execution, streamed output, the SPEC.md changes. Tasks always run.
 
 **T2 — Incremental and generated code.** `inputs` / `outputs` and the
 fingerprint, `Fresh` lines, `source-outputs` / `resource-outputs` wired into
