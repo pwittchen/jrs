@@ -482,33 +482,21 @@ h3 {
 
 /* ---- contact ----------------------------------------------------------- */
 
-/* Two panels divided by a hairline: the grid's gap shows the line colour behind them. */
 .contact {
-  display: grid;
-  grid-template-columns: minmax(16rem, 0.85fr) minmax(0, 1.3fr);
-  gap: 1px;
-  background: var(--line);
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  overflow: hidden;
-}
-
-.contact-about,
-.contact-cta {
   display: flex;
-  flex-direction: column;
+  align-items: center;
+  gap: 2rem;
   padding: 2.25rem;
   background: var(--raised);
-}
-
-.contact-about {
-  gap: 1.5rem;
+  border: 1px solid var(--line);
+  border-radius: 8px;
 }
 
 .contact-avatar {
   display: block;
-  width: 10rem;
-  height: 10rem;
+  flex: none;
+  width: 7.5rem;
+  height: 7.5rem;
   object-fit: cover;
   border-radius: 50%;
   border: 1px solid var(--line);
@@ -529,15 +517,22 @@ h3 {
 }
 
 .contact-note {
-  margin: 0;
+  margin: 0 0 1.5rem;
   color: var(--muted);
+}
+
+.contact-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 1rem 1.5rem;
 }
 
 .contact-links {
   display: flex;
   flex-wrap: wrap;
   gap: 0.5rem;
-  margin: 1rem 0 0;
+  margin: 0;
   color: var(--muted);
   font-size: 0.85rem;
 }
@@ -548,48 +543,6 @@ h3 {
 
 .contact-links a:hover {
   color: var(--accent);
-}
-
-.contact-lead {
-  margin: 0 0 1.25rem;
-  color: var(--muted);
-}
-
-.contact-list {
-  display: flex;
-  flex-direction: column;
-  margin: 0 0 1.75rem;
-  padding: 0;
-  list-style: none;
-}
-
-.contact-list li {
-  position: relative;
-  padding: 0.6rem 0 0.6rem 1.4rem;
-  border-bottom: 1px solid var(--line);
-  color: var(--muted);
-}
-
-.contact-list li:last-child {
-  border-bottom: 0;
-}
-
-.contact-list li::before {
-  content: "—";
-  position: absolute;
-  top: 0.6rem;
-  left: 0;
-  color: var(--accent);
-}
-
-.contact-list strong {
-  color: var(--text);
-  font-weight: 600;
-}
-
-.contact-button {
-  align-self: flex-start;
-  margin-top: auto;
 }
 
 /* ---- status & footer --------------------------------------------------- */
@@ -652,27 +605,20 @@ h3 {
     grid-template-columns: 1fr;
   }
 
-  .contact {
-    grid-template-columns: 1fr;
-  }
-
-  .contact-about {
-    align-items: center;
-    text-align: center;
-  }
-
-  .contact-links {
-    justify-content: center;
-  }
 }
 
 @media (max-width: 36rem) {
-  .contact-about,
-  .contact-cta {
+  .contact {
+    flex-direction: column;
     padding: 1.5rem 1.25rem;
+    text-align: center;
   }
 
-  .contact-button {
+  .contact-actions {
+    flex-direction: column;
+  }
+
+  .contact-actions .button {
     align-self: stretch;
     justify-content: center;
   }
