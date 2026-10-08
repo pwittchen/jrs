@@ -315,3 +315,61 @@ listed so the discussion has a home, not because they are planned.
 | Incremental Kotlin compilation (the Kotlin Build Tools API) | `compile/incremental.rs` compiles a Java-only unit file by file; a Kotlin unit is compiled whole. Kotlin's own incremental compiler keeps caches of its own and wants to run in-process, which is close to the compiler-daemon non-goal |
 | Highest-wins mediation (opt-in) | SPEC §13.6 chose nearest-wins. It is Gradle's default, so migrated Gradle builds can resolve to different versions; the migration report could flag where the two strategies disagree |
 | Gradle Module Metadata (`.module` files) beyond the JVM variant | jrs reads a `.module` only to follow a Multiplatform library's root to its JVM artifact (`resolve/gradle_module.rs`). Its rich versions (`strictly`, `prefer`, `reject`, ranges), dependency constraints and capabilities do not fit nearest-wins and the no-ranges rule (SPEC §8.2); honouring them means a different resolver |
+
+## 6. Faster than Gradle
+
+jrs starts faster than Gradle: it is a native binary with no configuration
+phase. Where Gradle still wins is the JVM work itself. Its warm daemon runs
+`javac` in-process with a hot JIT, its build cache skips work outright, and an
+up-to-date test task is not run at all. Each item below closes part of that gap
+without a daemon. The benchmarks in section 2 come first: they say which gap is
+real, and every item here is judged by them.
+
+- **Class-data sharing for every tool JVM.** The compiler and test JVMs start
+  with no tuning today. `-XX:+AutoCreateSharedArchive` with
+  `-XX:SharedArchiveFile` (JDK 19+) gives each tool an archive of its own in the
+  shared cache, keyed by the JDK and the tool's coordinate. It never goes in
+  `target/`, which stays disposable. `javac` would run as
+  `java -m jdk.compiler/com.sun.tools.javac.Main` so the flag reaches it.
+  kotlinc and scalac gain the most, since their start-up is the second or so
+  JVM_LANGUAGES.md §14.1 notes. The test JVM can get the same, keyed by the
+  test classpath's digest, or the JDK 24+ AOT cache (`-XX:AOTCache`, JEP 483),
+  which Spring Boot test suites, with their thousands of classes, feel first.
+  An archive that cannot be written or read is skipped, never an error.
+- **Flags for short-lived compiler JVMs.** A `javac` that lives two seconds
+  pays for C2 and G1 without using them. When the incremental index compiles a
+  handful of files, `-XX:TieredStopAtLevel=1 -XX:+UseSerialGC` start it faster.
+  A whole-unit compile keeps the full JIT. `<lang>.compiler-jvm-args` still
+  wins over either default.
+- **Test impact analysis.** The index in `compile/incremental.rs` already
+  knows which classes refer to which. `jrs test` could run only the test
+  classes that transitively refer to a changed class, under the rule the
+  compile index follows: anything the index cannot account for (a new or
+  deleted source, a resource, a processor, another language, a changed
+  dependency) runs the whole suite. Gradle re-runs a test task whole or skips
+  it, and selecting tests needs Develocity's paid Predictive Test Selection.
+  For the edit–build–test loop, and for coding agents, this is the largest
+  speed-up within reach. A flag such as `--all` runs everything regardless.
+- **A local build cache.** Already a row in section 5. The fingerprints exist,
+  so `target/classes` and test results stored in the shared cache under their
+  fingerprint would survive a branch switch, a `git stash` or a `jrs clean`. A
+  remote cache for CI is the same keys over HTTP, which `ureq` already speaks.
+- **A warm compiler that lives as long as `--watch`.** `--watch` already
+  keeps jrs alive for the session. Inside it, one `javac` worker JVM (a small
+  Java shim reading argfile paths on stdin and calling `javax.tools`) would
+  compile every rebuild after the first with a hot JIT, which is the warm
+  daemon's advantage. Kotlin's Build Tools API would do the same for kotlinc,
+  and opens incremental Kotlin compilation (section 5). The worker dies with
+  the command, so jrs never manages a background process. It still needs a
+  line in SPEC §1.2 saying that a worker scoped to one command is not the
+  compiler daemon the non-goal rules out.
+- **Pipelining.** Download test-only dependencies while the main unit
+  compiles, and prepare the test unit's argfiles and launcher before main is
+  done. The phase lines stay in the order they are today.
+- **A default for `test.forks`.** One test JVM unless set. A default from the
+  core count and the number of test classes would use the machine. It changes
+  behaviour for suites that share state between classes, so it needs an opt-out
+  and a line in the migration report.
+
+What stays out: a background daemon and an in-house compiler. Both would trade
+away the "no daemon, just a driver" defaults the Why page rests on.
