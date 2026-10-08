@@ -370,6 +370,14 @@ real, and every item here is judged by them.
   core count and the number of test classes would use the machine. It changes
   behaviour for suites that share state between classes, so it needs an opt-out
   and a line in the migration report.
+- **Balanced test forks.** `test::split` deals the classes out in name order
+  before any fork starts, so a few slow classes that land in one share keep
+  that JVM running while the others sit idle. Splitting by duration instead
+  would fix it: each class's time from the last run's `TEST-*.xml`, kept under
+  `target/.jrs/`, with the slowest classes placed first, each on the fork with
+  the least total time. A class with no recorded time falls back to the
+  current name-order split. The split stays deterministic for the same inputs,
+  and a lost `target/` only costs the balance, never a test.
 
 What stays out: a background daemon and an in-house compiler. Both would trade
 away the "no daemon, just a driver" defaults the Why page rests on.
