@@ -831,7 +831,30 @@ impl Context<'_> {
                 }
             }
         }
-        if announced && let Some(jvm) = self.jvm_artifact(coord)? {
+        let module = if announced {
+            self.fetcher.gradle_module(coord)?
+        } else {
+            None
+        };
+        let unreadable = |e: String| {
+            JrsError::resolve(format!(
+                "{coord}: its Gradle module metadata cannot be read: {e}"
+            ))
+        };
+        let jvm = match &module {
+            Some(module) => gradle_module::jvm_variant(module, coord).map_err(unreadable)?,
+            None => None,
+        };
+        if jvm.is_none()
+            && eff.packaging == "pom"
+            && let Some(module) = &module
+            && gradle_module::ships_jar(module, coord).map_err(unreadable)?
+        {
+            // Packaged as a POM, but publishing a jar all the same, as
+            // Gradle reads the module file to know.
+            eff.packaging = "jar".to_string();
+        }
+        if let Some(jvm) = jvm {
             // A Multiplatform root: what its POM lists is its common code's
             // dependencies, and its jar holds no JVM classes. It stands for
             // its JVM artifact instead, as it does in Gradle.
@@ -848,19 +871,6 @@ impl Context<'_> {
             }];
         }
         Ok(eff)
-    }
-
-    /// The artifact `coord`'s Gradle module metadata says holds its JVM
-    /// classes, when that is another artifact.
-    fn jvm_artifact(&self, coord: &Coord) -> Result<Option<Coord>> {
-        let Some(module) = self.fetcher.gradle_module(coord)? else {
-            return Ok(None);
-        };
-        gradle_module::jvm_variant(&module, coord).map_err(|e| {
-            JrsError::resolve(format!(
-                "{coord}: its Gradle module metadata cannot be read: {e}"
-            ))
-        })
     }
 }
 

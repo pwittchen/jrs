@@ -71,6 +71,45 @@ pub fn jvm_variant(module: &[u8], coord: &Coord) -> Result<Option<Coord>, String
         .filter(|target| target.ga() != coord.ga()))
 }
 
+/// Whether a module file's runtime library variant ships `coord`'s own jar.
+///
+/// `SpotBugs` publishes a POM whose `<packaging>` is `pom` beside a jar that
+/// holds every class; the module file is what says the jar is there, and
+/// Gradle takes it from there. A platform (a BOM) has no files, and a
+/// Multiplatform root's JVM classes are `available-at` another artifact, so
+/// neither counts.
+///
+/// # Errors
+///
+/// A message when the file is not JSON.
+pub fn ships_jar(module: &[u8], coord: &Coord) -> Result<bool, String> {
+    let text = std::str::from_utf8(module).map_err(|_| "it is not UTF-8".to_string())?;
+    let doc = Json::parse(text)?;
+    let jar = coord.file_name("jar");
+    Ok(doc
+        .get("variants")
+        .map(Json::items)
+        .unwrap_or_default()
+        .iter()
+        .any(|variant| {
+            let attribute = |name: &str| {
+                variant
+                    .get("attributes")
+                    .and_then(|a| a.get(name))
+                    .and_then(Json::as_str)
+            };
+            attribute("org.gradle.category") == Some("library")
+                && attribute("org.gradle.usage") == Some("java-runtime")
+                && variant.get("available-at").is_none()
+                && variant
+                    .get("files")
+                    .map(Json::items)
+                    .unwrap_or_default()
+                    .iter()
+                    .any(|f| f.get("name").and_then(Json::as_str) == Some(jar.as_str()))
+        }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -138,6 +177,26 @@ mod tests {
           {"name": "runtimeElements",
            "attributes": {"org.gradle.category": "library", "org.gradle.usage": "java-runtime"}}]}"#;
         assert_eq!(jvm_variant(java.as_bytes(), &root()).unwrap(), None);
+    }
+
+    #[test]
+    fn a_pom_packaged_library_that_ships_a_jar_says_so() {
+        // `com.github.spotbugs:spotbugs:4.9.3`, cut down.
+        let spotbugs = r#"{"variants": [
+          {"name": "runtimeElements",
+           "attributes": {"org.gradle.category": "library", "org.gradle.usage": "java-runtime"},
+           "files": [{"name": "spotbugs-4.9.3.jar", "url": "spotbugs-4.9.3.jar"}]},
+          {"name": "sourcesElements",
+           "attributes": {"org.gradle.category": "documentation", "org.gradle.usage": "java-runtime"},
+           "files": [{"name": "spotbugs-4.9.3-sources.jar", "url": "spotbugs-4.9.3-sources.jar"}]}]}"#;
+        let coord = Coord::new("com.github.spotbugs", "spotbugs", "4.9.3");
+        assert!(ships_jar(spotbugs.as_bytes(), &coord).unwrap());
+        // A platform, as Gradle publishes a BOM: no library, no files.
+        let bom = r#"{"variants": [
+          {"name": "apiElements",
+           "attributes": {"org.gradle.category": "platform", "org.gradle.usage": "java-runtime"}}]}"#;
+        assert!(!ships_jar(bom.as_bytes(), &coord).unwrap());
+        assert!(!ships_jar(MULTIPLATFORM.as_bytes(), &root()).unwrap());
     }
 
     #[test]

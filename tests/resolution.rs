@@ -57,6 +57,43 @@ fn a_transitive_graph_resolves_from_a_local_repository() {
     }
 }
 
+/// SpotBugs's shape: a POM packaged as `pom`, and a jar beside it all the
+/// same, which only the Gradle module metadata lists. The jar is used, as
+/// Gradle uses it; a BOM published the same way has no files, and no jar.
+#[test]
+fn a_pom_packaged_library_whose_module_lists_a_jar_puts_it_on_the_classpath() {
+    let scratch = Scratch::new("resolve-pom-with-jar");
+    let fixture = FixtureRepo::new(&scratch);
+    let tool = Coord::new("org.tool", "tool", "4.9.3");
+    fixture.publish_pom(
+        &tool,
+        "<project>\n  <!-- do_not_remove: published-with-gradle-metadata -->\n  \
+         <modelVersion>4.0.0</modelVersion>\n  <groupId>org.tool</groupId>\n  \
+         <artifactId>tool</artifactId>\n  <version>4.9.3</version>\n  \
+         <packaging>pom</packaging>\n</project>\n",
+    );
+    fixture.publish_jar(&tool, b"every class of the tool");
+    fixture.publish_module(
+        &tool,
+        r#"{"formatVersion": "1.1", "variants": [
+          {"name": "runtimeElements",
+           "attributes": {"org.gradle.category": "library", "org.gradle.usage": "java-runtime"},
+           "files": [{"name": "tool-4.9.3.jar", "url": "tool-4.9.3.jar"}]}]}"#,
+    );
+
+    let manifest = manifest(&fixture, "[dependencies]\n\"org.tool:tool\" = \"4.9.3\"");
+    let fetcher = fixture.fetcher();
+    let mut resolution = resolve::resolve(&manifest, &fetcher, 4).unwrap();
+    resolve::fetch_jars(&mut resolution, &fetcher, 4).unwrap();
+    assert_eq!(resolution.packages[0].packaging, "jar");
+    let jars: Vec<String> = resolution
+        .classpath(Classpath::Compile)
+        .iter()
+        .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(jars, ["tool-4.9.3.jar"]);
+}
+
 /// A Kotlin Multiplatform library, as Gradle publishes one: a root whose POM
 /// announces module metadata and lists its common code's dependencies, and a
 /// `-jvm` artifact that holds the classes. The root is declared; the `-jvm`
