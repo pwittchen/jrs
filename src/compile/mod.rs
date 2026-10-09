@@ -103,6 +103,10 @@ pub struct ForeignCompiler {
     /// Kotlin: `-Xplugin=` and `-P` flags for `[kotlin] plugins`, from
     /// [`lang::plugin_flags`].
     pub plugin_args: Vec<String>,
+    /// Scala 3's `-sourceroot`: the project root, which each `.tasty` file
+    /// records its source's path against. Left to scalac, it is the working
+    /// directory, and the classes of one project built in two places differ.
+    pub source_root: Option<PathBuf>,
     /// Whether diagnostics may be coloured. It changes nothing compiled, so
     /// it is not part of the fingerprint.
     pub color: bool,
@@ -732,6 +736,7 @@ mod tests {
             module_name: "app".into(),
             friend_paths: Vec::new(),
             plugin_args: Vec::new(),
+            source_root: None,
             color: false,
         }
     }

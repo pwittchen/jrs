@@ -3485,6 +3485,10 @@ impl<'a> Session<'a> {
                         name.clone()
                     },
                     friend_paths,
+                    source_root: Some(
+                        std::path::absolute(&self.manifest.root)
+                            .unwrap_or_else(|_| self.manifest.root.clone()),
+                    ),
                     color: self.ui.color(),
                 })
             }

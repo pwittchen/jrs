@@ -512,6 +512,11 @@ pub fn flags(
                 "-release"
             };
             args.extend([release.into(), unit.release.to_string()]);
+            if is_scala3(&compiler.version)
+                && let Some(root) = &compiler.source_root
+            {
+                args.extend(["-sourceroot".into(), root.display().to_string()]);
+            }
         }
         Language::Groovy => {
             // groovyc wants its classpath first.
@@ -735,6 +740,7 @@ mod tests {
             module_name: "app".into(),
             friend_paths: Vec::new(),
             plugin_args: Vec::new(),
+            source_root: Some(PathBuf::from("/p")),
             color: false,
         }
     }
@@ -894,6 +900,10 @@ mod tests {
         assert!(pairs(&three).contains(&("-encoding", "UTF-8")));
         let two = flags(&unit(), &compiler(Language::Scala, "2.13.18"), true).unwrap();
         assert!(pairs(&two).contains(&("-release", "21")), "{two:?}");
+        // TASTy records each source's path against the root, so the same
+        // project built in two places compiles to the same bytes.
+        assert!(pairs(&three).contains(&("-sourceroot", "/p")), "{three:?}");
+        assert!(!two.contains(&"-sourceroot".to_string()), "{two:?}");
         assert_eq!(
             no_color_flag(&compiler(Language::Scala, "3.3.6")),
             Some("-color:never")
