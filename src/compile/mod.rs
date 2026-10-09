@@ -23,6 +23,7 @@ pub mod doc;
 mod incremental;
 pub mod javac;
 pub mod lang;
+mod share;
 
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
@@ -35,7 +36,7 @@ pub use lang::{DocTool, Language};
 
 use crate::error::{IoResultExt, JrsError, Result};
 use crate::project;
-use crate::toolchain::{Toolchain, run_captured};
+use crate::toolchain::{CapturedOutput, Toolchain, run_captured};
 use crate::ui::{Stream, Ui};
 
 /// One compile unit: the main sources or the test sources.
@@ -61,6 +62,11 @@ pub struct CompileUnit {
     /// against. It is in the fingerprint, so a main change that alters that
     /// API recompiles the tests and one that does not leaves them fresh.
     pub main_api: Option<String>,
+    /// Where the compilers' class-data-sharing archives live, in the shared
+    /// cache (`share.rs`); `None` starts them without one. Not part of the
+    /// fingerprint: it changes how fast a compiler starts, not what it
+    /// writes.
+    pub share_dir: Option<PathBuf>,
 }
 
 /// A Kotlin, Scala or Groovy compiler, and what its run needs beyond the
@@ -325,7 +331,7 @@ fn run_steps(
         count(java.len(), None)
     };
     let started = Instant::now();
-    let result = javac::run(toolchain, unit, &java, after_foreign, &what, ui);
+    let result = javac::run(toolchain, unit, &java, after_foreign, false, &what, ui);
     steps.push(("javac", started.elapsed()));
     result
 }
@@ -352,6 +358,15 @@ fn run_foreign(
         .ok_or_else(|| JrsError::build(format!("{language} has no compiler for jrs to run")))?;
     let own = unit.sources_in(language);
 
+    let share = unit.share_dir.as_deref().and_then(|dir| {
+        share::Share::new(
+            dir,
+            toolchain,
+            compiler.main_class,
+            &foreign.classpath,
+            &foreign.jvm_args,
+        )
+    });
     let mut args = lang::jvm_flags(unit, foreign);
     args.extend([
         "-cp".to_string(),
@@ -375,8 +390,11 @@ fn run_foreign(
     let argfile = unit
         .work_dir
         .join(format!("{}-{}.args", language.compiler_name(), unit.label));
-    std::fs::write(&argfile, render_argfile(&args, &sources)).path(&argfile)?;
-    let output = run_captured(ui, &toolchain.java, &[format!("@{}", argfile.display())])?;
+    let output = share::run(share, CapturedOutput::ok, |shared| {
+        let flags: Vec<String> = shared.iter().cloned().chain(args.iter().cloned()).collect();
+        std::fs::write(&argfile, render_argfile(&flags, &sources)).path(&argfile)?;
+        run_captured(ui, &toolchain.java, &[format!("@{}", argfile.display())])
+    })?;
 
     if !output.stderr.trim().is_empty() {
         ui.passthrough(Stream::Err, output.stderr.trim_end());
@@ -449,6 +467,7 @@ mod tests {
             work_dir: root.join("target/.jrs"),
             foreign: None,
             main_api: None,
+            share_dir: None,
         }
     }
 

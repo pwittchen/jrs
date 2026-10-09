@@ -56,6 +56,7 @@ fn compile_main(manifest: &Manifest, toolchain: &Toolchain, classpath: Vec<PathB
         work_dir: project.work_dir(),
         foreign: None,
         main_api: None,
+        share_dir: None,
     };
     match compile::compile(toolchain, &unit, &silent_ui()).unwrap() {
         compile::Outcome::Compiled { classes, .. } => classes,
@@ -196,6 +197,7 @@ fn a_second_build_is_up_to_date_and_a_touched_source_is_not() {
         work_dir: project.work_dir(),
         foreign: None,
         main_api: None,
+        share_dir: None,
     };
 
     compile::compile(&toolchain, &unit(), &silent_ui()).unwrap();
@@ -254,6 +256,7 @@ fn tests_recompile_when_the_main_api_changes_and_only_then() {
         work_dir: target.join(".jrs"),
         foreign: None,
         main_api: None,
+        share_dir: None,
     };
     let main = || unit("main", &calc, classes.clone(), Vec::new());
     // As `jrs test` builds it: the main classes' API, taken after main built.
@@ -363,6 +366,7 @@ fn a_compilation_error_fails_the_build_and_leaves_no_fingerprint() {
         work_dir: project.work_dir(),
         foreign: None,
         main_api: None,
+        share_dir: None,
     };
     let error = compile::compile(&toolchain, &unit, &silent_ui()).unwrap_err();
     assert!(error.to_string().contains("compilation failed"), "{error}");
@@ -387,6 +391,7 @@ fn java_unit(toolchain: &Toolchain, root: &Path, out: &str) -> CompileUnit {
         work_dir: root.join(out).join(".jrs"),
         foreign: None,
         main_api: None,
+        share_dir: None,
     }
 }
 

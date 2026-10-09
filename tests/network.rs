@@ -139,6 +139,7 @@ fn a_project_with_dependencies_compiles_tests_and_runs_them() {
         work_dir: project.work_dir(),
         foreign: None,
         main_api: None,
+        share_dir: None,
     };
 
     compile::compile(

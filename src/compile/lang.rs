@@ -719,6 +719,7 @@ mod tests {
             work_dir: PathBuf::from("/p/target/.jrs"),
             foreign: None,
             main_api: None,
+            share_dir: None,
         }
     }
 

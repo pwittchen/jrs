@@ -45,6 +45,12 @@ use crate::ui::Ui;
 
 const HEADER: &str = "jrs compile index 1";
 
+/// The most sources a file-by-file `javac` run may hold and still start its
+/// JVM with [`javac::QUICK_JVM_FLAGS`]. Measured on JDK 25, C1 and the serial
+/// collector beat the full JIT up to a few hundred small sources; a
+/// whole-unit compile keeps the full JIT whatever its size.
+const QUICK_SOURCES: usize = 100;
+
 /// The service file through which `javac` finds annotation processors on
 /// its classpath.
 const PROCESSORS: &str = "META-INF/services/javax.annotation.processing.Processor";
@@ -442,7 +448,16 @@ impl Tracker {
             .map(|&i| self.current[i].path.clone())
             .collect();
         let started = Instant::now();
-        let result = javac::run(toolchain, unit, &paths, true, &count(paths.len(), None), ui);
+        let quick = paths.len() <= QUICK_SOURCES;
+        let result = javac::run(
+            toolchain,
+            unit,
+            &paths,
+            true,
+            quick,
+            &count(paths.len(), None),
+            ui,
+        );
         steps.push(("javac", started.elapsed()));
         if result.is_err() {
             let mut failed = previous.clone();
@@ -798,6 +813,7 @@ mod tests {
                 work_dir: self.0.join("target/.jrs"),
                 foreign: None,
                 main_api: None,
+                share_dir: None,
             }
         }
     }

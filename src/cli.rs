@@ -2972,6 +2972,7 @@ impl<'a> Session<'a> {
             work_dir: self.project().work_dir(),
             foreign,
             main_api: None,
+            share_dir: Cache::discover().ok().map(|c| c.root().join("cds")),
         })
     }
 

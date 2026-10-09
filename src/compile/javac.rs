@@ -6,9 +6,10 @@
 
 use std::path::{Path, PathBuf};
 
+use super::share::{self, Share};
 use super::{CompileUnit, render_argfile};
 use crate::error::{IoResultExt, JrsError, Result};
-use crate::toolchain::{Toolchain, run_captured};
+use crate::toolchain::{CapturedOutput, Toolchain, run_captured};
 use crate::ui::{Stream, Ui};
 
 impl CompileUnit {
@@ -50,7 +51,14 @@ impl CompileUnit {
     }
 }
 
-/// Run `javac` over `sources`, one step of `unit`.
+/// JVM flags for a `javac` that compiles a few files and exits: C1 alone and
+/// the serial collector start faster than the tiered JIT and G1, which a run
+/// this short never gets to use.
+pub(super) const QUICK_JVM_FLAGS: &[&str] = &["-XX:TieredStopAtLevel=1", "-XX:+UseSerialGC"];
+
+/// Run `javac` over `sources`, one step of `unit`. `quick` starts its JVM
+/// with [`QUICK_JVM_FLAGS`], for a run over a handful of files; with
+/// `unit.share_dir`, it maps its classes from an archive there.
 ///
 /// # Errors
 ///
@@ -62,6 +70,7 @@ pub(super) fn run(
     unit: &CompileUnit,
     sources: &[PathBuf],
     output_first: bool,
+    quick: bool,
     what: &str,
     ui: &Ui,
 ) -> Result<()> {
@@ -72,7 +81,23 @@ pub(super) fn run(
     )
     .path(&argfile)?;
 
-    let output = run_captured(ui, &toolchain.javac, &[format!("@{}", argfile.display())])?;
+    // JVM flags reach `javac`'s JVM as `-J` options, which only its command
+    // line may hold, never an argfile.
+    let quick: &[&str] = if quick { QUICK_JVM_FLAGS } else { &[] };
+    let share = unit
+        .share_dir
+        .as_deref()
+        .and_then(|dir| Share::new(dir, toolchain, "jdk.compiler", &[], &[]));
+    let output = share::run(share, CapturedOutput::ok, |shared| {
+        let mut args: Vec<String> = quick
+            .iter()
+            .map(|f| (*f).to_string())
+            .chain(shared.iter().cloned())
+            .map(|f| format!("-J{f}"))
+            .collect();
+        args.push(format!("@{}", argfile.display()));
+        run_captured(ui, &toolchain.javac, &args)
+    })?;
 
     // The live region comes down before any diagnostic reaches the terminal.
     if !output.stderr.trim().is_empty() {
