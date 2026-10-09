@@ -53,6 +53,14 @@ version. It can also be run by hand from the Actions tab.
   `bun run preview` serves it and `bun run dev` does not. It downloads
   `jrs-<target>.tar.gz` and `SHA256SUMS` from the GitHub release, so it breaks
   if `rust.yml` renames those assets.
+- `public/` holds what is served from fixed root URLs and so must not be
+  hashed: `robots.txt`, `sitemap.xml`, `favicon.ico`, `apple-touch-icon.png`
+  and `og.png`, the 1200×630 card link previews show. The build copies them
+  into `dist/` as is, like `install.sh`, so `bun run dev` does not serve them.
+  A new page needs a `<url>` in `sitemap.xml` and, in its `<head>`, the
+  canonical link and the Open Graph and Twitter tags the other pages carry.
+  `og.png` was drawn with ImageMagick from `../logo.png` and the IBM Plex Mono
+  files in `node_modules`; redraw it if the logo or the tagline changes.
 - The version in the header is imported from `../Cargo.toml` at build time, so
   the site shows whatever the crate is at.
 - The terminal replay in `src/main.ts` mirrors jrs's real output: 12-column
