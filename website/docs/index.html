@@ -207,6 +207,7 @@
     <tr><td>Linux, x86_64</td><td><code>x86_64-unknown-linux-musl</code></td></tr>
     <tr><td>Linux, ARM64</td><td><code>aarch64-unknown-linux-musl</code></td></tr>
     <tr><td>Windows, x86_64</td><td><code>x86_64-pc-windows-msvc</code></td></tr>
+    <tr><td>Windows, ARM64</td><td><code>aarch64-pc-windows-msvc</code></td></tr>
   </tbody>
 </table>
 <p>The Linux binaries are statically linked and run on any distribution. To install the latest release without the script:</p>
@@ -219,7 +220,25 @@ curl -fsSL "https://github.com/pwittchen/jrs/releases/latest/download/jrs-$TARGE
 <p>In PowerShell:</p>
 <pre>curl.exe -fsSLO https://github.com/pwittchen/jrs/releases/latest/download/jrs-x86_64-pc-windows-msvc.zip
 tar -xf jrs-x86_64-pc-windows-msvc.zip jrs.exe</pre>
-<p>then move <code>jrs.exe</code> to a directory on your <code>PATH</code>.</p>
+<p>then move <code>jrs.exe</code> to a directory on your <code>PATH</code>. On ARM64, download <code>jrs-aarch64-pc-windows-msvc.zip</code> instead.</p>
+
+<h3>In GitHub Actions</h3>
+<p>
+  The repository is also an action that installs a prebuilt jrs on the runner, checked against the
+  release's <code>SHA256SUMS</code>, and puts it on <code>PATH</code>: on Linux, macOS and Windows,
+  x86_64 and ARM64.
+</p>
+<pre data-lang="plain">- uses: actions/setup-java@v6
+  with: { distribution: temurin, java-version: '21' }
+- uses: pwittchen/jrs/setup-jrs@v0.9.0   # installs jrs 0.9.0
+- run: jrs test</pre>
+<p>
+  Used at a release tag, it installs that release; <code>with: { version: '0.8.0' }</code> or
+  <code>version: latest</code> picks another. Its <code>version</code> output is the version
+  installed. The action is
+  <a href="https://github.com/pwittchen/jrs/blob/master/setup-jrs/action.yml">setup-jrs/action.yml</a>
+  in the repository. See <a href="#ci">Continuous integration</a> for a whole workflow.
+</p>
 
 <h3>From source</h3>
 <pre>git clone https://github.com/pwittchen/jrs.git
@@ -274,6 +293,7 @@ jrs init</pre>
     <tr><td><code>jrs init --lang scala</code></td><td>The same in Scala, with MUnit tests.</td></tr>
     <tr><td><code>jrs init --lang groovy</code></td><td>Java code, specified with Spock.</td></tr>
     <tr><td><code>jrs init --check</code></td><td>Adds a <code>check</code> task that runs PMD over the Java sources after every compile. Refused with <code>--lang kotlin</code> and <code>scala</code>, whose starters have no Java sources.</td></tr>
+    <tr><td><code>jrs init --format</code></td><td>Adds google-java-format (ktfmt for Kotlin): a <code>format</code> task to run by hand, and a <code>format-check</code> task that fails the build on an unformatted source. Refused with <code>--lang scala</code>.</td></tr>
   </tbody>
 </table>
 
@@ -685,6 +705,23 @@ javadoc-args = ["-Xdoclint:none"]</pre>
 "org.lwjgl:lwjgl" = "3.3.3"
 "org.lwjgl:lwjgl:natives-linux" = "3.3.3"
 "org.lwjgl:lwjgl:natives-macos-arm64" = "3.3.3"</pre>
+<p>
+  Netty's native transports, <code>netty-tcnative</code> and others publish one jar per platform.
+  <code>{os-classifier}</code> in a classifier stands for the platform jrs runs on, spelled as
+  Maven's <code>os-maven-plugin</code> spells <code>${os.detected.classifier}</code>:
+  <code>linux-x86_64</code>, <code>linux-aarch_64</code>, <code>osx-aarch_64</code>,
+  <code>windows-x86_64</code>.
+</p>
+<pre data-lang="toml">[dependencies]
+"io.netty:netty-transport-native-epoll:{os-classifier}" = "4.1.115.Final"
+"io.netty:netty-tcnative-boringssl-static" = { version = "2.0.69.Final", classifier = "{os-classifier}" }</pre>
+<p>
+  <code>jrs.lock</code> keeps the placeholder, so it is the same file on every machine, and pins no
+  checksum for such a jar, since each platform downloads another; the repository's own checksum is
+  still checked. <code>JRS_OS_CLASSIFIER</code> set to a classifier stands for the host's, to
+  package for another platform. A platform that names its builds differently (JavaFX's
+  <code>mac-aarch64</code>, LWJGL's <code>natives-macos-arm64</code>) is written out.
+</p>
 
 <h3>Test dependencies</h3>
 <p>
@@ -1125,6 +1162,7 @@ checksum = "sha1:…"</pre>
     <tr><td><a href="#cmd-add"><code>add</code></a> / <a href="#cmd-remove"><code>remove</code></a></td><td>Edit the dependency tables.</td></tr>
     <tr><td><a href="#cmd-update"><code>update</code></a></td><td>Re-resolve and rewrite <code>jrs.lock</code>.</td></tr>
     <tr><td><a href="#cmd-outdated"><code>outdated</code></a></td><td>List dependencies with newer releases.</td></tr>
+    <tr><td><a href="#cmd-licenses"><code>licenses</code></a></td><td>List each dependency's licence.</td></tr>
     <tr><td><a href="#cmd-verify"><code>verify</code></a></td><td>Re-hash cached jars against <code>jrs.lock</code>.</td></tr>
     <tr><td><a href="#cmd-fetch"><code>fetch</code></a></td><td>Download everything a build needs, without building.</td></tr>
     <tr><td><a href="#cmd-metadata"><code>metadata</code></a></td><td>Print the project model as JSON.</td></tr>
@@ -1202,7 +1240,7 @@ jrs metadata | jq '.classpaths.test[].jar'</pre>
 
 <section id="cmd-run">
 <h2><code>jrs run</code></h2>
-<pre data-lang="plain">jrs run [--debug[=[HOST:]PORT]] [--timings] [-- ARGS...]</pre>
+<pre data-lang="plain">jrs run [--watch] [--debug[=[HOST:]PORT]] [--timings] [-- ARGS...]</pre>
 <p>Builds, runs the <code>pre-run</code> hook, then starts the program:</p>
 <pre data-lang="plain">java [jdwp] [run.java-agents] &lt;run.jvm-args&gt; -cp &lt;runtime classpath&gt; &lt;main-class&gt; ARGS...</pre>
 <p>
@@ -1213,6 +1251,7 @@ jrs metadata | jq '.classpaths.test[].jar'</pre>
 <table>
   <thead><tr><th>Flag</th><th>Effect</th></tr></thead>
   <tbody>
+    <tr><td><code>--watch</code></td><td>Stop the program, rebuild and start it again whenever a main source, a resource or <code>jrs.toml</code> changes. See <a href="#running-restarting-on-change">Restarting on change</a>.</td></tr>
     <tr><td><code>--debug[=[HOST:]PORT]</code></td><td>Start the JVM suspended with the JDWP agent and wait for a debugger: port 5005 unless given, localhost unless given a host. <code>--debug=*:5005</code> listens on every interface.</td></tr>
     <tr><td><code>--timings</code></td><td>Print the phase timings before the program starts.</td></tr>
   </tbody>
@@ -1221,6 +1260,7 @@ jrs metadata | jq '.classpaths.test[].jar'</pre>
 jrs run -- --port 8080 --verbose       # arguments for the program
 jrs run --debug                        # attach a debugger to localhost:5005
 jrs run --debug=8000
+jrs run --watch                        # restart on every change
 jrs -q run -- input.txt &gt; output.txt   # only the program's output</pre>
 <p>Requires <code>project.main-class</code>. See <a href="#running">Running and debugging</a>.</p>
 </section>
@@ -1229,7 +1269,7 @@ jrs -q run -- input.txt &gt; output.txt   # only the program's output</pre>
 <h2><code>jrs test</code></h2>
 <pre data-lang="plain">jrs test [--filter PATTERN] [--include-tag TAG]... [--exclude-tag TAG]... [--method CLASS#METHOD]...
          [--coverage] [--watch] [--debug[=[HOST:]PORT]] [--rerun-failed] [--fail-fast]
-         [--retries N] [--forks N] [--all] [--no-build-cache] [--timings]</pre>
+         [--retries N] [--forks N] [--shard I/N] [--suite NAME] [--all] [--no-build-cache] [--timings]</pre>
 <p>
   Builds, runs <code>pre-test</code>, compiles the test sources into
   <code>target/test-classes</code>, runs them on the JUnit Platform, then runs
@@ -1250,6 +1290,7 @@ jrs -q run -- input.txt &gt; output.txt   # only the program's output</pre>
     <tr><td><code>--fail-fast</code></td><td>Stop at the first failing test.</td></tr>
     <tr><td><code>--retries &lt;N&gt;</code></td><td>Run failing tests again up to <code>N</code> times; overrides <code>[test] retries</code>.</td></tr>
     <tr><td><code>--forks &lt;N&gt;</code></td><td>Split the test classes among <code>N</code> JVMs run at once; overrides <code>[test] forks</code>.</td></tr>
+    <tr><td><code>--shard &lt;I&gt;/&lt;N&gt;</code></td><td>Run only the <code>I</code>-th of <code>N</code> slices of the test classes, to spread one suite over <code>N</code> CI machines.</td></tr>
     <tr><td><code>--suite &lt;NAME&gt;</code></td><td>Run the suite <code>[test.suites.&lt;NAME&gt;]</code> declares instead of the default tests.</td></tr>
     <tr><td><code>--all</code></td><td>Run every test class, not only those a change since the last run reaches, and never take a passing run from the build cache.</td></tr>
     <tr><td><code>--no-build-cache</code></td><td>Neither restore from nor store into the build cache.</td></tr>
@@ -1261,14 +1302,15 @@ jrs test --method com.example.ParserTest#parsesEmptyInput
 jrs test --include-tag fast --exclude-tag 'slow | network'
 jrs test --coverage
 jrs test --rerun-failed
-jrs test --forks 4 --retries 2</pre>
+jrs test --forks 4 --retries 2
+jrs test --shard 2/4</pre>
 <p>The <a href="#testing">Testing</a> guide explains each of these in depth.</p>
 </section>
 
 <section id="cmd-package">
 <h2><code>jrs package</code></h2>
 <pre data-lang="plain">jrs package [--fat | --portable] [--jlink] [--jpackage [TYPE]] [--dist] [--native-image]
-            [--sources] [--javadoc] [--obfuscate] [--timings]</pre>
+            [--sources] [--javadoc] [--obfuscate] [--sbom] [--timings]</pre>
 <p>
   Builds, then writes <code>target/&lt;name&gt;-&lt;version&gt;.jar</code> and runs the
   <code>post-package</code> hook. The flags add to that jar or change its layout.
@@ -1286,6 +1328,7 @@ jrs test --forks 4 --retries 2</pre>
     <tr><td><code>--sources</code></td><td>Also <code>target/&lt;name&gt;-&lt;version&gt;-sources.jar</code>, generated sources included.</td></tr>
     <tr><td><code>--javadoc</code></td><td>Also runs <code>jrs doc</code> and writes <code>-javadoc.jar</code>.</td></tr>
     <tr><td><code>--obfuscate</code></td><td>Runs ProGuard over the jar. Needs an <code>[obfuscate]</code> table.</td></tr>
+    <tr><td><code>--sbom</code></td><td>Also a CycloneDX SBOM of the runtime dependencies, <code>target/&lt;name&gt;-&lt;version&gt;-cyclonedx.json</code>.</td></tr>
     <tr><td><code>--timings</code></td><td>Print the phase timings after the summary.</td></tr>
   </tbody>
 </table>
@@ -1299,7 +1342,8 @@ jrs package --fat --obfuscate              # obfuscated and self-contained
 jrs package --jlink                        # app + trimmed JRE in target/image
 jrs package --jpackage dmg                 # a macOS disk image
 jrs package --dist                         # zip with bin/ launchers, no JRE
-jrs package --sources --javadoc            # the jars a repository wants</pre>
+jrs package --sources --javadoc            # the jars a repository wants
+jrs package --sbom                         # plus a CycloneDX SBOM</pre>
 <p>See <a href="#packaging">Packaging</a> and <a href="#images">Runtime images and distributions</a>.</p>
 </section>
 
@@ -1469,6 +1513,23 @@ jrs remove org.assertj:assertj-core --dev</pre>
 </p>
 </section>
 
+<section id="cmd-licenses">
+<h2><code>jrs licenses</code></h2>
+<pre data-lang="plain">jrs licenses [--runtime]</pre>
+<p>
+  Lists every dependency with the licences its POM declares, or the nearest parent POM's, as Maven
+  inherits them, and warns about each dependency that declares none. It reads POMs only, from the
+  cache when they are there; it never interprets a licence.
+</p>
+<table>
+  <thead><tr><th>Flag</th><th>Effect</th></tr></thead>
+  <tbody>
+    <tr><td><code>--runtime</code></td><td>Leave out test and compile-only dependencies, for what a package actually ships.</td></tr>
+  </tbody>
+</table>
+<p>For a machine-readable list, see <a href="#packaging-software-bill-of-materials"><code>jrs package --sbom</code></a>.</p>
+</section>
+
 <section id="cmd-verify">
 <h2><code>jrs verify</code></h2>
 <pre data-lang="plain">jrs verify</pre>
@@ -1551,13 +1612,14 @@ jrs cache prune [--unused-for DAYS] [--dry-run]</pre>
 
 <section id="cmd-init">
 <h2><code>jrs init</code></h2>
-<pre data-lang="plain">jrs init [--lib] [--lang java|kotlin|scala|groovy] [--check] [--name NAME] [PATH]</pre>
+<pre data-lang="plain">jrs init [--lib] [--lang java|kotlin|scala|groovy] [--check] [--format] [--name NAME] [PATH]</pre>
 <table>
   <thead><tr><th>Flag</th><th>Effect</th></tr></thead>
   <tbody>
     <tr><td><code>--lib</code></td><td>A library: no main class, a starter library class instead.</td></tr>
     <tr><td><code>--lang &lt;LANG&gt;</code></td><td>The language of the starter code and its test: <code>java</code> (default), <code>kotlin</code>, <code>scala</code> (MUnit tests) or <code>groovy</code> (Java code with Spock specs).</td></tr>
     <tr><td><code>--check</code></td><td>Add a <code>check</code> task running PMD's quickstart rules over the Java sources, in the <code>post-compile</code> hook.</td></tr>
+    <tr><td><code>--format</code></td><td>Add a formatter, google-java-format (ktfmt for Kotlin), as a <code>format</code> task and a <code>format-check</code> task in the <code>post-compile</code> hook. See <a href="#tasks-formatters">Formatters</a>.</td></tr>
     <tr><td><code>--name &lt;NAME&gt;</code></td><td>The project name; defaults to the directory's name.</td></tr>
     <tr><td><code>PATH</code></td><td>Where to scaffold; defaults to the current directory.</td></tr>
   </tbody>
@@ -1565,7 +1627,7 @@ jrs cache prune [--unused-for DAYS] [--dry-run]</pre>
 <pre>jrs init
 jrs init --lib --name text-utils libs/text-utils
 jrs init --lang kotlin
-jrs init --check</pre>
+jrs init --check --format</pre>
 </section>
 
 <section id="cmd-migrate">
@@ -1794,7 +1856,8 @@ tasks = false                             # true: task outputs too</pre>
 <pre>jrs build --watch
 jrs test --watch
 jrs test --watch --filter '.*Parser.*'
-jrs task generate --watch</pre>
+jrs task generate --watch
+jrs run --watch</pre>
 <p>
   Watch mode runs the command, then polls every 300 ms for changes to the manifest, every source
   and resource root of every language, and every task's <code>inputs</code>. Once a change has
@@ -1811,6 +1874,10 @@ jrs task generate --watch</pre>
   so the second and later compiles skip the JVM's start-up and run with a warm JIT. It is a child
   of <code>jrs</code> and stops with it: nothing keeps running between commands. If it ever fails,
   that compile runs in a fresh <code>javac</code> as usual, and <code>-v</code> says so.
+</p>
+<p>
+  <code>jrs run --watch</code> also stops and restarts the program; see
+  <a href="#running-restarting-on-change">Restarting on change</a>.
 </p>
 </section>
 
@@ -1914,6 +1981,23 @@ jvm-args = [
   "-Djunit.jupiter.execution.parallel.mode.default=concurrent",
 ]</pre>
 
+<h3>Sharding across machines</h3>
+<p>
+  <code>--shard &lt;i&gt;/&lt;n&gt;</code> spreads one suite over several machines:
+  <code>--shard 1/4</code> on one CI job, <code>2/4</code> on the next, and so on, each running a
+  quarter of the test classes. The slices follow from the class names alone, every
+  <code>n</code>-th class in name order, never from anything one machine knows and another does not,
+  so together the shards run every class exactly once. Within its slice a shard works as a whole run
+  does: forks, retries, the build cache, and the record of what it ran, which is kept apart from the
+  other shards'. A shard with no classes left, when there are more shards than classes, runs nothing
+  and exits <code>0</code>.
+</p>
+<pre data-lang="plain">strategy:
+  matrix:
+    shard: [1, 2, 3, 4]
+steps:
+  - run: jrs test --shard ${{ matrix.shard }}/4</pre>
+
 <h3 id="testing-share-classes">Starting the test JVM faster</h3>
 <p>
   <code>[test] share-classes = true</code> starts the test JVM from a class-data-sharing archive of
@@ -2008,11 +2092,15 @@ jrs run --debug='*:5005'     # every interface, for a JVM in a container</pre>
   from your IDE with a "Remote JVM Debug" configuration. A bad port is a usage error.
 </p>
 
-<h3>Rebuilding on change</h3>
+<h3>Restarting on change</h3>
+<pre>jrs run --watch -- serve --port 8080</pre>
 <p>
-  <code>jrs run</code> has no watch mode of its own, since the program usually keeps running. Use
-  <code>jrs build --watch</code> in another terminal to keep <code>target/classes</code> current,
-  or <code>jrs test --watch</code> for a test loop.
+  <code>jrs run --watch</code> restarts the program, as Spring's devtools or a Ktor <code>-t</code>
+  build do: when a main source, a resource or <code>jrs.toml</code> changes, it stops the program
+  (<code>SIGTERM</code> first on Unix, so shutdown hooks run and its port is free again, and a kill
+  after ten seconds), builds, and starts it again. A change to the tests restarts nothing. A program
+  that exits on its own, or a build that fails, is waited out until the next change. The program
+  keeps the terminal while it runs, so its input still reaches it.
 </p>
 </section>
 
@@ -2089,6 +2177,22 @@ Automatic-Module-Name = "com.example.app"</pre>
   main sources, generated ones included. <code>--javadoc</code> runs <code>jrs doc</code> and jars
   <code>target/doc</code> into <code>-javadoc.jar</code>. They are the jars an IDE or a repository
   wants beside the main one, and they combine with every other flag.
+</p>
+
+<h3>Software bill of materials</h3>
+<pre>jrs package --sbom</pre>
+<p>
+  <code>--sbom</code> writes a <a href="https://cyclonedx.org">CycloneDX</a> 1.5 document beside
+  the jar, <code>target/&lt;name&gt;-&lt;version&gt;-cyclonedx.json</code>: every package on the
+  runtime classpath (and every local jar), with its package URL
+  (<code>pkg:maven/group/artifact@version</code>), the checksum <code>jrs.lock</code> pins for it,
+  its licences (by SPDX identifier when the POM's name or URL is a licence jrs recognises, by name
+  otherwise) and its place in the graph. It holds no timestamp, so the same inputs write the same
+  bytes, like the jar.
+</p>
+<p>
+  <a href="#cmd-licenses"><code>jrs licenses</code></a> prints the same licences for a person to
+  read, and warns about each dependency that declares none.
 </p>
 
 <h3>After packaging</h3>
@@ -2328,7 +2432,9 @@ args = ["--replace", "src/main/java/com/example/App.java"]
 <h3>Checks: PMD, Checkstyle, SpotBugs</h3>
 <p>
   Checkers are tools like any other, so they need neither a plugin nor an install.
-  <code>jrs init --check</code> scaffolds this one; a violation fails the build after PMD's report:
+  <code>jrs init --check</code> scaffolds this one; a violation fails the build after PMD's report.
+  <code>jrs migrate</code> writes the same kind of task for a build's Checkstyle, PMD and SpotBugs
+  plugins.
 </p>
 <pre data-lang="toml">[tasks.check]
 description = "Check the Java sources with PMD's quickstart rules"
@@ -2341,6 +2447,28 @@ args = ["check", "--no-progress", "--rulesets", "rulesets/java/quickstart.xml", 
 
 [hooks]
 post-compile = ["check"]</pre>
+
+<h3>Formatters</h3>
+<p>
+  Formatters work the same way. <code>jrs init --format</code> adds google-java-format (ktfmt for a
+  Kotlin project) as two tasks: <code>format</code>, which rewrites the sources in place and which
+  you run with <code>jrs task format</code>, and <code>format-check</code>, hooked into
+  <code>post-compile</code>, which fails the build when a source is not formatted.
+  google-java-format takes a list of files, which <code>{sources-argfile}</code> hands it:
+</p>
+<pre data-lang="toml">[tasks.format-check]
+main = "com.google.googlejavaformat.java.Main"
+args = ["--dry-run", "--set-exit-if-changed", "--aosp", "@{sources-argfile}"]
+env = { JDK_JAVA_OPTIONS = "--add-exports=jdk.compiler/com.sun.tools.javac.api=ALL-UNNAMED …" }
+
+[tasks.format-check.dependencies]
+"com.google.googlejavaformat:google-java-format" = "1.35.0"</pre>
+<p>
+  A <code>main</code> task's JVM takes no options of its own, so the ones google-java-format needs
+  reach it through <code>JDK_JAVA_OPTIONS</code>, which the launcher reads and announces on stderr.
+  The Java and Groovy starters use its <code>--aosp</code> style, the Kotlin starter ktfmt's
+  <code>--kotlinlang-style</code>.
+</p>
 
 <h3>Hooks</h3>
 <table>
@@ -2384,6 +2512,7 @@ post-compile = ["check"]</pre>
     <tr><td><code>{classpath}</code></td><td class="wrap">What <code>jrs classpath</code> prints: <code>target/classes</code>, then the compile jars.</td></tr>
     <tr><td><code>{runtime-classpath}</code>, <code>{test-classpath}</code></td><td class="wrap">What <code>jrs classpath --runtime</code> and <code>--test</code> print.</td></tr>
     <tr><td><code>{classpath-argfile}</code></td><td class="wrap">A file holding <code>-cp &lt;compile classpath&gt;</code>, for <code>java @{classpath-argfile}</code>, since a long classpath in an argument vector overflows the OS limit.</td></tr>
+    <tr><td><code>{sources-argfile}</code></td><td class="wrap">A file jrs writes before the task runs, listing the project's own main and test sources, one absolute path per line, for a tool that reads its file list as <code>@file</code>.</td></tr>
     <tr><td><code>{jar}</code></td><td class="wrap">The packaged jar. Only in a task that runs after <code>package</code>: from <code>post-package</code>, or one that depends on <code>package</code>.</td></tr>
   </tbody>
 </table>
@@ -2467,7 +2596,7 @@ post-compile = ["check"]</pre>
     as <code>gradle build</code> or <code>npm install</code> would. Read a project's
     <code>jrs.toml</code> before building it if you do not trust it. <code>tree</code>,
     <code>classpath</code>, <code>update</code>, <code>verify</code>, <code>outdated</code>,
-    <code>add</code>, <code>remove</code>, <code>cache</code>, <code>init</code>,
+    <code>licenses</code>, <code>add</code>, <code>remove</code>, <code>cache</code>, <code>init</code>,
     <code>migrate</code>, <code>completions</code>, <code>self</code> and <code>clean</code> never run a task, so
     inspecting a project with them is always safe.
   </p>
@@ -2675,6 +2804,7 @@ export JRS_REPO_MY_REPO_TOKEN=…          # for a repository named my-repo</pre
   <li><strong>Warm, then build offline</strong>: <code>jrs fetch</code> downloads everything, and <code>--offline</code> afterwards proves nothing else is reached for.</li>
   <li><strong>Output adapts by itself.</strong> Animation is off whenever <code>CI</code>, <code>GITHUB_ACTIONS</code>, <code>GITLAB_CI</code>, <code>TRAVIS</code>, <code>CIRCLECI</code>, <code>BUILDKITE</code>, <code>TEAMCITY_VERSION</code> or <code>JENKINS_URL</code> is set, or stderr is not a terminal.</li>
   <li><strong>Collect reports</strong> from <code>target/test-reports</code> (JUnit XML and <code>index.html</code>) and <code>target/coverage</code>.</li>
+  <li><strong>Shard a long suite</strong> over several jobs with <code>jrs test --shard &lt;i&gt;/&lt;n&gt;</code>; see <a href="#testing-sharding-across-machines">Sharding across machines</a>.</li>
   <li><strong>Gate on coverage</strong> with <code>[test] coverage-minimum</code> and <code>jrs test --coverage</code>.</li>
   <li><strong>Keep timings</strong>: <code>--timings</code> writes <code>target/.jrs/timings.txt</code> even under <code>-q</code>.</li>
   <li><strong>Share compiled classes</strong> through a <a href="#build-cache">remote build cache</a>: CI sets <code>JRS_BUILD_CACHE_URL</code> and <code>JRS_BUILD_CACHE_PUSH=true</code>, developers only the URL.</li>
@@ -2720,6 +2850,11 @@ jobs:
   <code>actions/setup-java</code> through the <code>JAVA_HOME_&lt;version&gt;_&lt;arch&gt;</code>
   variables it exports, so several JDKs can be installed side by side.
 </p>
+<p>
+  Instead of the install script, the <a href="#installation-in-github-actions"><code>setup-jrs</code>
+  action</a> installs jrs in one step, on every runner OS:
+</p>
+<pre data-lang="plain">      - uses: pwittchen/jrs/setup-jrs@v0.9.0</pre>
 </section>
 
 <section id="editors">
@@ -2844,6 +2979,10 @@ jrs migrate                # write jrs.toml; the original build file is untouche
     <tr><td class="wrap">A task the compile depends on that is Gradle code (<code>doLast { }</code>), with <code>gradlew</code> in the project</td><td class="wrap"><code>[tasks.gradle]</code>, running <code>./gradlew</code> over them; <code>project.target-dir = "build"</code></td></tr>
     <tr><td class="wrap"><code>sourceSets { main { kotlin { srcDir(…) } } }</code> under <code>build/</code></td><td class="wrap">The generating task's <code>source-outputs</code> / <code>resource-outputs</code></td></tr>
     <tr><td class="wrap"><code>withSourcesJar()</code>, <code>withJavadocJar()</code></td><td class="wrap">Reported: <code>jrs package --sources</code> and <code>--javadoc</code></td></tr>
+    <tr><td class="wrap">Spotless's <code>googleJavaFormat</code> and <code>ktfmt</code> steps (Gradle and Maven), <code>fmt-maven-plugin</code></td><td class="wrap">A <code>format</code> and a <code>format-check</code> task over the tool's own graph, with the version and style the build names; Spotless's other steps are reported</td></tr>
+    <tr><td class="wrap">Gradle's <code>checkstyle</code>, <code>pmd</code> and <code>com.github.spotbugs</code> plugins, <code>maven-checkstyle-plugin</code>, <code>maven-pmd-plugin</code>, <code>spotbugs-maven-plugin</code></td><td class="wrap">A <code>checkstyle</code>, <code>pmd</code> or <code>spotbugs</code> task hooked into <code>post-compile</code>, with the tool version, configuration file and rule sets they set</td></tr>
+    <tr><td class="wrap">The CycloneDX plugins, a licence report plugin</td><td class="wrap">Reported: <code>jrs package --sbom</code>, <code>jrs licenses</code></td></tr>
+    <tr><td class="wrap"><code>os-maven-plugin</code>'s <code>${os.detected.classifier}</code>, the osdetector plugin's classifier</td><td class="wrap"><code>{os-classifier}</code></td></tr>
   </tbody>
 </table>
 
@@ -2903,6 +3042,7 @@ jrs migrate                # write jrs.toml; the original build file is untouche
     <tr><td><code>JAVA_HOME_&lt;n&gt;_&lt;arch&gt;</code></td><td class="wrap">JDKs exported by <code>actions/setup-java</code>, searched for a pinned version.</td></tr>
     <tr><td><code>JRS_CACHE_DIR</code></td><td class="wrap">Where the shared dependency cache lives.</td></tr>
     <tr><td><code>JRS_CONFIG</code></td><td class="wrap">The user configuration file to read.</td></tr>
+    <tr><td><code>JRS_OS_CLASSIFIER</code></td><td class="wrap">The classifier <code>{os-classifier}</code> stands for, instead of the host's, to package for another platform.</td></tr>
     <tr><td><code>JRS_BUILD_CACHE</code></td><td class="wrap"><code>off</code> turns the build cache off.</td></tr>
     <tr><td><code>JRS_BUILD_CACHE_URL</code>, <code>JRS_BUILD_CACHE_PUSH</code></td><td class="wrap">The remote build cache, and whether to write to it (<code>true</code> or <code>1</code>). They override <code>[build-cache]</code>.</td></tr>
     <tr><td><code>JRS_REPO_&lt;NAME&gt;_USERNAME</code><br /><code>JRS_REPO_&lt;NAME&gt;_PASSWORD</code><br /><code>JRS_REPO_&lt;NAME&gt;_TOKEN</code></td><td class="wrap">Credentials for the repository named <code>&lt;name&gt;</code>, upper-cased with other characters as <code>_</code>. They override the configuration file.</td></tr>
@@ -2953,6 +3093,7 @@ jrs migrate                # write jrs.toml; the original build file is untouche
     <tr><td><code>test-classes/</code></td><td class="wrap">Test classes and resources.</td></tr>
     <tr><td><code>&lt;name&gt;-&lt;version&gt;.jar</code></td><td class="wrap"><code>jrs package</code>.</td></tr>
     <tr><td><code>&lt;name&gt;-&lt;version&gt;-sources.jar</code>, <code>-javadoc.jar</code></td><td class="wrap"><code>--sources</code>, <code>--javadoc</code>.</td></tr>
+    <tr><td><code>&lt;name&gt;-&lt;version&gt;-cyclonedx.json</code></td><td class="wrap"><code>--sbom</code>.</td></tr>
     <tr><td><code>lib/</code></td><td class="wrap"><code>--portable</code>.</td></tr>
     <tr><td><code>dist/</code>, <code>&lt;name&gt;-&lt;version&gt;.zip</code></td><td class="wrap"><code>--dist</code>.</td></tr>
     <tr><td><code>image/</code>, <code>jpackage/</code></td><td class="wrap"><code>--jlink</code>, <code>--jpackage</code>.</td></tr>

@@ -442,10 +442,14 @@ impl Fetcher {
         let Some(bytes) = self.fetch_one(repo, &path, false, 0)? else {
             return Ok(None);
         };
-        let classifier = coord.classifier.as_deref().filter(|_| ext != "pom");
+        let classifier = coord
+            .classifier
+            .as_deref()
+            .filter(|_| ext != "pom")
+            .map(crate::resolve::coord::expand_classifier);
         Ok(Metadata::parse(&bytes)
             .ok()
-            .and_then(|m| m.snapshot_file_version(&coord.version, ext, classifier)))
+            .and_then(|m| m.snapshot_file_version(&coord.version, ext, classifier.as_deref())))
     }
 
     /// Every version the repositories list for `group:artifact`, merged.

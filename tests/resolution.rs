@@ -425,6 +425,53 @@ fn a_classified_artifact_resolves_beside_the_main_one() {
     );
 }
 
+/// `{os-classifier}` fetches the host's jar, and `jrs.lock` keeps the
+/// placeholder, with no checksum, so it is the same file on every machine.
+#[test]
+fn a_platform_classifier_fetches_the_hosts_jar_and_locks_the_placeholder() {
+    let scratch = Scratch::new("resolve-os-classifier");
+    let fixture = FixtureRepo::new(&scratch);
+    let host = jrs::resolve::coord::expand_classifier("{os-classifier}").into_owned();
+    let natives = Coord::new("org.example", "lib", "1.0.0").with_classifier(Some(host.clone()));
+    fixture.publish_jar(&natives, b"native code for this host");
+
+    let manifest = manifest(
+        &fixture,
+        "[dependencies]\n\"org.example:lib:{os-classifier}\" = \"1.0.0\"",
+    );
+    let fetcher = fixture.fetcher();
+    let mut resolution = resolve::resolve(&manifest, &fetcher, 4).unwrap();
+    resolve::fetch_jars(&mut resolution, &fetcher, 4).unwrap();
+    let jars: Vec<String> = resolution
+        .classpath(Classpath::Compile)
+        .iter()
+        .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(
+        jars,
+        vec![
+            format!("lib-1.0.0-{host}.jar"),
+            "core-1.0.0.jar".to_string(),
+            // The fixture's `core` depends on `lib` in turn.
+            "lib-1.0.0.jar".to_string(),
+        ]
+    );
+
+    let path = scratch.join("jrs.lock");
+    Lockfile::from_resolution(&manifest, &resolution)
+        .write(&path)
+        .unwrap();
+    let text = std::fs::read_to_string(&path).unwrap();
+    assert!(text.contains("classifier = \"{os-classifier}\""), "{text}");
+    assert!(!text.contains(&host), "{text}");
+    let mut again = Lockfile::load(&path).unwrap().unwrap().to_resolution();
+    resolve::locate_cached(&mut again, &fetcher);
+    assert_eq!(
+        again.classpath(Classpath::Compile),
+        resolution.classpath(Classpath::Compile)
+    );
+}
+
 #[test]
 fn a_compile_path_widens_what_a_test_path_already_walked() {
     // testing -> shared -> leaf, walked first as test-only at depth 2;

@@ -224,8 +224,9 @@ actually had anything to do. A `post-compile` hook runs on a `Fresh` build too.
 Skipping work is the task's own business, through `inputs`/`outputs` (§6);
 jrs does not guess from whether compilation happened.
 
-No hook runs for `tree`, `classpath`, `update`, `verify`, `outdated`, `add`,
-`remove`, `cache`, `init`, `migrate`, `completions`, `self` or `clean`. None of them
+No hook runs for `tree`, `classpath`, `update`, `verify`, `outdated`,
+`licenses`, `add`, `remove`, `cache`, `init`, `migrate`, `completions`, `self` or
+`clean`. None of them
 builds, and none should execute project code.
 
 ### 4.4 Validation
@@ -275,6 +276,7 @@ badly.
 | `{runtime-classpath}` | Exactly what `jrs classpath --runtime` prints (no `compile-only`). |
 | `{test-classpath}` | Exactly what `jrs classpath --test` prints. |
 | `{classpath-argfile}` | Path to an argfile holding `-cp <compile classpath>`, for `java @{classpath-argfile}`. |
+| `{sources-argfile}` | Path to a file listing the project's own main and test sources, one absolute path per line, for a formatter or checker that reads `@file`. Not valid in a path-valued key. |
 | `{jar}` | The packaged jar. Only valid once `package` has run in the same invocation: in `post-package`, or in a task that depends on `package`. |
 | `{{`, `}}` | Literal braces. |
 

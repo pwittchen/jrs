@@ -63,11 +63,13 @@ jrs clean && jrs package --fat && shasum target/bookmarks-1.0.0.jar
 
 ## What jrs does not do here
 
-`jrs` is not the Spring Boot plugin. There is no `bootRun`, no dev-tools
-restart, no `bootJar` layout, and no `spring-boot-configuration-processor`
-metadata — `application.properties` gets no editor completion from this build.
-What there is: the dependencies Boot's BOM pins, compiled and packaged into a
-jar that starts.
+`jrs` is not the Spring Boot plugin. There is no `bootRun`, no `bootJar`
+layout, and no `spring-boot-configuration-processor` metadata —
+`application.properties` gets no editor completion from this build. What there
+is: the dependencies Boot's BOM pins, compiled and packaged into a jar that
+starts. The nearest thing to dev-tools is `jrs run --watch`, which stops the
+service on every change to a source or a resource, rebuilds it and starts it
+again — a new JVM each time, not dev-tools' reloading class loader.
 
 `jrs.lock` is committed, as it would be in a real project. Delete it, or run
 `jrs update`, to re-resolve from Maven Central.

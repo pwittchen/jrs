@@ -1,0 +1,103 @@
+# Installs a prebuilt jrs on a GitHub Actions runner and puts it on PATH:
+#
+#   - uses: actions/setup-java@v6
+#     with: { distribution: temurin, java-version: '21' }
+#   - uses: pwittchen/jrs/setup-jrs@v0.9.0
+#   - run: jrs test
+#
+# Used at a release tag, it installs that release unless `version` says
+# otherwise; at a branch, the latest. The archive is checked against the
+# release's SHA256SUMS. Linux, macOS and Windows, x86_64 and arm64.
+name: Set up jrs
+description: Install jrs, a Java build system, from its GitHub releases
+author: Piotr Wittchen
+branding:
+  icon: package
+  color: orange
+
+inputs:
+  version:
+    description: The release to install, such as 0.9.0, or `latest`. Defaults to the release the action is used at, or the latest.
+    required: false
+    default: ''
+
+outputs:
+  version:
+    description: The version of jrs installed, as `jrs --version` prints it.
+    value: ${{ steps.install.outputs.version }}
+
+runs:
+  using: composite
+  steps:
+    - id: install
+      shell: bash
+      env:
+        VERSION: ${{ inputs.version }}
+        ACTION_REF: ${{ github.action_ref }}
+        RUNNER_OS_NAME: ${{ runner.os }}
+        RUNNER_ARCH_NAME: ${{ runner.arch }}
+      run: |
+        set -euo pipefail
+        repo="pwittchen/jrs"
+        if [ -z "$VERSION" ]; then
+          case "$ACTION_REF" in
+            v[0-9]*) VERSION="${ACTION_REF#v}" ;;
+            *) VERSION=latest ;;
+          esac
+        fi
+        if [ "$VERSION" = latest ]; then
+          base="https://github.com/$repo/releases/latest/download"
+        else
+          base="https://github.com/$repo/releases/download/v${VERSION#v}"
+        fi
+
+        case "$RUNNER_ARCH_NAME" in
+          X64) arch=x86_64 ;;
+          ARM64) arch=aarch64 ;;
+          *) echo "::error::there is no prebuilt jrs for $RUNNER_ARCH_NAME"; exit 1 ;;
+        esac
+        case "$RUNNER_OS_NAME" in
+          Linux) asset="jrs-$arch-unknown-linux-musl.tar.gz" ;;
+          macOS) asset="jrs-$arch-apple-darwin.tar.gz" ;;
+          Windows) asset="jrs-$arch-pc-windows-msvc.zip" ;;
+          *) echo "::error::there is no prebuilt jrs for $RUNNER_OS_NAME"; exit 1 ;;
+        esac
+
+        tools="$RUNNER_TOOL_CACHE"
+        temp="$RUNNER_TEMP"
+        if [ "$RUNNER_OS_NAME" = Windows ]; then
+          tools="$(cygpath -u "$tools")"
+          temp="$(cygpath -u "$temp")"
+        fi
+        dir="$tools/jrs/$VERSION/$arch"
+        mkdir -p "$dir"
+        cd "$temp"
+        curl --proto '=https' --tlsv1.2 -fsSL --retry 3 -o "$asset" "$base/$asset"
+        curl --proto '=https' --tlsv1.2 -fsSL --retry 3 -o SHA256SUMS "$base/SHA256SUMS"
+        expected="$(awk -v f="$asset" '{ n = $2; sub(/^\*/, "", n) } n == f { print $1 }' SHA256SUMS)"
+        if command -v sha256sum >/dev/null; then
+          actual="$(sha256sum "$asset")"
+        else
+          actual="$(shasum -a 256 "$asset")"
+        fi
+        if [ -z "$expected" ] || [ "${actual%% *}" != "$expected" ]; then
+          echo "::error::$asset does not match the release's SHA256SUMS"
+          exit 1
+        fi
+        if [ "$RUNNER_OS_NAME" = Windows ]; then
+          # Git Bash's tar is GNU tar, which reads no zip.
+          7z x -y -o"$(cygpath -w "$dir")" "$asset" > /dev/null
+        else
+          tar -xzf "$asset" -C "$dir"
+        fi
+        rm -f "$asset" SHA256SUMS
+
+        if [ "$RUNNER_OS_NAME" = Windows ]; then
+          cygpath -w "$dir" >> "$GITHUB_PATH"
+          installed="$("$dir/jrs.exe" --version)"
+        else
+          echo "$dir" >> "$GITHUB_PATH"
+          installed="$("$dir/jrs" --version)"
+        fi
+        echo "version=${installed#jrs }" >> "$GITHUB_OUTPUT"
+        echo "Installed $installed into $dir"

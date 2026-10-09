@@ -36,7 +36,7 @@ backing it with evidence and for aiming the work at the people it fits.
    and `go.mod`, and have nobody who owns a Gradle build.
 4. **Builds with supply-chain requirements.** A lockfile, checksums,
    reproducible jars and no build scripts are auditable by reading two files.
-   An SBOM and a licence report (section 3) and a vulnerability audit
+   `jrs package --sbom`, `jrs licenses` and a vulnerability audit
    (section 5) complete the picture.
 5. **Coding agents.** A declarative TOML manifest, `jrs add` and `jrs
    remove`, plain output with `--progress never`, `jrs metadata` as JSON and
@@ -57,8 +57,8 @@ the page says what jrs does and leaves out how it compares:
 | --- | --- | --- |
 | Fast start, no daemon | No-op and incremental rebuild times against Maven and Gradle (warm daemon and `--no-daemon`) | Section 2 |
 | It builds real projects | The corpus's compatibility table | Section 1 |
-| Reproducible by default | Two builds of every example compared byte for byte in CI | Section 3 |
-| Auditable supply chain | `jrs package --sbom`, `jrs licenses` | Section 3 |
+| Reproducible by default | Two builds of every example compared byte for byte in CI | The `reproducible` job in `rust.yml` |
+| Auditable supply chain | `jrs package --sbom`, `jrs licenses` | Built in |
 | Works in the IDE | The IntelliJ plugin | Section 4 |
 
 **Order of work.** The plan follows from the table: first what stops people
@@ -71,9 +71,8 @@ audience.
    files in the IDE most JVM developers use, and nobody works that way every day.
 3. **Section 2, benchmarks.** They turn "fast" from a promise into a table,
    and the Why page and README link to the report once it exists.
-4. **Section 3's supply-chain items:** the SBOM, the licence report and the
-   reproducibility check, then distribution (Homebrew, Scoop, winget, a
-   `setup-jrs` action), so trying jrs costs one command on every platform.
+4. **Section 3, publishing to the package managers**, so trying jrs costs
+   one command on every platform.
 5. **One spec decision, taken early: `jrs install`** (section 5, publishing).
    Installing a jar into `~/.m2` is the smallest step past one module: it
    lets a team split a library out of a service without a reactor, which is
@@ -189,43 +188,22 @@ and testing the same projects, with the results written up in a report.
   a tool that is not installed, as `require_jdk!` does. It adds no crate to jrs.
   A manually triggered CI workflow can regenerate the report on a fixed runner.
 
-## 3. Smaller gaps
+## 3. Publishing to the package managers
 
-Each of these fits SPEC §1.2 and the crate list as they stand. Most answer a
-Gradle or Maven plugin, and those arrive with their `jrs migrate` row.
+Every release now builds a Windows ARM64 binary beside the others, and its
+`release` job writes a Homebrew formula, a Scoop manifest and a winget
+manifest from the release's checksums (`packaging/manifests.sh`, kept as the
+run's `package-manifests` artifact). The `setup-jrs/` action installs a
+release in GitHub Actions. What is left is putting the manifests where the
+package managers look:
 
-- **`jrs run --watch`.** `--watch` rebuilds for `build`, `test` and `task`,
-  but not for `run`. Restarting the application after a rebuild is what
-  Spring's devtools and a Ktor `-t` build give a developer, and what
-  `examples/bookmarks` says jrs does not do.
-- **An SBOM.** A CycloneDX JSON document of the runtime graph, written by
-  `jrs package --sbom` beside the jar: every coordinate, its checksum from
-  `jrs.lock`, its licence and its place in the graph. `json.rs` already
-  writes JSON. Migration maps the CycloneDX Gradle and Maven plugins onto it.
-- **A licence report.** `jrs licenses` lists each dependency's licence from
-  the `<licenses>` its POM (or its parent's) declares, and flags the ones
-  with none — what `license-maven-plugin` and Gradle's license-report plugin
-  give today.
-- **Platform classifiers.** Netty's native transports, `netty-tcnative`,
-  JavaFX and LWJGL pick their native jar by an OS classifier, which Maven
-  builds get from `os-maven-plugin`'s `${os.detected.classifier}`. A
-  `{os-classifier}` in a dependency's classifier, expanded to the host's,
-  with the lockfile recording the unexpanded key so it stays portable.
-- **Test sharding.** `jrs test --shard <i>/<n>` runs a stable slice of the
-  test classes, so CI can spread one suite over several machines. The split
-  `test.forks` already makes among local JVMs is the same problem.
-- **Formatters and linters.** `jrs init --check` scaffolds a PMD task;
-  google-java-format, ktfmt, Checkstyle and SpotBugs are the same shape — a
-  tool graph in `[tasks.<name>.dependencies]` hooked `post-compile`.
-  `jrs migrate` reports Spotless and friends as not migrated today; it could
-  write those tasks instead.
-- **A reproducibility check.** Byte-identical jars are load-bearing, but only
-  unit tests guard them. A CI job that builds each `examples/` project twice,
-  in two directories, and compares the jars would catch a regression the
-  unit tests miss.
-- **Distribution.** A Homebrew tap, Scoop and winget manifests, an
-  `aarch64-pc-windows-msvc` build in the `dist` matrix, and a `setup-jrs`
-  GitHub Action, so CI does not have to `curl | sh`.
+- **A Homebrew tap**, `pwittchen/homebrew-jrs`, holding `Formula/jrs.rb`, so
+  that `brew install pwittchen/jrs/jrs` works; then a job that commits each
+  release's formula there, with a token scoped to that repository.
+- **A Scoop bucket** the same way, and a pull request to `winget-pkgs` per
+  release (`wingetcreate` can open it from the manifests).
+- **DOCS.md and the website's install section** list the three commands once
+  they work, and `website/install.sh` mentions them for Windows.
 
 ## 4. An IntelliJ plugin
 

@@ -58,13 +58,16 @@ Android. The longer case, and where jrs is not the right choice, is at
 - Checksum-verified downloads into a shared cache, and an `--offline` mode
 - Kotlin, Scala and Groovy beside Java, each compiler pinned in `jrs.lock`
 - JUnit 4, 5 and 6, Spock, Kotest, ScalaTest and MUnit, with parallel test
-  JVMs, retries, reports and JaCoCo coverage
+  JVMs, sharding across CI machines, retries, reports and JaCoCo coverage
 - Plain, portable and fat jars, distributions, `jlink` images, `jpackage`
   installers, GraalVM native executables and ProGuard obfuscation
-- User-defined tasks and lifecycle hooks, with Java tools from Maven Central
+- A CycloneDX SBOM beside the jar, and a licence report
+- User-defined tasks and lifecycle hooks, with Java tools from Maven Central:
+  formatters and checkers such as google-java-format, ktfmt, Checkstyle, PMD
+  and SpotBugs need no plugin
 - One-shot migration from Maven and Gradle, Spring Boot builds included
-- Watch mode, dependency trees, outdated reports, `jrs add` / `jrs remove`
-  and shell completions
+- Watch mode that rebuilds, retests or restarts the program, dependency
+  trees, outdated reports, `jrs add` / `jrs remove` and shell completions
 
 ## Installation
 
@@ -81,8 +84,8 @@ or, with a Rust toolchain, from source:
 cargo install --git https://github.com/pwittchen/jrs.git
 ```
 
-Windows binaries, other versions and manual installation are covered in
-[DOCS.md](DOCS.md#installation). A prebuilt jrs updates itself:
+Windows binaries, other versions, manual installation and the `setup-jrs`
+GitHub Action are covered in [DOCS.md](DOCS.md#installation). A prebuilt jrs updates itself:
 `jrs self check` says whether a newer release is out, and `jrs self update`
 installs it ([Updating](DOCS.md#updating)).
 

@@ -18,7 +18,7 @@ use crate::manifest::{
     self, Action, Builtin, Dependency, Exclusion, Hook, Manifest, Repository, TaskDef, TaskRef,
     Template,
 };
-use crate::resolve::coord::{Ga, Scope, is_range};
+use crate::resolve::coord::{Ga, OS_CLASSIFIER, Scope, is_range};
 use crate::resolve::pom::{self, Effective, Element, PluginInfo, Pom, PomDependency};
 
 /// Plugins jrs knows how to read something out of. Anything else is reported.
@@ -76,7 +76,8 @@ pub fn migrate(pom_path: &Path, root: &Path) -> Result<Migration> {
     read_repositories(&effective, &mut out, &mut report);
     read_exec(pom, &effective, &mut out, &mut report);
     read_spring_boot(pom, boot_parent.as_deref(), &mut out, &mut report);
-    read_the_rest(pom, &mut report);
+    let checkers = read_checkers(pom, &mut out, &mut report);
+    read_the_rest(pom, &checkers, &mut report);
     report.append(profiles);
 
     Ok(Migration {
@@ -579,14 +580,12 @@ fn read_dependencies(effective: &Effective, pom: &Pom, out: &mut Manifest, repor
         }
         // `<type>` names a kind of file; the jar-shaped ones translate, and a
         // test-jar is simply the jar classified `tests`.
+        // `os-maven-plugin`'s classifier is jrs's `{os-classifier}`.
+        let classifier = (managed.classifier.as_ref())
+            .map(|c| c.replace("${os.detected.classifier}", OS_CLASSIFIER));
         let classifier = match managed.kind.as_str() {
-            "jar" | "bundle" | "ejb" => managed.classifier.clone(),
-            "test-jar" => Some(
-                managed
-                    .classifier
-                    .clone()
-                    .unwrap_or_else(|| "tests".to_string()),
-            ),
+            "jar" | "bundle" | "ejb" => classifier,
+            "test-jar" => Some(classifier.unwrap_or_else(|| "tests".to_string())),
             other => {
                 report.skipped(format!(
                     "{key} — <type>{other}</type> does not go on a classpath"
@@ -1323,7 +1322,230 @@ fn read_repositories(effective: &Effective, out: &mut Manifest, report: &mut Rep
     out.repositories = repos;
 }
 
-fn read_the_rest(pom: &Pom, report: &mut Report) {
+/// The version of `group:artifact` among a plugin's own `<dependencies>`,
+/// which is how a build picks the release of the tool a plugin runs.
+fn plugin_tool_version(pom: &Pom, plugin: &str, group: &str, artifacts: &[&str]) -> Option<String> {
+    let element = pom
+        .root
+        .path(&["build", "plugins"])?
+        .children_named("plugin")
+        .find(|p| p.text_of("artifactId") == Some(plugin))?;
+    element
+        .list("dependencies", "dependency")
+        .into_iter()
+        .find(|d| {
+            d.text_of("groupId") == Some(group)
+                && d.text_of("artifactId")
+                    .is_some_and(|a| artifacts.contains(&a))
+        })
+        .and_then(|d| d.text_of("version"))
+        .map(str::to_string)
+}
+
+/// Spotless's google-java-format and ktfmt steps, and `fmt-maven-plugin`,
+/// → `format` and `format-check` tasks. Returns the plugins translated.
+fn read_formatters(pom: &Pom, out: &mut Manifest, report: &mut Report) -> Vec<&'static str> {
+    use super::checks;
+    use crate::checkers::{self, Tool};
+
+    let mut done = Vec::new();
+    if let Some(c) = plugin(pom, "spotless-maven-plugin").map(|p| p.configuration.clone()) {
+        let c = c.unwrap_or_default();
+        let java = c.path(&["java", "googleJavaFormat"]);
+        let kotlin = c.path(&["kotlin", "ktfmt"]);
+        if let Some(gjf) = java {
+            let version = checks::version(
+                Tool::GoogleJavaFormat,
+                gjf.text_of("version").map(str::to_string),
+            );
+            let aosp = gjf
+                .text_of("style")
+                .is_some_and(|s| s.eq_ignore_ascii_case("aosp"));
+            checks::add(
+                out,
+                checkers::google_java_format(&version, aosp).map(Vec::from),
+                Tool::GoogleJavaFormat,
+                "plugin spotless-maven-plugin (googleJavaFormat)",
+                report,
+            );
+        }
+        if let Some(ktfmt) = kotlin {
+            let version =
+                checks::version(Tool::Ktfmt, ktfmt.text_of("version").map(str::to_string));
+            let style = match ktfmt
+                .text_of("style")
+                .map(str::to_ascii_uppercase)
+                .as_deref()
+            {
+                Some("GOOGLE") => Some("--google-style"),
+                Some("KOTLINLANG") => Some("--kotlinlang-style"),
+                _ => None,
+            };
+            let tasks = checkers::ktfmt(&version, style, &checks::kotlin_dirs(out)).map(|tasks| {
+                let mut tasks = Vec::from(tasks);
+                if java.is_some() {
+                    for t in &mut tasks {
+                        t.task.name = t.task.name.replacen("format", "format-kotlin", 1);
+                    }
+                }
+                tasks
+            });
+            checks::add(
+                out,
+                tasks,
+                Tool::Ktfmt,
+                "plugin spotless-maven-plugin (ktfmt)",
+                report,
+            );
+        }
+        if java.is_some() || kotlin.is_some() {
+            done.push("spotless-maven-plugin");
+        }
+    }
+    if let Some(c) = plugin(pom, "fmt-maven-plugin").map(|p| p.configuration.clone()) {
+        let aosp = c
+            .as_ref()
+            .and_then(|c| c.text_of("style"))
+            .is_some_and(|s| s.eq_ignore_ascii_case("aosp"));
+        checks::add(
+            out,
+            checkers::google_java_format(Tool::GoogleJavaFormat.default_version(), aosp)
+                .map(Vec::from),
+            Tool::GoogleJavaFormat,
+            "plugin fmt-maven-plugin",
+            report,
+        );
+        done.push("fmt-maven-plugin");
+    }
+    done
+}
+
+/// An SBOM and a licence report are commands in jrs, not tasks: the plugins
+/// that wrote them are pointed at those. Returns the plugins so reported.
+fn read_reports(pom: &Pom, report: &mut Report) -> Vec<&'static str> {
+    let mut done = Vec::new();
+    if plugin(pom, "cyclonedx-maven-plugin").is_some() {
+        report.review(
+            "plugin cyclonedx-maven-plugin — the SBOM is a flag in jrs: `jrs package --sbom` \
+             writes target/<name>-<version>-cyclonedx.json"
+                .to_string(),
+        );
+        done.push("cyclonedx-maven-plugin");
+    }
+    if let Some(p) = plugin(pom, "license-maven-plugin")
+        && p.group == "org.codehaus.mojo"
+    {
+        report.review(
+            "plugin license-maven-plugin — `jrs licenses` lists each dependency's licence \
+             and flags the ones that declare none"
+                .to_string(),
+        );
+        done.push("license-maven-plugin");
+    }
+    done
+}
+
+/// Formatter and checker plugins → tasks (`super::checks`). Returns the
+/// artifacts of the plugins it translated.
+fn read_checkers(pom: &Pom, out: &mut Manifest, report: &mut Report) -> Vec<&'static str> {
+    use super::checks;
+    use crate::checkers::{self, Tool};
+
+    let mut done = read_formatters(pom, out, report);
+    done.extend(read_reports(pom, report));
+    let config = |artifact: &str| plugin(pom, artifact).and_then(|p| p.configuration.clone());
+
+    if plugin(pom, "maven-checkstyle-plugin").is_some() {
+        let version = checks::version(
+            Tool::Checkstyle,
+            plugin_tool_version(
+                pom,
+                "maven-checkstyle-plugin",
+                "com.puppycrawl.tools",
+                &["checkstyle"],
+            ),
+        );
+        // The plugin's default, and the two configurations Checkstyle
+        // carries, are read from its jar.
+        let location = config("maven-checkstyle-plugin")
+            .and_then(|c| c.text_of("configLocation").map(str::to_string))
+            .unwrap_or_else(|| "sun_checks.xml".to_string());
+        let location = match location.as_str() {
+            "sun_checks.xml" | "google_checks.xml" => format!("/{location}"),
+            other => strip_basedir(other),
+        };
+        checks::add(
+            out,
+            checkers::checkstyle(&version, &location, &checks::java_dirs(out)).map(|t| vec![t]),
+            Tool::Checkstyle,
+            "plugin maven-checkstyle-plugin",
+            report,
+        );
+        done.push("maven-checkstyle-plugin");
+    }
+    if plugin(pom, "maven-pmd-plugin").is_some() {
+        let given = plugin_tool_version(
+            pom,
+            "maven-pmd-plugin",
+            "net.sourceforge.pmd",
+            &["pmd-core", "pmd-java"],
+        );
+        let version = match given {
+            Some(v) if v.starts_with("7.") => v,
+            _ => Tool::Pmd.default_version().to_string(),
+        };
+        let rulesets: Vec<String> = config("maven-pmd-plugin")
+            .map(|c| {
+                c.list("rulesets", "ruleset")
+                    .into_iter()
+                    .map(|r| strip_basedir(&r.text))
+                    .collect()
+            })
+            .unwrap_or_default();
+        if rulesets.is_empty() {
+            report.review(
+                "plugin maven-pmd-plugin — its default rule set is the plugin's own; the task \
+                 runs PMD's quickstart rules instead"
+                    .to_string(),
+            );
+        }
+        let rulesets = if rulesets.is_empty() {
+            "rulesets/java/quickstart.xml".to_string()
+        } else {
+            rulesets.join(",")
+        };
+        checks::add(
+            out,
+            checkers::pmd("pmd", &version, &checks::java_dirs(out), &rulesets).map(|t| vec![t]),
+            Tool::Pmd,
+            "plugin maven-pmd-plugin",
+            report,
+        );
+        done.push("maven-pmd-plugin");
+    }
+    if plugin(pom, "spotbugs-maven-plugin").is_some() {
+        let version = checks::version(
+            Tool::SpotBugs,
+            plugin_tool_version(
+                pom,
+                "spotbugs-maven-plugin",
+                "com.github.spotbugs",
+                &["spotbugs"],
+            ),
+        );
+        checks::add(
+            out,
+            checkers::spotbugs(&version).map(|t| vec![t]),
+            Tool::SpotBugs,
+            "plugin spotbugs-maven-plugin",
+            report,
+        );
+        done.push("spotbugs-maven-plugin");
+    }
+    done
+}
+
+fn read_the_rest(pom: &Pom, translated: &[&str], report: &mut Report) {
     if !pom.modules.is_empty() {
         report.skipped(format!(
             "<modules> {} — jrs builds one module per manifest; migrate each of \
@@ -1332,7 +1554,9 @@ fn read_the_rest(pom: &Pom, report: &mut Report) {
         ));
     }
     for plugin in &pom.build.plugins {
-        if !UNDERSTOOD_PLUGINS.contains(&plugin.artifact.as_str()) {
+        if !UNDERSTOOD_PLUGINS.contains(&plugin.artifact.as_str())
+            && !translated.contains(&plugin.artifact.as_str())
+        {
             report.skipped(format!(
                 "plugin {} — jrs has no plugin system; whatever it did must be done \
                  another way",
@@ -1782,6 +2006,78 @@ mod tests {
         let skipped = migration.report.not_migrated.join("\n");
         assert!(skipped.contains("<type>war</type>"), "{skipped}");
         assert!(skipped.contains("system"), "{skipped}");
+    }
+
+    #[test]
+    fn the_os_detected_classifier_becomes_the_os_classifier() {
+        let dir = Dir::new("os-classifier");
+        let migration = dir.migrate(
+            "<project><groupId>g</groupId><artifactId>a</artifactId><version>1</version>\
+             <dependencies>\
+             <dependency><groupId>io.netty</groupId>\
+             <artifactId>netty-transport-native-epoll</artifactId>\
+             <version>4.1.115.Final</version>\
+             <classifier>${os.detected.classifier}</classifier></dependency>\
+             </dependencies></project>",
+        );
+        assert_eq!(
+            migration.manifest.dependencies[0].key(),
+            "io.netty:netty-transport-native-epoll:{os-classifier}"
+        );
+    }
+
+    #[test]
+    fn formatter_and_checker_plugins_become_tasks() {
+        let dir = Dir::new("checkers");
+        dir.write("src/main/java/com/example/App.java", "");
+        dir.write("src/test/java/com/example/AppTest.java", "");
+        let migration = dir.migrate(
+            "<project><groupId>g</groupId><artifactId>a</artifactId><version>1</version>\
+             <build><plugins>\
+             <plugin><groupId>com.diffplug.spotless</groupId>\
+             <artifactId>spotless-maven-plugin</artifactId><configuration><java>\
+             <googleJavaFormat><version>1.17.0</version><style>AOSP</style></googleJavaFormat>\
+             </java></configuration></plugin>\
+             <plugin><artifactId>maven-checkstyle-plugin</artifactId>\
+             <configuration><configLocation>google_checks.xml</configLocation></configuration>\
+             <dependencies><dependency><groupId>com.puppycrawl.tools</groupId>\
+             <artifactId>checkstyle</artifactId><version>10.12.0</version></dependency>\
+             </dependencies></plugin>\
+             <plugin><artifactId>maven-pmd-plugin</artifactId><configuration><rulesets>\
+             <ruleset>${project.basedir}/config/pmd.xml</ruleset></rulesets></configuration>\
+             </plugin>\
+             <plugin><groupId>com.github.spotbugs</groupId>\
+             <artifactId>spotbugs-maven-plugin</artifactId></plugin>\
+             <plugin><groupId>org.cyclonedx</groupId>\
+             <artifactId>cyclonedx-maven-plugin</artifactId></plugin>\
+             </plugins></build></project>",
+        );
+        let m = &migration.manifest;
+        let names: Vec<&str> = m.tasks.iter().map(|t| t.name.as_str()).collect();
+        assert_eq!(
+            names,
+            ["format", "format-check", "checkstyle", "pmd", "spotbugs"]
+        );
+        assert_eq!(
+            m.hooks.tasks(Hook::PostCompile),
+            ["format-check", "checkstyle", "pmd", "spotbugs"]
+        );
+        let task = |name: &str| m.tasks.iter().find(|t| t.name == name).unwrap();
+        let args =
+            |name: &str| -> Vec<String> { task(name).args.iter().map(|a| a.raw.clone()).collect() };
+        assert_eq!(task("format").dependencies[0].version, "1.17.0");
+        assert!(args("format").contains(&"--aosp".to_string()));
+        assert_eq!(task("checkstyle").dependencies[0].version, "10.12.0");
+        assert_eq!(
+            args("checkstyle"),
+            ["-c", "/google_checks.xml", "src/main/java", "src/test/java"]
+        );
+        assert!(args("pmd").contains(&"config/pmd.xml".to_string()));
+
+        let skipped = migration.report.not_migrated.join("\n");
+        assert!(!skipped.contains("plugin"), "{skipped}");
+        let review = migration.report.needs_review.join("\n");
+        assert!(review.contains("jrs package --sbom"), "{review}");
     }
 
     #[test]

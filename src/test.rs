@@ -774,6 +774,60 @@ pub fn split(
     shares
 }
 
+/// `jrs test --shard <i>/<n>`: the `i`-th of `n` slices of the test classes,
+/// so that CI can spread one suite over `n` machines.
+///
+/// The slice depends on the class names alone — never on `test.times`, the
+/// last run's selection or anything else one machine has and another does
+/// not — so `n` machines building one commit run every class exactly once.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Shard {
+    /// From 1.
+    pub index: usize,
+    pub count: usize,
+}
+
+impl Shard {
+    /// Parse `--shard`'s value: `2/4`.
+    ///
+    /// # Errors
+    ///
+    /// A message for anything but two numbers with `1 <= i <= n`.
+    pub fn parse(s: &str) -> std::result::Result<Shard, String> {
+        let parsed = s
+            .split_once('/')
+            .and_then(|(i, n)| Some((i.trim().parse().ok()?, n.trim().parse().ok()?)));
+        match parsed {
+            Some((index, count)) if index >= 1 && index <= count => Ok(Shard { index, count }),
+            Some((index, count)) => Err(format!(
+                "shard {index} of {count} does not exist: expected `<i>/<n>` with i from 1 to n"
+            )),
+            None => Err(format!(
+                "`{s}` is not a shard: expected `<i>/<n>`, as in `--shard 1/4`"
+            )),
+        }
+    }
+
+    /// This shard's classes, out of all of them in name order: every `n`-th,
+    /// as [`split`] deals classes without times. Empty when there are fewer
+    /// classes than shards and this one is past them.
+    #[must_use]
+    pub fn select(&self, classes: &[String]) -> Vec<String> {
+        let mut sorted = classes.to_vec();
+        sorted.sort();
+        split(&sorted, self.count, &std::collections::BTreeMap::new())
+            .into_iter()
+            .nth(self.index - 1)
+            .unwrap_or_default()
+    }
+}
+
+impl std::fmt::Display for Shard {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}/{}", self.index, self.count)
+    }
+}
+
 /// Each test class's time in a run's XML: the milliseconds of its test
 /// cases, nested classes' with their top-level class's, retries included.
 #[must_use]
@@ -1988,6 +2042,38 @@ mod tests {
             "no more forks than classes"
         );
         assert_eq!(split(&[], 4, &none), [Vec::<String>::new()]);
+    }
+
+    #[test]
+    fn shards_cover_every_class_once_whatever_order_they_come_in() {
+        let classes = strings(&["b.E", "a.A", "a.C", "b.D", "a.B"]);
+        let shards: Vec<Vec<String>> = (1..=3)
+            .map(|index| Shard { index, count: 3 }.select(&classes))
+            .collect();
+        assert_eq!(
+            shards,
+            [
+                strings(&["a.A", "b.D"]),
+                strings(&["a.B", "b.E"]),
+                strings(&["a.C"])
+            ]
+        );
+        assert!(
+            Shard { index: 4, count: 4 }
+                .select(&strings(&["A", "B"]))
+                .is_empty(),
+            "more shards than classes: the last ones run nothing"
+        );
+    }
+
+    #[test]
+    fn a_shard_is_an_index_and_a_count() {
+        assert_eq!(Shard::parse("2/4"), Ok(Shard { index: 2, count: 4 }));
+        assert_eq!(Shard::parse("1/1").unwrap().to_string(), "1/1");
+        for bad in ["0/4", "5/4", "2", "a/b", "/4", "1/0", ""] {
+            assert!(Shard::parse(bad).is_err(), "{bad:?}");
+        }
+        assert!(Shard::parse("5/4").unwrap_err().contains("from 1 to n"));
     }
 
     #[test]

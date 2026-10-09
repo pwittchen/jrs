@@ -9,8 +9,9 @@
 use std::collections::BTreeMap;
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::sync::OnceLock;
+use std::time::Duration;
 
 use crate::error::{JrsError, Result};
 use crate::resolve::coord::compare_versions;
@@ -564,6 +565,56 @@ pub fn run_inherited_in(
     let code = status.code().unwrap_or(-1);
     ui.verbose(format!("{} exited with {code}", program.display()));
     Ok(code)
+}
+
+/// [`run_inherited_in`], without waiting: `jrs run --watch` keeps watching
+/// the sources while the program runs, and [`stop`]s it when one changes.
+///
+/// # Errors
+///
+/// [`JrsError::Build`] if `program` cannot be started.
+pub fn spawn_inherited_in(
+    ui: &Ui,
+    program: &Path,
+    args: &[impl AsRef<OsStr>],
+    environment: &Environment,
+) -> Result<Child> {
+    ui.verbose(describe(program, args));
+    ui.suspend();
+    let mut command = Command::new(program);
+    environment.apply(ui, &mut command);
+    command
+        .args(args.iter().map(AsRef::as_ref))
+        .spawn()
+        .map_err(|e| JrsError::build(format!("could not run {}: {e}", program.display())))
+}
+
+/// End a process [`spawn_inherited_in`] started. On Unix it is asked first,
+/// with `SIGTERM`, so that its shutdown hooks run and its port is free for
+/// the next start; whatever is still running after `grace` is killed.
+/// Returns its exit code, or `None` when it had to be killed.
+pub fn stop(child: &mut Child, grace: Duration) -> Option<i32> {
+    #[cfg(unix)]
+    if let Ok(pid) = libc::pid_t::try_from(child.id()) {
+        // SAFETY: `kill` has no memory effects; the pid is our own child's,
+        // which cannot be reaped and reused before we wait for it.
+        unsafe {
+            libc::kill(pid, libc::SIGTERM);
+        }
+        let deadline = std::time::Instant::now() + grace;
+        while std::time::Instant::now() < deadline {
+            match child.try_wait() {
+                Ok(Some(status)) => return status.code(),
+                Ok(None) => std::thread::sleep(Duration::from_millis(50)),
+                Err(_) => break,
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = grace;
+    let _ = child.kill();
+    let _ = child.wait();
+    None
 }
 
 /// Run a tool, streaming each stdout line through the UI as it arrives.

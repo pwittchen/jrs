@@ -81,6 +81,72 @@ jobs:
       if: runner.os == 'Linux'
       run: cargo test --verbose --features network-tests --test network
 
+  # Byte-identical jars are load-bearing, and unit tests only see jrs's own
+  # writer. Each example — Java, Kotlin, Scala, Groovy and a Spring Boot
+  # service, with the real compilers — is built twice, from two checkouts at
+  # different paths and without the build cache, and everything `jrs package`
+  # writes is compared byte for byte: a compiler that records a path or a
+  # time fails here.
+  reproducible:
+    runs-on: ubuntu-24.04
+
+    steps:
+    - uses: actions/checkout@v7
+
+    - name: Set up the JDK
+      uses: actions/setup-java@v6
+      with:
+        distribution: temurin
+        java-version: '21'
+
+    - name: Build jrs
+      run: cargo build --release --locked
+
+    - name: Build each example twice and compare
+      run: |
+        set -euo pipefail
+        jrs="$PWD/target/release/jrs"
+        work="$RUNNER_TEMP/reproducible"
+        export JRS_CACHE_DIR="$work/cache"
+        failed=0
+        for example in examples/*/; do
+          name=$(basename "$example")
+          a="$work/a/$name"
+          b="$work/b/somewhere/deeper/$name"
+          for dir in "$a" "$b"; do
+            mkdir -p "$(dirname "$dir")"
+            cp -R "$example" "$dir"
+            rm -rf "$dir/target"
+            run() { "$jrs" --manifest-path "$dir" --progress never package --no-build-cache "$@"; }
+            # A fat jar and the portable one share a name, so each set is
+            # kept before the next build.
+            run --portable --sources --dist --sbom
+            mkdir -p "$dir.out/portable" "$dir.out/fat"
+            cp -R "$dir/target/lib" "$dir"/target/*.jar "$dir"/target/*.zip \
+              "$dir"/target/*-cyclonedx.json "$dir.out/portable/"
+            run --fat
+            cp "$dir"/target/*.jar "$dir.out/fat/"
+          done
+          files=$(cd "$a.out" && find . -type f | sort)
+          if [ "$files" != "$(cd "$b.out" && find . -type f | sort)" ]; then
+            echo "::error::$name: the two builds wrote different files"
+            failed=1
+            continue
+          fi
+          differ=0
+          while read -r file; do
+            if ! cmp -s "$a.out/$file" "$b.out/$file"; then
+              echo "::error::$name: ${file#./} differs between the two builds"
+              differ=1
+            fi
+          done <<< "$files"
+          if [ "$differ" = 0 ]; then
+            echo "$name: $(wc -l <<< "$files" | tr -d ' ') files, byte for byte the same"
+          fi
+          failed=$((failed | differ))
+        done
+        exit "$failed"
+
   # A version tag sets the crate version: `v1.2.3` writes `version = "1.2.3"` to
   # Cargo.toml and Cargo.lock and commits that to master, so the release is
   # built from sources that report its version. The tag itself is left where it
@@ -153,6 +219,8 @@ jobs:
             os: macos-latest
           - target: x86_64-pc-windows-msvc
             os: windows-latest
+          - target: aarch64-pc-windows-msvc
+            os: windows-11-arm
 
     runs-on: ${{ matrix.os }}
 
@@ -176,6 +244,15 @@ jobs:
         sudo apt-get install -y musl-tools
         target='${{ matrix.target }}'
         echo "CC_${target//-/_}=musl-gcc" >> "$GITHUB_ENV"
+
+    # ring compiles its assembly for Windows on Arm with clang alone, which
+    # the image has under Program Files but not on PATH.
+    - name: Put clang on PATH
+      if: matrix.target == 'aarch64-pc-windows-msvc'
+      run: |
+        if ! command -v clang >/dev/null; then
+          echo 'C:\Program Files\LLVM\bin' >> "$GITHUB_PATH"
+        fi
 
     # Link the MSVC runtime statically, so the binary does not depend on the
     # Visual C++ redistributable being installed.
@@ -221,6 +298,23 @@ jobs:
     - name: Write checksums
       working-directory: dist
       run: sha256sum -- * > SHA256SUMS
+
+    # The Homebrew formula, the Scoop manifest and the winget manifest for
+    # this release, from its checksums; publishing them to the tap, the
+    # bucket and winget-pkgs is a step the maintainer takes.
+    - uses: actions/checkout@v7
+      with:
+        path: source
+        sparse-checkout: packaging
+
+    - name: Write the package manager manifests
+      run: sh source/packaging/manifests.sh "${GITHUB_REF_NAME#v}" dist/SHA256SUMS manifests
+
+    - uses: actions/upload-artifact@v7
+      with:
+        name: package-manifests
+        path: manifests
+        if-no-files-found: error
 
     - name: Publish the release
       env:

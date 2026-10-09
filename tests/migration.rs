@@ -717,8 +717,14 @@ fn the_gradle_report_opens_by_admitting_it_is_approximate() {
     assert!(skipped.contains("sharedVersion"), "{skipped}");
     assert!(skipped.contains("does.not.exist"), "{skipped}");
     assert!(skipped.contains("core, web"), "{skipped}");
-    assert!(skipped.contains("checkstyle"), "{skipped}");
     assert!(skipped.contains("task `customThing`"), "{skipped}");
+    // The checkstyle plugin is a task now, its jars resolved by jrs.
+    assert!(!skipped.contains("checkstyle"), "{skipped}");
+    let migrated = migration.report.migrated.join("\n");
+    assert!(
+        migrated.contains("plugin `checkstyle` → Checkstyle task `checkstyle` (post-compile)"),
+        "{migrated}"
+    );
 }
 
 #[test]

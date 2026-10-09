@@ -496,6 +496,13 @@ fn static_value(manifest: &Manifest, placeholder: Placeholder) -> Result<String>
                 placeholder.name()
             )));
         }
+        Placeholder::SourcesArgfile => {
+            return Err(JrsError::manifest(
+                "`{sources-argfile}` is an argument: it has a value in a task's `run`, `args` \
+                 and `env` only"
+                    .to_string(),
+            ));
+        }
     };
     Ok(path.display().to_string())
 }
@@ -1017,6 +1024,8 @@ pub fn prepare(task: &TaskDef, ctx: &Context<'_>, extra_args: &[String]) -> Resu
     let root = static_root(manifest);
     let argfile = tasks_dir(manifest).join(format!("{}.cp.args", task.name));
     let mut wants_argfile = false;
+    let sources_argfile = tasks_dir(manifest).join(format!("{}.sources.args", task.name));
+    let mut wants_sources = false;
 
     let join = |entries: &[PathBuf]| Toolchain::classpath(entries);
     let mut value = |p: Placeholder| -> Result<String> {
@@ -1037,6 +1046,10 @@ pub fn prepare(task: &TaskDef, ctx: &Context<'_>, extra_args: &[String]) -> Resu
                 classpaths()?;
                 wants_argfile = true;
                 Ok(argfile.display().to_string())
+            }
+            Placeholder::SourcesArgfile => {
+                wants_sources = true;
+                Ok(sources_argfile.display().to_string())
             }
             Placeholder::Jar => ctx.jar.map(|j| j.display().to_string()).ok_or_else(|| {
                 JrsError::build(format!(
@@ -1098,6 +1111,9 @@ pub fn prepare(task: &TaskDef, ctx: &Context<'_>, extra_args: &[String]) -> Resu
 
     if wants_argfile && let Some(classpaths) = ctx.classpaths {
         write_classpath_argfile(&argfile, &classpaths.compile)?;
+    }
+    if wants_sources {
+        write_sources_argfile(&sources_argfile, manifest)?;
     }
 
     let env = environment(task, ctx, &search_path, &own_env);
@@ -1190,6 +1206,26 @@ fn read_classpath(task: &TaskDef, classpaths: Option<&Classpaths>) -> Vec<PathBu
 }
 
 /// Write `-cp <classpath>` to the argfile at `path`, creating its directory.
+/// `{sources-argfile}`: the project's own main and test sources, of every
+/// language it compiles, one absolute path per line — the shape the
+/// formatters and checkers that read a file list take. Generated sources are
+/// not the project's to format, so they are left out.
+fn write_sources_argfile(path: &Path, manifest: &Manifest) -> Result<()> {
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir).path(dir)?;
+    }
+    let project = project::Project::new(manifest);
+    let mut text = String::new();
+    for unit in [project::Unit::Main, project::Unit::Test] {
+        for file in project.sources(unit, &[])?.files {
+            // Absolute: the task runs in its own `cwd`, not jrs's.
+            let file = std::path::absolute(&file).unwrap_or(file);
+            let _ = writeln!(text, "{}", file.display());
+        }
+    }
+    std::fs::write(path, text).path(path)
+}
+
 fn write_classpath_argfile(path: &Path, classpath: &[PathBuf]) -> Result<()> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).path(dir)?;
@@ -1481,10 +1517,9 @@ fn jvm_value(manifest: &Manifest, classpaths: &Classpaths, p: Placeholder) -> Re
         Placeholder::Classpath => Ok(Toolchain::classpath(&classpaths.compile)),
         Placeholder::RuntimeClasspath => Ok(Toolchain::classpath(&classpaths.runtime)),
         Placeholder::TestClasspath => Ok(Toolchain::classpath(&classpaths.test)),
-        Placeholder::Jar | Placeholder::ClasspathArgfile => Err(JrsError::manifest(format!(
-            "`{{{}}}` only has a value in a task",
-            p.name()
-        ))),
+        Placeholder::Jar | Placeholder::ClasspathArgfile | Placeholder::SourcesArgfile => Err(
+            JrsError::manifest(format!("`{{{}}}` only has a value in a task", p.name())),
+        ),
         _ => static_value(manifest, p),
     }
 }
@@ -1895,6 +1930,46 @@ mod tests {
             std::fs::read_to_string(path).unwrap(),
             "-cp\n\"/a b/c.jar\"\n"
         );
+    }
+
+    #[test]
+    fn the_sources_argfile_lists_the_projects_own_sources() {
+        let tree = Tree::new("sources-argfile");
+        let main = tree.write("src/main/java/com/example/App.java", "");
+        let test = tree.write("src/test/java/com/example/AppTest.java", "");
+        tree.write("src/main/resources/app.properties", "");
+        tree.write("Fmt.java", "");
+        let m =
+            tree.manifest("[tasks.format]\nscript = 'Fmt.java'\nargs = ['@{sources-argfile}']\n");
+        let t = toolchain();
+        let p = prepare(&m.tasks[0], &context(&m, &t), &[]).unwrap();
+        let path = tree.0.join("target/.jrs/tasks/format.sources.args");
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            format!("{}\n{}\n", main.display(), test.display())
+        );
+        let Launch::Exec { args, .. } = &p.launch else {
+            panic!()
+        };
+        assert_eq!(args[1], format!("@{}", path.display()));
+
+        let err = Manifest::parse(
+            &format!("{HEAD}[tasks.f]\nrun = ['f']\ninputs = ['{{sources-argfile}}']\n"),
+            &tree.0.join("jrs.toml"),
+            &tree.0,
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("name the source directories"),
+            "{err}"
+        );
+        let err = Manifest::parse(
+            &format!("{HEAD}[run]\nenv = {{ A = '{{sources-argfile}}' }}\n"),
+            &tree.0.join("jrs.toml"),
+            &tree.0,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("a task's own"), "{err}");
     }
 
     #[test]

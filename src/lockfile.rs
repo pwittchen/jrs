@@ -294,7 +294,14 @@ fn render_package(s: &mut String, header: &str, p: &ResolvedPackage) {
     if p.managed {
         s.push_str("managed = true\n");
     }
-    if let Some(c) = &p.checksum {
+    // A platform classifier's jar is another file on another machine, so
+    // there is no one checksum to pin; the repository's own is still checked.
+    let platform = p
+        .coord
+        .classifier
+        .as_deref()
+        .is_some_and(crate::resolve::coord::is_platform_classifier);
+    if let Some(c) = p.checksum.as_ref().filter(|_| !platform) {
         let _ = writeln!(s, "checksum = \"{c}\"");
     }
     if !p.dependencies.is_empty() {
@@ -643,6 +650,23 @@ mod tests {
         assert_eq!(child.coord.classifier.as_deref(), Some("natives-linux"));
         assert_eq!(child.classpath, Classpath::Provided);
         assert_eq!(again.roots, r.roots);
+    }
+
+    #[test]
+    fn a_platform_classifier_is_written_unexpanded_and_unpinned() {
+        let m = manifest("[dependencies]\n'g:a'='1.0'");
+        let mut r = resolution();
+        r.packages[0].coord.classifier = Some("{os-classifier}".into());
+        let text = Lockfile::from_resolution(&m, &r).render();
+        assert!(text.contains("classifier = \"{os-classifier}\""), "{text}");
+        let again = Lockfile::parse(&text, Path::new("jrs.lock")).unwrap();
+        let a = &again.packages[0];
+        assert_eq!(a.coord.classifier.as_deref(), Some("{os-classifier}"));
+        assert_eq!(
+            a.checksum, None,
+            "another machine downloads another jar: nothing to pin"
+        );
+        assert_eq!(again.packages[1].checksum.as_deref(), Some("sha1:abc123"));
     }
 
     #[test]

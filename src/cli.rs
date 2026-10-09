@@ -17,6 +17,7 @@ use clap::{Args, CommandFactory, Parser, Subcommand, ValueEnum};
 use rayon::prelude::*;
 
 use crate::build_cache::{self, BuildCache};
+use crate::checkers;
 use crate::compile::worker::Worker;
 use crate::compile::{self, CompileUnit, DocTool, DocUnit, ForeignCompiler, ForeignDoc, Language};
 use crate::compile::{impact, lang, share};
@@ -28,8 +29,8 @@ use crate::error::{IoResultExt, JrsError, Result, exit};
 use crate::image;
 use crate::lockfile::Lockfile;
 use crate::manifest::{
-    self, Action, Builtin, Dependency, Hook, JavaAgent, LanguageConfig, MANIFEST_FILE, Manifest,
-    Repository, ShareClasses, TaskDef, TaskRef, Template,
+    self, Builtin, Dependency, Hook, JavaAgent, LanguageConfig, MANIFEST_FILE, Manifest,
+    Repository, ShareClasses, TaskDef, TaskRef,
 };
 use crate::migrate;
 use crate::model;
@@ -44,6 +45,7 @@ use crate::resolve::metadata;
 use crate::resolve::repo::{Fetcher, Network};
 use crate::resolve::{self, Classpath, Resolution, UiReporter};
 use crate::runner;
+use crate::sbom;
 use crate::selfupdate::{self, Releases, Standing};
 use crate::task;
 use crate::test as junit;
@@ -218,6 +220,10 @@ pub enum Command {
         /// Arguments passed to the program, after `--`.
         #[arg(last = true, value_name = "ARGS")]
         args: Vec<String>,
+        /// Stop the program, build again and restart it whenever a source, a
+        /// resource or jrs.toml changes.
+        #[arg(long)]
+        watch: bool,
         /// Report the wall time of each phase before the program starts.
         #[arg(long)]
         timings: bool,
@@ -286,6 +292,15 @@ pub enum Command {
     /// List declared dependencies that have newer releases.
     Outdated,
 
+    /// List each dependency's licence, as its POM (or its parent's) declares
+    /// it, and flag the dependencies that declare none.
+    Licenses {
+        /// Only what the program runs with and a package ships: no test or
+        /// compile-only dependencies.
+        #[arg(long)]
+        runtime: bool,
+    },
+
     /// Add dependencies to jrs.toml, at their newest release unless a version
     /// is given.
     Add {
@@ -336,6 +351,11 @@ pub enum Command {
         /// sources, and a `post-compile` hook that runs it on every build.
         #[arg(long)]
         check: bool,
+        /// Add a `format` task that formats the sources — google-java-format,
+        /// or ktfmt for Kotlin — and a `format-check` task, run on every
+        /// build, that fails when one is not formatted.
+        #[arg(long)]
+        format: bool,
         /// Where to scaffold. Defaults to the current directory.
         #[arg(value_name = "PATH")]
         path: Option<PathBuf>,
@@ -460,6 +480,16 @@ pub struct TestArgs {
     /// `[test] forks`.
     #[arg(long, value_name = "N", value_parser = clap::value_parser!(u32).range(1..))]
     pub forks: Option<u32>,
+    /// Run only the I-th of N slices of the test classes, as `2/4`, so that
+    /// N machines can share one suite. The slice follows from the class
+    /// names alone, so it is the same on every machine.
+    #[arg(
+        long,
+        value_name = "I/N",
+        value_parser = junit::Shard::parse,
+        conflicts_with_all = ["method", "rerun_failed"]
+    )]
+    pub shard: Option<junit::Shard>,
     /// Run the suite `[test.suites.<NAME>]` declares instead of the tests
     /// under `project.test-dir`.
     #[arg(long, value_name = "NAME")]
@@ -517,6 +547,10 @@ pub struct PackageArgs {
     /// information, leaving behaviour untouched.
     #[arg(long)]
     pub obfuscate: bool,
+    /// Also write a `CycloneDX` SBOM of the runtime dependencies beside the
+    /// jar, as target/<name>-<version>-cyclonedx.json.
+    #[arg(long)]
+    pub sbom: bool,
     /// Neither restore from nor store into the build cache.
     #[arg(long)]
     pub no_build_cache: bool,
@@ -638,6 +672,7 @@ fn dispatch(cli: &Cli, ui: &Ui) -> Result<i32> {
             lib,
             lang,
             check,
+            format,
             path,
         } => {
             return init(
@@ -646,6 +681,7 @@ fn dispatch(cli: &Cli, ui: &Ui) -> Result<i32> {
                 *lib,
                 (*lang).into(),
                 *check,
+                *format,
                 path.as_deref(),
             );
         }
@@ -676,6 +712,12 @@ fn dispatch(cli: &Cli, ui: &Ui) -> Result<i32> {
         Command::Build { watch: true, .. } => return watch(cli, ui, |s| s.build_command()),
         Command::Test(args) if args.watch => return watch(cli, ui, |s| s.test_command(args)),
         Command::Task(args) if args.watch => return watch(cli, ui, |s| s.task_command(args)),
+        Command::Run {
+            watch: true,
+            args,
+            debug,
+            ..
+        } => return run_watch(cli, ui, args, debug.as_ref()),
         _ => {}
     }
 
@@ -698,6 +740,7 @@ fn dispatch(cli: &Cli, ui: &Ui) -> Result<i32> {
         Command::Update => session.update_command(),
         Command::Verify => session.verify_command(),
         Command::Outdated => session.outdated_command(),
+        Command::Licenses { runtime } => session.licenses_command(*runtime),
         Command::Metadata { no_deps } => session.metadata_command(*no_deps),
         Command::Fetch { sources } => session.fetch_command(*sources),
         Command::Init { .. }
@@ -926,22 +969,27 @@ impl<'a> Session<'a> {
     }
 
     /// What `--watch` keeps an eye on: the manifest, the source trees, and
-    /// every task's inputs outside the target directory.
-    fn watched_paths(&self) -> Vec<PathBuf> {
+    /// every task's inputs outside the target directory. `tests` adds the
+    /// test sources, which `jrs run --watch` has no reason to restart for.
+    fn watched_paths(&self, tests: bool) -> Vec<PathBuf> {
         let mut paths = vec![
             self.manifest.path.clone(),
             self.manifest.source_path(),
             self.manifest.resource_path(),
-            self.manifest.test_path(),
-            self.manifest.test_resource_path(),
         ];
         for config in &self.manifest.languages {
             paths.push(self.manifest.root.join(&config.source_dir));
-            paths.push(self.manifest.root.join(&config.test_dir));
         }
-        for suite in &self.manifest.test.suites {
-            paths.push(self.manifest.root.join(&suite.test_dir));
-            paths.push(self.manifest.root.join(&suite.test_resource_dir));
+        if tests {
+            paths.push(self.manifest.test_path());
+            paths.push(self.manifest.test_resource_path());
+            for config in &self.manifest.languages {
+                paths.push(self.manifest.root.join(&config.test_dir));
+            }
+            for suite in &self.manifest.test.suites {
+                paths.push(self.manifest.root.join(&suite.test_dir));
+                paths.push(self.manifest.root.join(&suite.test_resource_dir));
+            }
         }
         paths.extend(task::watched_inputs(&self.manifest));
         paths
@@ -975,6 +1023,22 @@ impl<'a> Session<'a> {
     }
 
     fn run_command(&self, args: &[String], debug: Option<&runner::DebugAddress>) -> Result<i32> {
+        let launch = self.launch(args, debug)?;
+        let code =
+            toolchain::run_inherited_in(self.ui, &launch.java, &launch.args, &launch.environment)?;
+        if code != 0 {
+            self.ui.phase(
+                "Finished",
+                format!("{} exited with {code}", launch.main_class),
+            );
+        }
+        Ok(code)
+    }
+
+    /// Everything `jrs run` does before the program gets the terminal:
+    /// build, the `pre-run` hook, the command line, `--timings` and the
+    /// `Running` line.
+    fn launch(&self, args: &[String], debug: Option<&runner::DebugAddress>) -> Result<Launch> {
         let main_class = self.manifest.require_main_class("run")?.to_string();
         let built = self.build()?;
         self.check_main_class(&main_class)?;
@@ -1010,20 +1074,12 @@ impl<'a> Session<'a> {
         if let Some(debug) = debug {
             self.announce_debugger(debug);
         }
-        let code = runner::run_main(
-            &toolchain,
-            &jvm_args,
-            &classpath,
-            &main_class,
-            args,
-            &environment,
-            self.ui,
-        )?;
-        if code != 0 {
-            self.ui
-                .phase("Finished", format!("{main_class} exited with {code}"));
-        }
-        Ok(code)
+        Ok(Launch {
+            java: toolchain.java,
+            args: runner::java_args(&jvm_args, &classpath, &main_class, args),
+            environment,
+            main_class,
+        })
     }
 
     /// A Kotlin `main` at file level compiles to `<File>Kt`, so a `main-class`
@@ -1514,7 +1570,56 @@ impl<'a> Session<'a> {
             let bytes = self.obfuscate_jar(args, jar, built)?;
             rows.push(("obfuscated", row(jar, bytes)));
         }
+
+        if args.sbom {
+            let output = target.join(format!("{base}-cyclonedx.json"));
+            let bytes = self.write_sbom(&built.resolution, &output)?;
+            rows.push(("sbom", row(&output, bytes)));
+        }
         Ok(rows)
+    }
+
+    /// `--sbom`: the runtime graph as a `CycloneDX` document at `output`.
+    /// Returns its size.
+    fn write_sbom(&self, resolution: &Resolution, output: &Path) -> Result<u64> {
+        let packages: Vec<&resolve::ResolvedPackage> = resolution
+            .packages
+            .iter()
+            .filter(|p| p.classpath.runs())
+            .collect();
+        let locals: Vec<&resolve::LocalJar> = resolution
+            .local
+            .iter()
+            .filter(|l| l.classpath.runs())
+            .collect();
+        let licenses = if packages.is_empty() {
+            Vec::new()
+        } else {
+            self.licenses_of(&packages)?
+        };
+        self.ui.phase("Writing", output.display());
+        let components: Vec<sbom::Component<'_>> = packages
+            .iter()
+            .zip(&licenses)
+            .map(|(p, licenses)| sbom::Component {
+                package: p,
+                licenses,
+                // A platform classifier's jar has no pin: this one's own hash.
+                checksum: p.checksum.clone().or_else(|| {
+                    let bytes = std::fs::read(p.jar.as_ref()?).ok()?;
+                    Some(format!("sha256:{}", resolve::repo::sha256_hex(&bytes)))
+                }),
+            })
+            .collect();
+        for (p, licenses) in packages.iter().zip(&licenses) {
+            if licenses.is_empty() && p.packaging != "pom" {
+                self.ui
+                    .verbose(format!("`{}` declares no licence", p.coord));
+            }
+        }
+        let text = sbom::cyclonedx(&self.manifest, &components, &locals).render();
+        std::fs::write(output, &text).path(output)?;
+        Ok(text.len() as u64)
     }
 
     /// `--obfuscate`: rewrite the jar just written in place with `ProGuard`,
@@ -1760,10 +1865,24 @@ impl<'a> Session<'a> {
             class_path: Vec::new(),
             share_flags: Vec::new(),
         };
-        let label = suite.map_or_else(|| "test".to_string(), |s| format!("suite-{}", s.name));
+        let mut label = suite.map_or_else(|| "test".to_string(), |s| format!("suite-{}", s.name));
+        let mut classes = junit::test_classes(&run.scan_dir)?;
+        if let Some(shard) = args.shard {
+            // The shard is the whole run from here on: what it records is its
+            // own, so that another shard run here does not take it for its.
+            classes = shard.select(&classes);
+            if classes.is_empty() {
+                self.ui.phase(
+                    "Testing",
+                    format!("shard {shard} has no test classes to run"),
+                );
+                return Ok(None);
+            }
+            run.filter = Some(junit::fork_pattern(&classes, run.filter.as_deref()));
+            let _ = write!(label, "-shard-{}-of-{}", shard.index, shard.count);
+        }
         let state = project.work_dir().join(format!("{label}.tested"));
         let times = project.work_dir().join(format!("{label}.times"));
-        let classes = junit::test_classes(&run.scan_dir)?;
         // Only a run of the whole suite says anything about the next one.
         let whole = args.filter.is_none()
             && args.include_tag.is_empty()
@@ -1779,7 +1898,13 @@ impl<'a> Session<'a> {
             Some((impact::Selection::Only(only), _))
                 if !args.all && !args.coverage && args.debug.is_none() =>
             {
-                Some(only.clone())
+                // A change can reach a class another shard runs.
+                Some(
+                    only.iter()
+                        .filter(|class| classes.binary_search(class).is_ok())
+                        .cloned()
+                        .collect::<Vec<_>>(),
+                )
             }
             _ => None,
         };
@@ -1831,7 +1956,15 @@ impl<'a> Session<'a> {
         let share =
             cds.and_then(|dir| self.test_archive(&dir, &toolchain, &run, &label, &mut forks));
         let reached = selected.as_ref().map(|only| (only.len(), classes.len()));
-        self.announce_tests(&mut run, rerun.as_ref(), &sources, reached, forks.len());
+        let sharded = args.shard.map(|shard| (shard, classes.len()));
+        self.announce_tests(
+            &mut run,
+            rerun.as_ref(),
+            &sources,
+            reached,
+            sharded,
+            forks.len(),
+        );
         let started = Instant::now();
         let outcome = self
             .launch_tests(&toolchain, &run, &forks, share, args.debug.as_ref())
@@ -2034,6 +2167,10 @@ impl<'a> Session<'a> {
             run.launcher_version,
             cache.relative(&run.scan_dir.display().to_string())
         );
+        // A shard's pattern: another shard of the same classes runs others.
+        if let Some(filter) = &run.filter {
+            let _ = writeln!(text, "filter {filter}");
+        }
         for (key, value) in &run.environment.vars {
             let _ = writeln!(text, "env {key}={}", cache.relative(value));
         }
@@ -2354,6 +2491,7 @@ impl<'a> Session<'a> {
         rerun: Option<&(usize, test_report::Selection)>,
         sources: &Sources,
         reached: Option<(usize, usize)>,
+        shard: Option<(junit::Shard, usize)>,
         forks: usize,
     ) {
         if let Some((_, selection)) = rerun {
@@ -2378,9 +2516,14 @@ impl<'a> Session<'a> {
             );
             return;
         }
-        let what = match reached {
-            Some((n, of)) => format!("{n} of {of} test classes a change reaches"),
-            None => sources.describe("test sources"),
+        let what = match (reached, shard) {
+            (Some((n, of)), None) => format!("{n} of {of} test classes a change reaches"),
+            (Some((n, of)), Some((shard, _))) => {
+                format!("{n} of shard {shard}'s {of} test classes a change reaches")
+            }
+            (None, Some((shard, 1))) => format!("shard {shard}: 1 test class"),
+            (None, Some((shard, of))) => format!("shard {shard}: {of} test classes"),
+            (None, None) => sources.describe("test sources"),
         };
         if forks > 1 {
             self.ui.phase("Testing", format!("{what} in {forks} JVMs"));
@@ -2990,6 +3133,120 @@ impl<'a> Session<'a> {
         Ok(exit::SUCCESS)
     }
 
+    fn licenses_command(&self, runtime: bool) -> Result<i32> {
+        let resolution = self.dependencies(false)?;
+        let packages: Vec<&resolve::ResolvedPackage> = resolution
+            .packages
+            .iter()
+            .filter(|p| p.packaging != "pom" && (!runtime || p.classpath.runs()))
+            .collect();
+        let locals: Vec<&resolve::LocalJar> = resolution
+            .local
+            .iter()
+            .filter(|l| !runtime || l.classpath.runs())
+            .collect();
+        if packages.is_empty() && locals.is_empty() {
+            self.ui.phase("Finished", "there are no dependencies");
+            return Ok(exit::SUCCESS);
+        }
+        let licenses = self.licenses_of(&packages)?;
+
+        let mut rows = Vec::new();
+        let mut unlicensed = Vec::new();
+        for (p, licenses) in packages.iter().zip(&licenses) {
+            let name = format!("{}{}", p.coord, classpath_suffix(p.classpath));
+            if licenses.is_empty() {
+                unlicensed.push(p.coord.to_string());
+                rows.push([name, "(none declared)".to_string()]);
+            } else {
+                let labels: Vec<String> = licenses
+                    .iter()
+                    .map(resolve::license::License::label)
+                    .collect();
+                rows.push([name, labels.join(", ")]);
+            }
+        }
+        for l in &locals {
+            unlicensed.push(l.name.clone());
+            rows.push([
+                format!("{}{}", l.name, classpath_suffix(l.classpath)),
+                "(a local jar: no POM to declare one)".to_string(),
+            ]);
+        }
+        let header = ["dependency".to_string(), "licence".to_string()];
+        let width = rows
+            .iter()
+            .chain(std::iter::once(&header))
+            .map(|r| r[0].chars().count())
+            .max()
+            .unwrap_or(0);
+        self.ui.suspend();
+        for row in std::iter::once(&header).chain(&rows) {
+            self.ui.println_out(
+                format!("{:<width$}  {}", row[0], row[1])
+                    .trim_end()
+                    .to_string(),
+            );
+        }
+        for name in &unlicensed {
+            self.ui.warn(format!("`{name}` declares no licence"));
+        }
+        let total = rows.len();
+        self.ui.phase(
+            "Finished",
+            match unlicensed.len() {
+                0 => format!("{total} dependencies, each with a licence"),
+                n => format!("{total} dependencies, {n} without a licence"),
+            },
+        );
+        Ok(exit::SUCCESS)
+    }
+
+    /// The licences each of `packages` declares, by its POM or the nearest
+    /// parent's, fetched `jobs` at a time.
+    fn licenses_of(
+        &self,
+        packages: &[&resolve::ResolvedPackage],
+    ) -> Result<Vec<Vec<resolve::license::License>>> {
+        let fetcher = self.fetcher()?;
+        let coords: Vec<Coord> = packages.iter().map(|p| p.coord.clone()).collect();
+        self.ui.phase(
+            "Reading",
+            match coords.len() {
+                1 => "the licence of 1 dependency".to_string(),
+                n => format!("the licences of {n} dependencies"),
+            },
+        );
+        let scope = self
+            .ui
+            .spinner("Reading", format!("{} licences", coords.len()));
+        let answers = resolve::license::of_each(&fetcher, &coords, self.jobs);
+        scope.finish();
+        for warning in fetcher.take_warnings() {
+            self.ui.warn(warning);
+        }
+        answers.into_iter().collect()
+    }
+
+    /// `jrs verify` on a jar `jrs.lock` holds no checksum for: a warning,
+    /// unless its classifier names the host's platform, which is never pinned.
+    fn unpinned(&self, coord: &Coord, lock_path: &Path) {
+        if coord
+            .classifier
+            .as_deref()
+            .is_some_and(resolve::coord::is_platform_classifier)
+        {
+            self.ui.verbose(format!(
+                "{coord} names the host's platform, whose jar is never pinned"
+            ));
+        } else {
+            self.ui.warn(format!(
+                "`{coord}` has no checksum in {}; it was not verified",
+                lock_path.display()
+            ));
+        }
+    }
+
     fn verify_command(&self) -> Result<i32> {
         let lock_path = self.manifest.lock_path();
         let lock = Lockfile::load(&lock_path)?.ok_or_else(|| {
@@ -3041,11 +3298,7 @@ impl<'a> Session<'a> {
                     self.ui
                         .verbose(format!("{} is a snapshot, which is never pinned", c.coord));
                 }
-                resolve::Integrity::Unpinned => self.ui.warn(format!(
-                    "`{}` has no checksum in {}; it was not verified",
-                    c.coord,
-                    lock_path.display()
-                )),
+                resolve::Integrity::Unpinned => self.unpinned(&c.coord, &lock_path),
                 resolve::Integrity::Mismatch { expected, actual } => mismatches.push(format!(
                     "  {}\n    locked {expected}\n    cached {actual}",
                     c.path.display()
@@ -4788,6 +5041,14 @@ type ResolvedWithTools = (
 /// staged.
 type ImageAgents = (Vec<String>, Vec<(PathBuf, String)>);
 
+/// The JVM `jrs run` starts: `java`, its arguments, where and with what.
+struct Launch {
+    java: PathBuf,
+    args: Vec<String>,
+    environment: toolchain::Environment,
+    main_class: String,
+}
+
 /// A language's compiler, as the graph jrs resolved for it.
 #[derive(Clone)]
 struct Tool {
@@ -4882,7 +5143,7 @@ fn watch(cli: &Cli, ui: &Ui, run: impl Fn(&Session) -> Result<i32>) -> Result<i3
                 if let Err(e) = run(&session) {
                     report(ui, &e);
                 }
-                session.watched_paths()
+                session.watched_paths(true)
             }
             Err(e) => {
                 // A manifest that does not parse is worth waiting on too.
@@ -4891,14 +5152,81 @@ fn watch(cli: &Cli, ui: &Ui, run: impl Fn(&Session) -> Result<i32>) -> Result<i3
             }
         };
         ui.phase("Watching", "for changes (ctrl-c to stop)");
-        wait_for_change(ui, &watched);
+        wait_for_change(ui, &watched, || {});
     }
 }
 
-fn wait_for_change(ui: &Ui, paths: &[PathBuf]) {
+/// How long a program `jrs run --watch` restarts has to shut down after
+/// `SIGTERM` before it is killed.
+const RESTART_GRACE: Duration = Duration::from_secs(10);
+
+/// `jrs run --watch`: build and start the program, and when a watched file
+/// changes, stop it, build again and start it again — what Spring's
+/// devtools or a Ktor `-t` build give a developer. A program that exits by
+/// itself, or a build that fails, is waited out until the next change.
+fn run_watch(
+    cli: &Cli,
+    ui: &Ui,
+    args: &[String],
+    debug: Option<&runner::DebugAddress>,
+) -> Result<i32> {
+    let worker = Cache::discover()
+        .ok()
+        .map(|cache| Arc::new(Worker::new(cache.root().join("worker"))));
+    loop {
+        let session = match Session::open(cli, ui).map(|s| s.with_worker(worker.clone())) {
+            Ok(session) => session,
+            Err(e) => {
+                report(ui, &e);
+                ui.phase("Watching", "for changes (ctrl-c to stop)");
+                wait_for_change(ui, &[manifest_path(cli)?], || {});
+                continue;
+            }
+        };
+        let watched = session.watched_paths(false);
+        let started = session.launch(args, debug).and_then(|launch| {
+            let child =
+                toolchain::spawn_inherited_in(ui, &launch.java, &launch.args, &launch.environment)?;
+            Ok((launch.main_class, child))
+        });
+        let (main_class, mut child) = match started {
+            Ok(started) => started,
+            Err(e) => {
+                report(ui, &e);
+                ui.phase("Watching", "for changes (ctrl-c to stop)");
+                wait_for_change(ui, &watched, || {});
+                continue;
+            }
+        };
+        let mut exited = None;
+        wait_for_change(ui, &watched, || {
+            if exited.is_none() {
+                exited = child
+                    .try_wait()
+                    .ok()
+                    .flatten()
+                    .map(|s| s.code().unwrap_or(-1));
+                if let Some(code) = exited {
+                    ui.phase("Finished", format!("{main_class} exited with {code}"));
+                    ui.phase("Watching", "for changes (ctrl-c to stop)");
+                }
+            }
+        });
+        if exited.is_none() {
+            ui.phase("Stopping", format!("{main_class} to restart it"));
+            toolchain::stop(&mut child, RESTART_GRACE);
+        }
+    }
+}
+
+/// Wait until a file under `paths` changes, and say which. `between` runs
+/// before every look, which is how `jrs run --watch` notices its program
+/// exiting while it waits.
+fn wait_for_change(ui: &Ui, paths: &[PathBuf], mut between: impl FnMut()) {
     let before = Snapshot::take(paths);
     loop {
         std::thread::sleep(WATCH_INTERVAL);
+        between();
         let mut now = Snapshot::take(paths);
         if now == before {
             continue;
@@ -5580,50 +5908,13 @@ fn starter(language: Language, lib: bool) -> Starter {
     }
 }
 
-/// PMD, the checker `jrs init --check` scaffolds. Its `quickstart` rules are
-/// PMD's own starting point, and every Java starter passes them.
-const STARTER_PMD: &str = "7.27.0";
-
-/// `jrs init --check`: a `check` task running PMD over the main Java sources
-/// from a graph of its own (TASKS.md §8), so nothing needs installing.
-fn check_task() -> Result<TaskDef> {
-    let args = [
-        "check",
-        "--no-progress",
-        "--rulesets",
-        "rulesets/java/quickstart.xml",
-        "--dir",
-        "src/main/java",
-        "--cache",
-        "{target}/pmd.cache",
-    ]
-    .iter()
-    .map(|raw| Template::parse(raw).map_err(JrsError::manifest))
-    .collect::<Result<_>>()?;
-    let pmd = |artifact| Dependency::new("net.sourceforge.pmd", artifact, STARTER_PMD);
-    Ok(TaskDef {
-        name: "check".to_string(),
-        description: Some("Check the Java sources with PMD's quickstart rules".to_string()),
-        action: Some(Action::Main("net.sourceforge.pmd.cli.PmdCli".to_string())),
-        args,
-        depends_on: Vec::new(),
-        env: Vec::new(),
-        cwd: None,
-        inputs: Vec::new(),
-        outputs: Vec::new(),
-        source_outputs: Vec::new(),
-        resource_outputs: Vec::new(),
-        cache: false,
-        dependencies: vec![pmd("pmd-cli"), pmd("pmd-java")],
-    })
-}
-
 fn init(
     ui: &Ui,
     name: Option<&str>,
     lib: bool,
     language: Language,
     check: bool,
+    format: bool,
     path: Option<&Path>,
 ) -> Result<i32> {
     ui.banner();
@@ -5635,6 +5926,13 @@ fn init(
             "`--check` scaffolds PMD, which checks Java sources, and the {language} starter \
              has none"
         )));
+    }
+    if format && language == Language::Scala {
+        return Err(JrsError::usage(
+            "`--format` scaffolds google-java-format for Java and ktfmt for Kotlin; there is \
+             no Scala formatter to scaffold"
+                .to_string(),
+        ));
     }
 
     let root = path.map_or_else(|| PathBuf::from("."), Path::to_path_buf);
@@ -5678,9 +5976,33 @@ fn init(
         });
     }
     manifest.dev_dependencies = starter.dev_dependencies;
+    let mut scaffolded = Vec::new();
     if check {
-        manifest.tasks.push(check_task()?);
-        manifest.hooks.add(Hook::PostCompile, "check");
+        scaffolded.push(checkers::pmd(
+            "check",
+            checkers::Tool::Pmd.default_version(),
+            &["src/main/java".to_string()],
+            "rulesets/java/quickstart.xml",
+        )?);
+    }
+    if format {
+        scaffolded.extend(if language == Language::Kotlin {
+            // Kotlin's own four-space style, as the starters are written.
+            checkers::ktfmt(
+                checkers::Tool::Ktfmt.default_version(),
+                Some("--kotlinlang-style"),
+                &["src/main/kotlin".to_string(), "src/test/kotlin".to_string()],
+            )?
+        } else {
+            // AOSP's four spaces, as the starters are written.
+            checkers::google_java_format(checkers::Tool::GoogleJavaFormat.default_version(), true)?
+        });
+    }
+    for checkers::Scaffolded { task, hooked } in scaffolded {
+        if hooked {
+            manifest.hooks.add(Hook::PostCompile, &task.name);
+        }
+        manifest.tasks.push(task);
     }
     std::fs::write(&manifest_path, manifest.render(None)).path(&manifest_path)?;
     ui.phase("Created", manifest_path.display());
@@ -5910,7 +6232,7 @@ mod tests {
                 std::process::id()
             ));
             let _ = std::fs::remove_dir_all(&root);
-            init(&ui, Some("app"), lib, language, false, Some(&root)).unwrap();
+            init(&ui, Some("app"), lib, language, false, false, Some(&root)).unwrap();
 
             let manifest = Manifest::load(root.join(MANIFEST_FILE)).unwrap();
             assert!(manifest.warnings.is_empty(), "{:?}", manifest.warnings);
@@ -5967,14 +6289,16 @@ mod tests {
             (Language::Groovy, false),
         ] {
             let root = scratch(&format!("{}-{lib}", language.key()));
-            init(&ui, Some("app"), lib, language, true, Some(&root)).unwrap();
+            init(&ui, Some("app"), lib, language, true, false, Some(&root)).unwrap();
 
             let manifest = Manifest::load(root.join(MANIFEST_FILE)).unwrap();
             assert!(manifest.warnings.is_empty(), "{:?}", manifest.warnings);
             let check = manifest.tasks.iter().find(|t| t.name == "check").unwrap();
             assert_eq!(
                 check.action,
-                Some(Action::Main("net.sourceforge.pmd.cli.PmdCli".to_string()))
+                Some(manifest::Action::Main(
+                    "net.sourceforge.pmd.cli.PmdCli".to_string()
+                ))
             );
             let tools: Vec<String> = check
                 .dependencies
@@ -5995,11 +6319,44 @@ mod tests {
         }
         for language in [Language::Kotlin, Language::Scala] {
             let root = scratch(language.key());
-            let err = init(&ui, Some("app"), false, language, true, Some(&root)).unwrap_err();
+            let err =
+                init(&ui, Some("app"), false, language, true, false, Some(&root)).unwrap_err();
             assert!(err.to_string().contains("--check"), "{err}");
             assert!(!root.join(MANIFEST_FILE).exists());
             let _ = std::fs::remove_dir_all(&root);
         }
+
+        // `--format`: the language's formatter, with only its check hooked.
+        for (language, main) in [
+            (Language::Java, "com.google.googlejavaformat.java.Main"),
+            (Language::Kotlin, "com.facebook.ktfmt.cli.Main"),
+        ] {
+            let root = scratch(&format!("format-{}", language.key()));
+            init(&ui, Some("app"), false, language, false, true, Some(&root)).unwrap();
+            let manifest = Manifest::load(root.join(MANIFEST_FILE)).unwrap();
+            assert!(manifest.warnings.is_empty(), "{:?}", manifest.warnings);
+            let names: Vec<&str> = manifest.tasks.iter().map(|t| t.name.as_str()).collect();
+            assert_eq!(names, ["format", "format-check"]);
+            assert_eq!(
+                manifest.tasks[0].action,
+                Some(manifest::Action::Main(main.to_string()))
+            );
+            assert_eq!(manifest.hooks.tasks(Hook::PostCompile), ["format-check"]);
+            let _ = std::fs::remove_dir_all(&root);
+        }
+        let root = scratch("format-scala");
+        let err = init(
+            &ui,
+            Some("app"),
+            false,
+            Language::Scala,
+            false,
+            true,
+            Some(&root),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("--format"), "{err}");
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
@@ -6075,6 +6432,18 @@ mod tests {
         let cli = parse(&["jrs", "run", "--", "--verbose", "input.txt"]);
         match cli.command {
             Command::Run { args, .. } => assert_eq!(args, vec!["--verbose", "input.txt"]),
+            other => panic!("expected run, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn run_takes_watch_before_the_program_arguments() {
+        let cli = parse(&["jrs", "run", "--watch", "--", "--watch"]);
+        match cli.command {
+            Command::Run { args, watch, .. } => {
+                assert!(watch);
+                assert_eq!(args, vec!["--watch"], "after `--`, the program's");
+            }
             other => panic!("expected run, got {other:?}"),
         }
     }

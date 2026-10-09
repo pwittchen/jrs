@@ -78,6 +78,7 @@ src/
 ├── manifest.rs        jrs.toml: hand-parsed, ordered, per-key diagnostics
 ├── config.rs          the per-user config.toml: credentials, mirrors, proxy, jdks
 ├── edit.rs            format-preserving line editor for `jrs add` / `jrs remove`
+├── checkers.rs        PMD, Checkstyle, SpotBugs, google-java-format, ktfmt as tasks
 ├── lockfile.rs        jrs.lock: read, write, manifest-checksum
 ├── project.rs         layout, source globbing, target/, resource sync, snapshots
 ├── expand.rs          [resources]: ${name} expansion of resources as they are copied
@@ -100,7 +101,9 @@ src/
 │   ├── coord.rs       coordinates, scopes, Maven version ordering
 │   ├── pom.rs         POM XML → effective model (parents, BOMs, properties)
 │   ├── metadata.rs    maven-metadata.xml: version lists, snapshot builds
-│   ├── gradle_module.rs  .module files: a Multiplatform library's JVM artifact
+│   ├── gradle_module.rs  .module files: a Multiplatform library's JVM artifact,
+│   │                  a POM-packaged library's own jar
+│   ├── license.rs     <licenses> of a POM or its nearest parent; SPDX ids
 │   ├── repo.rs        Fetcher: cache → repositories, checksums, retries
 │   └── cache.rs       the local store: layout, atomic writes, pruning
 ├── test.rs            the JUnit Platform console launcher, one or several; JaCoCo
@@ -111,13 +114,15 @@ src/
 ├── native_image.rs    --native-image: GraalVM's native-image, by argfile
 ├── obfuscate.rs       --obfuscate: ProGuard over the assembled jar, by config file
 ├── relocate.rs        [package.relocate]: a fat jar's packages moved, constant pools rewritten
-├── runner.rs          `jrs run`: the user's program gets the terminal
+├── sbom.rs            --sbom: the runtime graph as a CycloneDX document
+├── runner.rs          `jrs run`'s command line: debugger, java agents, jvm-args
 ├── selfupdate.rs      `jrs self check|update`: GitHub releases, checksum, binary swap
 ├── task.rs            [tasks] and [hooks]: plan, cycles, placeholders, freshness
 ├── migrate/
 │   ├── mod.rs         detection, report, manifest emission
 │   ├── maven.rs       pom.xml → Manifest (reuses resolve::pom); exec-maven-plugin → [tasks]
 │   ├── maven_profiles.rs  the <profiles> a plain `mvn` build activates, merged in
+│   ├── checks.rs      formatter and checker plugins → crate::checkers tasks
 │   ├── gradle.rs      build.gradle[.kts] → Manifest (pattern extraction)
 │   ├── gradle_files.rs  files() / fileTree() → local jars, literal ones only
 │   ├── gradle_generated.rs  openApiGenerate, sourceSets srcDirs, tasks left to ./gradlew
@@ -187,7 +192,7 @@ What the layering buys:
   enum from `compile::lang`, coordinate parsing from `resolve::coord`, and
   `task::check` for the whole-manifest task validation.
 - **Modules that run processes take a `&Ui`** (`toolchain`, `compile`, `test`,
-  `runner`, `image`, `native_image`) only so they can tear the live region down before a
+  `image`, `native_image`) only so they can tear the live region down before a
   subprocess writes to the terminal, and pass that output through verbatim.
 - **`cli` is the only module that decides what a user sees**, and the only one
   that renders an error.
@@ -217,6 +222,7 @@ What the layering buys:
    ├── needs no manifest, or manages its own sessions:
    │     init · migrate · completions · cache · add · remove
    │     build --watch · test --watch · task --watch   (a fresh Session per change)
+   │     run --watch    (a Session per change; the program stopped and restarted)
    │
    └── everything else:
          Session::open(cli, ui)        load jrs.toml (walk up from cwd, or
@@ -262,6 +268,11 @@ it, it runs **at most once per invocation**.
 
 `watch()` creates the `Worker` once and hands it to each `Session` it opens,
 so the worker outlives every build of the session but not the command.
+`run_watch()` does the same for `jrs run --watch`, with one difference: the
+program is spawned (`toolchain::spawn_inherited_in`) rather than waited for,
+`wait_for_change` polls it between looks at the tree, and a change stops it
+(`toolchain::stop`: `SIGTERM`, then a kill after ten seconds) before the next
+`Session` builds and starts it again. It watches the main trees only.
 
 The commands nest. `build()` is the shared spine; the others call it first and
 add to it:
@@ -314,10 +325,11 @@ add to it:
  └  hook(post-package)
 
  run_command()                                              jrs run
- │  build()
- │  hook(pre-run)
- └  runner::run_main ─► java … <main-class> args   (stdio inherited;
-                                                      run.env, in run.cwd)
+ │  launch():  build()
+ │             hook(pre-run)
+ │             the command line, --timings, "Running"
+ └  toolchain::run_inherited_in ─► java … <main-class> args   (stdio
+                                     inherited; run.env, in run.cwd)
 ```
 
 Every phase line (`Resolving`, `Downloading`, `Compiling`, `Fresh`, `Testing`,
@@ -408,7 +420,10 @@ compile that fails returns before the join, so its error is the one
 reported, and the detached thread dies with the process.
 
 `jrs.lock` records coordinates and checksums, never absolute paths; cache paths
-are recomputed on load. It is `version = 1` byte for byte until a `[[tool]]`
+are recomputed on load. A classifier may hold `{os-classifier}` (SPEC §8.10):
+the coordinate keeps it, so the graph and `jrs.lock` do, and only
+`Coord::file_name` expands it to the host's (`coord::expand_classifier`), so
+every path and URL names the host's jar; the lockfile pins no checksum for it. It is `version = 1` byte for byte until a `[[tool]]`
 block makes it `version = 2`. A task's graph is downloaded with the compilers'
 when it is resolved afresh, so that `jrs.lock` pins its jars; read from
 `jrs.lock`, it waits until the task runs (`Session::task_classpath`).
@@ -464,6 +479,10 @@ read; its rich versions and constraints would not fit nearest-wins.
 Version ranges are rejected with an error, never guessed at. The classpath jrs
 hands to `javac` is ordered direct dependencies first, then transitive ones,
 each sorted by coordinate, so it is deterministic.
+
+A POM whose `<packaging>` is `pom` but whose module file lists the
+artifact's own jar in its runtime library variant (SpotBugs publishes so)
+is a `jar` node: `gradle_module::ships_jar`, read from the same module file.
 
 `[managed]` (SPEC §8.9) is read before the walk: `managed_versions_with`
 takes the table's own versions, then each BOM's effective `<dependencyManagement>`
@@ -768,6 +787,12 @@ reaches the launcher as a fork's does, a lookahead `--include-classname`.
  run them; record test.tested with what failed or was flaky
 ```
 
+`--shard <i>/<n>` cuts the class list first (`test::Shard::select`, every
+`n`-th class in name order, nothing machine-local), makes the slice the run's
+lookahead `--include-classname`, narrows the impact selection to it, and
+records under `test-shard-<i>-of-<n>.tested`, so a shard is a whole run of
+its own from there on, and its build-cache key holds the pattern.
+
 Between that selection and the launcher, two shortcuts. A whole-suite run
 (no selectors, not `--all`, `--coverage` or `--debug`) is keyed over the
 same settings with jars by identity and every class-directory file by the
@@ -867,6 +892,13 @@ launchers reuse `image.rs`'s quoting; `native-image` is found beside `javac`,
 and its absence means the JDK is not GraalVM, which is reported before the
 build starts.
 
+`--sbom` lives in `sbom.rs`: `cli.rs` takes the runtime packages, reads each
+one's licences (`resolve::license::of_each`: the POM, or the nearest parent
+that declares any, `jobs` at a time) and its checksum (`jrs.lock`'s pin, or
+the jar's SHA-256), and `sbom::cyclonedx` turns them and the graph's edges
+into a `json::Json` document — CycloneDX 1.5, no timestamp, so the same
+inputs give the same bytes. `jrs licenses` reads the licences the same way.
+
 `--obfuscate` lives in `obfuscate.rs` and runs last, over the assembled jar, so
 it composes with the merge rules above instead of redoing them. ProGuard is
 resolved as an isolated tool graph and pinned in `jrs.lock` as the
@@ -940,6 +972,13 @@ directories by their files' bytes. `Session::run_task` asks
 zip keeps each file's `644`/`755`. `target/.jrs/tasks/<name>.outputs`
 records the files the last run or restore left, which is what lets an
 output outside `target/` be replaced without touching a user's file.
+
+`{sources-argfile}` is the one placeholder `task::prepare` writes a file
+for besides `{classpath-argfile}`: `<name>.sources.args`, the project's own
+main and test sources, one absolute path per line. `checkers.rs` builds the
+formatter and checker tasks `jrs init --check` / `--format` and
+`migrate/checks.rs` write — plain `TaskDef`s over a tool graph, nothing that
+runs inside jrs.
 
 A task's action is `run`, `shell`, `script` or `main`. `main` runs a class
 from the task's own `[tasks.<name>.dependencies]` (TASKS.md §8): `cli.rs`
@@ -1048,6 +1087,7 @@ poisoning, which is documented under each function's `# Panics`.
      ├── <name>-<version>.jar
      ├── <name>-<version>-sources.jar  <name>-<version>-javadoc.jar
      │                            --sources / --javadoc
+     ├── <name>-<version>-cyclonedx.json   --sbom
      ├── <name>-<version>.zip     --dist, zipped from dist/<name>-<version>/
      ├── lib/                     --portable
      ├── dist/                    --dist: the staged distribution, bin/ launchers
@@ -1064,10 +1104,11 @@ poisoning, which is documented under each function's `# Panics`.
          ├── main.index  test.index  per source: classes, API digests, references
          ├── test.tested  suite-<name>.tested   class dirs as the last run left them,
          │                          and the test classes to run again
+         │   test-shard-<i>-of-<n>.tested  …  the same, for one --shard
          ├── test.times  suite-<name>.times     each test class's last time, to split forks
          ├── resources-main.list  resources-test.list  resources-*-generated-*.list
          ├── tasks/                 <task>.fingerprint  <task>.cp.args
-         │                          <task>.tool.args
+         │                          <task>.tool.args  <task>.sources.args
          │                          <task>.outputs   cache = true: what the
          │                                           outputs held, by hash
          ├── javadoc.args  scaladoc.args  groovydoc.args
@@ -1140,6 +1181,10 @@ can never lose user data, and task-generated sources must live under
  └── benches/incremental.rs SPEC §7.2: rebuilds after one edit, javac's share;
                            a clean build restored from the build cache
 
+ CI: the reproducible job (.github/workflows/rust.yml)
+ └── every examples/ project packaged from two checkouts at different paths,
+     without the build cache, and everything written compared byte for byte
+
  JRS_BENCH_PROJECT=<path> cargo bench --bench test_jvm
  └── benches/test_jvm.rs   SPEC §10.2: `jrs test` on a real project with
                            share-classes off, true and "aot", and whether
@@ -1168,6 +1213,7 @@ design regression, not a style nit.
 | Relocation rewrites only a class's `CONSTANT_Utf8` entries, never their number or order; a class it cannot read fails the jar | `relocate.rs` |
 | Toolchain output passed through verbatim | `compile/`, `test.rs`, `image.rs` |
 | `jrs.lock` holds no absolute paths; `manifest-checksum` triggers re-resolution | `lockfile.rs` |
+| `{os-classifier}` stays in the coordinate and `jrs.lock`; only file names expand it, and its jar is never pinned | `resolve::coord`, `lockfile.rs` |
 | Resolution reads `effective_dependencies()`, never `dependencies` alone | `manifest.rs`, `resolve/mod.rs` |
 | A managed version replaces what a POM asks for, before mediation; a declared version still wins for its own dependency | `resolve::admissible`, `resolve::with_managed_versions` |
 | A compiler's, a task's or the obfuscator's graph never meets the project's | `resolve::resolve_tool`, `resolve::resolve_tool_dependencies` |

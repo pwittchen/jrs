@@ -145,11 +145,19 @@ impl Coord {
     /// Like [`Coord::file_name`], with the version in the file name replaced —
     /// a timestamped snapshot lives in the `-SNAPSHOT` directory under a name like
     /// `lib-1.0-20240101.120000-3.jar`.
+    ///
+    /// An `{os-classifier}` in the classifier names the host's file
+    /// ([`expand_classifier`]): the coordinate keeps the placeholder, so the
+    /// graph and `jrs.lock` are the same on every machine.
     #[must_use]
     pub fn file_name_as(&self, ext: &str, file_version: &str) -> String {
         match &self.classifier {
             Some(c) if ext != "pom" && !ext.starts_with("pom.") => {
-                format!("{}-{file_version}-{c}.{ext}", self.artifact)
+                format!(
+                    "{}-{file_version}-{}.{ext}",
+                    self.artifact,
+                    expand_classifier(c)
+                )
             }
             _ => format!("{}-{file_version}.{ext}", self.artifact),
         }
@@ -209,6 +217,60 @@ impl PartialOrd for Coord {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))
     }
+}
+
+/// The placeholder a dependency's classifier may hold for the host's
+/// platform, as `os-maven-plugin`'s `${os.detected.classifier}` gives it to
+/// a Maven build: `linux-x86_64`, `osx-aarch_64`, `windows-x86_64`.
+pub const OS_CLASSIFIER: &str = "{os-classifier}";
+
+/// Set to a classifier, it stands for the host's in [`OS_CLASSIFIER`]: to
+/// package for another platform than the one building.
+pub const OS_CLASSIFIER_ENV: &str = "JRS_OS_CLASSIFIER";
+
+/// Whether `classifier` holds a placeholder that names a different file on
+/// another platform — and so a jar whose checksum `jrs.lock` cannot pin.
+#[must_use]
+pub fn is_platform_classifier(classifier: &str) -> bool {
+    classifier.contains(OS_CLASSIFIER)
+}
+
+/// `classifier` with every [`OS_CLASSIFIER`] replaced by the host's, or by
+/// [`OS_CLASSIFIER_ENV`] when that is set.
+#[must_use]
+pub fn expand_classifier(classifier: &str) -> std::borrow::Cow<'_, str> {
+    if is_platform_classifier(classifier) {
+        let host = std::env::var(OS_CLASSIFIER_ENV)
+            .ok()
+            .filter(|v| !v.trim().is_empty())
+            .unwrap_or_else(|| host_classifier(std::env::consts::OS, std::env::consts::ARCH));
+        std::borrow::Cow::Owned(classifier.replace(OS_CLASSIFIER, host.trim()))
+    } else {
+        std::borrow::Cow::Borrowed(classifier)
+    }
+}
+
+/// `os-maven-plugin`'s `os.detected.classifier` for Rust's names of an OS and
+/// an architecture: `<os>-<arch>`, in that plugin's spelling of each.
+#[must_use]
+pub fn host_classifier(os: &str, arch: &str) -> String {
+    let os = match os {
+        "macos" | "ios" => "osx",
+        "solaris" | "illumos" => "sunos",
+        other => other,
+    };
+    let arch = match arch {
+        "x86" => "x86_32",
+        "aarch64" => "aarch_64",
+        "arm" => "arm_32",
+        "powerpc" => "ppc_32",
+        "powerpc64" if cfg!(target_endian = "little") => "ppcle_64",
+        "powerpc64" => "ppc_64",
+        "s390x" => "s390_64",
+        "loongarch64" => "loongarch_64",
+        other => other,
+    };
+    format!("{os}-{arch}")
 }
 
 /// The classifier Maven publishes source code under.
@@ -417,6 +479,40 @@ mod tests {
         assert!(Coord::parse("g:a").is_err());
         assert!(Coord::parse("g:a:1.0:natives:extra").is_err());
         assert!(Coord::parse("g::1.0").is_err());
+    }
+
+    #[test]
+    fn the_host_classifier_is_spelled_as_os_maven_plugin_spells_it() {
+        assert_eq!(host_classifier("linux", "x86_64"), "linux-x86_64");
+        assert_eq!(host_classifier("macos", "aarch64"), "osx-aarch_64");
+        assert_eq!(host_classifier("windows", "x86_64"), "windows-x86_64");
+        assert_eq!(host_classifier("linux", "aarch64"), "linux-aarch_64");
+        assert_eq!(host_classifier("linux", "s390x"), "linux-s390_64");
+    }
+
+    #[test]
+    fn a_platform_classifier_names_the_hosts_file_and_keeps_its_identity() {
+        let c = Coord::new("io.netty", "netty-transport-native-epoll", "4.1.115.Final")
+            .with_classifier(Some("{os-classifier}".into()));
+        let host = host_classifier(std::env::consts::OS, std::env::consts::ARCH);
+        if std::env::var_os(OS_CLASSIFIER_ENV).is_none() {
+            assert_eq!(
+                c.file_name("jar"),
+                format!("netty-transport-native-epoll-4.1.115.Final-{host}.jar")
+            );
+        }
+        assert_eq!(
+            c.to_string(),
+            "io.netty:netty-transport-native-epoll:4.1.115.Final:{os-classifier}",
+            "the coordinate, and so the graph and jrs.lock, keep the placeholder"
+        );
+        assert_eq!(
+            c.file_name("pom"),
+            "netty-transport-native-epoll-4.1.115.Final.pom"
+        );
+        assert!(is_platform_classifier("natives-{os-classifier}"));
+        assert!(!is_platform_classifier("linux-x86_64"));
+        assert_eq!(expand_classifier("tests"), "tests");
     }
 
     #[test]

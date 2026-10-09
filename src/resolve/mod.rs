@@ -7,6 +7,7 @@
 pub mod cache;
 pub mod coord;
 pub mod gradle_module;
+pub mod license;
 pub mod metadata;
 pub mod pom;
 pub mod repo;

@@ -10,6 +10,7 @@
 //! what a user sees.
 
 pub mod build_cache;
+pub mod checkers;
 pub mod cli;
 pub mod compile;
 pub mod completions;
@@ -29,6 +30,7 @@ pub mod project;
 pub mod relocate;
 pub mod resolve;
 pub mod runner;
+pub mod sbom;
 pub mod selfupdate;
 pub mod task;
 pub mod test;

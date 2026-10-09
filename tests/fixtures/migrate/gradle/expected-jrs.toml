@@ -18,3 +18,14 @@ javac-args = ["-proc:full"]
 
 [repositories]
 "nexus" = "https://nexus.example.com/repository/maven-public"
+
+[tasks.checkstyle]
+description = "Check the Java sources with Checkstyle (config/checkstyle/checkstyle.xml)"
+main = "com.puppycrawl.tools.checkstyle.Main"
+args = ["-c", "config/checkstyle/checkstyle.xml", "src/main/java"]
+
+[tasks.checkstyle.dependencies]
+"com.puppycrawl.tools:checkstyle" = "12.3.1"
+
+[hooks]
+post-compile = ["checkstyle"]

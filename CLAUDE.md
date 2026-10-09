@@ -34,13 +34,20 @@ until it is clean. Only then mark the task as done.
 
 CI (`.github/workflows/rust.yml`) runs exactly those four on Linux, macOS and
 Windows (`fmt` on Linux only), plus the network tests on Linux, on push and PR
-against `master`. Changes that only touch `*.md`, `LICENSE` or `website/` are
+against `master`. Its `reproducible` job packages every `examples/` project
+from two checkouts at different paths and compares what was written byte for
+byte: a compiler or writer that records a path or a time fails there. Changes that only touch `*.md`, `LICENSE` or `website/` are
 excluded via `paths-ignore` — they cannot break the build, so they do not run it. A `v*` tag
 push runs the same checks, then `bump` writes the tag's version into `Cargo.toml`
 and `Cargo.lock` and commits it to `master` (the tag itself is never moved), the
-`dist` matrix builds release binaries for Linux (musl), macOS and Windows from that
-commit, and `release` publishes them. The tag must point at the tip of `master`. Don't
-bump the version by hand — tagging is the release process.
+`dist` matrix builds release binaries for Linux (musl), macOS and Windows (x86_64
+and ARM64) from that commit, and `release` publishes them and writes the
+Homebrew, Scoop and winget manifests from their checksums
+(`packaging/manifests.sh`, kept as the `package-manifests` artifact; publishing
+those is manual). The tag must point at the tip of `master`. Don't
+bump the version by hand — tagging is the release process. `setup-jrs/action.yml`
+is the GitHub Action that installs a release (`uses: pwittchen/jrs/setup-jrs@<tag>`);
+it, `website/install.sh` and `packaging/manifests.sh` all depend on the asset names.
 
 `.github/workflows/website.yml` builds `website/` with Bun and rsyncs it to
 `getjrs.dev` on the mikr.us VPS (the `VPS_*` repository secrets) on pushes to

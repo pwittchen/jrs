@@ -229,7 +229,7 @@ post-package = ["checksum"]
 | `resources.properties` | no | `{}` | Names `${...}` may use besides `project.name` and `project.version`; values may use `{project.name}` and `{project.version}`. Needs `resources.expand`. |
 | `obfuscate.*` | no | — | The table turns obfuscation on (§9.8): `version` (required, exact — the ProGuard release), `keep` (class names whose names must survive), `proguard-args` (passed to ProGuard verbatim). Opt-in; `jrs package --obfuscate` runs it. |
 | `kotlin.*`, `scala.*`, `groovy.*` | no | — | The table turns the language on (§7.7): `version` (required, exact), `source-dir` / `test-dir` (`src/main/<lang>` / `src/test/<lang>`), `kotlinc-args` / `scalac-args` / `groovyc-args`, `compiler-jvm-args`, and for Kotlin `plugins` (compiler plugins by name, resolved into the compiler's graph). |
-| `dependencies.*` | no | `{}` | Key is `group:artifact` or `group:artifact:classifier`; value is a version, or a table with `version` and optionally `classifier`, `exclusions` (`group:artifact` patterns, `*` allowed), and `compile-only` or `runtime-only`. A table without `version`, `{}` at its shortest, takes the version `[managed]` gives it (§8.9). A table with `path` instead is a local jar: the key is a name, the path is relative to the project root, and only `compile-only` / `runtime-only` go with it (§8.8). |
+| `dependencies.*` | no | `{}` | Key is `group:artifact` or `group:artifact:classifier` (`{os-classifier}` in a classifier is the host's platform, §8.10); value is a version, or a table with `version` and optionally `classifier`, `exclusions` (`group:artifact` patterns, `*` allowed), and `compile-only` or `runtime-only`. A table without `version`, `{}` at its shortest, takes the version `[managed]` gives it (§8.9). A table with `path` instead is a local jar: the key is a name, the path is relative to the project root, and only `compile-only` / `runtime-only` go with it (§8.8). |
 | `dev-dependencies.*` | no | `{}` | Test classpath only; never packaged. Same forms, without `compile-only` or `runtime-only`. |
 | `managed.*` | no | `{}` | `group:artifact` → a version the artifact is held to wherever it turns up in the graph, or `{ version, bom = true }`, a BOM whose managed versions apply the same way (§8.9). |
 | `repositories.*` | no | Central | Name → base URL, or `{ url, groups }` to confine the repository to those groups (§8.7). |
@@ -320,8 +320,9 @@ jrs <command> [options]
 | Command | Behaviour |
 | --- | --- |
 | `jrs build [--watch]` | Resolve → compile main sources → copy resources. `--watch` repeats on every change (§7.5). |
-| `jrs test [--debug[=port]]` | `build` + compile test sources + run the test engine (§10.2). `--rerun-failed` runs only what failed last time, `--fail-fast` stops at the first failure, `--retries <n>` overrides `test.retries`, `--forks <n>` overrides `test.forks`, `--all` runs every test class rather than those a change reaches, and never takes a passing run from the build cache (§7.8). |
+| `jrs test [--debug[=port]]` | `build` + compile test sources + run the test engine (§10.2). `--rerun-failed` runs only what failed last time, `--fail-fast` stops at the first failure, `--retries <n>` overrides `test.retries`, `--forks <n>` overrides `test.forks`, `--shard <i>/<n>` runs the `i`-th of `n` slices of the test classes, `--all` runs every test class rather than those a change reaches, and never takes a passing run from the build cache (§7.8). |
 | `jrs run [--debug[=port]] [-- args...]` | `build` + `java [<jdwp>] [<run.java-agents>] <run.jvm-args> -cp <cp> <main-class> args...`, in `run.cwd` with `run.env`. |
+| `jrs run --watch` | The same, and on every change to the main sources, resources or the manifest the program is stopped, rebuilt and started again (§7.5). |
 | `jrs package` | `build` + produce `target/<name>-<version>.jar`. |
 | `jrs package --portable` | Same, with the runtime dependencies in `target/lib/` (§9.3). |
 | `jrs package --fat` | Same, but with all runtime dependencies unpacked into the jar. |
@@ -330,6 +331,7 @@ jrs <command> [options]
 | `jrs package --dist` | Also a distribution with launch scripts, zipped into `target/<name>-<version>.zip` (§9.6). |
 | `jrs package --native-image` | Also a GraalVM native executable in `target/native` (§9.7). |
 | `jrs package --obfuscate` | Obfuscate the packaged jar with ProGuard; needs `[obfuscate]` (§9.8). |
+| `jrs package --sbom` | Also a CycloneDX SBOM of the runtime graph, `target/<name>-<version>-cyclonedx.json` (§9.10). |
 | `jrs doc` | Generate Javadoc into `target/doc` (§7.4). |
 | `jrs clean` | Remove `target/`. |
 | `jrs tree [--depth n] [--why artifact] [--tool name] [--task name]` | Print the resolved dependency graph, `n` levels deep, inverted from one artifact to the manifest, a compiler's own graph (§7.7), or a task's (§7.6). |
@@ -337,9 +339,10 @@ jrs <command> [options]
 | `jrs update` | Re-resolve and rewrite `jrs.lock`; re-check every cached snapshot. |
 | `jrs verify` | Re-hash the cached jars against the checksums in `jrs.lock`; exit `1` on a mismatch. |
 | `jrs outdated` | List declared dependencies and `[managed]` entries with newer releases, from `maven-metadata.xml`. |
+| `jrs licenses [--runtime]` | List each dependency's licences from its POM or the nearest parent's, and warn about each that declares none (§8.11). |
 | `jrs add` / `jrs remove` | Edit `[dependencies]` / `[dev-dependencies]` in place, then re-resolve (§4.5). `jrs add` leaves the version out of what `[managed]` covers (§8.9). |
 | `jrs cache path` / `jrs cache prune` | Show or prune the shared cache (§8.6). |
-| `jrs init [--lib] [--lang java\|kotlin\|scala\|groovy]` | Scaffold `jrs.toml`, a starter class and a starter test: JUnit 5 for Java and Kotlin, MUnit for Scala, and for Groovy Java code with Spock specs (§7.7). `--check` adds a `check` task running PMD's `quickstart` rules as a tool (§7.6), in the `post-compile` hook; it is refused for Kotlin and Scala, whose starters have no Java sources. |
+| `jrs init [--lib] [--lang java\|kotlin\|scala\|groovy]` | Scaffold `jrs.toml`, a starter class and a starter test: JUnit 5 for Java and Kotlin, MUnit for Scala, and for Groovy Java code with Spock specs (§7.7). `--check` adds a `check` task running PMD's `quickstart` rules as a tool (§7.6), in the `post-compile` hook; it is refused for Kotlin and Scala, whose starters have no Java sources. `--format` adds a `format` task and a `format-check` task in the `post-compile` hook: google-java-format (AOSP style) for Java and Groovy, ktfmt (kotlinlang style) for Kotlin, as the starters are written; refused for Scala. |
 | `jrs migrate` | Generate `jrs.toml` from an existing `pom.xml` or Gradle build (§11). |
 | `jrs completions <shell>` | Print a bash, zsh or fish completion script. |
 | `jrs task <name> [-- args...]` | Run a user-defined task and whatever it depends on (§7.6). A task with `cache = true` is restored from the build cache rather than run, unless arguments follow `--`. |
@@ -923,6 +926,17 @@ The `inputs` of every task (§7.6) are watched too, and `jrs task <name>
 --watch` runs the same loop. Nothing under `project.target-dir` is ever
 watched, so a task's output cannot retrigger it.
 
+**Restarting the program.** `jrs run --watch` starts the program as a child
+with the terminal handed to it, as `jrs run` does, and watches while it runs:
+the manifest, the main source and resource trees and the tasks' inputs, but
+not the tests, which the program never sees. On a change it stops the program
+— `SIGTERM` on Unix, so shutdown hooks run and a port is released, and a kill
+after ten seconds; a kill on Windows — with a `Stopping` line, then builds
+and starts it again. A program that exits by itself gets its `Finished` line
+and is not restarted until something changes; a failed build is waited out the
+same way. It is what Spring's devtools and a Ktor `-t` build give, with no
+agent in the program: a new JVM per change.
+
 **A warm `javac`.** A watch session keeps one `javac` worker JVM for its
 own lifetime, started the first time a `javac` step runs and sent every
 later one, the first build's included. The worker is a hundred lines of
@@ -1010,7 +1024,7 @@ compile hooks, `test`, `package` and `run` add their own, and `doc` fires
 `pre-compile`, since it documents generated sources too. A hook runs every time
 its point is reached, whether or not `javac` had work to do; skipping work is
 the task's own business. `tree`, `classpath`, `update`, `verify`, `outdated`,
-`add`, `remove`, `cache`, `init`, `migrate`, `completions`, `self` and `clean` never
+`licenses`, `add`, `remove`, `cache`, `init`, `migrate`, `completions`, `self` and `clean` never
 run a task. That is a guarantee: inspecting a freshly cloned project is safe.
 
 **Ordering.** Tasks run serially, and each runs at most once per invocation.
@@ -1053,6 +1067,7 @@ literal braces.
 | `{classes}`, `{test-classes}` | `target/classes`, `target/test-classes`, absolute. |
 | `{classpath}`, `{runtime-classpath}`, `{test-classpath}` | Exactly what `jrs classpath`, `jrs classpath --runtime` and `jrs classpath --test` print. `{classpath}` is `target/classes`, then the compile jars. |
 | `{classpath-argfile}` | `target/.jrs/tasks/<name>.cp.args`, holding `-cp <compile classpath>`, for `java @{classpath-argfile}`. A long classpath in an argument vector overflows the OS limit. |
+| `{sources-argfile}` | `target/.jrs/tasks/<name>.sources.args`, written as the task starts: the project's own main and test sources, of every language, one absolute path per line, generated ones left out. For a formatter or checker that reads its file list as `@file`. Not in a path-valued key. |
 | `{jar}` | The packaged jar. |
 
 A classpath placeholder resolves dependencies if nothing else has, lockfile
@@ -1599,6 +1614,40 @@ jrs older than the table warns that it does not know it and refuses a
 dependency without a version; a project that relies on it can say so with
 `project.jrs-version` (§4.3).
 
+### 8.10 Platform classifiers
+
+A library with native code publishes one jar per platform, by classifier:
+Netty's transports and `netty-tcnative`, among others, which a Maven build
+picks with `os-maven-plugin`'s `${os.detected.classifier}`. In a dependency's
+classifier, `{os-classifier}` stands for the host's, in that plugin's
+spelling: `<os>-<arch>`, with `osx`, `linux`, `windows`, … and `x86_64`,
+`aarch_64`, `x86_32`, `ppcle_64`, …; any other brace in a classifier is a
+manifest error. `JRS_OS_CLASSIFIER` set to a classifier takes the host's
+place, to package for another platform.
+
+The placeholder is part of the coordinate: the graph, `jrs tree` and
+`jrs.lock` hold it unexpanded, so the lockfile is the same on every machine,
+and only a file name — the cache path, the download, the jar in `lib/` —
+expands it. Such a jar has no `checksum` in `jrs.lock`, since another
+platform downloads another file; the repository's own checksum is still
+verified on download, `jrs verify` passes over it under `-v`, and a build
+cache key takes the jar's content hash. The SBOM (§9.10) names the host's jar.
+A library that spells its platforms otherwise (JavaFX, LWJGL) is declared with
+the classifier written out.
+
+### 8.11 Licences
+
+`jrs licenses` lists every package of the graph that has a jar — `--runtime`,
+only those on the runtime classpath — with the `<licenses>` of its POM. A POM
+that declares none inherits its parent's, as in Maven's model, so the
+`<parent>` chain is followed until one does. A licence is shown by its SPDX
+identifier when its name or URL is one of the common licences' usual
+spellings in Maven Central (`The Apache Software License, Version 2.0` is
+`Apache-2.0`), and by its name otherwise; jrs never guesses beyond that. A
+package that declares none is listed as such and warned about; a local jar
+has no POM to declare one. Nothing fails: what a project accepts is a policy
+jrs does not hold. It reads POMs only, from the cache where they are.
+
 ---
 
 ## 9. Packaging
@@ -1835,6 +1884,27 @@ the table is present. `jrs run` and `jrs test` run the unrelocated classpath.
 Relocation needs no tool and no crate: it is the one place jrs rewrites class
 files, and all it touches is names.
 
+### 9.10 SBOM (`--sbom`)
+
+`jrs package --sbom` writes `target/<name>-<version>-cyclonedx.json`, a
+CycloneDX 1.5 JSON document of what the package ships: the project as
+`metadata.component` (an `application` with a main class, a `library`
+otherwise), jrs as the tool, and a component for every package on the runtime
+classpath and every runtime local jar, with
+
+- its package URL as `bom-ref` and `purl`: `pkg:maven/<group>/<artifact>@<version>`,
+  a classifier as a qualifier (the host's, for `{os-classifier}`, §8.10) and
+  `type=pom` for a POM-packaged node;
+- its checksum, `SHA-1` or `SHA-256`, the one `jrs.lock` pins, or the jar's
+  own SHA-256 where nothing is pinned;
+- its licences (§8.11): an SPDX `id` when there is one, a `name` otherwise,
+  and the URL;
+- and the graph, as `dependencies`: the project on its direct dependencies,
+  and each package on the runtime packages it depends on.
+
+`json.rs` writes it, as it writes `jrs metadata`. It holds no timestamp and no
+serial number, so the same inputs write the same bytes (§9.2's determinism).
+
 ---
 
 ## 10. Testing
@@ -2034,6 +2104,18 @@ files, and all it touches is names.
   that cannot map the cache runs without it, silently. Whether either mode
   becomes the default is decided by measurement on the corpus
   (`specs/TEST_JVM_BENCHMARK.md`, `cargo bench --bench test_jvm`).
+- `jrs test --shard <i>/<n>` runs the `i`-th of `n` slices of the test
+  classes, so CI can spread one suite over `n` machines. The slices are dealt
+  as forks are without times — the top-level classes in name order, every
+  `n`-th to each — and depend on nothing else, never on `test.times` or the
+  last run's selection, which differ from machine to machine; `n` shards of
+  one commit run every class once. The slice becomes the run's
+  `--include-classname` (a lookahead in front of `--filter`, as a fork's) and
+  its whole: what a change reaches is narrowed to it, its build-cache key holds
+  it, and its record is `test-shard-<i>-of-<n>.tested`, so two shards run in
+  one checkout do not take each other's runs for their own. A shard with no
+  classes says so and exits `0`. `--method` and `--rerun-failed` select
+  across the whole suite, so they are refused with it.
 - `test.forks = n` (or `--forks n`) splits a class-path scan among `n`
   launchers run at once, Gradle's `maxParallelForks`. Unset, jrs runs one
   launcher per 8 top-level test classes, up to half the available cores, and
@@ -2142,6 +2224,10 @@ parent chains and `<dependencyManagement>` already work.
 | `<profiles>` a plain `mvn` build activates: each whose `<activation>` holds with no `-P` and no `-D` — its conditions all negated properties (`!skipDocs`) — else the `<activeByDefault>` ones | merged into their POM before anything is read, as Maven injects them, the profile dominant: properties by name, dependencies and repositories by key, plugins by key with `<configuration>` merged element by element, executions by `<id>`. A default profile gets a review line when another profile could activate on some machine and turn it off |
 | `maven-surefire-plugin` `<argLine>`, `<systemPropertyVariables>` | `test.jvm-args` |
 | `maven-surefire-plugin` `<forkCount>`, a number | `test.forks`, `1` included: unset, jrs picks its own number. A build with tests and no `<forkCount>` gets a review line saying so |
+| `spotless-maven-plugin` `<java><googleJavaFormat>` / `<kotlin><ktfmt>`, `fmt-maven-plugin` | `format` and `format-check` tasks (`format-kotlin…` beside a Java formatter) over the formatter's own graph, at the `<version>` and `<style>` given; `format-check` in `hooks.post-compile` |
+| `maven-checkstyle-plugin`, `maven-pmd-plugin`, `spotbugs-maven-plugin` | `checkstyle`, `pmd` and `spotbugs` tasks in `hooks.post-compile`, over the tool's own graph at the version among the plugin's `<dependencies>`: Checkstyle's `<configLocation>` (`sun_checks.xml` by default, read from Checkstyle's jar), PMD 7's `<rulesets>` (PMD's `quickstart` rules, reviewed, when the plugin's own default applies) |
+| `cyclonedx-maven-plugin`, `org.codehaus.mojo:license-maven-plugin` | a review line pointing at `jrs package --sbom` / `jrs licenses` |
+| `<classifier>${os.detected.classifier}</classifier>` | `{os-classifier}` (§8.10) |
 
 Reported, not translated:
 
@@ -2153,7 +2239,8 @@ Reported, not translated:
   does not go on a classpath.
 - Any plugin other than `maven-compiler-plugin`, `maven-jar-plugin`,
   `maven-surefire-plugin`, `maven-shade-plugin`, `spring-boot-maven-plugin`,
-  `exec-maven-plugin` and the language plugins of §11.6 — each is named in
+  `exec-maven-plugin`, the formatters and checkers above and the language
+  plugins of §11.6 — each is named in
   the report as unmigrated. An `exec-maven-plugin` execution jrs cannot
   translate whole (another phase, `<async>`, a property it cannot evaluate)
   is named on its own.
@@ -2242,6 +2329,18 @@ the conventional declarative subset, and is explicit about the fact:
   migration does by reading the main sources. `bootJar`'s nested layout is not
   reproduced: `jrs package --fat` builds a flat jar with Spring's registries
   merged (§9.2), and a review line says so.
+- Formatters and checkers. Spotless's `googleJavaFormat(...)` and
+  `ktfmt(...)` steps → `format` and `format-check` tasks at the version
+  given, with `.aosp()`, `.googleStyle()` and `.kotlinlangStyle()`; its other
+  steps get a review line. The `checkstyle`, `pmd` and `com.github.spotbugs`
+  plugins → `checkstyle`, `pmd` and `spotbugs` tasks, at `toolVersion`, with
+  Checkstyle's `configFile` (Gradle's `config/checkstyle/checkstyle.xml`
+  otherwise) and PMD's `ruleSetFiles` / `ruleSets` (Gradle's
+  `category/java/errorprone.xml` otherwise; a PMD 6 version is reviewed and
+  PMD 7 run). The checks go into `hooks.post-compile`. The `org.cyclonedx.bom`
+  and `com.github.jk1.dependency-license-report` plugins get a review line
+  pointing at `jrs package --sbom` and `jrs licenses`, and the osdetector
+  plugin's `osdetector.classifier` becomes `{os-classifier}` (§8.10).
 - The Shadow plugin (`com.github.johnrengelman.shadow`, `com.gradleup.shadow`,
   `io.github.goooler.shadow`). `shadowJar` is `jrs package --fat`, and a review
   line says so. Its `relocate` calls with literal packages (in `shadowJar { }`,

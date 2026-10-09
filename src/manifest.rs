@@ -600,11 +600,12 @@ pub enum Placeholder {
     RuntimeClasspath,
     TestClasspath,
     ClasspathArgfile,
+    SourcesArgfile,
     Jar,
 }
 
 impl Placeholder {
-    pub const ALL: [Placeholder; 11] = [
+    pub const ALL: [Placeholder; 12] = [
         Placeholder::Root,
         Placeholder::Target,
         Placeholder::ProjectName,
@@ -615,6 +616,7 @@ impl Placeholder {
         Placeholder::RuntimeClasspath,
         Placeholder::TestClasspath,
         Placeholder::ClasspathArgfile,
+        Placeholder::SourcesArgfile,
         Placeholder::Jar,
     ];
 
@@ -632,6 +634,7 @@ impl Placeholder {
             Placeholder::RuntimeClasspath => "runtime-classpath",
             Placeholder::TestClasspath => "test-classpath",
             Placeholder::ClasspathArgfile => "classpath-argfile",
+            Placeholder::SourcesArgfile => "sources-argfile",
             Placeholder::Jar => "jar",
         }
     }
@@ -1213,6 +1216,7 @@ pub const RESERVED_TASK_NAMES: &[&str] = &[
     "update",
     "verify",
     "outdated",
+    "licenses",
     "add",
     "remove",
     "cache",
@@ -2280,27 +2284,39 @@ fn parse_tasks(table: &toml::Table, warnings: &mut Vec<String>) -> Result<Vec<Ta
             cache: bool_key(t, "cache", &format!("`{section}.cache`"))?,
             dependencies,
         };
-        for (key, t) in task
-            .path_templates()
-            .chain(task.cwd.iter().map(|t| ("cwd", t)))
-        {
-            if let Some(p) = t.placeholders().find(|p| p.is_classpath()) {
-                return Err(JrsError::manifest(format!(
-                    "`{section}.{key}`: `{{{}}}` is a classpath, not a path; it cannot \
-                     name a file or directory",
-                    p.name()
-                )));
-            }
-            if t.has_free_port() {
-                return Err(JrsError::manifest(format!(
-                    "`{section}.{key}`: `{{free-port.<name>}}` is a port, not a path; it \
-                     belongs in `env` or `args`"
-                )));
-            }
-        }
+        check_path_templates(&task, &section)?;
         out.push(task);
     }
     Ok(out)
+}
+
+/// A task's path-valued keys hold paths: no classpath, port or argfile.
+fn check_path_templates(task: &TaskDef, section: &str) -> Result<()> {
+    for (key, t) in task
+        .path_templates()
+        .chain(task.cwd.iter().map(|t| ("cwd", t)))
+    {
+        if let Some(p) = t.placeholders().find(|p| p.is_classpath()) {
+            return Err(JrsError::manifest(format!(
+                "`{section}.{key}`: `{{{}}}` is a classpath, not a path; it cannot \
+                 name a file or directory",
+                p.name()
+            )));
+        }
+        if t.has_free_port() {
+            return Err(JrsError::manifest(format!(
+                "`{section}.{key}`: `{{free-port.<name>}}` is a port, not a path; it \
+                 belongs in `env` or `args`"
+            )));
+        }
+        if t.placeholders().any(|p| p == Placeholder::SourcesArgfile) {
+            return Err(JrsError::manifest(format!(
+                "`{section}.{key}`: `{{sources-argfile}}` is written when the task runs, \
+                 for its arguments; name the source directories here instead"
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// `[tasks.<name>.dependencies]`: the `[dependencies]` value forms, as the
@@ -2409,8 +2425,8 @@ fn parse_jvm_cwd(t: &toml::Table, section: &str) -> Result<Option<Template>> {
     Ok(Some(template))
 }
 
-/// `{jar}` and `{classpath-argfile}` have a value in a task only: `jrs run`
-/// and `jrs test` package nothing, and the argfile is a task's own.
+/// `{jar}` and the argfiles have a value in a task only: `jrs run` and
+/// `jrs test` package nothing, and an argfile is a task's own.
 fn refuse_task_placeholders(template: &Template, key: &str) -> Result<()> {
     for p in template.placeholders() {
         let why = match p {
@@ -2419,6 +2435,7 @@ fn refuse_task_placeholders(template: &Template, key: &str) -> Result<()> {
                 "the argfile is a task's own; use `{classpath}`, `{runtime-classpath}` or \
                  `{test-classpath}`"
             }
+            Placeholder::SourcesArgfile => "the argfile is a task's own",
             _ => continue,
         };
         return Err(JrsError::manifest(format!(
@@ -2600,6 +2617,7 @@ fn parse_dependency_table(value: Option<&toml::Value>, section: &str) -> Result<
                 )));
             }
         }
+        check_classifier(&dep, section, key)?;
         if matches!(value, toml::Value::String(_)) && dep.version.trim().is_empty() {
             return Err(JrsError::manifest(format!(
                 "`{section}.\"{key}\"` has an empty version; write `{{}}` to take it from \
@@ -2615,6 +2633,27 @@ fn parse_dependency_table(value: Option<&toml::Value>, section: &str) -> Result<
         out.push(dep);
     }
     Ok(out)
+}
+
+/// A classifier holds no braces but those of `{os-classifier}`, the one
+/// placeholder there is: anything else would reach the repository as a
+/// file name.
+fn check_classifier(dep: &Dependency, section: &str, key: &str) -> Result<()> {
+    let Some(classifier) = &dep.classifier else {
+        return Ok(());
+    };
+    if classifier
+        .replace(crate::resolve::coord::OS_CLASSIFIER, "")
+        .contains(['{', '}'])
+    {
+        return Err(JrsError::manifest(format!(
+            "`{section}.\"{key}\"`: the classifier `{classifier}` holds a placeholder jrs does \
+             not know; the one there is, `{}`, stands for the platform jrs runs on, as \
+             `linux-x86_64` or `osx-aarch_64`",
+            crate::resolve::coord::OS_CLASSIFIER
+        )));
+    }
+    Ok(())
 }
 
 /// The keys of a dependency written as a table: its version, classifier,
@@ -3767,6 +3806,25 @@ internal = "https://nexus.example.com/repository/maven-public/"
             ]
         );
         assert_eq!(m.dev_dependencies.len(), 1);
+    }
+
+    #[test]
+    fn a_classifier_may_name_the_hosts_platform() {
+        let base = "[project]\nname = 'a'\nversion = '1'\n";
+        let m = parse(&format!(
+            "{base}[dependencies]\n\
+             'io.netty:netty-transport-native-epoll:{{os-classifier}}' = '4.1.115.Final'\n\
+             'io.netty:netty-tcnative-boringssl-static' = \
+             {{ version = '2.0.69.Final', classifier = '{{os-classifier}}' }}\n"
+        ))
+        .unwrap();
+        for d in &m.dependencies {
+            assert_eq!(d.classifier.as_deref(), Some("{os-classifier}"));
+        }
+        let err = parse(&format!("{base}[dependencies]\n'g:a:{{os}}' = '1'\n"))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("placeholder jrs does not know"), "{err}");
     }
 
     #[test]

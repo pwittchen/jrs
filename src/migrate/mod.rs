@@ -5,6 +5,7 @@
 //! build files are never touched, so a project can keep building with its old
 //! tool while the migration is evaluated.
 
+mod checks;
 pub mod gradle;
 mod gradle_files;
 mod gradle_generated;

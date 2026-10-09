@@ -17,7 +17,7 @@ use super::{Migration, Report, Source};
 use crate::compile::lang::Language;
 use crate::error::{IoResultExt, Result};
 use crate::manifest::{self, Dependency, Exclusion, Manifest, Placeholder};
-use crate::resolve::coord::Ga;
+use crate::resolve::coord::{Ga, OS_CLASSIFIER};
 
 const PREAMBLE: &str = "Gradle migration is approximate. jrs reads the declarative \
                         parts of a build script by pattern, not by running Gradle, \
@@ -130,6 +130,7 @@ pub fn migrate(build_file: &Path, root: &Path) -> Result<Migration> {
         super::gradle_generated::read_source_sets(&script, &paths, &mut out, &mut report);
     vars.report(&mut report);
     read_jacoco(&script, &plugins, &mut out, &mut report);
+    let checkers = read_checkers(&script, &plugins, &mut out, &mut report);
     report_the_unreadable(
         &script,
         &settings,
@@ -137,6 +138,7 @@ pub fn migrate(build_file: &Path, root: &Path) -> Result<Migration> {
         &Understood {
             openapi: openapi_translated,
             source_sets: source_sets_read,
+            checkers,
         },
         &out,
         &mut report,
@@ -1702,6 +1704,206 @@ fn read_jacoco(script: &str, plugins: &[Plugin], out: &mut Manifest, report: &mu
     );
 }
 
+/// The statements of `name { }`, whether the block spans lines or is
+/// written on one, as `checkstyle { toolVersion = '10.12.0' }`.
+fn block_statements(script: &str, name: &str) -> Vec<String> {
+    let mut out: Vec<String> = block_lines(script, name)
+        .iter()
+        .map(|l| l.trim().to_string())
+        .collect();
+    for line in script.lines().map(str::trim) {
+        if let Some(rest) = line.strip_prefix(name)
+            && let Some(body) = rest.trim_start().strip_prefix('{')
+            && let Some(body) = body.trim_end().strip_suffix('}')
+        {
+            out.extend(body.split(';').map(|s| s.trim().to_string()));
+        }
+    }
+    out
+}
+
+/// The value of `key` in `name { }`: `key = "x"`, or `key.set("x")` in the
+/// Kotlin DSL.
+fn block_setting(script: &str, name: &str, key: &str) -> Option<String> {
+    block_statements(script, name)
+        .iter()
+        .find(|l| l.starts_with(key))
+        .and_then(|l| quoted(l).into_iter().next())
+}
+
+fn tool_version(script: &str, name: &str) -> Option<String> {
+    block_setting(script, name, "toolVersion")
+}
+
+/// Spotless's googleJavaFormat and ktfmt steps → `format` and
+/// `format-check` tasks. Whether there was either.
+fn read_spotless(script: &str, out: &mut Manifest, report: &mut Report) -> bool {
+    use super::checks;
+    use crate::checkers::{self, Tool};
+
+    let block = block_lines(script, "spotless").join("\n");
+    // `googleJavaFormat('1.17.0').aosp()`, `ktfmt("0.46").googleStyle()`.
+    let call = |name: &str| {
+        let rest = block.split(&format!("{name}(")).nth(1)?;
+        let args = rest.split(')').next().unwrap_or_default();
+        let tail = rest.lines().next().unwrap_or_default().to_string();
+        Some((quoted(args).into_iter().next(), tail))
+    };
+    let java = call("googleJavaFormat");
+    let kotlin = call("ktfmt");
+    if let Some((given, tail)) = &java {
+        let version = checks::version(Tool::GoogleJavaFormat, given.clone());
+        let tasks = checkers::google_java_format(&version, tail.contains(".aosp()"));
+        checks::add(
+            out,
+            tasks.map(Vec::from),
+            Tool::GoogleJavaFormat,
+            "plugin `com.diffplug.spotless` (googleJavaFormat)",
+            report,
+        );
+    }
+    if let Some((given, tail)) = &kotlin {
+        let version = checks::version(Tool::Ktfmt, given.clone());
+        let style = if tail.contains("googleStyle") {
+            Some("--google-style")
+        } else if tail.contains("kotlinlangStyle") {
+            Some("--kotlinlang-style")
+        } else {
+            None
+        };
+        let tasks = checkers::ktfmt(&version, style, &checks::kotlin_dirs(out)).map(|tasks| {
+            // Beside google-java-format's, they need names of their own.
+            let mut tasks = Vec::from(tasks);
+            if java.is_some() {
+                for t in &mut tasks {
+                    t.task.name = t.task.name.replacen("format", "format-kotlin", 1);
+                }
+            }
+            tasks
+        });
+        checks::add(
+            out,
+            tasks,
+            Tool::Ktfmt,
+            "plugin `com.diffplug.spotless` (ktfmt)",
+            report,
+        );
+    }
+    if java.is_none() && kotlin.is_none() {
+        return false;
+    }
+    if block.contains("palantirJavaFormat")
+        || block.contains("eclipse(")
+        || block.contains("prettier")
+        || block.contains("licenseHeader")
+    {
+        report.review(
+            "plugin `com.diffplug.spotless` — only its googleJavaFormat and ktfmt steps \
+             became tasks; the others in `spotless { }` did not"
+                .to_string(),
+        );
+    }
+    true
+}
+
+/// The plugin ids of formatters and checkers this translated into tasks
+/// (`super::checks`), and of the SBOM and licence report plugins jrs has a
+/// command for.
+fn read_checkers(
+    script: &str,
+    plugins: &[Plugin],
+    out: &mut Manifest,
+    report: &mut Report,
+) -> Vec<&'static str> {
+    use super::checks;
+    use crate::checkers::{self, Tool};
+
+    let applied = |id: &str| plugins.iter().any(|p| p.id == id);
+    let mut done = Vec::new();
+    if applied("com.diffplug.spotless") && read_spotless(script, out, report) {
+        done.push("com.diffplug.spotless");
+    }
+    if applied("checkstyle") {
+        let version = checks::version(Tool::Checkstyle, tool_version(script, "checkstyle"));
+        // Gradle's own default, which it requires to exist.
+        let config = block_setting(script, "checkstyle", "configFile")
+            .unwrap_or_else(|| "config/checkstyle/checkstyle.xml".to_string());
+        let task = checkers::checkstyle(&version, &config, &checks::java_dirs(out));
+        checks::add(
+            out,
+            task.map(|t| vec![t]),
+            Tool::Checkstyle,
+            "plugin `checkstyle`",
+            report,
+        );
+        done.push("checkstyle");
+    }
+    if applied("pmd") {
+        let given = tool_version(script, "pmd");
+        if given.as_deref().is_some_and(|v| !v.starts_with("7.")) {
+            report.review(format!(
+                "plugin `pmd` — `toolVersion` {} is not PMD 7, which jrs's task runs; \
+                 rules may have moved",
+                given.as_deref().unwrap_or_default()
+            ));
+        }
+        let version = match given {
+            Some(v) if v.starts_with("7.") => v,
+            _ => Tool::Pmd.default_version().to_string(),
+        };
+        let rulesets: Vec<String> = block_statements(script, "pmd")
+            .iter()
+            .filter(|l| l.starts_with("ruleSetFiles") || l.starts_with("ruleSets"))
+            .flat_map(|l| quoted(l))
+            .collect();
+        // Gradle's default rule set.
+        let rulesets = if rulesets.is_empty() {
+            "category/java/errorprone.xml".to_string()
+        } else {
+            rulesets.join(",")
+        };
+        let task = checkers::pmd("pmd", &version, &checks::java_dirs(out), &rulesets);
+        checks::add(
+            out,
+            task.map(|t| vec![t]),
+            Tool::Pmd,
+            "plugin `pmd`",
+            report,
+        );
+        done.push("pmd");
+    }
+    // An SBOM and a licence report are commands in jrs, not tasks.
+    if applied("org.cyclonedx.bom") {
+        report.review(
+            "plugin `org.cyclonedx.bom` — the SBOM is a flag in jrs: `jrs package --sbom` \
+             writes target/<name>-<version>-cyclonedx.json"
+                .to_string(),
+        );
+        done.push("org.cyclonedx.bom");
+    }
+    if applied("com.github.jk1.dependency-license-report") {
+        report.review(
+            "plugin `com.github.jk1.dependency-license-report` — `jrs licenses` lists each \
+             dependency's licence and flags the ones that declare none"
+                .to_string(),
+        );
+        done.push("com.github.jk1.dependency-license-report");
+    }
+    if applied("com.github.spotbugs") {
+        let version = checks::version(Tool::SpotBugs, tool_version(script, "spotbugs"));
+        let task = checkers::spotbugs(&version);
+        checks::add(
+            out,
+            task.map(|t| vec![t]),
+            Tool::SpotBugs,
+            "plugin `com.github.spotbugs`",
+            report,
+        );
+        done.push("com.github.spotbugs");
+    }
+    done
+}
+
 /// `jar { }`, and the `tasks.jar` / `tasks.named('jar')` /
 /// `tasks.withType(Jar)` spellings of it.
 fn is_jar_block(header: &str) -> bool {
@@ -1911,6 +2113,8 @@ struct Understood {
     openapi: bool,
     /// Every `srcDir` in `sourceSets { }`.
     source_sets: bool,
+    /// The formatter and checker plugins that became tasks.
+    checkers: Vec<&'static str>,
 }
 
 fn report_the_unreadable(
@@ -1968,7 +2172,8 @@ fn report_the_unreadable(
         ) || SHADOW_PLUGINS.contains(&id)
             || language_plugin(id).is_some()
             || kotlin_compiler_plugin(id).is_some()
-            || (understood.openapi && id == super::gradle_generated::OPENAPI_PLUGIN);
+            || (understood.openapi && id == super::gradle_generated::OPENAPI_PLUGIN)
+            || understood.checkers.contains(&id);
         if !understood {
             report.skipped(format!("plugin `{id}` — jrs has no plugin system"));
         }
@@ -2772,6 +2977,14 @@ fn literal_gav(
     if !literal.contains(':') {
         return Ok(None);
     }
+    // The osdetector plugin's classifier is jrs's `{os-classifier}`.
+    let literal = if quote == '"' {
+        literal
+            .replace("${osdetector.classifier}", OS_CLASSIFIER)
+            .replace("$osdetector.classifier", OS_CLASSIFIER)
+    } else {
+        literal
+    };
     let (coordinate, names) = if quote == '"' && literal.contains('$') {
         vars.interpolate(&literal)?
     } else {
@@ -2806,7 +3019,10 @@ fn parse_map_notation(
         };
         let mut dep = Dependency::new(group, artifact, version);
         dep.classifier = gradle_vars::map_field(line, "classifier")
-            .map(|c| read(&c))
+            .map(|c| match c.trim() {
+                "osdetector.classifier" => Ok(OS_CLASSIFIER.to_string()),
+                c => read(c),
+            })
             .transpose()?;
         Ok(dep)
     })();
@@ -2959,6 +3175,72 @@ application {
     }
 
     #[test]
+    fn formatter_and_checker_plugins_become_tasks() {
+        let dir = Dir::new("checkers");
+        dir.write("src/main/java/com/example/App.java", "");
+        let migration = dir.migrate(
+            "plugins {\n\
+             \x20 id 'java'\n\
+             \x20 id 'checkstyle'\n\
+             \x20 id 'pmd'\n\
+             \x20 id 'com.github.spotbugs' version '6.0.7'\n\
+             \x20 id 'com.diffplug.spotless' version '6.25.0'\n\
+             }\n\
+             checkstyle { toolVersion = '10.12.0' }\n\
+             pmd {\n  toolVersion = '7.2.0'\n  ruleSetFiles = files('config/pmd/rules.xml')\n}\n\
+             spotless {\n  java {\n    googleJavaFormat('1.17.0').aosp()\n  }\n}\n",
+        );
+        let m = &migration.manifest;
+        let names: Vec<&str> = m.tasks.iter().map(|t| t.name.as_str()).collect();
+        assert_eq!(
+            names,
+            ["format", "format-check", "checkstyle", "pmd", "spotbugs"]
+        );
+        assert_eq!(
+            m.hooks.tasks(manifest::Hook::PostCompile),
+            ["format-check", "checkstyle", "pmd", "spotbugs"]
+        );
+        let version = |task: &str| {
+            m.tasks
+                .iter()
+                .find(|t| t.name == task)
+                .unwrap()
+                .dependencies[0]
+                .version
+                .clone()
+        };
+        assert_eq!(version("format"), "1.17.0");
+        assert_eq!(version("checkstyle"), "10.12.0");
+        assert_eq!(version("pmd"), "7.2.0");
+        let args = |task: &str| -> Vec<String> {
+            m.tasks
+                .iter()
+                .find(|t| t.name == task)
+                .unwrap()
+                .args
+                .iter()
+                .map(|a| a.raw.clone())
+                .collect()
+        };
+        assert!(args("format-check").contains(&"--aosp".to_string()));
+        assert_eq!(
+            args("checkstyle"),
+            ["-c", "config/checkstyle/checkstyle.xml", "src/main/java"],
+            "Gradle's default configuration, and only the directories that exist"
+        );
+        assert!(args("pmd").contains(&"config/pmd/rules.xml".to_string()));
+
+        let skipped = migration.report.not_migrated.join("\n");
+        for id in ["spotless", "checkstyle", "pmd", "spotbugs"] {
+            assert!(!skipped.contains(id), "{id}: {skipped}");
+        }
+        // The manifest it writes reads back.
+        let text = m.render(None);
+        let again = Manifest::parse(&text, &dir.path.join("jrs.toml"), &dir.path).unwrap();
+        assert_eq!(again.tasks.len(), 5, "{text}");
+    }
+
+    #[test]
     fn shadow_jar_relocations_are_translated() {
         let dir = Dir::new("shadow");
         let migration = dir.migrate(&format!(
@@ -3042,6 +3324,29 @@ application {
             "compileOnly plus runtimeOnly is a plain dependency"
         );
         assert!(!m.dev_dependencies[0].runtime_only);
+    }
+
+    #[test]
+    fn the_osdetector_classifier_becomes_the_os_classifier() {
+        let dir = Dir::new("osdetector");
+        let m = dir
+            .migrate(
+                "dependencies {\n\
+                 \x20 implementation \"io.netty:netty-tcnative-boringssl-static:2.0.69.Final:\
+                 ${osdetector.classifier}\"\n\
+                 \x20 implementation group: 'io.netty', name: 'netty-transport-native-epoll', \
+                 version: '4.1.115.Final', classifier: osdetector.classifier\n\
+                 }\n",
+            )
+            .manifest;
+        let keys: Vec<String> = m.dependencies.iter().map(|d| d.key()).collect();
+        assert_eq!(
+            keys,
+            vec![
+                "io.netty:netty-tcnative-boringssl-static:{os-classifier}",
+                "io.netty:netty-transport-native-epoll:{os-classifier}",
+            ]
+        );
     }
 
     #[test]

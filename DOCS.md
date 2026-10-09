@@ -56,6 +56,7 @@ for each of these platforms:
 | Linux, x86_64 | `x86_64-unknown-linux-musl` |
 | Linux, ARM64 | `aarch64-unknown-linux-musl` |
 | Windows, x86_64 | `x86_64-pc-windows-msvc` |
+| Windows, ARM64 | `aarch64-pc-windows-msvc` |
 
 The Linux binaries are statically linked and run on any distribution. To install
 the latest release into `~/.local/bin` by hand, without the script:
@@ -75,6 +76,23 @@ tar -xf jrs-x86_64-pc-windows-msvc.zip jrs.exe
 
 then move `jrs.exe` to a directory on your `PATH`. Each release also carries a
 `SHA256SUMS` file for verifying the downloads.
+
+### In GitHub Actions
+
+The repository is also an action that installs a prebuilt jrs on the runner,
+checked against the release's `SHA256SUMS`, and puts it on `PATH` — on Linux,
+macOS and Windows, x86_64 and ARM64:
+
+```yaml
+- uses: actions/setup-java@v6
+  with: { distribution: temurin, java-version: '21' }
+- uses: pwittchen/jrs/setup-jrs@v0.9.0   # installs jrs 0.9.0
+- run: jrs test
+```
+
+Used at a release tag, it installs that release; `with: { version: '0.8.0' }`
+or `version: latest` picks another. Its `version` output is the version
+installed. The action is [`setup-jrs/action.yml`](setup-jrs/action.yml).
 
 ### From source
 
@@ -453,6 +471,24 @@ The long form is a table with a `version` and any of the following:
   natives or a platform build. Writing the classifier in the key lets one table
   hold the same artifact with and without it.
 
+Netty's native transports, `netty-tcnative` and others publish one jar per
+platform. `{os-classifier}` in a classifier stands for the platform jrs runs
+on, spelled as Maven's `os-maven-plugin` spells `${os.detected.classifier}`:
+`linux-x86_64`, `linux-aarch_64`, `osx-aarch_64`, `windows-x86_64`.
+
+```toml
+[dependencies]
+"io.netty:netty-transport-native-epoll:{os-classifier}" = "4.1.115.Final"
+"io.netty:netty-tcnative-boringssl-static" = { version = "2.0.69.Final", classifier = "{os-classifier}" }
+```
+
+`jrs.lock` keeps the placeholder, so it is the same file on every machine,
+and pins no checksum for such a jar, since each platform downloads another;
+the repository's own checksum is still checked. `JRS_OS_CLASSIFIER` set to a
+classifier stands for the host's, to package for another platform. A
+platform that names its builds differently — JavaFX's `mac-aarch64`, LWJGL's
+`natives-macos-arm64` — is written out.
+
 A version ending in `-SNAPSHOT` resolves through the repository's
 `maven-metadata.xml`, and its checksum is not pinned in `jrs.lock`. A cached
 snapshot is re-checked once a day. When it came from a `file://` repository,
@@ -540,7 +576,7 @@ for any repository.
 | `jrs build [--watch]` | Resolve → compile main sources → copy resources. `--watch` rebuilds on every change, compiling in one warm `javac` for the whole session. |
 | `jrs build --verify-cache` | Compile everything and run every cached task, and fail if the [build cache](#build-cache) holds different classes or outputs for the same inputs. |
 | `jrs test` | `build` + compile test sources + run the tests a change since the last run reaches. The tests are not recompiled for a main change that leaves the main classes' API alone. See [Tests](#tests) for its flags. |
-| `jrs run [--debug[=<port>]] [-- args...]` | `build` + run `main-class` with `args`. `--debug` waits for a debugger first; see below. |
+| `jrs run [--watch] [--debug[=<port>]] [-- args...]` | `build` + run `main-class` with `args`. `--watch` stops the program, rebuilds and starts it again on every change; `--debug` waits for a debugger first; see below. |
 | `jrs package` | `build` + produce `target/<name>-<version>.jar`. |
 | `jrs package --portable` | Same, with the runtime dependencies copied into `target/lib/`. |
 | `jrs package --fat` | Same, with every runtime dependency unpacked into the jar. |
@@ -550,6 +586,7 @@ for any repository.
 | `jrs package --dist` | Also write a distribution with launch scripts in `bin/`, zipped into `target/<name>-<version>.zip`. |
 | `jrs package --native-image` | Also build a native executable in `target/native` with GraalVM's `native-image`. |
 | `jrs package --obfuscate` | Obfuscate the packaged jar with ProGuard; needs an `[obfuscate]` table. |
+| `jrs package --sbom` | Also write a CycloneDX SBOM of the runtime dependencies, `target/<name>-<version>-cyclonedx.json`. |
 | `jrs doc` | Generate API docs into `target/doc`: Javadoc, or Scaladoc / Groovydoc for Scala and Groovy code. |
 | `jrs clean` | Remove `target/`. |
 | `jrs tree [--depth <n>] [--why <artifact>] [--tool <name>] [--task <name>]` | Print the resolved dependency graph, every path that leads to one artifact, a compiler's own graph (`kotlin-compiler`, `scala-compiler`, `groovy-compiler`), the obfuscator's (`obfuscator`), or a task's. |
@@ -557,10 +594,11 @@ for any repository.
 | `jrs update` | Re-resolve and rewrite `jrs.lock`. |
 | `jrs verify` | Re-hash the cached dependency jars against the checksums in `jrs.lock`. |
 | `jrs outdated` | List declared dependencies and `[managed]` versions that have newer releases. |
+| `jrs licenses [--runtime]` | List each dependency's licence, as its POM or its parent's declares it, and flag those that declare none. |
 | `jrs add <group:artifact[:version[:classifier]]>... [--dev] [--compile-only \| --runtime-only]` | Add dependencies to `jrs.toml`, at their newest release unless given a version; what `[managed]` covers goes in without one. |
 | `jrs remove <group:artifact \| name>... [--dev]` | Remove dependencies from `jrs.toml`; a local jar goes by its name. |
 | `jrs cache path` / `jrs cache prune` | Print where the cache is, or remove what no project uses. See [Dependency cache](#dependency-cache). |
-| `jrs init [--lib] [--lang <java\|kotlin\|scala\|groovy>] [--check] [--name <name>] [path]` | Scaffold `jrs.toml`, a starter class and its test; `--check` adds a PMD `check` task in the `post-compile` hook. |
+| `jrs init [--lib] [--lang <java\|kotlin\|scala\|groovy>] [--check] [--format] [--name <name>] [path]` | Scaffold `jrs.toml`, a starter class and its test; `--check` adds a PMD `check` task in the `post-compile` hook, `--format` a formatter (see [Tasks and hooks](#tasks-and-hooks)). |
 | `jrs migrate` | Generate `jrs.toml` from an existing `pom.xml` or Gradle build. |
 | `jrs completions <bash\|zsh\|fish>` | Print a shell completion script. See [Shell completions](#shell-completions). |
 | `jrs self check` / `jrs self update` | Say whether jrs is the latest release, or update it to that release. See [Updating](#updating). |
@@ -577,6 +615,14 @@ rebuild, so the second and later compiles skip the JVM's start-up and run
 with a warm JIT. It is a child of `jrs` and stops with it: nothing runs in the
 background between commands. If it ever fails, that compile runs in a fresh
 `javac` as usual; `-v` says so.
+
+`jrs run --watch` restarts the program, as Spring's devtools or a Ktor `-t`
+build do: when a main source, a resource or `jrs.toml` changes, it stops the
+program — `SIGTERM` first on Unix, so shutdown hooks run and its port is free
+again, and a kill after ten seconds — builds, and starts it again. A change to
+the tests restarts nothing. A program that exits on its own, or a build that
+fails, is waited out until the next change. The program keeps the terminal
+while it runs, so its input still reaches it.
 
 Global flags: `-v/--verbose`, `-q/--quiet`, `--offline`, `-j/--jobs <n>`,
 `--manifest-path <p>`, `--progress <auto|always|never>`,
@@ -630,6 +676,19 @@ comes first. A duplicate class is reported by name, with both jars; with
 Every jar jrs writes carries a directory entry for each package, as `jar cf`
 does, so a framework that scans the classpath by asking the class loader for a
 package — Spring's component scan, among others — finds the classes inside it.
+
+`--sbom` writes a [CycloneDX](https://cyclonedx.org) 1.5 document beside the
+jar: every package on the runtime classpath (and every local jar), with its
+package URL (`pkg:maven/group/artifact@version`), the checksum `jrs.lock`
+pins for it, its licences — by SPDX identifier when the POM's name or URL is
+a licence jrs recognises, by name otherwise — and its place in the graph. It
+holds no timestamp, so the same inputs write the same bytes, like the jar.
+
+`jrs licenses` lists every dependency with the licences its POM declares, or
+the nearest parent POM's, as Maven inherits them, and warns about each
+dependency that declares none. `--runtime` leaves out test and compile-only
+dependencies, for what a package actually ships. It reads POMs only, from the
+cache when they are there; it never interprets a licence.
 
 `jrs add` and `jrs remove` edit `jrs.toml` in place, keeping its comments and
 order. An edit that jrs cannot make safely is refused, with a message saying to
@@ -868,6 +927,7 @@ the JDK it picked.
 | `--fail-fast` | Stop at the first failing test. |
 | `--retries <n>` | Run failing tests again up to `n` times; overrides `[test] retries`. |
 | `--forks <n>` | Split the test classes among `n` test JVMs run at once; overrides `[test] forks`. |
+| `--shard <i>/<n>` | Run only the `i`-th of `n` slices of the test classes, to spread one suite over `n` CI machines. |
 | `--suite <name>` | Run the suite `[test.suites.<name>]` declares instead of the tests under `test-dir`. |
 | `--all` | Run every test class, not only those a change since the last run reaches, and never take a passing run from the [build cache](#build-cache). |
 | `--no-build-cache` | Neither restore from nor store into the build cache. |
@@ -931,6 +991,24 @@ as `TEST-<engine>-fork-<k>.xml`, and their coverage goes into the one
 `target/jacoco.exec`. Retries, `--rerun-failed`, `--method`, `--fail-fast`
 and `--debug` run in one JVM. Tests that share something outside the JVM — a
 port, a database, a file — must be ready for another JVM running beside them.
+
+`--shard <i>/<n>` spreads one suite over several machines: `--shard 1/4` on
+one CI job, `2/4` on the next, and so on, each running a quarter of the test
+classes. The slices follow from the class names alone — every `n`-th class in
+name order — never from anything one machine knows and another does not, so
+together the shards run every class exactly once. Within its slice a shard
+works as a whole run does: forks, retries, the build cache, and the record of
+what it ran, which is kept apart from the other shards'. A shard with no
+classes left, when there are more shards than classes, runs nothing and
+exits `0`.
+
+```yaml
+strategy:
+  matrix:
+    shard: [1, 2, 3, 4]
+steps:
+  - run: jrs test --shard ${{ matrix.shard }}/4
+```
 
 Jupiter also runs tests in parallel inside each test JVM when asked to, and
 asking goes through `jvm-args`:
@@ -1102,7 +1180,9 @@ Checks are tasks too, so Checkstyle, PMD or SpotBugs need neither a plugin nor
 an install. `jrs init --check` starts a project with one: a `check` task that
 runs PMD's `quickstart` rules over `src/main/java`, hooked into `post-compile`,
 so a violation fails the build after PMD's report. `jrs task check` runs it
-alone. The ruleset, or the tool, is yours to change in `jrs.toml`:
+alone. `jrs migrate` writes the same kind of task for a build's Checkstyle,
+PMD and SpotBugs plugins. The ruleset, or the tool, is yours to change in
+`jrs.toml`:
 
 ```toml
 [tasks.check]
@@ -1117,6 +1197,27 @@ args = ["check", "--no-progress", "--rulesets", "rulesets/java/quickstart.xml", 
 [hooks]
 post-compile = ["check"]
 ```
+
+Formatters work the same way. `jrs init --format` adds google-java-format
+(ktfmt for a Kotlin project) as two tasks: `format`, which rewrites the
+sources in place and which you run with `jrs task format`, and
+`format-check`, hooked into `post-compile`, which fails the build when a
+source is not formatted. google-java-format takes a list of files, which
+`{sources-argfile}` hands it:
+
+```toml
+[tasks.format-check]
+main = "com.google.googlejavaformat.java.Main"
+args = ["--dry-run", "--set-exit-if-changed", "--aosp", "@{sources-argfile}"]
+env = { JDK_JAVA_OPTIONS = "--add-exports=jdk.compiler/com.sun.tools.javac.api=ALL-UNNAMED …" }
+
+[tasks.format-check.dependencies]
+"com.google.googlejavaformat:google-java-format" = "1.35.0"
+```
+
+A `main` task's JVM takes no options of its own, so the ones
+google-java-format needs reach it through `JDK_JAVA_OPTIONS`, which the
+launcher reads and announces on stderr.
 
 A task with no action, like `release`, only runs its `depends-on`. That list
 names other tasks, or `build`, `test`, `package` and `doc`, which run as their
@@ -1170,7 +1271,10 @@ otherwise the task runs and leaves your files alone (`-v` names the file).
 
 Placeholders such as `{root}`, `{target}`, `{classes}`, `{project.version}`,
 `{classpath}` (what `jrs classpath` prints) and `{jar}` are expanded in `run`,
-`args`, `cwd` and `env`; `args` and `env` also take `{free-port.<name>}`. `shell` strings use environment variables instead:
+`args`, `cwd` and `env`; `args` and `env` also take `{free-port.<name>}`.
+`{sources-argfile}` is a file jrs writes before the task runs, listing the
+project's own main and test sources, one absolute path per line — for a tool
+that reads its file list as `@file`. `shell` strings use environment variables instead:
 `JRS_ROOT`, `JRS_CLASSPATH`, `JRS_JAR` and the rest, with `JAVA_HOME` set to
 the project's JDK; a `shell` task's `args` arrive as `$1`, `$2`…. The full
 list is in [SPEC §7.6](SPEC.md#76-tasks-and-hooks).
@@ -1187,8 +1291,8 @@ returns the program's.
 **Tasks run code.** `jrs build` on a freshly cloned project runs whatever its
 `[hooks]` name, as `gradle build` or `npm install` would. Read a project's
 `jrs.toml` before building it if you do not trust it. `tree`, `classpath`,
-`update`, `verify`, `outdated`, `add`, `remove`, `cache`, `init`, `migrate`,
-`completions`, `self` and `clean` never run a task, so inspecting a project with them
+`update`, `verify`, `outdated`, `licenses`, `add`, `remove`, `cache`, `init`,
+`migrate`, `completions`, `self` and `clean` never run a task, so inspecting a project with them
 is always safe.
 
 ## Annotation processors
@@ -1318,6 +1422,18 @@ jar, a flat one with Spring's registries merged.
 Maven's `exec-maven-plugin` executions become tasks, and their `<phase>` a
 hook: `exec` a `run` command, and `java` a `java` command over jrs's
 classpath, or a `main` task over the plugin's own `<dependencies>`.
+
+Formatters and checkers become tasks over the tool's own graph, a checker
+hooked into `post-compile`: Spotless's `googleJavaFormat` and `ktfmt` steps
+(Gradle and Maven) and `fmt-maven-plugin` a `format` and a `format-check`
+task, with the version and style the build names; Gradle's `checkstyle`, `pmd`
+and `com.github.spotbugs` plugins and Maven's `maven-checkstyle-plugin`,
+`maven-pmd-plugin` and `spotbugs-maven-plugin` a `checkstyle`, `pmd` or
+`spotbugs` task, with the tool version, configuration file and rule sets they
+set. Spotless's other steps are reported. The CycloneDX plugins point at
+`jrs package --sbom`, and a licence report plugin at `jrs licenses`.
+`os-maven-plugin`'s `${os.detected.classifier}` and the osdetector plugin's
+classifier become `{os-classifier}`.
 
 `jrs.toml` is one fixed configuration, so a Maven build migrates as a plain
 `mvn` build runs it: the profiles that build activates — `<activeByDefault>`

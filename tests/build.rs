@@ -1522,6 +1522,136 @@ fn jrs_isolated(scratch: &Scratch, root: &Path, args: &[&str]) -> (i32, String, 
     )
 }
 
+/// A project on `lic:child`, which inherits its parent's Apache licence and
+/// depends on `lic:bare`, which declares none, with `lic:testing` (MIT) as a
+/// dev-dependency.
+fn licensed_project(scratch: &Scratch) -> PathBuf {
+    let fixture = FixtureRepo::new(scratch);
+    let pom = |artifact: &str, extra: &str| {
+        let coord = Coord::new("lic", artifact, "1");
+        fixture.publish_pom(
+            &coord,
+            &format!(
+                "<project><groupId>lic</groupId><artifactId>{artifact}</artifactId>\
+                 <version>1</version>{extra}</project>"
+            ),
+        );
+        coord
+    };
+    pom(
+        "parent",
+        "<packaging>pom</packaging><licenses><license>\
+         <name>The Apache Software License, Version 2.0</name>\
+         <url>https://www.apache.org/licenses/LICENSE-2.0.txt</url></license></licenses>",
+    );
+    let child = pom(
+        "child",
+        "<parent><groupId>lic</groupId><artifactId>parent</artifactId><version>1</version>\
+         </parent><dependencies><dependency><groupId>lic</groupId><artifactId>bare</artifactId>\
+         <version>1</version></dependency></dependencies>",
+    );
+    let bare = pom("bare", "");
+    let testing = pom(
+        "testing",
+        "<licenses><license><name>MIT License</name></license></licenses>",
+    );
+    // An empty zip: its end-of-central-directory record, nothing else.
+    let mut empty = b"PK\x05\x06".to_vec();
+    empty.resize(22, 0);
+    for coord in [&child, &bare, &testing] {
+        fixture.publish_jar(coord, &empty);
+    }
+    scratch.write(
+        "app/jrs.toml",
+        &format!(
+            "[project]\nname = \"app\"\nversion = \"1.0.0\"\nmain-class = \"com.example.Main\"\n\n\
+             [dependencies]\n\"lic:child\" = \"1\"\n\n[dev-dependencies]\n\"lic:testing\" = \"1\"\n\n{}",
+            fixture.manifest_section()
+        ),
+    );
+    scratch.write(
+        "app/src/main/java/com/example/Main.java",
+        "package com.example;\n\npublic class Main {\n    \
+         public static void main(String[] a) { System.out.println(\"hi\"); }\n}\n",
+    );
+    scratch.join("app")
+}
+
+#[test]
+fn licenses_lists_each_dependencys_licence_and_flags_the_ones_without() {
+    let scratch = Scratch::new("licenses");
+    let root = licensed_project(&scratch);
+
+    let (code, stdout, stderr) = jrs_isolated(&scratch, &root, &["licenses"]);
+    assert_eq!(code, 0, "{stderr}");
+    let line = |needle: &str| {
+        stdout
+            .lines()
+            .find(|l| l.starts_with(needle))
+            .unwrap_or_else(|| panic!("no {needle} in:\n{stdout}"))
+            .to_string()
+    };
+    assert!(
+        line("lic:child:1").ends_with("Apache-2.0"),
+        "inherited: {stdout}"
+    );
+    assert!(line("lic:bare:1").ends_with("(none declared)"), "{stdout}");
+    assert!(line("lic:testing:1 (test)").ends_with("MIT"), "{stdout}");
+    assert!(
+        stderr.contains("`lic:bare:1` declares no licence"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("3 dependencies, 1 without a licence"),
+        "{stderr}"
+    );
+
+    let (code, stdout, _) = jrs_isolated(&scratch, &root, &["licenses", "--runtime"]);
+    assert_eq!(code, 0);
+    assert!(!stdout.contains("lic:testing"), "{stdout}");
+}
+
+#[test]
+fn package_sbom_writes_the_runtime_graph_as_cyclonedx() {
+    let _toolchain = require_jdk!();
+    let scratch = Scratch::new("sbom");
+    let root = licensed_project(&scratch);
+
+    let (code, _, stderr) = jrs_isolated(&scratch, &root, &["package", "--sbom"]);
+    assert_eq!(code, 0, "{stderr}");
+    let path = root.join("target/app-1.0.0-cyclonedx.json");
+    let text = std::fs::read_to_string(&path).unwrap();
+    let doc = jrs::json::Json::parse(&text).unwrap();
+    assert_eq!(doc.get("bomFormat").unwrap().as_str(), Some("CycloneDX"));
+    let purls: Vec<&str> = doc
+        .get("components")
+        .unwrap()
+        .items()
+        .iter()
+        .filter_map(|c| c.get("purl")?.as_str())
+        .collect();
+    assert_eq!(
+        purls,
+        ["pkg:maven/lic/bare@1", "pkg:maven/lic/child@1"],
+        "the runtime graph only: no test dependency"
+    );
+    assert!(text.contains("\"id\": \"Apache-2.0\""), "{text}");
+    let lock = std::fs::read_to_string(root.join("jrs.lock")).unwrap();
+    let pin = lock
+        .split("\n[[package]]\n")
+        .find(|b| b.contains("artifact = \"child\""))
+        .and_then(|b| b.lines().find_map(|l| l.strip_prefix("checksum = \"sha1:")))
+        .unwrap()
+        .trim_end_matches('"');
+    assert!(text.contains(pin), "the checksum jrs.lock pins: {text}");
+    assert!(stderr.contains("app-1.0.0-cyclonedx.json"), "{stderr}");
+
+    // The same inputs, the same bytes.
+    let (code, _, stderr) = jrs_isolated(&scratch, &root, &["package", "--sbom"]);
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), text);
+}
+
 /// `jrs build --watch` keeps one `javac` worker for the session: three
 /// edits, three rebuilds, one worker started.
 #[test]
@@ -1610,6 +1740,99 @@ fn a_watch_session_compiles_every_rebuild_in_one_javac_worker() {
         .filter(|l| l.contains("javac worker (pid ") && l.contains("): @"))
         .count();
     assert_eq!(served, 4, "{transcript}");
+}
+
+/// `jrs run --watch` stops the program when a source changes, builds again
+/// and starts the new one.
+#[test]
+fn run_watch_restarts_the_program_after_a_change() {
+    use std::io::BufRead as _;
+    let _toolchain = require_jdk!();
+    let scratch = Scratch::new("run-watch");
+    let root = scratch.join("server");
+    let main = root.join("src/main/java/com/example/Server.java");
+    std::fs::create_dir_all(main.parent().unwrap()).unwrap();
+    std::fs::write(
+        root.join("jrs.toml"),
+        "[project]\nname = \"server\"\nversion = \"1.0.0\"\nmain-class = \"com.example.Server\"\n",
+    )
+    .unwrap();
+    let server = |generation: u32| {
+        format!(
+            "package com.example;\n\npublic final class Server {{\n    \
+             public static void main(String[] args) throws Exception {{\n        \
+             System.out.println(\"serving generation {generation}\");\n        \
+             Thread.sleep(600_000);\n    }}\n}}\n"
+        )
+    };
+    std::fs::write(&main, server(1)).unwrap();
+
+    struct Session(std::process::Child);
+    impl Drop for Session {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+    let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_jrs"))
+        .arg("--manifest-path")
+        .arg(&root)
+        .args(["--progress", "never", "--color", "never", "run", "--watch"])
+        .env("JRS_CACHE_DIR", scratch.join("jrs-cache"))
+        .env("JRS_CONFIG", scratch.join("no-config.toml"))
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let (tx, rx) = std::sync::mpsc::channel();
+    for stream in [
+        Box::new(child.stdout.take().unwrap()) as Box<dyn std::io::Read + Send>,
+        Box::new(child.stderr.take().unwrap()),
+    ] {
+        let tx = tx.clone();
+        std::thread::spawn(move || {
+            for line in std::io::BufReader::new(stream)
+                .lines()
+                .map_while(Result::ok)
+            {
+                if tx.send(line).is_err() {
+                    break;
+                }
+            }
+        });
+    }
+    let session = Session(child);
+    let mut seen = Vec::new();
+    let wait_for = |text: &str, seen: &mut Vec<String>| loop {
+        match rx.recv_timeout(std::time::Duration::from_secs(60)) {
+            Ok(line) => {
+                let found = line.contains(text);
+                seen.push(line);
+                if found {
+                    return;
+                }
+            }
+            Err(e) => panic!("no `{text}` ({e}):\n{}", seen.join("\n")),
+        }
+    };
+    wait_for("serving generation 1", &mut seen);
+    // The watcher pictures the tree just before it starts the program.
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    std::fs::write(&main, server(2)).unwrap();
+    wait_for("serving generation 2", &mut seen);
+    drop(session);
+    let transcript = seen.join("\n");
+    assert!(
+        transcript.contains("Stopping com.example.Server to restart it"),
+        "{transcript}"
+    );
+    assert_eq!(
+        seen.iter()
+            .filter(|l| l.contains("Running com.example.Server"))
+            .count(),
+        2,
+        "{transcript}"
+    );
 }
 
 // ---- the build cache ---------------------------------------------------------
@@ -4458,6 +4681,61 @@ fn a_test_run_runs_only_the_test_classes_a_change_reaches() {
     assert!(stdout.contains("passes()"), "{stdout}");
     let (_, stdout, _) = p.jrs(&["test"]);
     assert!(launches(&stdout).is_empty(), "{stdout}");
+}
+
+/// `--shard <i>/<n>`: each shard runs its own slice, by class name, and
+/// records what it ran apart from the others.
+#[test]
+fn a_shard_runs_its_slice_of_the_test_classes() {
+    let toolchain = require_jdk!();
+    let scratch = Scratch::new("tests-shard");
+    let p = junit_project(
+        &scratch,
+        &toolchain,
+        FAKE_LAUNCHER_6,
+        "",
+        &[("AddTest.java", ADD_TEST), ("OtherTest.java", OTHER_TEST)],
+    );
+
+    for (shard, mine, theirs) in [
+        ("1/2", "AddTest", "OtherTest"),
+        ("2/2", "OtherTest", "AddTest"),
+    ] {
+        let (code, stdout, stderr) = p.jrs(&["test", "--shard", shard]);
+        assert_eq!(code, 0, "{shard}: {stderr}");
+        assert!(
+            stderr.contains(&format!("Testing shard {shard}: 1 test class")),
+            "{stderr}"
+        );
+        let runs = launches(&stdout);
+        assert_eq!(runs.len(), 1, "{stdout}");
+        assert!(
+            runs[0].contains(&format!(r"\Qcom.example.{mine}\E")),
+            "{}",
+            runs[0]
+        );
+        assert!(!runs[0].contains(theirs), "{}", runs[0]);
+    }
+
+    // Each shard remembers its own run: nothing changed for shard 1 since.
+    let (code, stdout, stderr) = p.jrs(&["test", "--shard", "1/2"]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(
+        stderr.contains("no test class reaches a change since the last run"),
+        "{stderr}"
+    );
+    assert!(launches(&stdout).is_empty(), "{stdout}");
+
+    let (code, stdout, stderr) = p.jrs(&["test", "--shard", "3/3"]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(
+        stderr.contains("shard 3/3 has no test classes to run"),
+        "{stderr}"
+    );
+    assert!(launches(&stdout).is_empty(), "{stdout}");
+
+    let (code, _, stderr) = p.jrs(&["test", "--shard", "3/2"]);
+    assert_eq!(code, 2, "{stderr}");
 }
 
 #[test]

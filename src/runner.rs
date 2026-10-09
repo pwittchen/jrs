@@ -1,8 +1,10 @@
-//! Running the compiled project.
+//! The command line that runs the compiled project.
 //!
 //! `jrs run` hands the terminal to the user's program: stdin, stdout and stderr
 //! are inherited, and the live region comes down first, so a program that draws
-//! its own output is not fighting jrs for the cursor.
+//! its own output is not fighting jrs for the cursor. `cli.rs` starts it with
+//! `toolchain::run_inherited_in`, or, under `--watch`, spawns it so that it can
+//! be stopped and started again; this module builds what it is started with.
 
 use std::path::{Path, PathBuf};
 
@@ -10,8 +12,7 @@ use crate::error::{JrsError, Result};
 use crate::manifest::JavaAgent;
 use crate::resolve::coord::{Coord, Ga};
 use crate::resolve::{Classpath, Resolution};
-use crate::toolchain::{Environment, Toolchain, run_inherited_in};
-use crate::ui::Ui;
+use crate::toolchain::Toolchain;
 
 /// The port `--debug` listens on unless given one: the one IDEs default to.
 pub const DEFAULT_DEBUG_PORT: u16 = 5005;
@@ -219,25 +220,6 @@ pub fn java_args(
     args.push(main_class.to_string());
     args.extend(program_args.iter().cloned());
     args
-}
-
-/// Run the project's main class in `environment`, returning its exit code.
-///
-/// # Errors
-///
-/// [`JrsError::Build`] if `java` cannot be started. A program that exits
-/// non-zero is not an error: its code is returned.
-pub fn run_main(
-    toolchain: &Toolchain,
-    jvm_args: &[String],
-    classpath: &[PathBuf],
-    main_class: &str,
-    program_args: &[String],
-    environment: &Environment,
-    ui: &Ui,
-) -> Result<i32> {
-    let args = java_args(jvm_args, classpath, main_class, program_args);
-    run_inherited_in(ui, &toolchain.java, &args, environment)
 }
 
 #[cfg(test)]
