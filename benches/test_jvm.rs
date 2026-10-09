@@ -55,8 +55,8 @@ fn main() {
     println!("  project  {}", source.display());
     println!("  runs     {runs} per mode, medians; `jrs test --all --forks {forks}`\n");
     println!(
-        "  {:<9}{:>10}{:>10}{:>10}  {:<28}{}",
-        "", "first", "wall", "test JVM", "outcome", "archive"
+        "  {:<9}{:>10}{:>10}{:>10}  {:<28}archive",
+        "", "first", "wall", "test JVM", "outcome"
     );
     let mut baseline: Option<String> = None;
     for (mode, value) in MODES {
