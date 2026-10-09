@@ -538,7 +538,7 @@ for any repository.
 | Command | Behaviour |
 | --- | --- |
 | `jrs build [--watch]` | Resolve → compile main sources → copy resources. `--watch` rebuilds on every change, compiling in one warm `javac` for the whole session. |
-| `jrs build --verify-cache` | Compile everything, and fail if the [build cache](#build-cache) holds different classes for the same inputs. |
+| `jrs build --verify-cache` | Compile everything and run every cached task, and fail if the [build cache](#build-cache) holds different classes or outputs for the same inputs. |
 | `jrs test` | `build` + compile test sources + run the tests a change since the last run reaches. The tests are not recompiled for a main change that leaves the main classes' API alone. See [Tests](#tests) for its flags. |
 | `jrs run [--debug[=<port>]] [-- args...]` | `build` + run `main-class` with `args`. `--debug` waits for a debugger first; see below. |
 | `jrs package` | `build` + produce `target/<name>-<version>.jar`. |
@@ -569,7 +569,7 @@ for any repository.
 | `jrs metadata [--no-deps]` | Print the project model as JSON, for editors and tools. |
 | `jrs fetch [--sources]` | Download the dependencies into the cache without building, and with `--sources` their `-sources.jar`s. |
 
-`--no-build-cache` on `build`, `test`, `run` and `package` leaves the
+`--no-build-cache` on `build`, `test`, `run`, `package` and `task` leaves the
 [build cache](#build-cache) alone for that command.
 
 `--watch` keeps one `javac` JVM running for the session and hands it every
@@ -727,9 +727,12 @@ JVM. `--all` runs them anyway.
 
 Entries live in the dependency cache's directory, under `build/`. A plain
 `jrs cache prune` drops them all; `--unused-for` drops those no build has hit
-in that long. `--no-build-cache` on `build`, `test`, `run` or `package`,
-`JRS_BUILD_CACHE=off`, or `enabled = false` under `[build-cache]` in the
-[user configuration](#user-configuration) turns the cache off.
+in that long. `--no-build-cache` on `build`, `test`, `run`, `package` or
+`task`, `JRS_BUILD_CACHE=off`, or `enabled = false` under `[build-cache]` in
+the [user configuration](#user-configuration) turns the cache off.
+
+Tasks that say `cache = true` are kept too: their outputs, restored instead
+of running the task. See [Tasks and hooks](#tasks-and-hooks).
 
 An annotation processor or Groovy AST transformation that reads a file it was
 not given, or an environment variable, is outside the hash, as it is for
@@ -745,15 +748,21 @@ only when pushing is on, `PUT`s what it compiled:
 url = "https://cache.example.com/jrs"     # or file:///mnt/shared/jrs-cache
 push = false                              # CI sets true
 credentials = "build-cache"               # a [credentials.<name>] entry
+tasks = false                             # true: task outputs too
 ```
 
 CI can set the same through `JRS_BUILD_CACHE_URL` and
 `JRS_BUILD_CACHE_PUSH=true`. Whoever can push can put classes into every build
 that reads the cache, so give push rights to CI alone. A remote that fails or
 times out is skipped for the rest of the command (`-v` says why), and never
-fails a build. `jrs build --verify-cache` compiles every unit and fails if the
-cache holds different classes under the same key — a CI job can run it
-nightly.
+fails a build. `jrs build --verify-cache` compiles every unit and runs every
+cached task, and fails if the cache holds different classes or outputs
+under the same key — a CI job can run it nightly.
+
+A remote serves and takes cached tasks' outputs only with `tasks = true`.
+They deserve more care than classes: an output can be a script, a frontend
+bundle or a binary that runs outside any JVM, and a task's key trusts its
+declared inputs.
 
 ## User configuration
 
@@ -1126,6 +1135,38 @@ Commands include each other, so `jrs package` runs the compile hooks too. A
 hook runs every time its point is reached. A task that declares both `inputs`
 and `outputs` is skipped, printing `Fresh`, while neither has changed; a task
 without them always runs.
+
+**Cached tasks.** A generator that runs before `javac` runs on every clean
+build and on every CI machine. Add `cache = true` to a task with `inputs`
+and `outputs`, and its outputs go into the [build cache](#build-cache)
+under a hash of its command, its inputs' contents and its tool jars: after
+`jrs clean`, in a second checkout or on CI, they are put back instead, and
+the compile that follows them usually comes from the cache too.
+
+```toml
+[tasks.openapi]
+main = "org.openapitools.codegen.OpenAPIGenerator"
+args = ["generate", "-i", "api.yaml", "-g", "spring", "-o", "{target}/openapi"]
+inputs = ["api.yaml"]
+outputs = ["{target}/openapi"]
+source-outputs = ["{target}/openapi/src/main/java"]
+cache = true
+```
+
+```
+    Restored openapi (task, from the build cache)
+```
+
+A restored task prints nothing of what it printed when it ran. Only say
+`cache = true` of a task that reads nothing but its `inputs`, its arguments
+and its tools: jrs cannot see a file, the network or the clock read behind
+its back, and a `run` program is keyed by its name, not its version. A task
+that uses `{jar}`, or that `post-package` or `pre-run` runs, cannot be
+cached — those exist for their side effects. Outputs must be inside the
+project; one outside `target-dir` (a client checked into `src/generated`)
+is only replaced when it holds exactly what the task last wrote there, and
+otherwise the task runs and leaves your files alone (`-v` names the file).
+`jrs task <name> -- args` with extra arguments never uses the cache.
 
 Placeholders such as `{root}`, `{target}`, `{classes}`, `{project.version}`,
 `{classpath}` (what `jrs classpath` prints) and `{jar}` are expanded in `run`,

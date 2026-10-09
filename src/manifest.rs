@@ -975,6 +975,9 @@ pub struct TaskDef {
     pub outputs: Vec<Template>,
     pub source_outputs: Vec<Template>,
     pub resource_outputs: Vec<Template>,
+    /// `cache = true`: the outputs are kept in the build cache under a key
+    /// of the task's inputs, and restored instead of a run (SPEC §7.6).
+    pub cache: bool,
     /// `[tasks.<name>.dependencies]`: Java tools from a repository, resolved
     /// as a graph of the task's own and pinned in `jrs.lock` (TASKS.md §8).
     pub dependencies: Vec<Dependency>,
@@ -1174,6 +1177,7 @@ const TASK_KEYS: &[&str] = &[
     "outputs",
     "source-outputs",
     "resource-outputs",
+    "cache",
 ];
 const TOP_KEYS: &[&str] = &[
     "project",
@@ -1989,6 +1993,9 @@ fn render_task(s: &mut String, task: &TaskDef) {
             let _ = writeln!(s, "{key} = {}", quote_templates(list));
         }
     }
+    if task.cache {
+        s.push_str("cache = true\n");
+    }
     if !task.dependencies.is_empty() {
         let _ = writeln!(s, "\n[tasks.{}.dependencies]", task.name);
         for d in &task.dependencies {
@@ -2270,6 +2277,7 @@ fn parse_tasks(table: &toml::Table, warnings: &mut Vec<String>) -> Result<Vec<Ta
             outputs: templates("outputs")?,
             source_outputs: templates("source-outputs")?,
             resource_outputs: templates("resource-outputs")?,
+            cache: bool_key(t, "cache", &format!("`{section}.cache`"))?,
             dependencies,
         };
         for (key, t) in task

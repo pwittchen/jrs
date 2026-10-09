@@ -102,6 +102,9 @@ pub struct BuildCacheConfig {
     pub push: bool,
     /// The `[credentials.<name>]` entry the remote cache is reached with.
     pub credentials: Option<String>,
+    /// Whether the remote cache serves, and takes, user-defined tasks'
+    /// entries too (SPEC §7.6): their outputs may run outside any JVM.
+    pub tasks: bool,
 }
 
 impl Default for BuildCacheConfig {
@@ -111,6 +114,7 @@ impl Default for BuildCacheConfig {
             url: None,
             push: false,
             credentials: None,
+            tasks: false,
         }
     }
 }
@@ -123,7 +127,7 @@ const TOP_KEYS: &[&str] = &[
     "jdks",
     "build-cache",
 ];
-const BUILD_CACHE_KEYS: &[&str] = &["enabled", "url", "push", "credentials"];
+const BUILD_CACHE_KEYS: &[&str] = &["enabled", "url", "push", "credentials", "tasks"];
 const PROXY_KEYS: &[&str] = &["url", "no-proxy"];
 const CREDENTIAL_KEYS: &[&str] = &["username", "password", "password-env", "token", "token-env"];
 
@@ -425,6 +429,7 @@ fn parse_build_cache(
         url: text("url")?.map(|u| u.trim_end_matches('/').to_string()),
         push: flag("push", false)?,
         credentials: text("credentials")?,
+        tasks: flag("tasks", false)?,
     })
 }
 
@@ -539,7 +544,7 @@ token = "ghp_x"
 
         let config = parse(
             "[build-cache]\nurl = \"https://cache.example.com/jrs/\"\npush = true\n\
-             credentials = \"build-cache\"\n",
+             credentials = \"build-cache\"\ntasks = true\n",
         )
         .unwrap();
         assert_eq!(
@@ -549,6 +554,7 @@ token = "ghp_x"
                 url: Some("https://cache.example.com/jrs".into()),
                 push: true,
                 credentials: Some("build-cache".into()),
+                tasks: true,
             }
         );
 

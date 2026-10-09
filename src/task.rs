@@ -13,10 +13,12 @@ use std::ffi::OsString;
 use std::fmt::Write as _;
 use std::path::{Component, Path, PathBuf};
 
+use crate::build_cache::{BuildCache, Entries};
 use crate::compile::render_argfile;
 use crate::error::{IoResultExt, JrsError, Result};
 use crate::manifest::{Action, Builtin, Hook, Manifest, Placeholder, TaskDef, TaskRef, Template};
 use crate::project;
+use crate::resolve::repo::sha256_hex;
 use crate::toolchain::{Launch, Toolchain, find_program};
 
 /// 1980-01-01, the timestamp jrs's own jar entries carry, as the
@@ -111,6 +113,8 @@ pub fn check(manifest: &Manifest) -> Result<Vec<String>> {
         }
     }
 
+    check_cached(manifest)?;
+
     let mut warnings = Vec::new();
     let generators: HashSet<&str> = reached_from(manifest, Hook::PreCompile)
         .into_iter()
@@ -135,6 +139,82 @@ pub fn check(manifest: &Manifest) -> Result<Vec<String>> {
         }
     }
     Ok(warnings)
+}
+
+/// The tasks that may not say `cache = true` (SPEC §7.6): one that is not
+/// up-to-date-checked, one that publishes or deploys, one a hook runs for its
+/// side effects, and one whose restore would write outside the project or
+/// over all of it.
+fn check_cached(manifest: &Manifest) -> Result<()> {
+    let side_effects: HashSet<&str> = [Hook::PostPackage, Hook::PreRun]
+        .into_iter()
+        .flat_map(|h| reached_from(manifest, h))
+        .map(|t| t.name.as_str())
+        .collect();
+    let root = static_root(manifest);
+    let target = static_target(manifest);
+    for task in manifest.tasks.iter().filter(|t| t.cache) {
+        let refuse = |why: String| {
+            Err(JrsError::manifest(format!(
+                "`tasks.{}.cache`: {why}",
+                task.name
+            )))
+        };
+        for (key, list) in [("inputs", &task.inputs), ("outputs", &task.outputs)] {
+            if list.is_empty() {
+                return refuse(format!(
+                    "a cached task needs `{key}`\n\nthe build cache keeps a task's \
+                     `outputs` under a key of its `inputs`; without both it is not even \
+                     checked for being up to date"
+                ));
+            }
+        }
+        if task.uses(Placeholder::Jar) {
+            return refuse(
+                "a task that uses `{jar}` is never cached: it runs after `package`, to \
+                 publish or deploy"
+                    .to_string(),
+            );
+        }
+        if side_effects.contains(task.name.as_str()) {
+            return refuse(
+                "a task the `post-package` or `pre-run` hook runs is never cached: those \
+                 hooks run tasks for their side effects"
+                    .to_string(),
+            );
+        }
+        for template in &task.outputs {
+            let path = normalize(&static_path(manifest, template)?);
+            let what = if path == root || path == target {
+                "is the whole of the project root or of `project.target-dir`"
+            } else if path.starts_with(&root) {
+                continue;
+            } else {
+                "is not inside the project root"
+            };
+            return refuse(format!(
+                "the output `{}` {what}\n\nrestoring a cached task's outputs removes \
+                 and rewrites them, so each must be a path under the root",
+                template.raw
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// `path` with every `.` and `..` worked out by its text alone.
+fn normalize(path: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                out.pop();
+            }
+            other => out.push(other),
+        }
+    }
+    out
 }
 
 /// One step of a cycle: a node, and the hook that led to it from the step
@@ -477,6 +557,53 @@ pub struct Prepared {
     /// both, a task always runs.
     pub fingerprint: Option<String>,
     fingerprint_path: PathBuf,
+    /// For a `cache = true` task: what its build-cache key is made of.
+    cache: Option<CacheInputs>,
+}
+
+/// What a cached task's key holds beyond its name, its `cwd` and its
+/// outputs, kept from the expansion the fingerprint was made from: hashing
+/// the inputs costs a read of each, so the key is worked out only when the
+/// fingerprint says the task would run.
+#[derive(Debug, Clone)]
+struct CacheInputs {
+    root: PathBuf,
+    target: PathBuf,
+    /// The launch as the key holds it: a `run` program by the name written
+    /// in the manifest, the JDK's `java` as `java`.
+    launch: String,
+    /// A `script` action's file, which the key holds by its contents.
+    script: Option<PathBuf>,
+    own_env: Vec<(String, String)>,
+    inputs: Vec<PathBuf>,
+    /// The entries of the classpaths the task reads.
+    classpath: Vec<PathBuf>,
+    tool_classpath: Vec<PathBuf>,
+    /// `target/.jrs/tasks/<name>.outputs`: every file the last successful
+    /// run or restore left in the outputs, by path and hash (SPEC §7.6).
+    record: PathBuf,
+}
+
+/// A cached task's outputs as a build-cache entry: each output's files
+/// under its index (`0/...`, or `0` for an output that is a file) and
+/// `jrs-task.txt`, which says what each output was and each file's mode.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TaskEntry {
+    pub entries: Entries,
+    /// The entries written with mode `755`.
+    pub executable: HashSet<String>,
+}
+
+/// The file in a cached entry that describes it.
+pub const TASK_ENTRY_INDEX: &str = "jrs-task.txt";
+
+/// What collecting a task's outputs found.
+#[derive(Debug)]
+pub enum Collected {
+    Entry(TaskEntry),
+    /// A symbolic link in an output: such a task is never stored, since a
+    /// link is where an innocent-looking entry writes outside the root.
+    Link(PathBuf),
 }
 
 impl Prepared {
@@ -511,6 +638,359 @@ impl Prepared {
     pub fn forget(&self) {
         let _ = std::fs::remove_file(&self.fingerprint_path);
     }
+
+    /// Whether the task says `cache = true`.
+    #[must_use]
+    pub fn is_cached(&self) -> bool {
+        self.cache.is_some()
+    }
+
+    /// The text of the task's build-cache key (SPEC §7.6): its name, its
+    /// launch, `cwd` and own `env` with the checkout's paths as `{root}` and
+    /// `{cache}`, each input by its contents, each jar by its identity, each
+    /// class directory it reads by its files' contents, and each output by
+    /// its path. `None` for a task that is not cached, and for one that
+    /// cannot be keyed — an input or a jar that cannot be read — which then
+    /// runs.
+    #[must_use]
+    pub fn cache_text(&self, cache: &BuildCache) -> Option<String> {
+        let c = self.cache.as_ref()?;
+        let shown = |p: &Path| cache.relative(&p.display().to_string());
+        let mut s = format!("task {}\n{}\n", self.name, cache.relative(&c.launch));
+        if let Some(script) = &c.script {
+            let _ = writeln!(s, "script {} {}", shown(script), hash_file(script)?);
+        }
+        let _ = writeln!(s, "cwd {}", shown(&self.cwd));
+        for (key, value) in &c.own_env {
+            let _ = writeln!(s, "env {key}={}", cache.relative(value));
+        }
+        for input in &c.inputs {
+            if input.is_dir() {
+                for file in project::find_all(input).ok()? {
+                    let _ = writeln!(s, "input {} {}", shown(&file), hash_file(&file)?);
+                }
+            } else if input.exists() {
+                let _ = writeln!(s, "input {} {}", shown(input), hash_file(input)?);
+            } else {
+                let _ = writeln!(s, "missing {}", shown(input));
+            }
+        }
+        for jar in &c.tool_classpath {
+            let _ = writeln!(s, "tool {}", cache.jar(jar)?);
+        }
+        for entry in &c.classpath {
+            if entry.is_dir() {
+                // By bytes, not by API: a task may run the classes it reads.
+                let mut digest = String::new();
+                for file in project::find_all(entry).ok()? {
+                    let name = project::slash_path(file.strip_prefix(entry).unwrap_or(&file));
+                    let _ = writeln!(digest, "{} {name}", hash_file(&file)?);
+                }
+                let _ = writeln!(
+                    s,
+                    "classes {} {}",
+                    shown(entry),
+                    sha256_hex(digest.as_bytes())
+                );
+            } else if entry.exists() {
+                let _ = writeln!(s, "jar {}", cache.jar(entry)?);
+            } else {
+                let _ = writeln!(s, "missing {}", shown(entry));
+            }
+        }
+        for output in &self.outputs {
+            let _ = writeln!(s, "output {}", shown(output));
+        }
+        Some(s)
+    }
+
+    /// The first file in an output outside `target-dir` that this task's
+    /// last run or restore did not leave there as it is now: a file the
+    /// user put there, which a restore must not remove (SPEC §7.6). A
+    /// symbolic link counts as the user's too.
+    #[must_use]
+    pub fn user_file(&self) -> Option<PathBuf> {
+        let c = self.cache.as_ref()?;
+        let record = read_record(&c.record);
+        for output in &self.outputs {
+            if normalize(output).starts_with(&c.target) {
+                continue;
+            }
+            let files = match output_files(output) {
+                Ok(Ok(files)) => files,
+                Ok(Err(link)) => return Some(link),
+                Err(_) => return Some(output.clone()),
+            };
+            for file in files {
+                let ours = record
+                    .get(&relative_to(&c.root, &file))
+                    .is_some_and(|hash| hash_file(&file).as_ref() == Some(hash));
+                if !ours {
+                    return Some(file);
+                }
+            }
+        }
+        None
+    }
+
+    /// The outputs as they are now, as a build-cache entry.
+    ///
+    /// # Errors
+    ///
+    /// [`JrsError::Io`] if an output cannot be walked or a file in it read.
+    pub fn collect_outputs(&self) -> Result<Collected> {
+        let mut index = String::from("jrs task entry 1\n");
+        let mut entry = TaskEntry::default();
+        for (i, output) in self.outputs.iter().enumerate() {
+            let shown = self.cache.as_ref().map_or_else(
+                || output.clone(),
+                |c| PathBuf::from(relative_to(&c.root, output)),
+            );
+            let kind = match std::fs::symlink_metadata(output) {
+                Err(_) => "absent",
+                Ok(meta) if meta.is_dir() => "dir",
+                Ok(meta) if meta.is_file() => "file",
+                Ok(_) => return Ok(Collected::Link(output.clone())),
+            };
+            let _ = writeln!(index, "output {i} {kind} {}", project::slash_path(&shown));
+            let files = match output_files(output)? {
+                Ok(files) => files,
+                Err(link) => return Ok(Collected::Link(link)),
+            };
+            for file in files {
+                let name = if kind == "file" {
+                    i.to_string()
+                } else {
+                    let within = file.strip_prefix(output).unwrap_or(&file);
+                    format!("{i}/{}", project::slash_path(within))
+                };
+                let executable = is_executable(&file);
+                let _ = writeln!(
+                    index,
+                    "mode {} {name}",
+                    if executable { "755" } else { "644" }
+                );
+                if executable {
+                    entry.executable.insert(name.clone());
+                }
+                let bytes = std::fs::read(&file).path(&file)?;
+                entry.entries.push((name, bytes));
+            }
+        }
+        entry
+            .entries
+            .push((TASK_ENTRY_INDEX.to_string(), index.into_bytes()));
+        entry.entries.sort_by(|a, b| a.0.cmp(&b.0));
+        Ok(Collected::Entry(entry))
+    }
+
+    /// Put a cached entry's files in place of the outputs: each output is
+    /// removed first, file or directory, so nothing a run would not have
+    /// written is left behind. `Ok(false)`, with nothing touched, for an
+    /// entry that does not describe this task's outputs. The caller has
+    /// checked [`Prepared::user_file`], and records the restore after.
+    ///
+    /// # Errors
+    ///
+    /// [`JrsError::Io`] if an output cannot be removed or a file written.
+    pub fn restore_outputs(&self, entries: &Entries) -> Result<bool> {
+        let Some(c) = &self.cache else {
+            return Ok(false);
+        };
+        let Some((_, index)) = entries.iter().find(|(n, _)| n == TASK_ENTRY_INDEX) else {
+            return Ok(false);
+        };
+        let index = String::from_utf8_lossy(index);
+        let mut kinds = Vec::new();
+        let mut executable = HashSet::new();
+        for line in index.lines().skip(1) {
+            // A name, last on its line, may hold spaces.
+            let mut words = line.splitn(3, ' ');
+            match (words.next(), words.next(), words.next()) {
+                (Some("output"), Some(i), Some(rest)) => {
+                    let (kind, path) = rest.split_once(' ').unwrap_or((rest, ""));
+                    let same = i == kinds.len().to_string()
+                        && self
+                            .outputs
+                            .get(kinds.len())
+                            .is_some_and(|o| relative_to(&c.root, o) == path);
+                    if !same || !matches!(kind, "dir" | "file" | "absent") {
+                        return Ok(false);
+                    }
+                    kinds.push(kind.to_string());
+                }
+                (Some("mode"), Some("755"), Some(name)) => {
+                    executable.insert(name.to_string());
+                }
+                (Some("mode"), Some("644"), Some(_)) => {}
+                _ => return Ok(false),
+            }
+        }
+        if kinds.len() != self.outputs.len() {
+            return Ok(false);
+        }
+        for output in &self.outputs {
+            remove(output)?;
+        }
+        for (output, kind) in self.outputs.iter().zip(&kinds) {
+            if kind == "dir" {
+                std::fs::create_dir_all(output).path(output)?;
+            }
+        }
+        for (name, bytes) in entries.iter().filter(|(n, _)| n != TASK_ENTRY_INDEX) {
+            let (i, within) = name.split_once('/').unwrap_or((name, ""));
+            let Some(output) = i.parse::<usize>().ok().and_then(|i| self.outputs.get(i)) else {
+                continue;
+            };
+            let path = if within.is_empty() {
+                output.clone()
+            } else {
+                output.join(within)
+            };
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent).path(parent)?;
+            }
+            std::fs::write(&path, bytes).path(&path)?;
+            if executable.contains(name) {
+                make_executable(&path)?;
+            }
+        }
+        Ok(true)
+    }
+
+    /// Remember which files the outputs hold after a successful run or a
+    /// restore, so that the next restore can tell them from the user's.
+    ///
+    /// # Errors
+    ///
+    /// [`JrsError::Io`] if the record cannot be written.
+    pub fn record_outputs(&self, entry: &TaskEntry) -> Result<()> {
+        let Some(c) = &self.cache else {
+            return Ok(());
+        };
+        let mut text = String::new();
+        for (name, bytes) in &entry.entries {
+            let (i, within) = name.split_once('/').unwrap_or((name, ""));
+            let Some(output) = i.parse::<usize>().ok().and_then(|i| self.outputs.get(i)) else {
+                continue;
+            };
+            let path = if within.is_empty() {
+                output.clone()
+            } else {
+                output.join(within)
+            };
+            let _ = writeln!(
+                text,
+                "{} {}",
+                sha256_hex(bytes),
+                relative_to(&c.root, &path)
+            );
+        }
+        if let Some(dir) = c.record.parent() {
+            std::fs::create_dir_all(dir).path(dir)?;
+        }
+        std::fs::write(&c.record, text).path(&c.record)
+    }
+
+    /// Forget the record of the outputs, as a failed run does.
+    pub fn forget_outputs(&self) {
+        if let Some(c) = &self.cache {
+            let _ = std::fs::remove_file(&c.record);
+        }
+    }
+}
+
+/// A file's SHA-256, or `None` when it cannot be read.
+fn hash_file(path: &Path) -> Option<String> {
+    std::fs::read(path).ok().map(|b| sha256_hex(&b))
+}
+
+/// `path` under `root`, `/`-separated, as the output record names it.
+fn relative_to(root: &Path, path: &Path) -> String {
+    let path = normalize(path);
+    project::slash_path(path.strip_prefix(root).unwrap_or(&path))
+}
+
+/// The record of a task's outputs: hash by path.
+fn read_record(path: &Path) -> HashMap<String, String> {
+    std::fs::read_to_string(path)
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|l| l.split_once(' '))
+        .map(|(hash, path)| (path.to_string(), hash.to_string()))
+        .collect()
+}
+
+/// Every file under `path` — or `path` itself when it is a file — sorted;
+/// nothing when it does not exist. `Ok(Err(link))` for the first symbolic
+/// link found, which [`project::find_all`] would pass over in silence.
+fn output_files(path: &Path) -> Result<std::result::Result<Vec<PathBuf>, PathBuf>> {
+    fn walk(dir: &Path, out: &mut Vec<PathBuf>) -> Result<Option<PathBuf>> {
+        let mut entries: Vec<PathBuf> = std::fs::read_dir(dir)
+            .path(dir)?
+            .map(|e| e.map(|e| e.path()).path(dir))
+            .collect::<Result<_>>()?;
+        entries.sort();
+        for entry in entries {
+            let meta = std::fs::symlink_metadata(&entry).path(&entry)?;
+            if meta.is_dir() {
+                if let Some(link) = walk(&entry, out)? {
+                    return Ok(Some(link));
+                }
+            } else if meta.is_file() {
+                out.push(entry);
+            } else {
+                return Ok(Some(entry));
+            }
+        }
+        Ok(None)
+    }
+
+    let Ok(meta) = std::fs::symlink_metadata(path) else {
+        return Ok(Ok(Vec::new()));
+    };
+    if meta.is_file() {
+        return Ok(Ok(vec![path.to_path_buf()]));
+    }
+    if !meta.is_dir() {
+        return Ok(Err(path.to_path_buf()));
+    }
+    let mut out = Vec::new();
+    Ok(match walk(path, &mut out)? {
+        Some(link) => Err(link),
+        None => Ok(out),
+    })
+}
+
+/// Remove an output, file or directory, if it is there.
+fn remove(path: &Path) -> Result<()> {
+    match std::fs::symlink_metadata(path) {
+        Err(_) => Ok(()),
+        Ok(meta) if meta.is_dir() => std::fs::remove_dir_all(path).path(path),
+        Ok(_) => std::fs::remove_file(path).path(path),
+    }
+}
+
+#[cfg(unix)]
+fn is_executable(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt as _;
+    std::fs::metadata(path).is_ok_and(|m| m.permissions().mode() & 0o111 != 0)
+}
+
+#[cfg(not(unix))]
+fn is_executable(_: &Path) -> bool {
+    false
+}
+
+#[cfg(unix)]
+fn make_executable(path: &Path) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt as _;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).path(path)
+}
+
+#[cfg(not(unix))]
+fn make_executable(_: &Path) -> Result<()> {
+    Ok(())
 }
 
 /// Where a task's own files go: `target/.jrs/tasks/`.
@@ -528,6 +1008,10 @@ fn tasks_dir(manifest: &Manifest) -> PathBuf {
 /// there is one, names a program that is not on `PATH` or a script that does
 /// not exist; [`JrsError::Io`] if the argfile cannot be written or an input
 /// directory cannot be walked.
+#[allow(
+    clippy::too_many_lines,
+    reason = "one expansion: every step shares the placeholder closure and what it records"
+)]
 pub fn prepare(task: &TaskDef, ctx: &Context<'_>, extra_args: &[String]) -> Result<Prepared> {
     let manifest = ctx.manifest;
     let root = static_root(manifest);
@@ -601,6 +1085,16 @@ pub fn prepare(task: &TaskDef, ctx: &Context<'_>, extra_args: &[String]) -> Resu
         |list: Vec<String>| -> Vec<PathBuf> { list.into_iter().map(|p| root.join(p)).collect() };
     let inputs = resolve_paths(expand_list(&task.inputs, &mut value)?);
     let outputs = resolve_paths(expand_list(&task.outputs, &mut value)?);
+    // A cached task's key holds a `run` program as written, and a script by
+    // its contents.
+    let written = match &task.action {
+        Some(Action::Run(argv)) if task.cache => Some(argv[0].expand(&mut value)?),
+        _ => None,
+    };
+    let script = match &task.action {
+        Some(Action::Script(file)) if task.cache => Some(root.join(file.expand(&mut value)?)),
+        _ => None,
+    };
 
     if wants_argfile && let Some(classpaths) = ctx.classpaths {
         write_classpath_argfile(&argfile, &classpaths.compile)?;
@@ -620,6 +1114,21 @@ pub fn prepare(task: &TaskDef, ctx: &Context<'_>, extra_args: &[String]) -> Resu
             tool_classpath.unwrap_or_default(),
         )?)
     };
+    let cache = if task.cache && fingerprint.is_some() {
+        Some(CacheInputs {
+            root: normalize(&root),
+            target: normalize(&static_target(manifest)),
+            launch: key_launch(&launch, written.as_deref()),
+            script,
+            own_env: own_env.clone(),
+            inputs,
+            classpath: read_classpath(task, ctx.classpaths),
+            tool_classpath: tool_classpath.unwrap_or_default().to_vec(),
+            record: tasks_dir(manifest).join(format!("{}.outputs", task.name)),
+        })
+    } else {
+        None
+    };
     Ok(Prepared {
         name: task.name.clone(),
         launch,
@@ -628,7 +1137,56 @@ pub fn prepare(task: &TaskDef, ctx: &Context<'_>, extra_args: &[String]) -> Resu
         outputs,
         fingerprint,
         fingerprint_path: tasks_dir(manifest).join(format!("{}.fingerprint", task.name)),
+        cache,
     })
+}
+
+/// The launch as a cached task's key holds it: a `run` program by
+/// `written`, its name in the manifest, rather than where `PATH` found it,
+/// and the JDK's `java` as `java`, since the key holds the JDK already.
+fn key_launch(launch: &Launch, written: Option<&str>) -> String {
+    match launch {
+        Launch::Exec { args, .. } => format!(
+            "exec {}\u{1}{}",
+            written.unwrap_or("java"),
+            args.join("\u{1}")
+        ),
+        Launch::Shell { script, args } => format!("shell {script}\u{1}{}", args.join("\u{1}")),
+    }
+}
+
+/// The entries of the classpaths `task` reads, through a placeholder or a
+/// variable, each once, in a fixed order.
+fn read_classpath(task: &TaskDef, classpaths: Option<&Classpaths>) -> Vec<PathBuf> {
+    let Some(classpaths) = classpaths else {
+        return Vec::new();
+    };
+    let used = |placeholders: &[Placeholder], variable: Option<&str>| {
+        task.templates()
+            .any(|(_, t)| t.placeholders().any(|p| placeholders.contains(&p)))
+            || variable.is_some_and(
+                |v| matches!(&task.action, Some(Action::Shell(script)) if script.contains(v)),
+            )
+    };
+    let mut entries: Vec<PathBuf> = Vec::new();
+    if used(
+        &[Placeholder::Classpath, Placeholder::ClasspathArgfile],
+        Some("JRS_CLASSPATH"),
+    ) {
+        entries.extend(classpaths.compile.iter().cloned());
+    }
+    if used(
+        &[Placeholder::RuntimeClasspath],
+        Some("JRS_RUNTIME_CLASSPATH"),
+    ) {
+        entries.extend(classpaths.runtime.iter().cloned());
+    }
+    if used(&[Placeholder::TestClasspath], None) {
+        entries.extend(classpaths.test.iter().cloned());
+    }
+    entries.sort();
+    entries.dedup();
+    entries
 }
 
 /// Write `-cp <classpath>` to the argfile at `path`, creating its directory.
@@ -1498,6 +2056,323 @@ mod tests {
         assert!(p.fingerprint.is_none());
         p.record().unwrap();
         assert!(!p.is_fresh());
+    }
+
+    #[test]
+    fn only_a_task_with_inputs_and_outputs_and_no_side_effects_is_cached() {
+        let head = "[tasks.gen]\nscript = 'Gen.java'\ncache = true\n";
+        for (extra, needle) in [
+            ("outputs = ['target/gen']\n", "needs `inputs`"),
+            ("inputs = ['in']\n", "needs `outputs`"),
+            (
+                "inputs = ['in']\noutputs = ['target/gen']\nargs = ['{jar}']\n\
+                 depends-on = ['package']\n",
+                "uses `{jar}`",
+            ),
+            (
+                "inputs = ['in']\noutputs = ['target/gen']\n[hooks]\npre-run = ['gen']\n",
+                "`post-package` or `pre-run`",
+            ),
+            (
+                "inputs = ['in']\noutputs = ['../elsewhere']\n",
+                "is not inside the project root",
+            ),
+            (
+                "inputs = ['in']\noutputs = ['{target}']\n",
+                "the whole of the project root",
+            ),
+            (
+                "inputs = ['in']\noutputs = ['.']\n",
+                "the whole of the project root",
+            ),
+        ] {
+            let err = parse(&format!("{head}{extra}")).unwrap_err().to_string();
+            assert!(err.contains("`tasks.gen.cache`"), "{extra}: {err}");
+            assert!(err.contains(needle), "{extra}: {err}");
+        }
+        // Reached from `post-package` through a dependency counts too.
+        let err = parse(&format!(
+            "{head}inputs = ['in']\noutputs = ['target/gen']\n\
+             [tasks.ship]\ndepends-on = ['gen']\n[hooks]\npost-package = ['ship']\n"
+        ))
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("`post-package` or `pre-run`"), "{err}");
+        assert!(
+            parse(&format!(
+                "{head}inputs = ['in']\noutputs = ['target/x']\ncache = 'yes'\n"
+            ))
+            .is_err()
+        );
+
+        let m = parse(&format!(
+            "{head}inputs = ['in']\noutputs = ['{{target}}/gen', 'src/generated']\n\
+             [hooks]\npre-compile = ['gen']\n"
+        ))
+        .unwrap();
+        assert!(m.tasks[0].cache);
+        assert!(
+            m.render(None).contains("cache = true"),
+            "{}",
+            m.render(None)
+        );
+        let plain = parse("[tasks.gen]\nscript = 'Gen.java'\n").unwrap();
+        assert!(!plain.tasks[0].cache);
+        assert!(!plain.render(None).contains("cache"));
+    }
+
+    fn build_cache(tree: &Tree) -> BuildCache {
+        BuildCache::new(
+            tree.0.join("cache/build"),
+            &std::path::absolute(&tree.0).unwrap(),
+            &tree.0.join("cache"),
+            &toolchain(),
+        )
+    }
+
+    #[test]
+    fn a_cached_tasks_key_follows_contents_not_times_and_holds_no_path() {
+        let tree = Tree::new("cache-key");
+        tree.write("Gen.java", "class Gen {}");
+        let input = tree.write("api/a.yaml", "one");
+        let text = "[tasks.gen]\nscript = 'Gen.java'\nargs = ['{target}/gen']\n\
+                    inputs = ['api', 'absent.txt']\noutputs = ['target/gen']\ncache = true\n";
+        let m = tree.manifest(text);
+        let t = toolchain();
+        let cache = build_cache(&tree);
+        let key = |m: &Manifest| {
+            prepare(&m.tasks[0], &context(m, &t), &[])
+                .unwrap()
+                .cache_text(&cache)
+                .unwrap()
+        };
+        let first = key(&m);
+        let root = std::path::absolute(&tree.0).unwrap().display().to_string();
+        assert!(!first.contains(&root), "{first}");
+        assert!(first.contains("{root}/target/gen"), "{first}");
+        assert!(first.contains("missing {root}/absent.txt"), "{first}");
+        assert!(first.starts_with("task gen\nexec java\u{1}"), "{first}");
+
+        // The same bytes written again: the same key.
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        std::fs::write(&input, "one").unwrap();
+        assert_eq!(first, key(&m));
+        // Other bytes, another script, another argument: another key.
+        std::fs::write(&input, "two").unwrap();
+        let second = key(&m);
+        assert_ne!(first, second);
+        tree.write("Gen.java", "class Gen { }");
+        assert_ne!(second, key(&m));
+        let other = tree.manifest(&text.replace("{target}/gen']", "{target}/gen', '-x']"));
+        assert_ne!(key(&m), key(&other));
+
+        // A task without `cache = true` has no key.
+        let uncached = tree.manifest(&text.replace("cache = true\n", ""));
+        let p = prepare(&uncached.tasks[0], &context(&uncached, &t), &[]).unwrap();
+        assert!(!p.is_cached());
+        assert!(p.cache_text(&cache).is_none());
+    }
+
+    #[test]
+    fn a_run_task_is_keyed_by_its_program_as_written() {
+        let tree = Tree::new("cache-run");
+        tree.write("in.txt", "x");
+        tree.write("bin/tool", "");
+        let m = tree.manifest(
+            "[tasks.t]\nrun = ['bin/tool', 'go']\ninputs = ['in.txt']\noutputs = ['out']\n\
+             cache = true\n",
+        );
+        let t = toolchain();
+        let p = prepare(&m.tasks[0], &context(&m, &t), &[]).unwrap();
+        let text = p.cache_text(&build_cache(&tree)).unwrap();
+        assert!(text.contains("exec bin/tool\u{1}go\n"), "{text}");
+    }
+
+    #[test]
+    fn another_tool_jar_or_main_class_is_another_key() {
+        let tree = Tree::new("cache-tool");
+        tree.write("in.txt", "x");
+        let jar = tree.write("tools/tool.jar", "1.0");
+        let text = "[tasks.t]\nmain = 'x.Y'\ninputs = ['in.txt']\noutputs = ['out']\ncache = true\n\
+                    [tasks.t.dependencies]\n'g:tool' = '1.0'\n";
+        let t = toolchain();
+        let jars = [jar.clone()];
+        let cache = build_cache(&tree);
+        let key = |text: &str| {
+            let m = tree.manifest(text);
+            let mut ctx = context(&m, &t);
+            ctx.tool_classpath = Some(&jars);
+            prepare(&m.tasks[0], &ctx, &[])
+                .unwrap()
+                .cache_text(&cache)
+                .unwrap()
+        };
+        let first = key(text);
+        assert_ne!(
+            first,
+            key(&text.replace("x.Y", "x.Z")),
+            "another main class"
+        );
+        std::fs::write(&jar, "2.0").unwrap();
+        let fresh_cache = build_cache(&tree);
+        let m = tree.manifest(text);
+        let mut ctx = context(&m, &t);
+        ctx.tool_classpath = Some(&jars);
+        let other = prepare(&m.tasks[0], &ctx, &[])
+            .unwrap()
+            .cache_text(&fresh_cache)
+            .unwrap();
+        assert_ne!(first, other, "another tool jar");
+    }
+
+    #[test]
+    fn a_class_directory_on_a_read_classpath_counts_by_its_bytes() {
+        let tree = Tree::new("cache-classes");
+        tree.write("Gen.java", "");
+        tree.write("in.txt", "x");
+        let class = tree.write("target/classes/A.class", "one");
+        let text = "[tasks.gen]\nscript = 'Gen.java'\ninputs = ['in.txt']\noutputs = ['target/out']\n\
+                    cache = true\n";
+        let reads = tree.manifest(&format!("{text}args = ['{{runtime-classpath}}']\n"));
+        let blind = tree.manifest(text);
+        let t = toolchain();
+        let classes = std::path::absolute(tree.0.join("target/classes")).unwrap();
+        let classpaths = Classpaths {
+            compile: vec![classes.clone()],
+            runtime: vec![classes.clone(), tree.0.join("missing.jar")],
+            test: vec![tree.0.join("target/test-classes"), classes],
+        };
+        let cache = build_cache(&tree);
+        let key = |m: &Manifest| {
+            let ctx = Context {
+                classpaths: Some(&classpaths),
+                ..context(m, &t)
+            };
+            prepare(&m.tasks[0], &ctx, &[])
+                .unwrap()
+                .cache_text(&cache)
+                .unwrap()
+        };
+        let before = key(&reads);
+        assert!(
+            before.contains("classes {root}/target/classes "),
+            "{before}"
+        );
+        assert!(before.contains("missing {root}/missing.jar"), "{before}");
+        assert!(
+            !before.contains("test-classes"),
+            "only what it reads: {before}"
+        );
+        let unread = key(&blind);
+        std::fs::write(&class, "two").unwrap();
+        assert_ne!(before, key(&reads), "a method body counts");
+        assert_eq!(unread, key(&blind));
+    }
+
+    #[test]
+    fn outputs_restore_byte_for_byte_with_their_modes_and_the_users_files_are_kept() {
+        let tree = Tree::new("cache-restore");
+        tree.write("in.txt", "x");
+        tree.write("Gen.java", "");
+        let m = tree.manifest(
+            "[tasks.gen]\nscript = 'Gen.java'\ninputs = ['in.txt']\n\
+             outputs = ['target/gen', 'src/generated', 'bin/run', 'target/never']\ncache = true\n",
+        );
+        let t = toolchain();
+        let p = prepare(&m.tasks[0], &context(&m, &t), &[]).unwrap();
+        tree.write("target/gen/com/A.java", "a");
+        tree.write("target/gen/with space.txt", "s");
+        tree.write("src/generated/Client.java", "client");
+        let run = tree.write("bin/run", "#!/bin/sh\n");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(&run, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let Collected::Entry(entry) = p.collect_outputs().unwrap() else {
+            panic!("no link here")
+        };
+        let names: Vec<&str> = entry.entries.iter().map(|(n, _)| n.as_str()).collect();
+        assert_eq!(
+            names,
+            [
+                "0/com/A.java",
+                "0/with space.txt",
+                "1/Client.java",
+                "2",
+                TASK_ENTRY_INDEX
+            ]
+        );
+        let index = String::from_utf8_lossy(&entry.entries[4].1).into_owned();
+        assert!(index.contains("output 2 file bin/run"), "{index}");
+        assert!(index.contains("output 3 absent target/never"), "{index}");
+        assert_eq!(
+            entry.executable.contains("2"),
+            cfg!(unix),
+            "{:?}",
+            entry.executable
+        );
+
+        // No record yet: an existing output outside target/ is the user's.
+        assert_eq!(
+            p.user_file(),
+            Some(tree.0.join("src/generated/Client.java"))
+        );
+        p.record_outputs(&entry).unwrap();
+        assert_eq!(p.user_file(), None);
+
+        // A restore removes what the entry does not hold, and keeps modes.
+        tree.write("target/gen/Stale.java", "stale");
+        std::fs::remove_file(&run).unwrap();
+        assert!(p.restore_outputs(&entry.entries).unwrap());
+        assert!(!tree.0.join("target/gen/Stale.java").exists());
+        assert_eq!(
+            std::fs::read(tree.0.join("target/gen/com/A.java")).unwrap(),
+            b"a"
+        );
+        assert_eq!(std::fs::read(&run).unwrap(), b"#!/bin/sh\n");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let mode = std::fs::metadata(&run).unwrap().permissions().mode();
+            assert_eq!(mode & 0o111, 0o111, "{mode:o}");
+        }
+
+        // A file the user adds, or changes, outside target/ stops a restore.
+        let mine = tree.write("src/generated/Mine.java", "mine");
+        assert_eq!(p.user_file(), Some(mine.clone()));
+        std::fs::remove_file(&mine).unwrap();
+        tree.write("src/generated/Client.java", "edited");
+        assert!(p.user_file().is_some());
+        // But one under target/ never does.
+        tree.write("src/generated/Client.java", "client");
+        tree.write("target/gen/Extra.java", "x");
+        assert_eq!(p.user_file(), None);
+
+        // An entry for other outputs is refused untouched.
+        let other = tree.manifest(
+            "[tasks.gen]\nscript = 'Gen.java'\ninputs = ['in.txt']\n\
+             outputs = ['target/other']\ncache = true\n",
+        );
+        let q = prepare(&other.tasks[0], &context(&other, &t), &[]).unwrap();
+        assert!(!q.restore_outputs(&entry.entries).unwrap());
+        assert!(tree.0.join("target/gen/Extra.java").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_output_holding_a_link_is_not_stored() {
+        let tree = Tree::new("cache-link");
+        tree.write("in.txt", "x");
+        tree.write("Gen.java", "");
+        let m = tree.manifest(
+            "[tasks.gen]\nscript = 'Gen.java'\ninputs = ['in.txt']\noutputs = ['target/gen']\n\
+             cache = true\n",
+        );
+        let p = prepare(&m.tasks[0], &context(&m, &toolchain()), &[]).unwrap();
+        tree.write("target/gen/a.txt", "a");
+        std::os::unix::fs::symlink("/etc", tree.0.join("target/gen/etc")).unwrap();
+        assert!(matches!(p.collect_outputs().unwrap(), Collected::Link(l) if l.ends_with("etc")));
     }
 
     #[test]

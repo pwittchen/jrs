@@ -596,6 +596,7 @@ fn openapi_task(
         outputs,
         source_outputs: Vec::new(),
         resource_outputs: Vec::new(),
+        cache: false,
         dependencies: vec![Dependency::new(OPENAPI_CLI.0, OPENAPI_CLI.1, version)],
     };
     // Without an output there is nothing to be fresh about.
@@ -675,6 +676,7 @@ pub(super) fn delegate(
         outputs,
         source_outputs: Vec::new(),
         resource_outputs: Vec::new(),
+        cache: false,
         dependencies: Vec::new(),
     }
 }

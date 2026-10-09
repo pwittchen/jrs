@@ -6,13 +6,15 @@ Design proposal for the third item left in
 user-defined task's outputs, restored from the build cache of SPEC §7.8
 instead of run again.
 
-Status: **proposal, nothing implemented.** It extends two contracts that are
-already in place, the task model of [TASKS.md](TASKS.md) (SPEC §7.6) and the
-build cache (SPEC §7.8), and crosses one line drawn in TASKS.md §7: there, a
-task's generated output must live under `target-dir`. §6 lists the SPEC.md
-edits it needs before it has code. As with the other specs, this document is
-the design record. Once it lands, the SPEC sections it names become the
-contract.
+Status: **T1, T2 and T3 implemented** (§8.1), with one change to §4.1: a
+class directory on a classpath the task reads is keyed by the bytes of its
+files, not by `compile::api_digest`, since a task may run the classes it
+reads, and a method body then changes its output. It extends two contracts,
+the task model of [TASKS.md](TASKS.md) (SPEC §7.6) and the build cache
+(SPEC §7.8), and crosses one line drawn in TASKS.md §7: there, a task's
+generated output must live under `target-dir`. The SPEC edits of §6 are
+made, and SPEC §7.6's **Cached tasks** and §7.8 are the contract; this
+document is the design record.
 
 ---
 
@@ -130,10 +132,11 @@ absolute path and no modification time:
   and pinned checksum;
 - when the task reads a classpath placeholder (`task::needs_classpath`), each
   jar on the classpaths it names by `BuildCache::jar`, and each class
-  directory on them by `compile::api_digest`, as the test unit counts
-  `target/classes`; a task reading the test classpath needs both class
-  directories digested, and a directory that does not exist yet is
-  `missing <path>`;
+  directory on them by the hash of every file in it — by bytes, not by
+  `compile::api_digest` as first proposed, since a task that runs the
+  classes depends on their method bodies; a task reading the test classpath
+  needs both class directories hashed, and a directory that does not exist
+  yet is `missing <path>`;
 - each output, by its relative path, so that two tasks with the same command
   and different outputs cannot share an entry.
 

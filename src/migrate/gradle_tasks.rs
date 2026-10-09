@@ -762,6 +762,7 @@ fn translate(gradle: &str, header: Header, block: Option<&str>) -> Result<Declar
             outputs: literals(&body.outputs),
             source_outputs: Vec::new(),
             resource_outputs: Vec::new(),
+            cache: false,
             dependencies: Vec::new(),
         },
         depends_on: body.depends_on,

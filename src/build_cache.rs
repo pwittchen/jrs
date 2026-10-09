@@ -214,6 +214,17 @@ impl BuildCache {
     /// which is then kept locally. `None` on a miss, and for an entry that
     /// does not read back.
     pub fn load(&self, key: &str, ui: &Ui) -> Option<Entries> {
+        self.load_from(key, self.remote.as_ref(), ui)
+    }
+
+    /// A task's entry under `key` (SPEC §7.6): as [`BuildCache::load`], but
+    /// from the remote only when `[build-cache] tasks` lets it serve them,
+    /// since a task's output may be code that runs outside any JVM.
+    pub fn load_task(&self, key: &str, ui: &Ui) -> Option<Entries> {
+        self.load_from(key, self.remote.as_ref().filter(|r| r.tasks), ui)
+    }
+
+    fn load_from(&self, key: &str, remote: Option<&Remote>, ui: &Ui) -> Option<Entries> {
         let path = self.local_path(key);
         if let Ok(bytes) = std::fs::read(&path) {
             if let Some(entries) = unzip(&bytes) {
@@ -226,8 +237,7 @@ impl BuildCache {
             ));
             let _ = std::fs::remove_file(&path);
         }
-        let remote = self.remote.as_ref()?;
-        let bytes = remote.get(key, ui)?;
+        let bytes = remote?.get(key, ui)?;
         let Some(entries) = unzip(&bytes) else {
             ui.verbose(format!(
                 "build cache: the remote entry {key} does not read back; it is ignored"
@@ -243,7 +253,25 @@ impl BuildCache {
     /// Store `entries` under `key`: locally, and on the remote when pushing
     /// is turned on.
     pub fn save(&self, key: &str, entries: &Entries, ui: &Ui) {
-        let bytes = match zip(entries) {
+        self.store(key, zip(entries), self.remote.as_ref(), ui);
+    }
+
+    /// Store a task's `entries` under `key`, the files named in `executable`
+    /// with mode `755`: locally, and on the remote only when pushing is on
+    /// and `[build-cache] tasks` lets it hold task entries.
+    pub fn save_task<S: std::hash::BuildHasher>(
+        &self,
+        key: &str,
+        entries: &Entries,
+        executable: &HashSet<String, S>,
+        ui: &Ui,
+    ) {
+        let remote = self.remote.as_ref().filter(|r| r.tasks);
+        self.store(key, zip_with_modes(entries, executable), remote, ui);
+    }
+
+    fn store(&self, key: &str, bytes: Result<Vec<u8>>, remote: Option<&Remote>, ui: &Ui) {
+        let bytes = match bytes {
             Ok(bytes) => bytes,
             Err(e) => {
                 ui.verbose(format!("build cache: could not write an entry: {e}"));
@@ -255,7 +283,7 @@ impl BuildCache {
             Ok(()) => ui.verbose(format!("build cache: stored {}", path.display())),
             Err(e) => ui.verbose(format!("build cache: could not store {key}: {e}")),
         }
-        if let Some(remote) = &self.remote
+        if let Some(remote) = remote
             && remote.push
         {
             remote.put(key, &bytes, ui);
@@ -267,6 +295,8 @@ impl BuildCache {
 pub struct Remote {
     url: String,
     push: bool,
+    /// Whether task entries are read from and pushed to it as well.
+    tasks: bool,
     authorization: Option<String>,
     agent: ureq::Agent,
     /// Set by the first failure, after which the remote is left alone.
@@ -300,6 +330,7 @@ impl Remote {
         Ok(Some(Remote {
             url: url.trim_end_matches('/').to_string(),
             push: config.push,
+            tasks: config.tasks,
             authorization: credentials.map(authorization),
             agent: ureq::Agent::new_with_config(agent.build()),
             failed: AtomicBool::new(false),
@@ -458,21 +489,56 @@ pub fn extract(entries: &Entries, dir: &Path) -> Result<()> {
 ///
 /// [`JrsError::Build`] if the zip cannot be written.
 pub fn zip(entries: &Entries) -> Result<Vec<u8>> {
+    zip_with_modes(entries, &HashSet::<String>::new())
+}
+
+/// [`zip`], with the files named in `executable` at mode `755` rather than
+/// `644`: a task's outputs keep their execute bit, and the modes stay a
+/// fixed set, so the entry stays deterministic.
+///
+/// # Errors
+///
+/// [`JrsError::Build`] if the zip cannot be written.
+pub fn zip_with_modes<S: std::hash::BuildHasher>(
+    entries: &Entries,
+    executable: &HashSet<String, S>,
+) -> Result<Vec<u8>> {
     let sorted: BTreeMap<&str, &[u8]> = entries
         .iter()
         .map(|(n, b)| (n.as_str(), b.as_slice()))
         .collect();
     let options = zip::write::SimpleFileOptions::default()
         .compression_method(zip::CompressionMethod::Deflated)
-        .last_modified_time(crate::package::fixed_timestamp())
-        .unix_permissions(0o644);
+        .last_modified_time(crate::package::fixed_timestamp());
     let fail = |e: &dyn std::fmt::Display| JrsError::build(format!("build cache entry: {e}"));
     let mut writer = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
     for (name, bytes) in sorted {
-        writer.start_file(name, options).map_err(|e| fail(&e))?;
+        let mode = if executable.contains(name) {
+            0o755
+        } else {
+            0o644
+        };
+        writer
+            .start_file(name, options.unix_permissions(mode))
+            .map_err(|e| fail(&e))?;
         writer.write_all(bytes).map_err(|e| fail(&e))?;
     }
     Ok(writer.finish().map_err(|e| fail(&e))?.into_inner())
+}
+
+/// The names of the files [`zip_with_modes`] wrote with mode `755`, or
+/// `None` when `bytes` do not read back as a zip.
+#[must_use]
+pub fn executables(bytes: &[u8]) -> Option<HashSet<String>> {
+    let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bytes)).ok()?;
+    let mut out = HashSet::new();
+    for i in 0..archive.len() {
+        let file = archive.by_index_raw(i).ok()?;
+        if file.unix_mode().is_some_and(|m| m & 0o111 != 0) {
+            out.insert(file.name().to_string());
+        }
+    }
+    Some(out)
 }
 
 /// The files of a zip [`zip`] wrote, or `None` when it does not read back
@@ -582,6 +648,19 @@ mod tests {
         assert!(unzip(b"not a zip").is_none());
         let escaping = zip(&vec![("../evil.class".to_string(), b"x".to_vec())]).unwrap();
         assert!(unzip(&escaping).is_none(), "a path outside the directory");
+    }
+
+    #[test]
+    fn a_task_entry_keeps_the_execute_bit_and_stays_deterministic() {
+        let executable = HashSet::from(["0/bin/run".to_string()]);
+        let mut files = entries();
+        files.push(("0/bin/run".to_string(), b"#!/bin/sh".to_vec()));
+        let bytes = zip_with_modes(&files, &executable).unwrap();
+        files.reverse();
+        assert_eq!(bytes, zip_with_modes(&files, &executable).unwrap());
+        assert_eq!(executables(&bytes).unwrap(), executable);
+        assert!(executables(&zip(&files).unwrap()).unwrap().is_empty());
+        assert_eq!(unzip(&bytes).unwrap().len(), 3);
     }
 
     #[test]

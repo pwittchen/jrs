@@ -1106,6 +1106,7 @@ fn exec_task(
             outputs: Vec::new(),
             source_outputs: Vec::new(),
             resource_outputs: Vec::new(),
+            cache: false,
             dependencies,
         },
         hook,

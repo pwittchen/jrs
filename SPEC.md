@@ -233,7 +233,7 @@ post-package = ["checksum"]
 | `dev-dependencies.*` | no | `{}` | Test classpath only; never packaged. Same forms, without `compile-only` or `runtime-only`. |
 | `managed.*` | no | `{}` | `group:artifact` → a version the artifact is held to wherever it turns up in the graph, or `{ version, bom = true }`, a BOM whose managed versions apply the same way (§8.9). |
 | `repositories.*` | no | Central | Name → base URL, or `{ url, groups }` to confine the repository to those groups (§8.7). |
-| `tasks.<name>.*` | no | `{}` | A user-defined task: one action (`run`, `shell`, `script` or `main`) or none, plus `description`, `args`, `depends-on`, `env`, `cwd`, `inputs`, `outputs`, `source-outputs`, `resource-outputs`, and `[tasks.<name>.dependencies]` for a `main` or `script` (§7.6). |
+| `tasks.<name>.*` | no | `{}` | A user-defined task: one action (`run`, `shell`, `script` or `main`) or none, plus `description`, `args`, `depends-on`, `env`, `cwd`, `inputs`, `outputs`, `source-outputs`, `resource-outputs`, `cache` (keep the outputs in the build cache, default `false`), and `[tasks.<name>.dependencies]` for a `main` or `script` (§7.6). |
 | `hooks.*` | no | `{}` | Lifecycle point (`pre-compile`, `post-compile`, `pre-test`, `post-test`, `post-package`, `pre-run`) → list of task names (§7.6). |
 
 ### 4.3 Validation
@@ -342,11 +342,11 @@ jrs <command> [options]
 | `jrs init [--lib] [--lang java\|kotlin\|scala\|groovy]` | Scaffold `jrs.toml`, a starter class and a starter test: JUnit 5 for Java and Kotlin, MUnit for Scala, and for Groovy Java code with Spock specs (§7.7). `--check` adds a `check` task running PMD's `quickstart` rules as a tool (§7.6), in the `post-compile` hook; it is refused for Kotlin and Scala, whose starters have no Java sources. |
 | `jrs migrate` | Generate `jrs.toml` from an existing `pom.xml` or Gradle build (§11). |
 | `jrs completions <shell>` | Print a bash, zsh or fish completion script. |
-| `jrs task <name> [-- args...]` | Run a user-defined task and whatever it depends on (§7.6). |
+| `jrs task <name> [-- args...]` | Run a user-defined task and whatever it depends on (§7.6). A task with `cache = true` is restored from the build cache rather than run, unless arguments follow `--`. |
 | `jrs task <name> --watch` | The same, repeated on every change to the task's inputs, the manifest or the source trees (§7.5). |
 | `jrs task --list` | List the tasks, their descriptions and the hooks that run them, to stdout. |
-| `jrs build --verify-cache` | Compile every unit even when it is up to date, and fail (exit `1`) if the build cache holds other classes under the same key (§7.8). |
-| `--no-build-cache` on `build`, `test`, `run`, `package` | Neither restore from nor store into the build cache (§7.8). |
+| `jrs build --verify-cache` | Compile every unit and run every cached task even when it is up to date, and fail (exit `1`) if the build cache holds other classes or outputs under the same key (§7.8). |
+| `--no-build-cache` on `build`, `test`, `run`, `package`, `task` | Neither restore from nor store into the build cache (§7.8). |
 | `--timings` on `build`, `test`, `run`, `package` | Report the wall time of each phase after the summary, with a copy in `target/.jrs/timings.txt` (§5.3.9). |
 | `jrs metadata [--no-deps]` | Print the project model as versioned JSON on stdout, for editors and tools; resolves but never compiles (§5.4). |
 | `jrs fetch [--sources]` | Resolve and download the dependencies, the compilers, the tasks' tools and the test launcher into the cache without building; `--sources` adds each dependency's `-sources.jar` (§5.4). |
@@ -428,8 +428,9 @@ Cargo-style, right-aligned in 12 columns, verb in bold green:
 ```
 
 A task prints `Task <name>`, with the hook that ran it in parentheses, or
-`Fresh <name> (task)` when its up-to-date check lets it be skipped (§7.6).
-A compile unit whose classes came from the build cache prints `Restored
+`Fresh <name> (task)` when its up-to-date check lets it be skipped (§7.6),
+or `Restored <name> (task, from the build cache)` when a cached task's
+outputs were put back instead of a run (§7.6). A compile unit whose classes came from the build cache prints `Restored
 my-app v1.0.0 (from the build cache)` in place of `Compiling` (§7.8).
 
 #### 5.3.3 Spinners
@@ -1032,7 +1033,11 @@ warn. These are errors:
 - an unknown placeholder, or a classpath placeholder in a path-valued key
   (`cwd`, `inputs`, `outputs`, `source-outputs`, `resource-outputs`);
 - `{jar}` in a task reachable from any hook but `post-package`, unless the task
-  depends on `package`.
+  depends on `package`;
+- `cache = true` on a task without both `inputs` and `outputs`, on one that
+  uses `{jar}`, on one the `post-package` or `pre-run` hook reaches, or with
+  an output outside the root, or that is the root or `project.target-dir`
+  itself (see **Cached tasks** below).
 
 Tasks do not feed `manifest-checksum`, so adding one does not re-resolve;
 their `dependencies` do, since those are resolved.
@@ -1077,6 +1082,40 @@ is written to `target/.jrs/tasks/<name>.fingerprint` after a successful run and
 deleted on failure. A task is fresh when the fingerprint matches and every
 output exists: it prints `Fresh <name> (task)` and does not run. `jrs clean`
 forgets every fingerprint.
+
+**Cached tasks.** `cache = true` keeps a task's outputs in the build cache
+(§7.8), so that a clean checkout, a CI machine or a branch switch restores
+them instead of running the task. It is opt-in, never inferred: a task is
+arbitrary code, and only its author can say it reads nothing it did not
+declare. `jrs migrate` never writes it. The design record is
+[TASK_OUTPUT_CACHE.md](specs/TASK_OUTPUT_CACHE.md).
+
+- *When.* The fingerprint stays first: the cache is asked only when the task
+  is not fresh. A hit prints `Restored <name> (task, from the build cache)`
+  and replays none of the output the task printed when it ran; a miss runs
+  it, and a successful run is stored. `jrs task <name>` restores as a hook
+  does; with arguments after `--` it neither restores nor stores.
+- *The key*, of kind `task`, holds no absolute path and no mtime: the task's
+  name; its launch after expansion, with a `run` program by the name written
+  in the manifest (not as found on `PATH`, which the key cannot vouch for),
+  `cwd` and its own `env`, all with `{root}` and `{cache}` in place of the
+  checkout's paths; a `script` file by its contents; each input file by its
+  path and SHA-256, a missing one as missing; each jar of the task's own
+  `dependencies` by its identity (§7.8); for each classpath the task reads,
+  each jar by its identity and each class directory by the hash of every
+  file in it — by bytes, not by API, since a task may run the classes it
+  reads; and each output by its path.
+- *Where outputs may be.* Under the root, always. Under
+  `project.target-dir` they are restored freely. Elsewhere, an output is
+  restored only when it does not exist or holds exactly the files the task's
+  last run or restore left there: `target/.jrs/tasks/<name>.outputs` records
+  each by path and hash. Any other file in it is the user's, and the task
+  runs instead, with a `-v` line naming the file. After `jrs clean` there is
+  no record, so the first build runs such a task.
+- *Restoring* removes each output, file or directory, then writes the
+  entry's files, then the record and the fingerprint. *Storing* follows a
+  successful run; a failed one stores nothing and forgets the record. A task
+  whose outputs hold a symbolic link is never stored, which `-v` says.
 
 **Generated sources and resources.** The `source-outputs` and
 `resource-outputs` of tasks reached from `pre-compile` feed the main compile
@@ -1189,9 +1228,12 @@ pre-1.8 `kotlin-stdlib-jdk7`/`-jdk8` beside a Kotlin 2 stdlib.
 
 The fingerprints in `target/.jrs/` say whether `target/` is up to date; they
 cannot bring back what a branch switch, a `git stash` or a `jrs clean` threw
-away. The build cache can (`build_cache.rs`). It holds two kinds of entry,
-both content-addressed: a compile unit's output, and a passing test run's
-reports. The design record is `specs/FASTER_BUILDS.md` §5.
+away. The build cache can (`build_cache.rs`). It holds three kinds of entry,
+all content-addressed: a compile unit's output, a passing test run's
+reports, and the outputs of a task that says `cache = true` (§7.6). The
+design record is `specs/FASTER_BUILDS.md` §5, and for tasks
+`specs/TASK_OUTPUT_CACHE.md`. Each kind's key text starts with its kind, so
+no task key can equal a compile or a test key.
 
 **Keys.** An entry's key is a SHA-256 over a text that holds no absolute path
 and no modification time, so that two checkouts of one commit, in two
@@ -1250,8 +1292,15 @@ instead of starting the JVM; the `post-test` hook still runs. `--all`,
 finds no test class reaching a change (§10.2) says so before the cache is
 asked.
 
+**Task entries.** A task's entry holds each output's files under its index
+(`0/…`, or `0` alone for an output that is a file) and `jrs-task.txt`, which
+says whether each output was a directory, a file or absent, and each file's
+mode, `644` or `755`, so that a generated launcher keeps its execute bit.
+Its key is §7.6's.
+
 **Storage.** An entry is a zip written as jars are: entries sorted, the fixed
-1980 timestamp, fixed permissions. It lives at
+1980 timestamp, fixed permissions — `644`, or `755` for a task's executable
+file. It lives at
 `<cache>/build/<k[0..2]>/<key>.zip`, written to a temporary file and renamed.
 A hit records its use in the entry's access time, as a cached jar does
 (§8.3). An entry that does not read back as a zip, or names a path outside
@@ -1264,17 +1313,23 @@ on. It is configured per machine (§8.5), reached through the `[proxy]`
 settings with the credentials it names, with a 5-second connect and a
 2-minute overall timeout. A remote that fails or answers anything but 200, 404
 or 410 is reported once under `-v` and left alone for the rest of the command.
+Task entries are read from it, and pushed to it, only under `[build-cache]
+tasks = true`: a task's output can be code that runs outside any JVM — a
+script, a bundle served to browsers — and its key trusts the declared
+inputs and a `run` program's name.
 
 **Trust.** Anyone who can push can put classes into every build that reads
 the cache. So pushing is off unless asked for, push rights belong to CI
 alone, and an entry is only ever read by its content key: a client cannot be
 served an entry for other inputs, only a wrong value under the right key.
-`jrs build --verify-cache` compiles every unit, up to date or not, and fails
-(exit `1`) naming the first file that differs from what the cache holds under
-the unit's key; with nothing held, it stores what it compiled.
+`jrs build --verify-cache` compiles every unit and runs every cached task
+the build reaches, up to date or not, and fails (exit `1`) naming the first
+file that differs from what the cache holds under the unit's or the task's
+key; with nothing held, it stores what it compiled or the task wrote.
 
-**Turning it off.** `--no-build-cache` on `build`, `test`, `run` and
-`package`, `JRS_BUILD_CACHE=off`, or `[build-cache] enabled = false` (§8.5).
+**Turning it off.** `--no-build-cache` on `build`, `test`, `run`,
+`package` and `task`, `JRS_BUILD_CACHE=off`, or `[build-cache] enabled =
+false` (§8.5). Removing `cache = true` turns it off for one task.
 The local cache is on by default, as the dependency cache is; a remote one
 exists only when configured. None of it can fail a build: a cache that
 cannot be read or written costs the speed-up, and nothing else.
@@ -1421,6 +1476,7 @@ unknown keys warn, errors name the key — and a missing file means every defaul
 | `build-cache.url` | A remote build cache, `http(s)://` or `file://`, read on a local miss. |
 | `build-cache.push` | Whether this machine writes to the remote: `true` on CI, and nowhere else. Default `false`. |
 | `build-cache.credentials` | The `[credentials.<name>]` entry the remote is reached with; `JRS_REPO_<NAME>_*` apply to it as to a repository. |
+| `build-cache.tasks` | Whether the remote also serves, and with `push` takes, the entries of tasks that say `cache = true` (§7.6, §7.8). Default `false`: the remote holds compile and test entries only. |
 
 - Credentials from `JRS_REPO_<NAME>_USERNAME` + `JRS_REPO_<NAME>_PASSWORD` or
   `JRS_REPO_<NAME>_TOKEN` override the file. They are sent only to the
@@ -2365,6 +2421,10 @@ produces something runnable.
   (F7, §10.2); whether it, or the archive, becomes the default waits for
   the corpus measurement [TEST_JVM_BENCHMARK.md](specs/TEST_JVM_BENCHMARK.md)
   plans
+- ☑ task outputs in the build cache, opt-in with `cache = true`, outputs
+  outside `target/` guarded by a record, remote task entries behind
+  `[build-cache] tasks` (T1–T3 of
+  [TASK_OUTPUT_CACHE.md](specs/TASK_OUTPUT_CACHE.md), §7.6, §7.8)
 - Added after M8; the design, and the argument for the line §1.2 now draws
   between a compiler daemon and a `--watch` worker, is in
   [FASTER_BUILDS.md](specs/FASTER_BUILDS.md).

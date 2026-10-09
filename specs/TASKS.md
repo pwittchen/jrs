@@ -351,6 +351,11 @@ every output exists. A fresh task prints `Fresh <name> (task)` and is not run.
 Because it lives in `target/`, `jrs clean` forgets it, and the next build runs
 every task. `target/` stays fully disposable.
 
+A task that also says `cache = true` keeps its outputs in the build cache, so
+that after a clean, on another checkout or on CI they are restored rather
+than generated again: [TASK_OUTPUT_CACHE.md](TASK_OUTPUT_CACHE.md), and
+SPEC §7.6's **Cached tasks**.
+
 ---
 
 ## 7. Generated sources and resources

@@ -909,8 +909,12 @@ they cannot reorder or replace the built-in phases.
              │                                  <name>.tool.args written,  │
              │                                  inputs/outputs fingerprint │
              │                  fresh?  ─► "Fresh (task)"                  │
+             │                  cache = true and a hit, no user's file     │
+             │                  in an output outside target/?              │
+             │                          ─► restore, "Restored (task, …)"   │
              │                  else    ─► "Task" + toolchain::run_task_*  │
-             │                              success ─► record fingerprint  │
+             │                              success ─► record fingerprint, │
+             │                                 store when cache = true     │
              │                              failure ─► build error, exit 1 │
              └─────────────────────────────────────────────────────────────┘
 
@@ -923,6 +927,19 @@ terminal: whole-manifest checks (unknown references, cycles, where a
 placeholder is available, generated output must be under `target-dir`),
 ordering, placeholder expansion, the environment and fingerprints. It is tested
 without a TTY; `cli.rs` decides when a task runs and what is printed around it.
+
+A task with `cache = true` (SPEC §7.6, TASK_OUTPUT_CACHE.md) is also a
+build-cache entry. `task::prepare` keeps what its key needs beside the
+fingerprint, and `Prepared::cache_text` reads it only once `is_fresh` said
+no, since it hashes every input: paths through `BuildCache::relative`, a
+`run` program by its written name, jars by `BuildCache::jar`, class
+directories by their files' bytes. `Session::run_task` asks
+`BuildCache::load_task` — the remote only under `[build-cache] tasks` — and
+`Prepared::user_file` before `restore_outputs`; after a successful run,
+`collect_outputs` (which refuses a symbolic link) feeds `save_task`, whose
+zip keeps each file's `644`/`755`. `target/.jrs/tasks/<name>.outputs`
+records the files the last run or restore left, which is what lets an
+output outside `target/` be replaced without touching a user's file.
 
 A task's action is `run`, `shell`, `script` or `main`. `main` runs a class
 from the task's own `[tasks.<name>.dependencies]` (TASKS.md §8): `cli.rs`
@@ -1051,6 +1068,8 @@ poisoning, which is documented under each function's `# Panics`.
          ├── resources-main.list  resources-test.list  resources-*-generated-*.list
          ├── tasks/                 <task>.fingerprint  <task>.cp.args
          │                          <task>.tool.args
+         │                          <task>.outputs   cache = true: what the
+         │                                           outputs held, by hash
          ├── javadoc.args  scaladoc.args  groovydoc.args
          ├── junit-palette.properties  jpackage-input/
          │   native-image.args

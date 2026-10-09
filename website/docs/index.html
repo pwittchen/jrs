@@ -1030,6 +1030,7 @@ plugins = ["serialization"]           # optional, Kotlin compiler plugins</pre>
     <tr><td><code>inputs</code>, <code>outputs</code></td><td>arrays</td><td>Files or directories; with both, the task is skipped while nothing changed.</td></tr>
     <tr><td><code>source-outputs</code></td><td>array</td><td>Generated source directories to compile, under <code>target-dir</code>.</td></tr>
     <tr><td><code>resource-outputs</code></td><td>array</td><td>Generated resource directories to copy, under <code>target-dir</code>.</td></tr>
+    <tr><td><code>cache</code></td><td>bool</td><td><code>true</code> keeps the outputs in the <a href="#build-cache">build cache</a> and restores them instead of running the task. Needs <code>inputs</code> and <code>outputs</code>; default <code>false</code>.</td></tr>
     <tr><td><code>[tasks.&lt;name&gt;.dependencies]</code></td><td>table</td><td>The classpath of a <code>main</code> or <code>script</code> task, resolved as its own graph.</td></tr>
   </tbody>
 </table>
@@ -1192,8 +1193,8 @@ jrs metadata | jq '.classpaths.test[].jar'</pre>
   <tbody>
     <tr><td><code>--watch</code></td><td>Build again whenever a source, a resource, a task input or <code>jrs.toml</code> changes. See <a href="#watch">Watch mode</a>.</td></tr>
     <tr><td><code>--timings</code></td><td>Print the wall time of each phase after the summary. See <a href="#output-timings">Timings</a>.</td></tr>
-    <tr><td><code>--no-build-cache</code></td><td>Neither restore from nor store into the <a href="#build-cache">build cache</a>. <code>test</code>, <code>run</code> and <code>package</code> take it too.</td></tr>
-    <tr><td><code>--verify-cache</code></td><td>Compile every unit, up to date or not, and fail if the build cache holds different classes for the same inputs.</td></tr>
+    <tr><td><code>--no-build-cache</code></td><td>Neither restore from nor store into the <a href="#build-cache">build cache</a>. <code>test</code>, <code>run</code>, <code>package</code> and <code>task</code> take it too.</td></tr>
+    <tr><td><code>--verify-cache</code></td><td>Compile every unit and run every cached task, up to date or not, and fail if the build cache holds different classes or outputs for the same inputs.</td></tr>
   </tbody>
 </table>
 <p><code>test</code>, <code>run</code> and <code>package</code> all start with exactly this build.</p>
@@ -1338,7 +1339,7 @@ jrs package --sources --javadoc            # the jars a repository wants</pre>
 
 <section id="cmd-task">
 <h2><code>jrs task</code></h2>
-<pre data-lang="plain">jrs task &lt;NAME&gt; [--watch] [-- ARGS...]
+<pre data-lang="plain">jrs task &lt;NAME&gt; [--watch] [--no-build-cache] [-- ARGS...]
 jrs task --list</pre>
 <p>
   Runs a task from <code>jrs.toml</code> after whatever its <code>depends-on</code> names. The task
@@ -1350,6 +1351,7 @@ jrs task --list</pre>
   <tbody>
     <tr><td><code>--list</code></td><td>List every task, its description and the hooks that run it, on stdout. <code>shell</code> tasks are marked <code>(sh)</code>.</td></tr>
     <tr><td><code>--watch</code></td><td>Run it again whenever its inputs, a source or <code>jrs.toml</code> changes.</td></tr>
+    <tr><td><code>--no-build-cache</code></td><td>Run a task that says <code>cache = true</code> rather than restore it, and store nothing. Extra arguments after <code>--</code> do the same.</td></tr>
   </tbody>
 </table>
 <pre>jrs task --list
@@ -1746,7 +1748,9 @@ jrs build --timings     # how long each step took</pre>
   machines, share their entries. A <code>jrs test</code> run of the whole suite that passed, with no
   flaky test, is kept too: a later run over the same class files puts its reports back and prints
   <code>Testing 214 test classes: passed in the cached run</code> without starting the JVM.
-  <code>--all</code> runs them anyway.
+  <code>--all</code> runs them anyway. A task that says <code>cache = true</code> is kept as well:
+  its outputs are restored instead of running it, as <a href="#tasks">Tasks and hooks</a>
+  describes.
 </p>
 <p>
   Entries live in the dependency cache, under <code>build/</code>. A plain
@@ -1768,14 +1772,20 @@ jrs build --timings     # how long each step took</pre>
 <pre data-lang="toml" data-file="~/.config/jrs/config.toml">[build-cache]
 url = "https://cache.example.com/jrs"     # or file:///mnt/shared/jrs-cache
 push = false                              # CI sets true
-credentials = "build-cache"               # a [credentials.&lt;name&gt;] entry</pre>
+credentials = "build-cache"               # a [credentials.&lt;name&gt;] entry
+tasks = false                             # true: task outputs too</pre>
 <p>
   CI can set the same with <code>JRS_BUILD_CACHE_URL</code> and
   <code>JRS_BUILD_CACHE_PUSH=true</code>. Whoever can push can put classes into every build that
   reads the cache, so give push rights to CI alone. A remote that fails or times out is skipped for
   the rest of the command (<code>-v</code> says why) and never fails a build.
-  <code>jrs build --verify-cache</code> compiles every unit and fails if the cache holds different
-  classes under the same key; a CI job can run it nightly.
+  <code>jrs build --verify-cache</code> compiles every unit and runs every cached task, and fails if
+  the cache holds different classes or outputs under the same key; a CI job can run it nightly.
+</p>
+<p>
+  A remote serves and takes cached tasks' outputs only with <code>tasks = true</code>. They deserve
+  more care than classes: an output can be a script, a frontend bundle or a binary that runs
+  outside any JVM, and a task's key trusts its declared inputs.
 </p>
 </section>
 
@@ -2412,6 +2422,27 @@ post-compile = ["check"]</pre>
   <code>jrs clean</code> forgets every fingerprint.
 </p>
 
+<h3>Cached tasks</h3>
+<p>
+  A generator that runs before <code>javac</code> runs on every clean build and every CI machine.
+  <code>cache = true</code> on a task with <code>inputs</code> and <code>outputs</code> keeps its
+  outputs in the <a href="#build-cache">build cache</a>, under a hash of its command, its inputs'
+  contents, its tool jars and any classpath it reads, with no path of the checkout in it. When the
+  task is not fresh, a hit puts the outputs back and prints
+</p>
+<pre>    Restored openapi (task, from the build cache)</pre>
+<p>
+  without running it or replaying what it printed; the compile that follows usually hits too. Only
+  say it of a task that reads nothing but its inputs, its arguments and its tools: jrs cannot see a
+  file, the network or the clock read behind its back, and a <code>run</code> program is keyed by
+  its name, not its version. It is refused on a task that uses <code>{jar}</code> or that
+  <code>post-package</code> or <code>pre-run</code> runs, and on an output outside the project.
+  An output outside <code>target-dir</code> is only replaced while it holds exactly what the task
+  last wrote there (<code>target/.jrs/tasks/&lt;name&gt;.outputs</code> records it); a file of
+  yours in it makes the task run instead, and <code>-v</code> names the file. A task whose outputs
+  hold a symbolic link is never stored.
+</p>
+
 <h3>Generated sources and resources</h3>
 <p>
   The <code>source-outputs</code> and <code>resource-outputs</code> of tasks reached from
@@ -2724,7 +2755,7 @@ jobs:
     Packaging target/my-app-1.0.0.jar
          Task checksum (post-package)
      Finished package in 2.31s</pre>
-<p>A task prints <code>Task &lt;name&gt;</code> with the hook that ran it, or <code>Fresh &lt;name&gt; (task)</code> when its check let it be skipped.</p>
+<p>A task prints <code>Task &lt;name&gt;</code> with the hook that ran it, <code>Fresh &lt;name&gt; (task)</code> when its check let it be skipped, or <code>Restored &lt;name&gt; (task, from the build cache)</code> when a cached task's outputs were put back.</p>
 
 <h3>When it animates</h3>
 <p>

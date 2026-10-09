@@ -823,7 +823,10 @@ fn jrs(root: &Path, args: &[&str]) -> (i32, String, String) {
     argv.extend(args.iter().map(ToString::to_string));
     // In process, jrs uses the user's own cache: these tests' identical
     // projects must not restore each other's classes from its build cache.
-    if matches!(args.first(), Some(&("build" | "test" | "run" | "package"))) {
+    if matches!(
+        args.first(),
+        Some(&("build" | "test" | "run" | "package" | "task"))
+    ) {
         argv.insert(4, "--no-build-cache".to_string());
     }
     let code = cli::run_with(argv, &ui);
@@ -1827,6 +1830,329 @@ fn the_build_cache_restores_a_second_checkout_byte_for_byte() {
         1,
         "kept locally"
     );
+}
+
+/// A generator for the task-cache tests: it writes `BuildInfo.java` from
+/// `api.txt` into its first argument, an executable launcher into its
+/// second, a client into its third, and a marker that it ran into its
+/// fourth, which is not an output.
+const CACHED_GENERATOR: &str = r##"import java.nio.file.*;
+
+class Gen {
+    public static void main(String[] a) throws Exception {
+        var api = Files.readString(Path.of("api.txt")).trim();
+        var dir = Path.of(a[0], "com", "example");
+        Files.createDirectories(dir);
+        Files.writeString(dir.resolve("BuildInfo.java"),
+            "package com.example;\npublic final class BuildInfo {\n"
+            + "    public static final String API = \"" + api + "\";\n}\n");
+        var bin = Path.of(a[1]);
+        Files.createDirectories(bin);
+        Files.writeString(bin.resolve("run.sh"), "#!/bin/sh\necho " + api + "\n");
+        bin.resolve("run.sh").toFile().setExecutable(true);
+        Files.createDirectories(Path.of(a[2]));
+        Files.writeString(Path.of(a[2], "client.txt"), "client for " + api + "\n");
+        Files.createDirectories(Path.of(a[3]).getParent());
+        Files.writeString(Path.of(a[3]), "ran");
+        System.out.println("generated from " + api);
+    }
+}
+"##;
+
+/// A checkout of a project whose `pre-compile` task says `cache = true`, at
+/// `scratch/<name>`: a copy of the first one, less `target/`, when there is
+/// one.
+fn cached_task_checkout(scratch: &Scratch, name: &str) -> PathBuf {
+    let root = scratch.join(name);
+    if name != "a" {
+        common::copy_dir(&scratch.join("a"), &root);
+        let _ = std::fs::remove_dir_all(root.join("target"));
+        let _ = std::fs::remove_dir_all(root.join("src/generated"));
+        return root;
+    }
+    scratch.write("a/build/Gen.java", CACHED_GENERATOR);
+    scratch.write("a/api.txt", "v1\n");
+    scratch.write(
+        "a/src/main/java/com/example/App.java",
+        "package com.example;\n\npublic class App {\n    public static void main(String[] args) {\n\
+         \x20       System.out.println(\"api \" + BuildInfo.API);\n    }\n}\n",
+    );
+    scratch.write(
+        "a/jrs.toml",
+        r#"[project]
+name = "app"
+version = "1.2.3"
+main-class = "com.example.App"
+
+[tasks.gen]
+script = "build/Gen.java"
+args = ["{target}/generated/sources", "{target}/bin", "src/generated", "{target}/marker/ran"]
+inputs = ["build/Gen.java", "api.txt"]
+outputs = ["{target}/generated/sources", "{target}/bin", "src/generated"]
+source-outputs = ["{target}/generated/sources"]
+cache = true
+
+[hooks]
+pre-compile = ["gen"]
+"#,
+    );
+    root
+}
+
+/// The task entries among the build cache's.
+fn task_entries_in(cache: &Path) -> Vec<PathBuf> {
+    entries_in(cache)
+        .into_iter()
+        .filter(|e| zip_names(e).iter().any(|n| n == "jrs-task.txt"))
+        .collect()
+}
+
+/// A task that says `cache = true` is restored from the build cache in a
+/// second checkout, byte for byte and with its execute bit, without
+/// running; the compile that follows hits too. What changes the key runs
+/// it, and a touch that changes no byte restores rather than runs.
+#[test]
+fn a_cached_task_restores_its_outputs_in_a_second_checkout() {
+    let _toolchain = require_jdk!();
+    let scratch = Scratch::new("task-cache");
+    let cache = scratch.join("jrs-cache");
+    let no_config = scratch.join("no-config.toml");
+    let jrs = |root: &Path, args: &[&str]| jrs_with(&cache, &no_config, root, args);
+
+    let a = cached_task_checkout(&scratch, "a");
+    let (code, _, stderr) = jrs(&a, &["build"]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stderr.contains("Task gen (pre-compile)"), "{stderr}");
+    assert!(stderr.contains("generated from v1"), "{stderr}");
+    assert_eq!(task_entries_in(&cache).len(), 1, "the task was stored");
+    let (code, _, stderr) = jrs(&a, &["build"]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stderr.contains("Fresh gen (task)"), "{stderr}");
+
+    let b = cached_task_checkout(&scratch, "b");
+    let (code, _, stderr) = jrs(&b, &["-v", "build"]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(
+        stderr.contains("Restored gen (task, from the build cache)"),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("generated from"), "no replay: {stderr}");
+    assert!(
+        !b.join("target/marker/ran").exists(),
+        "the generator never ran"
+    );
+    assert!(
+        stderr.contains("Restored app v1.2.3 (from the build cache)"),
+        "the generated sources are byte-identical, so the compile hits too: {stderr}"
+    );
+    for dir in ["target/generated/sources", "target/bin", "src/generated"] {
+        assert_eq!(tree_of(&a.join(dir)), tree_of(&b.join(dir)), "{dir}");
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        let mode = std::fs::metadata(b.join("target/bin/run.sh"))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o111, 0o111, "{mode:o}");
+    }
+    let (code, stdout, stderr) = jrs(&b, &["run"]);
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(stdout.trim(), "api v1");
+    assert!(stderr.contains("Fresh gen (task)"), "{stderr}");
+
+    // The same bytes written again: the fingerprint is stale, the key is not.
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    std::fs::write(b.join("api.txt"), "v1\n").unwrap();
+    let (code, _, stderr) = jrs(&b, &["build"]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stderr.contains("Restored gen (task"), "{stderr}");
+
+    // Other bytes in an input, or another argument: the task runs.
+    std::fs::write(b.join("api.txt"), "v2\n").unwrap();
+    let (code, _, stderr) = jrs(&b, &["build"]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stderr.contains("Task gen (pre-compile)"), "{stderr}");
+    assert!(stderr.contains("generated from v2"), "{stderr}");
+    let manifest = b.join("jrs.toml");
+    let text = std::fs::read_to_string(&manifest).unwrap();
+    std::fs::write(
+        &manifest,
+        text.replace("/marker/ran\"", "/marker/ran\", \"x\""),
+    )
+    .unwrap();
+    let (code, _, stderr) = jrs(&b, &["build"]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stderr.contains("Task gen (pre-compile)"), "{stderr}");
+    assert_eq!(task_entries_in(&cache).len(), 3);
+
+    // `--no-build-cache` runs it and stores nothing.
+    let c = cached_task_checkout(&scratch, "c");
+    let (code, _, stderr) = jrs(&c, &["build", "--no-build-cache"]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stderr.contains("Task gen (pre-compile)"), "{stderr}");
+    assert_eq!(task_entries_in(&cache).len(), 3);
+
+    // `jrs task <name>` restores; with arguments after `--` it runs.
+    let d = cached_task_checkout(&scratch, "d");
+    let (code, _, stderr) = jrs(&d, &["task", "gen"]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stderr.contains("Restored gen (task"), "{stderr}");
+    let (code, _, stderr) = jrs(&d, &["task", "gen", "--no-build-cache"]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stderr.contains("Fresh gen (task)"), "{stderr}");
+    let (code, _, stderr) = jrs(&d, &["task", "gen", "--", "extra"]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stderr.contains("Task gen"), "{stderr}");
+    assert!(d.join("target/marker/ran").exists());
+    assert_eq!(
+        task_entries_in(&cache).len(),
+        3,
+        "one-off arguments are not stored"
+    );
+}
+
+/// An output outside `target/` is restored only over what the task itself
+/// left there: a file the user put in it makes the task run instead, and
+/// survives.
+#[test]
+fn a_cached_task_never_restores_over_a_users_file() {
+    let _toolchain = require_jdk!();
+    let scratch = Scratch::new("task-cache-guard");
+    let cache = scratch.join("jrs-cache");
+    let no_config = scratch.join("no-config.toml");
+    let jrs = |root: &Path, args: &[&str]| jrs_with(&cache, &no_config, root, args);
+
+    let a = cached_task_checkout(&scratch, "a");
+    assert_eq!(jrs(&a, &["build"]).0, 0);
+
+    // After a clean, nothing records what the task wrote into src/generated.
+    let (code, _, stderr) = jrs(&a, &["clean"]);
+    assert_eq!(code, 0, "{stderr}");
+    let (code, _, stderr) = jrs(&a, &["-v", "build"]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stderr.contains("Task gen (pre-compile)"), "{stderr}");
+    assert!(
+        stderr.contains("runs rather than restoring over")
+            && stderr.contains("client.txt, which it did not write"),
+        "{stderr}"
+    );
+
+    // Now it does: a touch restores, until the user adds a file.
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    std::fs::write(a.join("api.txt"), "v1\n").unwrap();
+    let (code, _, stderr) = jrs(&a, &["build"]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stderr.contains("Restored gen (task"), "{stderr}");
+    let notes = a.join("src/generated/notes.txt");
+    std::fs::write(&notes, "mine").unwrap();
+    std::fs::write(a.join("api.txt"), "v1\n").unwrap();
+    let (code, _, stderr) = jrs(&a, &["-v", "build"]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stderr.contains("Task gen (pre-compile)"), "{stderr}");
+    assert!(
+        stderr.contains("notes.txt, which it did not write"),
+        "{stderr}"
+    );
+    assert_eq!(std::fs::read_to_string(&notes).unwrap(), "mine");
+}
+
+/// A remote serves and takes task entries only under `[build-cache]
+/// tasks = true`, and `--verify-cache` runs a cached task and fails on a
+/// forged entry.
+#[test]
+fn a_remote_serves_task_entries_only_when_told_to() {
+    let _toolchain = require_jdk!();
+    let scratch = Scratch::new("task-cache-remote");
+    let remote = scratch.join("remote");
+    std::fs::create_dir_all(&remote).unwrap();
+    let url = resolve::repo::file_url(&remote);
+    let config = |name: &str, extra: &str| {
+        scratch.write(
+            &format!("{name}.toml"),
+            &format!("[build-cache]\nurl = \"{url}\"\n{extra}"),
+        )
+    };
+    let compile_pusher = config("compile-pusher", "push = true\n");
+    let pusher = config("pusher", "push = true\ntasks = true\n");
+    let compile_reader = config("compile-reader", "");
+    let reader = config("reader", "tasks = true\n");
+    let remote_tasks = || {
+        project::find_all(&remote)
+            .unwrap()
+            .into_iter()
+            .filter(|e| zip_names(e).iter().any(|n| n == "jrs-task.txt"))
+            .count()
+    };
+
+    let a = cached_task_checkout(&scratch, "a");
+    let (code, _, stderr) = jrs_with(&scratch.join("cache-1"), &compile_pusher, &a, &["build"]);
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(
+        std::fs::read_dir(&remote).unwrap().count(),
+        1,
+        "the compile only"
+    );
+    assert_eq!(remote_tasks(), 0);
+    let (code, _, stderr) = jrs_with(
+        &scratch.join("cache-2"),
+        &pusher,
+        &a,
+        &["build", "--verify-cache"],
+    );
+    assert_eq!(code, 0, "{stderr}");
+    assert!(
+        stderr.contains("Task gen (pre-compile)"),
+        "verified by running: {stderr}"
+    );
+    assert_eq!(remote_tasks(), 1, "pushed with `tasks = true`");
+
+    let b = cached_task_checkout(&scratch, "b");
+    let (code, _, stderr) = jrs_with(&scratch.join("cache-3"), &compile_reader, &b, &["build"]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stderr.contains("Task gen (pre-compile)"), "{stderr}");
+    assert!(stderr.contains("Restored app v1.2.3"), "{stderr}");
+    let c = cached_task_checkout(&scratch, "c");
+    let (code, _, stderr) = jrs_with(&scratch.join("cache-4"), &reader, &c, &["build"]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stderr.contains("Restored gen (task"), "{stderr}");
+
+    // A forged entry fails `--verify-cache`.
+    let local = scratch.join("cache-4");
+    let entry = &task_entries_in(&local)[0];
+    let forged: Vec<(String, Vec<u8>)> = {
+        let mut archive = zip::ZipArchive::new(std::fs::File::open(entry).unwrap()).unwrap();
+        (0..archive.len())
+            .map(|i| {
+                let mut file = archive.by_index(i).unwrap();
+                let mut bytes = Vec::new();
+                std::io::Read::read_to_end(&mut file, &mut bytes).unwrap();
+                let name = file.name().to_string();
+                if name.ends_with("client.txt") {
+                    bytes = b"forged".to_vec();
+                }
+                (name, bytes)
+            })
+            .collect()
+    };
+    std::fs::write(entry, jrs::build_cache::zip(&forged).unwrap()).unwrap();
+    let (code, _, stderr) = jrs_with(
+        &local,
+        &no_remote(&scratch),
+        &c,
+        &["build", "--verify-cache"],
+    );
+    assert_eq!(code, 1, "{stderr}");
+    assert!(
+        stderr.contains("for task `gen` differs from what it wrote: `2/client.txt`"),
+        "{stderr}"
+    );
+}
+
+/// A user configuration without a remote cache.
+fn no_remote(scratch: &Scratch) -> PathBuf {
+    scratch.join("no-config.toml")
 }
 
 /// Compile one class, `class` (fully qualified) holding `body`, into a jar at

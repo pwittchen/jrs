@@ -6,7 +6,7 @@
 //! only add motion, so `--progress never` produces the same transcript.
 
 use std::cell::{OnceCell, RefCell};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ffi::OsString;
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
@@ -400,6 +400,10 @@ pub struct TaskArgs {
     /// Arguments appended to the task's own command line, after `--`.
     #[arg(last = true, value_name = "ARGS")]
     pub args: Vec<String>,
+    /// Neither restore a cached task's outputs from the build cache nor
+    /// store them there.
+    #[arg(long)]
+    pub no_build_cache: bool,
 }
 
 #[allow(
@@ -555,7 +559,7 @@ impl Command {
     }
 
     /// Whether the command was given `--no-build-cache`, which `build`,
-    /// `test`, `run` and `package` take.
+    /// `test`, `run`, `package` and `task` take.
     #[must_use]
     pub fn no_build_cache(&self) -> bool {
         match self {
@@ -564,6 +568,7 @@ impl Command {
             }
             Command::Test(args) => args.no_build_cache,
             Command::Package(args) => args.no_build_cache,
+            Command::Task(args) => args.no_build_cache,
             _ => false,
         }
     }
@@ -3733,10 +3738,32 @@ impl<'a> Session<'a> {
         };
         let started = Instant::now();
         let prepared = task::prepare(def, &ctx, named.unwrap_or_default())?;
-        if prepared.is_fresh() {
+        // Arguments after `--` are not in the manifest: a run with them is
+        // neither restored nor stored, or the cache would fill with one-offs.
+        let cached = prepared.is_cached() && named.is_none_or(<[String]>::is_empty);
+        let verifying = cached && self.cache_use == CacheUse::Verify;
+        if !verifying && prepared.is_fresh() {
             self.ui.phase("Fresh", format!("{} (task)", def.name));
             self.timings
-                .since(task_timing_label(&def.name, hook, true), started);
+                .since(task_timing_label(&def.name, hook, Some("fresh")), started);
+            return Ok(exit::SUCCESS);
+        }
+        let key = if cached {
+            self.task_key(&prepared)
+        } else {
+            None
+        };
+        if let Some((cache, key)) = &key
+            && self.restore_task(&prepared, cache, key)?
+        {
+            self.ui.phase(
+                "Restored",
+                format!("{} (task, from the build cache)", def.name),
+            );
+            self.timings.since(
+                task_timing_label(&def.name, hook, Some("restored")),
+                started,
+            );
             return Ok(exit::SUCCESS);
         }
 
@@ -3765,13 +3792,153 @@ impl<'a> Session<'a> {
             code?
         };
         self.timings
-            .since(task_timing_label(&def.name, hook, false), started);
+            .since(task_timing_label(&def.name, hook, None), started);
         if code == exit::SUCCESS {
             prepared.record()?;
+            if let Some((cache, key)) = &key {
+                self.store_task(&prepared, cache, key)?;
+            }
         } else {
             prepared.forget();
+            prepared.forget_outputs();
         }
         Ok(code)
+    }
+
+    /// The build cache and the key a cached task's outputs are kept under
+    /// (SPEC §7.6), or `None` when the cache is off or the task cannot be
+    /// keyed.
+    fn task_key(&self, prepared: &task::Prepared) -> Option<(Arc<BuildCache>, String)> {
+        let cache = self.build_cache()?;
+        let Some(text) = prepared.cache_text(&cache) else {
+            self.ui.verbose(format!(
+                "build cache: task `{}` cannot be keyed, so it runs",
+                prepared.name
+            ));
+            return None;
+        };
+        let key = cache.key("task", &text);
+        Some((cache, key))
+    }
+
+    /// Put a cached task's outputs in place of a run, when the cache holds
+    /// them and every output is safe to replace. `false` on a miss, under
+    /// `--verify-cache`, and whenever anything stands in the way: the task
+    /// runs then, and no failure here fails the command.
+    fn restore_task(
+        &self,
+        prepared: &task::Prepared,
+        cache: &BuildCache,
+        key: &str,
+    ) -> Result<bool> {
+        if cache.verifies() {
+            return Ok(false);
+        }
+        let Some(entries) = cache.load_task(key, self.ui) else {
+            return Ok(false);
+        };
+        if let Some(file) = prepared.user_file() {
+            self.ui.verbose(format!(
+                "build cache: task `{}` runs rather than restoring over {}, which it did \
+                 not write",
+                prepared.name,
+                file.display()
+            ));
+            return Ok(false);
+        }
+        // Until the outputs are in place, nothing may say they are current.
+        prepared.forget();
+        prepared.forget_outputs();
+        match prepared.restore_outputs(&entries) {
+            Ok(true) => {}
+            Ok(false) => {
+                self.ui.verbose(format!(
+                    "build cache: the entry {key} does not describe task `{}`'s outputs; \
+                     it runs",
+                    prepared.name
+                ));
+                return Ok(false);
+            }
+            Err(e) => {
+                self.ui.verbose(format!(
+                    "build cache: could not restore task `{}`: {e}; it runs",
+                    prepared.name
+                ));
+                return Ok(false);
+            }
+        }
+        prepared.record_outputs(&task::TaskEntry {
+            entries,
+            ..task::TaskEntry::default()
+        })?;
+        prepared.record()?;
+        self.ui.verbose(format!(
+            "build cache: restored task `{}` from {key}",
+            prepared.name
+        ));
+        Ok(true)
+    }
+
+    /// After a successful run of a cached task: record its outputs, and
+    /// store them — or under `--verify-cache`, compare them with what the
+    /// cache holds.
+    ///
+    /// # Errors
+    ///
+    /// `JrsError::Build` under `--verify-cache` when the cache holds other
+    /// outputs than the task wrote; `JrsError::Io` if the record cannot be
+    /// written.
+    fn store_task(&self, prepared: &task::Prepared, cache: &BuildCache, key: &str) -> Result<()> {
+        let entry = match prepared.collect_outputs() {
+            Ok(task::Collected::Entry(entry)) => entry,
+            Ok(task::Collected::Link(link)) => {
+                self.ui.verbose(format!(
+                    "build cache: task `{}` is not stored: {} is a symbolic link",
+                    prepared.name,
+                    link.display()
+                ));
+                prepared.forget_outputs();
+                return Ok(());
+            }
+            Err(e) => {
+                self.ui.verbose(format!(
+                    "build cache: could not read task `{}`'s outputs: {e}",
+                    prepared.name
+                ));
+                prepared.forget_outputs();
+                return Ok(());
+            }
+        };
+        prepared.record_outputs(&entry)?;
+        if cache.verifies()
+            && let Some(held) = cache.load_task(key, self.ui)
+        {
+            let held: BTreeMap<&str, &[u8]> = held
+                .iter()
+                .map(|(n, b)| (n.as_str(), b.as_slice()))
+                .collect();
+            let written: BTreeMap<&str, &[u8]> = entry
+                .entries
+                .iter()
+                .map(|(n, b)| (n.as_str(), b.as_slice()))
+                .collect();
+            if let Some(name) = held
+                .keys()
+                .chain(written.keys())
+                .find(|name| held.get(*name) != written.get(*name))
+            {
+                return Err(JrsError::build(format!(
+                    "the build cache's entry {key} for task `{}` differs from what it \
+                     wrote: `{name}`\n\nsomething wrote that entry from other inputs than \
+                     its key says, or the task is not deterministic; whoever can push to \
+                     the remote cache should look into it",
+                    prepared.name
+                )));
+            }
+            return Ok(());
+        }
+        cache.save_task(key, &entry.entries, &entry.executable, self.ui);
+        Ok(())
     }
 
     /// The classpaths a task can name, as `jrs classpath` prints them — with
@@ -4635,12 +4802,12 @@ fn display_roots(roots: &[PathBuf]) -> String {
 
 /// A task's row in the `--timings` report: `task gen (pre-compile)`, with
 /// `fresh` when its up-to-date check let it be skipped.
-fn task_timing_label(name: &str, hook: Option<Hook>, fresh: bool) -> String {
-    match (hook, fresh) {
-        (Some(hook), false) => format!("task {name} ({hook})"),
-        (Some(hook), true) => format!("task {name} ({hook}, fresh)"),
-        (None, false) => format!("task {name}"),
-        (None, true) => format!("task {name} (fresh)"),
+fn task_timing_label(name: &str, hook: Option<Hook>, state: Option<&str>) -> String {
+    match (hook, state) {
+        (Some(hook), None) => format!("task {name} ({hook})"),
+        (Some(hook), Some(state)) => format!("task {name} ({hook}, {state})"),
+        (None, None) => format!("task {name}"),
+        (None, Some(state)) => format!("task {name} ({state})"),
     }
 }
 
@@ -5442,6 +5609,7 @@ fn check_task() -> Result<TaskDef> {
         outputs: Vec::new(),
         source_outputs: Vec::new(),
         resource_outputs: Vec::new(),
+        cache: false,
         dependencies: vec![pmd("pmd-cli"), pmd("pmd-java")],
     })
 }
@@ -6120,14 +6288,21 @@ mod tests {
     #[test]
     fn a_task_row_names_its_hook_and_freshness() {
         assert_eq!(
-            task_timing_label("gen", Some(Hook::PreCompile), false),
+            task_timing_label("gen", Some(Hook::PreCompile), None),
             "task gen (pre-compile)"
         );
         assert_eq!(
-            task_timing_label("gen", Some(Hook::PreCompile), true),
+            task_timing_label("gen", Some(Hook::PreCompile), Some("fresh")),
             "task gen (pre-compile, fresh)"
         );
-        assert_eq!(task_timing_label("fmt", None, false), "task fmt");
-        assert_eq!(task_timing_label("fmt", None, true), "task fmt (fresh)");
+        assert_eq!(task_timing_label("fmt", None, None), "task fmt");
+        assert_eq!(
+            task_timing_label("fmt", None, Some("fresh")),
+            "task fmt (fresh)"
+        );
+        assert_eq!(
+            task_timing_label("gen", None, Some("restored")),
+            "task gen (restored)"
+        );
     }
 }

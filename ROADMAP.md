@@ -323,9 +323,10 @@ jrs starts faster than Gradle: it is a native binary with no configuration
 phase. Where Gradle still wins is the JVM work itself. Most of that gap is
 closed now ([specs/FASTER_BUILDS.md](specs/FASTER_BUILDS.md)): the compiler
 JVMs start from class-data-sharing archives, and the test JVM can too
-(`test.share-classes`, SPEC §10.2); a build cache restores compiled classes
-and passing test runs across branches, checkouts and CI machines, locally
-and from a remote (SPEC §7.8); `--watch` compiles in one warm `javac` worker
+(`test.share-classes`, SPEC §10.2); a build cache restores compiled classes,
+passing test runs and the outputs of tasks that opt in with `cache = true`
+across branches, checkouts and CI machines, locally and from a remote
+(SPEC §7.6, §7.8); `--watch` compiles in one warm `javac` worker
 (SPEC §7.5); and a cold build downloads the test jars behind the main
 compile (SPEC §8.3). What is left is below. The benchmarks in section 2 say
 which gap is real, and every item here is judged by them.
@@ -342,8 +343,6 @@ which gap is real, and every item here is judged by them.
   the AOT cache is never assembled after Mockito self-attaches, a forked run
   never writes an archive, and the test JVM does not run in the project
   directory.
-- **Task outputs in the build cache**, opt-in per task with `cache = true`:
-  [specs/TASK_OUTPUT_CACHE.md](specs/TASK_OUTPUT_CACHE.md), a proposal.
 - **Per-class test results in the build cache**, keyed by each class's
   reach, so that a branch switch reuses part of a suite's results rather
   than all or nothing: [specs/TEST_RESULT_CACHE.md](specs/TEST_RESULT_CACHE.md),
