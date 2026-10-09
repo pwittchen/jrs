@@ -10,7 +10,9 @@
 //! starts the test JVM, and in one JVM unless `JRS_BENCH_FORKS` says
 //! otherwise, since forks only read an archive. The shared cache is the
 //! user's own (or `JRS_CACHE_DIR`), so the project's jars are not
-//! downloaded again.
+//! downloaded again; the test archives the copy wrote there are deleted at
+//! the end. `jrs` runs in the copy, as a user runs it, since the test JVM
+//! works in jrs's own directory.
 //!
 //! ```text
 //! JRS_BENCH_PROJECT=~/corpus/petclinic cargo bench --bench test_jvm
@@ -23,8 +25,12 @@
 //! `--timings`, and the outcome: the exit code and the `Finished` line. A
 //! mode whose outcome differs from the usual layout's is the evidence that
 //! decides whether `share-classes` may become the default; a mode that kept
-//! the usual layout says why (a class directory shadowing a jar, say).
+//! the usual layout says why (a class directory shadowing a jar, say). An
+//! outcome the runs of one mode did not agree on says how many did, and when
+//! any run failed, every run's log is kept and its directory printed: the
+//! test tree in it names the test that differs.
 
+use std::fmt::Write as _;
 use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -49,49 +55,103 @@ fn main() {
     copy_project(&source, &project);
     let manifest = project.join("jrs.toml");
     let original = std::fs::read_to_string(&manifest).expect("read jrs.toml");
-    let log = scratch.join("stderr.log");
+    // The copy's archives are keyed by its path, which no later run uses
+    // again: they are deleted before each mode and at the end, a hundred
+    // megabytes each.
+    let cds = jrs::resolve::cache::Cache::discover()
+        .expect("a cache directory")
+        .root()
+        .join("cds");
+    let before = test_archives(&cds);
+    let logs = scratch.join("logs");
+    std::fs::create_dir_all(&logs).expect("create the log directory");
 
     println!("jrs test JVM benchmark (SPEC §10.2)\n");
     println!("  project  {}", source.display());
     println!("  runs     {runs} per mode, medians; `jrs test --all --forks {forks}`\n");
-    println!(
-        "  {:<9}{:>10}{:>10}{:>10}  {:<28}archive",
-        "", "first", "wall", "test JVM", "outcome"
-    );
+    let mut rows = vec![[
+        String::new(),
+        "first".to_string(),
+        "wall".to_string(),
+        "test JVM".to_string(),
+        "outcome".to_string(),
+        "archive".to_string(),
+    ]];
     let mut baseline: Option<String> = None;
+    let mut kept = false;
     for (mode, value) in MODES {
         std::fs::write(&manifest, with_share_classes(&original, *value)).expect("write jrs.toml");
         let _ = std::fs::remove_dir_all(project.join("target"));
+        // On a JDK older than 24, `"aot"` falls back to the archive `true`
+        // wrote, which its first run would otherwise find.
+        delete_new_archives(&cds, &before);
         // Compiles, and writes the mode's archive.
-        let first = test(&project, forks, &log);
-        let samples: Vec<Sample> = (0..runs).map(|_| test(&project, forks, &log)).collect();
-        let outcome = samples[samples.len() / 2].outcome.clone();
-        let same = match &baseline {
+        let first = test(&project, forks, &logs.join(format!("{mode}-first.log")));
+        let samples: Vec<Sample> = (1..=runs)
+            .map(|n| test(&project, forks, &logs.join(format!("{mode}-{n}.log"))))
+            .collect();
+        kept |= first.failed || samples.iter().any(|s| s.failed);
+        let mut outcome = samples[samples.len() / 2].outcome.clone();
+        let agreeing = samples.iter().filter(|s| s.outcome == outcome).count();
+        if agreeing < samples.len() {
+            // Run to run, the suite did not agree with itself: a flaky test,
+            // or an archive that one run wrote and the next one read.
+            let _ = write!(outcome, " ({agreeing} of {runs} runs)");
+        }
+        let marker = match &baseline {
             None => {
                 baseline = Some(outcome.clone());
-                String::new()
+                ""
             }
-            Some(b) if *b == outcome => String::new(),
-            Some(_) => "  ← differs from `off`".to_string(),
+            Some(b) if *b == outcome => "",
+            Some(_) => "  ← differs from `off`",
         };
-        println!(
-            "  {mode:<9}{:>10}{:>10}{:>10}  {:<28}{}{same}",
+        let archive = samples[samples.len() / 2]
+            .archive
+            .clone()
+            .or(first.archive)
+            .unwrap_or_default();
+        rows.push([
+            (*mode).to_string(),
             ms(first.wall),
             ms(median(samples.iter().map(|s| s.wall))),
             ms(median(samples.iter().map(|s| s.jvm))),
             outcome,
-            samples[samples.len() / 2]
-                .archive
-                .clone()
-                .or(first.archive)
-                .unwrap_or_default(),
+            archive + marker,
+        ]);
+    }
+    let width = |column: usize| {
+        rows.iter()
+            .map(|r| r[column].chars().count())
+            .max()
+            .unwrap_or(0)
+    };
+    let widths: Vec<usize> = (0..5).map(width).collect();
+    for [mode, first, wall, jvm, outcome, archive] in &rows {
+        println!(
+            "  {mode:<w0$}  {first:>w1$}  {wall:>w2$}  {jvm:>w3$}  {outcome:<w4$}  {archive}",
+            w0 = widths[0],
+            w1 = widths[1],
+            w2 = widths[2],
+            w3 = widths[3],
+            w4 = widths[4],
         );
     }
-    let _ = std::fs::remove_dir_all(&scratch);
+    delete_new_archives(&cds, &before);
+    if kept {
+        // A failed run is what SPEC §10.2's decision is made from: its test
+        // tree says which test differs, so the logs outlive the benchmark.
+        let _ = std::fs::remove_dir_all(&project);
+        println!("\n  logs     {} (a run failed)", logs.display());
+    } else {
+        let _ = std::fs::remove_dir_all(&scratch);
+    }
 }
 
 struct Sample {
     wall: Duration,
+    /// Whether `jrs test` exited with anything but 0.
+    failed: bool,
     /// The `test JVM` row of `--timings`.
     jvm: Duration,
     /// The exit code and the `Finished` line.
@@ -101,11 +161,15 @@ struct Sample {
 }
 
 fn test(project: &Path, forks: usize, log: &Path) -> Sample {
-    let stderr = File::create(log).expect("create the stderr log");
+    let stdout = File::create(log).expect("create the run's log");
+    let stderr = stdout.try_clone().expect("share the run's log");
     let start = Instant::now();
     let status = Command::new(env!("CARGO_BIN_EXE_jrs"))
         .arg("--manifest-path")
         .arg(project)
+        // In the project, as a user runs it: the test JVM works in jrs's own
+        // directory, and suites read `src/main` and compose files from there.
+        .current_dir(project)
         .args([
             "test",
             "--all",
@@ -115,7 +179,7 @@ fn test(project: &Path, forks: usize, log: &Path) -> Sample {
         ])
         .args(["--progress", "never", "--forks", &forks.to_string()])
         .stdin(Stdio::null())
-        .stdout(Stdio::null())
+        .stdout(stdout)
         .stderr(stderr)
         .status()
         .expect("spawn jrs");
@@ -141,9 +205,33 @@ fn test(project: &Path, forks: usize, log: &Path) -> Sample {
     });
     Sample {
         wall,
+        failed: !status.success(),
         jvm,
         outcome: format!("exit {} {finished}", status.code().unwrap_or(-1)),
         archive,
+    }
+}
+
+/// The test JVM archives in the shared cache's `cds/` directory.
+fn test_archives(cds: &Path) -> Vec<PathBuf> {
+    std::fs::read_dir(cds)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| {
+            p.file_name()
+                .is_some_and(|n| n.to_string_lossy().starts_with("test-"))
+        })
+        .collect()
+}
+
+/// Delete the test archives in `cds` that were not there `before`.
+fn delete_new_archives(cds: &Path, before: &[PathBuf]) {
+    for archive in test_archives(cds) {
+        if !before.contains(&archive) {
+            let _ = std::fs::remove_file(archive);
+        }
     }
 }
 

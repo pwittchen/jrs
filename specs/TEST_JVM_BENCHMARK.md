@@ -51,8 +51,16 @@ once untimed, then `JRS_BENCH_RUNS` times, and prints per mode:
 | outcome | the exit code and the `Finished` line's counts |
 | archive | what `-v` said: mapping which archive, or why the usual layout was kept |
 
-A mode whose outcome differs from `off`'s is marked. The shared cache is the
-user's own, so the jars are not downloaded per mode.
+A mode whose outcome differs from `off`'s is marked, and an outcome the runs
+of one mode did not agree on says how many of them did — a flaky test shows
+there before step 3 of §4 has to rule it out. When any run fails, every
+run's output is kept and the directory printed, so the test tree names the
+test that differs. `jrs` runs inside the copy, as a user runs it: the test
+JVM works in jrs's own directory (there is no `test.cwd`), and a suite that
+reads `src/main` or a compose file by a relative path fails from anywhere
+else. The shared cache is the user's own, so the jars are not downloaded per
+mode; the archives the copy wrote there, keyed by its path, are deleted at
+the end.
 
 A first run on a one-test JUnit 5.13.4 project, JDK 25, macOS, release build:
 
