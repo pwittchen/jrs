@@ -1953,7 +1953,7 @@ mod tests {
         let Launch::Exec { args, .. } = &p.launch else {
             panic!()
         };
-        assert_eq!(args[1], format!("@{}", path.display()));
+        assert_eq!(Path::new(args[1].strip_prefix('@').unwrap()), path);
 
         let err = Manifest::parse(
             &format!("{HEAD}[tasks.f]\nrun = ['f']\ninputs = ['{{sources-argfile}}']\n"),
