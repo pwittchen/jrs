@@ -24,7 +24,13 @@ cargo build
 cargo test                      # hermetic: no network, uses a file:// repo fixture
 cargo fmt --check
 cargo clippy --all-targets -- -D warnings
+cargo lint                      # clippy + the pedantic group (alias in .cargo/config.toml)
 ```
+
+**After implementing each task, run `cargo lint`.** If it reports any errors or
+warnings, fix them — in the code where the lint has a point, or with a local
+`#[allow(..., reason = "...")]` where the code is deliberate — and run it again
+until it is clean. Only then mark the task as done.
 
 CI (`.github/workflows/rust.yml`) runs exactly those four on Linux, macOS and
 Windows (`fmt` on Linux only), plus the network tests on Linux, on push and PR
