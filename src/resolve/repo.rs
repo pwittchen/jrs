@@ -51,7 +51,7 @@ impl Default for Network {
 const MAX_ARTIFACT_BYTES: u64 = 512 * 1024 * 1024;
 
 /// How long a cached snapshot is trusted before its repository is asked again.
-const SNAPSHOT_RECHECK: Duration = Duration::from_secs(24 * 60 * 60);
+const SNAPSHOT_RECHECK: Duration = Duration::from_hours(24);
 
 /// Where a byte-count for the live download bars is published.
 ///

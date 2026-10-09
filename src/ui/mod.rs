@@ -95,18 +95,13 @@ fn in_ci() -> bool {
         "TEAMCITY_VERSION",
         "JENKINS_URL",
     ];
-    VARS.iter().any(|v| {
-        std::env::var(v)
-            .map(|s| !s.is_empty() && s != "0" && s != "false")
-            .unwrap_or(false)
-    })
+    VARS.iter()
+        .any(|v| std::env::var(v).is_ok_and(|s| !s.is_empty() && s != "0" && s != "false"))
 }
 
 fn dumb_terminal() -> bool {
-    std::env::var("NO_COLOR")
-        .map(|v| !v.is_empty())
-        .unwrap_or(false)
-        || std::env::var("TERM").map(|t| t == "dumb").unwrap_or(false)
+    std::env::var("NO_COLOR").is_ok_and(|v| !v.is_empty())
+        || std::env::var("TERM").is_ok_and(|t| t == "dumb")
 }
 
 fn decide_mode(opts: &UiOptions, stderr_tty: bool) -> Mode {

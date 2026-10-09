@@ -184,8 +184,7 @@ fn effective_jobs(flag: Option<usize>, config: Option<usize>) -> usize {
 /// beats one even on a single-core machine (SPEC §8.4).
 fn default_jobs() -> usize {
     std::thread::available_parallelism()
-        .map(std::num::NonZero::get)
-        .unwrap_or(4)
+        .map_or(4, std::num::NonZero::get)
         .max(4)
 }
 

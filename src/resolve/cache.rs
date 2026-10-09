@@ -307,7 +307,7 @@ pub fn mark_used(path: &Path) {
 }
 
 /// How finely [`mark_used`] tracks use.
-const USE_GRANULARITY: Duration = Duration::from_secs(24 * 60 * 60);
+const USE_GRANULARITY: Duration = Duration::from_hours(24);
 
 /// Write to a sibling temp file, then rename. Rename is atomic within a
 /// filesystem, which is why the temp file goes next to the destination rather
