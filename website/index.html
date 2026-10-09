@@ -64,7 +64,7 @@
           </p>
         </div>
         <div class="cta">
-          <a class="button primary" href="#install">
+          <a class="button primary" href="#install" data-fast-goal="install_click_home">
             <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v12M7 10l5 5 5-5M5 21h14" /></svg>
             Install jrs
           </a>
@@ -251,7 +251,7 @@ version = "2.4.20"
         <div class="panel" role="tabpanel" id="panel-macos" aria-labelledby="tab-macos">
           <div class="shell">
             <pre><code>curl -fsSL https://getjrs.dev/install.sh | sh</code></pre>
-            <button class="copy" type="button">Copy</button>
+            <button class="copy" type="button" data-fast-goal="copy_install_macos">Copy</button>
           </div>
           <p class="note">Picks the Apple Silicon or Intel build and installs it into <code>~/.local/bin</code>. Add <code>-s -- --to &lt;dir&gt;</code> after <code>sh</code> to install elsewhere.</p>
         </div>
@@ -259,7 +259,7 @@ version = "2.4.20"
         <div class="panel" role="tabpanel" id="panel-linux" aria-labelledby="tab-linux" hidden>
           <div class="shell">
             <pre><code>curl -fsSL https://getjrs.dev/install.sh | sh</code></pre>
-            <button class="copy" type="button">Copy</button>
+            <button class="copy" type="button" data-fast-goal="copy_install_linux">Copy</button>
           </div>
           <p class="note">Picks the x86_64 or ARM64 build and installs it into <code>~/.local/bin</code>. The binaries are static and run on any distribution.</p>
         </div>
@@ -268,7 +268,7 @@ version = "2.4.20"
           <div class="shell">
             <pre><code>curl.exe -fsSLO https://github.com/pwittchen/jrs/releases/latest/download/jrs-x86_64-pc-windows-msvc.zip
 tar -xf jrs-x86_64-pc-windows-msvc.zip jrs.exe</code></pre>
-            <button class="copy" type="button">Copy</button>
+            <button class="copy" type="button" data-fast-goal="copy_install_windows">Copy</button>
           </div>
           <p class="note">Run in PowerShell, then move <code>jrs.exe</code> to a directory on your <code>PATH</code>.</p>
         </div>
@@ -278,7 +278,7 @@ tar -xf jrs-x86_64-pc-windows-msvc.zip jrs.exe</code></pre>
             <pre><code>git clone https://github.com/pwittchen/jrs.git
 cd jrs
 cargo install --path .</code></pre>
-            <button class="copy" type="button">Copy</button>
+            <button class="copy" type="button" data-fast-goal="copy_install_source">Copy</button>
           </div>
           <p class="note">Needs a Rust toolchain with edition 2024 support. The binary lands in <code>~/.cargo/bin</code>.</p>
         </div>
