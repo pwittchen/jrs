@@ -325,8 +325,9 @@ The compiler JVMs now start from a class-data-sharing archive and, for a
 file-by-file compile, with C1 and the serial collector; `jrs test` runs only
 the test classes a change reaches, splits a large suite among JVMs by
 default and balances the split by each class's last time. What is left is
-below. The benchmarks in section 2 say which gap is real, and every item here
-is judged by them.
+below, and [specs/FASTER_BUILDS.md](specs/FASTER_BUILDS.md) designs it. The
+benchmarks in section 2 say which gap is real, and every item here is judged
+by them.
 
 - **Class-data sharing for the test JVM.** The compilers have it; the test
   JVM cannot, since CDS refuses a classpath holding a non-empty class
