@@ -320,36 +320,21 @@ listed so the discussion has a home, not because they are planned.
 
 jrs starts faster than Gradle: it is a native binary with no configuration
 phase. Where Gradle still wins is the JVM work itself. Its warm daemon runs
-`javac` in-process with a hot JIT, its build cache skips work outright, and an
-up-to-date test task is not run at all. Each item below closes part of that gap
-without a daemon. The benchmarks in section 2 come first: they say which gap is
-real, and every item here is judged by them.
+`javac` in-process with a hot JIT, and its build cache skips work outright.
+The compiler JVMs now start from a class-data-sharing archive and, for a
+file-by-file compile, with C1 and the serial collector; `jrs test` runs only
+the test classes a change reaches, splits a large suite among JVMs by
+default and balances the split by each class's last time. What is left is
+below. The benchmarks in section 2 say which gap is real, and every item here
+is judged by them.
 
-- **Class-data sharing for every tool JVM.** The compiler and test JVMs start
-  with no tuning today. `-XX:+AutoCreateSharedArchive` with
-  `-XX:SharedArchiveFile` (JDK 19+) gives each tool an archive of its own in the
-  shared cache, keyed by the JDK and the tool's coordinate. It never goes in
-  `target/`, which stays disposable. `javac` would run as
-  `java -m jdk.compiler/com.sun.tools.javac.Main` so the flag reaches it.
-  kotlinc and scalac gain the most, since their start-up is the second or so
-  JVM_LANGUAGES.md §14.1 notes. The test JVM can get the same, keyed by the
-  test classpath's digest, or the JDK 24+ AOT cache (`-XX:AOTCache`, JEP 483),
-  which Spring Boot test suites, with their thousands of classes, feel first.
-  An archive that cannot be written or read is skipped, never an error.
-- **Flags for short-lived compiler JVMs.** A `javac` that lives two seconds
-  pays for C2 and G1 without using them. When the incremental index compiles a
-  handful of files, `-XX:TieredStopAtLevel=1 -XX:+UseSerialGC` start it faster.
-  A whole-unit compile keeps the full JIT. `<lang>.compiler-jvm-args` still
-  wins over either default.
-- **Test impact analysis.** The index in `compile/incremental.rs` already
-  knows which classes refer to which. `jrs test` could run only the test
-  classes that transitively refer to a changed class, under the rule the
-  compile index follows: anything the index cannot account for (a new or
-  deleted source, a resource, a processor, another language, a changed
-  dependency) runs the whole suite. Gradle re-runs a test task whole or skips
-  it, and selecting tests needs Develocity's paid Predictive Test Selection.
-  For the edit–build–test loop, and for coding agents, this is the largest
-  speed-up within reach. A flag such as `--all` runs everything regardless.
+- **Class-data sharing for the test JVM.** The compilers have it; the test
+  JVM cannot, since CDS refuses a classpath holding a non-empty class
+  directory, and `target/classes` and `target/test-classes` are two. The
+  JDK 24+ AOT cache (`-XX:AOTCache`, JEP 483), which Spring Boot test suites
+  with their thousands of classes would feel first, has the same rule. Both
+  would need the class directories on the test classpath as jars, or an
+  archive of the dependency jars alone.
 - **A local build cache.** Already a row in section 5. The fingerprints exist,
   so `target/classes` and test results stored in the shared cache under their
   fingerprint would survive a branch switch, a `git stash` or a `jrs clean`. A
@@ -364,20 +349,11 @@ real, and every item here is judged by them.
   line in SPEC §1.2 saying that a worker scoped to one command is not the
   compiler daemon the non-goal rules out.
 - **Pipelining.** Download test-only dependencies while the main unit
-  compiles, and prepare the test unit's argfiles and launcher before main is
-  done. The phase lines stay in the order they are today.
-- **A default for `test.forks`.** One test JVM unless set. A default from the
-  core count and the number of test classes would use the machine. It changes
-  behaviour for suites that share state between classes, so it needs an opt-out
-  and a line in the migration report.
-- **Balanced test forks.** `test::split` deals the classes out in name order
-  before any fork starts, so a few slow classes that land in one share keep
-  that JVM running while the others sit idle. Splitting by duration instead
-  would fix it: each class's time from the last run's `TEST-*.xml`, kept under
-  `target/.jrs/`, with the slowest classes placed first, each on the fork with
-  the least total time. A class with no recorded time falls back to the
-  current name-order split. The split stays deterministic for the same inputs,
-  and a lost `target/` only costs the balance, never a test.
+  compiles, and prepare the test unit's launcher before main is done. Today
+  `dependencies()` downloads every jar before the first compile, so that a
+  fresh `jrs.lock` pins their checksums, and the output layer has one live
+  region, which a download and a compile would share. It only pays on a cold
+  cache. The phase lines stay in the order they are today.
 
 What stays out: a background daemon and an in-house compiler. Both would trade
 away the "no daemon, just a driver" defaults the Why page rests on.

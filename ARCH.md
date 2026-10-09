@@ -86,6 +86,8 @@ src/
 │   ├── mod.rs         CompileUnit: steps, fingerprint, staleness, argfiles
 │   ├── abi.rs         class-file API digests: compile avoidance, per-class reads
 │   ├── incremental.rs file-by-file compilation of a Java unit: <unit>.index
+│   ├── share.rs       class-data-sharing archives for the compiler JVMs: <cache>/cds
+│   ├── impact.rs      which test classes a change reaches: <suite>.tested
 │   ├── javac.rs       javac and javadoc
 │   ├── doc.rs         Scaladoc and Groovydoc
 │   └── lang.rs        enum Language: Kotlin/Scala/Groovy as plain data
@@ -265,11 +267,15 @@ add to it:
  │                        main_api = api_digest(target/classes)
  │  sync test resources
  │  fetch_internal: JUnit console launcher (+ JaCoCo agent/cli with --coverage)
+ │  impact::select: class dirs vs test.tested ─► every test class, or those a
+ │    change reaches (none: say so, record, stop)
  │  test::run  ─► java … ConsoleLauncher --scan-class-path …   (+ test.env)
- │    or, with test.forks: the classes dealt out, test::run_forks, one launcher
+ │    or, with test.forks (or by default, one per 8 classes up to half the
+ │    cores): the classes split by test.times, test::run_forks, one launcher
  │    each at once, output held and passed through whole, XML moved up
  │  retries (test.retries): what still fails, one launcher each
  │  test_report: XML read back ─► flaky count, test-reports/index.html
+ │  record test.times, and test.tested with what failed or was flaky
  │  coverage report (even when tests failed), then test.coverage-minimum
  └  hook(post-test)      only if the tests passed and met the minimums
 
@@ -541,6 +547,26 @@ Every compiler is run as `java @argfile` (or `javac @argfile`), never with a
 long command line: a few dozen dependency jars exceed the OS argument limit.
 Compiler output is passed through verbatim.
 
+Each compiler JVM starts from a class-data-sharing archive of its own
+(`compile/share.rs`), kept in the shared cache under `cds/` and keyed by the
+JDK and the compiler's classpath, never in `target/`. `javac` gets it as `-J`
+flags on its command line, since an argfile may not hold them; the other
+compilers in their argfile. The first run dumps to a temporary file, renamed
+into place only after a successful run; every failure mode costs the archive,
+never the build. A file-by-file `javac` run over at most 100 sources also
+starts with C1 and the serial collector.
+
+```
+ Share::new  no base archive, CDS flags of the user's, cds/ unwritable ─► none
+     │ <tool>-jdk<n>-<key>.jsa exists ─► -XX:SharedArchiveFile=…  -Xlog:cds*=off
+     │ otherwise ─► -XX:ArchiveClassesAtExit=<tmp>  -Xlog:cds*=off
+     ▼
+ run the compiler ── ok ─► rename <tmp> into place
+     │ failed while dumping
+     ▼
+ run it again without the flags (a JVM that cannot dump does not start)
+```
+
 The test unit compiles against `target/classes`, which is a directory, not a
 jar, so its size and mtime say nothing. What its fingerprint holds instead is
 `compile::api_digest` of it (`compile/abi.rs`): a hand-written class-file
@@ -628,6 +654,27 @@ files up as `TEST-<engine>-fork-<k>.xml` beside the others.
    else --select-unique-id            (cli.rs)                    first with their
    else --select-class                                            traces, the rest
  for --rerun-failed and test.retries                              folded
+```
+
+Before the launcher starts, `compile/impact.rs` decides which test classes
+it runs. It hashes every file in the class directories on the test
+classpath, compares with `target/.jrs/test.tested`, and walks the constant
+pools of the classes that changed back to the test classes that reach them.
+Whatever the class files cannot vouch for runs everything; the selection
+reaches the launcher as a fork's does, a lookahead `--include-classname`.
+
+```
+ class dirs now  vs  test.tested ── none, other settings ─────────► every class
+      │ a resource, a class added or removed, Groovy, unreadable ─► every class
+      ▼
+ changed classes ─► the classes that refer to them, transitively
+      │ one reaches no test class (loaded by name) ───────────────► every class
+      ▼
+ test classes reached  ∪  those reaching a framework, ServiceLoader or
+ java.lang.reflect  ∪  test.tested's pending (failed or flaky last time)
+      │ empty ─► "no test class reaches a change", nothing runs
+      ▼
+ run them; record test.tested with what failed or was flaky
 ```
 
 `--fail-fast` is the launcher's own from JUnit 6 on (`TestRun::fail_fast_mode`).
@@ -886,6 +933,9 @@ poisoning, which is documented under each function's `# Panics`.
          ├── javac-main.args  javac-test.args  kotlinc-main.args  …
          ├── main.fingerprint  test.fingerprint
          ├── main.index  test.index  per source: classes, API digests, references
+         ├── test.tested  suite-<name>.tested   class dirs as the last run left them,
+         │                          and the test classes to run again
+         ├── test.times  suite-<name>.times     each test class's last time, to split forks
          ├── resources-main.list  resources-test.list  resources-*-generated-*.list
          ├── tasks/                 <task>.fingerprint  <task>.cp.args
          │                          <task>.tool.args
@@ -900,6 +950,8 @@ poisoning, which is documented under each function's `# Panics`.
  ├── com/google/guava/guava/33.0.0-jre/guava-33.0.0-jre.jar   Maven layout
  │     (a snapshot keeps a *.jrs-snapshot record of its build beside it)
  │     (and guava-33.0.0-jre-sources.jar, once `jrs fetch --sources` ran)
+ ├── cds/                         <compiler>-jdk<n>-<key>.jsa: CDS archives for
+ │                                the compiler JVMs, rewritten when pruned
  └── .jrs/projects                the lockfiles of every project built with it,
                                   which `jrs cache prune` keeps alive
 

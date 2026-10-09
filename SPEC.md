@@ -214,7 +214,7 @@ post-package = ["checksum"]
 | `test.java-agents` | no | `[]` | As `run.java-agents`, a `group:artifact` looked up on the test classpath (dev-dependencies included), ahead of JaCoCo's agent (§10.2). |
 | `test.env` | no | `{}` | As `run.env`, for the test JVM. |
 | `test.retries` | no | `0` | Run a failed test again up to this many times (§10.2). One that passes on a retry is reported as flaky, not as passed. `jrs test --retries <n>` overrides it. |
-| `test.forks` | no | `1` | Test JVMs a run's classes are split among, run at once (§10.2): Gradle's `maxParallelForks`, surefire's `<forkCount>`. `jrs test --forks <n>` overrides it. |
+| `test.forks` | no | one per 8 test classes, up to half the cores | Test JVMs a run's classes are split among, run at once (§10.2): Gradle's `maxParallelForks`, surefire's `<forkCount>`. `jrs test --forks <n>` overrides it; `1` keeps one JVM. |
 | `test.suites.<name>.*` | no | — | A test suite (§10.2): `test-dir` (required), `test-resource-dir` (beside `test-dir`), `jvm-args`, `env`, `forks`, `retries`. Compiled against the main and default test classes and the test classpath into `target/suites/<name>/classes`, and run by `jrs test --suite <name>` only. |
 | `test.coverage-minimum` | no | `{}` | Ratios from 0 to 1 that `jrs test --coverage` must reach, per JaCoCo counter: `instruction`, `branch`, `line`, `complexity`, `method`, `class` — e.g. `{ line = 0.80, branch = 0.70 }` (§10.2). Ignored without `--coverage`. |
 | `package.add-modules` | no | `[]` | Modules a runtime image needs beyond what `jdeps` finds (§9.4). |
@@ -316,7 +316,7 @@ jrs <command> [options]
 | Command | Behaviour |
 | --- | --- |
 | `jrs build [--watch]` | Resolve → compile main sources → copy resources. `--watch` repeats on every change (§7.5). |
-| `jrs test [--debug[=port]]` | `build` + compile test sources + run the test engine (§10.2). `--rerun-failed` runs only what failed last time, `--fail-fast` stops at the first failure, `--retries <n>` overrides `test.retries`, `--forks <n>` overrides `test.forks`. |
+| `jrs test [--debug[=port]]` | `build` + compile test sources + run the test engine (§10.2). `--rerun-failed` runs only what failed last time, `--fail-fast` stops at the first failure, `--retries <n>` overrides `test.retries`, `--forks <n>` overrides `test.forks`, `--all` runs every test class rather than those a change reaches. |
 | `jrs run [--debug[=port]] [-- args...]` | `build` + `java [<jdwp>] [<run.java-agents>] <run.jvm-args> -cp <cp> <main-class> args...`, in `run.cwd` with `run.env`. |
 | `jrs package` | `build` + produce `target/<name>-<version>.jar`. |
 | `jrs package --portable` | Same, with the runtime dependencies in `target/lib/` (§9.3). |
@@ -658,6 +658,8 @@ src/
 │   ├── mod.rs        # compile units and their steps, fingerprint, staleness, argfiles
 │   ├── javac.rs      # javac and javadoc invocation
 │   ├── incremental.rs # file-by-file compilation of a Java unit (§7.2)
+│   ├── share.rs      # class-data-sharing archives for the compiler JVMs (§7.2)
+│   ├── impact.rs     # which test classes a change reaches (§10.2)
 │   └── lang.rs       # Kotlin, Scala, Groovy: compilers, runtime libraries, flags (§7.7)
 ├── image.rs          # jdeps, jlink, jpackage (§9.4)
 ├── resolve/
@@ -804,6 +806,24 @@ own.
         -cp <resolved classpath> <javac-args> @sources.args
   ```
 - Non-zero exit → surface `javac` stderr and exit `1`.
+- A `javac` run over at most 100 sources of a file-by-file compile starts its
+  JVM with `-J-XX:TieredStopAtLevel=1 -J-XX:+UseSerialGC`: a JVM that lives a
+  second never gets to use C2 or G1, and pays for starting them. A
+  whole-unit compile keeps the JVM's defaults.
+- Every compiler JVM — `javac`, kotlinc, scalac, groovyc — maps the classes
+  it loads from a class-data-sharing archive of its own, in the shared cache
+  under `cds/`, keyed by the JDK (its home and module image) and the
+  compiler's classpath. The first run dumps one into a temporary file
+  (`-XX:ArchiveClassesAtExit`), which jrs renames into place only when that
+  run succeeded, as the cache writes a jar; later runs read it
+  (`-XX:SharedArchiveFile`). CDS logging is off (`-Xlog:cds*=off`), so an
+  archive the JVM cannot map is skipped in silence. A dumping run that fails
+  runs once more without the flags, since a JVM that cannot write its dump
+  does not start. No archive is used on a JDK without its default CDS
+  archive, or when `compiler-jvm-args` hold CDS flags of their own. The
+  archive changes nothing a compiler writes, so it is not in the
+  fingerprint. The test JVM gets none: CDS refuses a classpath with a
+  non-empty class directory, and `target/classes` is one.
 - A unit with Kotlin, Scala or Groovy sources runs that language's compiler
   first, into the same output directory and under the same fingerprint; such
   a unit is all-or-nothing (§7.7).
@@ -1684,10 +1704,42 @@ files, and all it touches is names.
   plugin. The coverage agent appends to the first attempt's data. Under
   `--debug` there are no retries: each would be a JVM waiting for a debugger
   again.
+- `jrs test` runs only the test classes a change reaches (test impact
+  analysis, `compile/impact.rs`). A run records every file in the class
+  directories on the test classpath, with its hash, in
+  `target/.jrs/test.tested` (`suite-<name>.tested` for a suite), and a
+  digest of the rest of what the outcome depends on: the JVM's arguments and
+  environment, the launcher, and each jar by its size and modification time.
+  The next run compares. When only classes changed, it reads every class
+  file's constant pool (`abi::class_info`) and selects the top-level test
+  classes that reach a changed class through the project's own classes, as
+  a lookahead `--include-classname` pattern in front of the usual one, as a
+  fork's is. Anything else runs every test class, since a skipped test that
+  would have failed is a wrong result: no record, different settings, a
+  changed resource, a class added or removed, a class that cannot be read, a
+  Groovy class (its calls dispatch at run time), and a changed class that no
+  test class reaches, since only something that finds classes by name can
+  load it. A test class whose reach includes a reference to Spring's,
+  Micronaut's or Quarkus's test support, Ktor's test host, the JUnit suite
+  engine, Cucumber, ArchUnit, Reflections, ClassGraph, `ServiceLoader` or
+  `java.lang.reflect` runs on every change. Nothing reached prints a
+  `Testing` line saying so and runs nothing. A run records the classes that
+  failed or were flaky, by its XML, or every class it ran when the XML cannot
+  say, and the next run runs those as well. `--all`, `--coverage` and
+  `--debug` run everything and still record; `--filter`, the tag flags,
+  `--method` and `--rerun-failed` run what they select and neither read nor
+  write the record. Gradle reruns a test task whole or skips it; selecting
+  tests is Develocity's paid Predictive Test Selection.
 - `test.forks = n` (or `--forks n`) splits a class-path scan among `n`
-  launchers run at once, Gradle's `maxParallelForks`. jrs lists the top-level
-  classes in `target/test-classes` and deals them out in name order, one to
-  each launcher in turn. Each still scans, with one `--include-classname`: a
+  launchers run at once, Gradle's `maxParallelForks`. Unset, jrs runs one
+  launcher per 8 top-level test classes, up to half the available cores, and
+  at least one; `forks = 1` keeps one. jrs lists the top-level classes in
+  `target/test-classes` and deals them out. Each class's time in the last
+  run's XML is kept in `target/.jrs/test.times`; the classes with a time go
+  first, slowest first, each to the launcher with the least time so far, and
+  the rest follow in name order, each to the launcher with the fewest
+  classes, which without any times is every `n`-th class to each. Ties go to
+  the earlier launcher, so the same classes and times split the same way. Each still scans, with one `--include-classname`: a
   lookahead naming its classes, nested ones included, in front of `--filter`,
   the pattern for the project's languages, or the launcher's own. It cannot
   be `--select-class`, since the launcher adds every selected class to its
@@ -1785,7 +1837,7 @@ parent chains and `<dependencyManagement>` already work.
 | `exec-maven-plugin` executions | `[tasks]` and `[hooks]`: `exec` → a `run` task, `java` → `java @{classpath-argfile} <main>`, or a `main` task over the plugin's `<dependencies>` with `includePluginDependencies`; the `<phase>` → the hook at the same point ([TASKS.md §12](specs/TASKS.md#12-open-questions) item 5). With no execution, its `<mainClass>` → `project.main-class` |
 | `<profiles>` a plain `mvn` build activates: each whose `<activation>` holds with no `-P` and no `-D` — its conditions all negated properties (`!skipDocs`) — else the `<activeByDefault>` ones | merged into their POM before anything is read, as Maven injects them, the profile dominant: properties by name, dependencies and repositories by key, plugins by key with `<configuration>` merged element by element, executions by `<id>`. A default profile gets a review line when another profile could activate on some machine and turn it off |
 | `maven-surefire-plugin` `<argLine>`, `<systemPropertyVariables>` | `test.jvm-args` |
-| `maven-surefire-plugin` `<forkCount>`, a number | `test.forks` |
+| `maven-surefire-plugin` `<forkCount>`, a number | `test.forks`, `1` included: unset, jrs picks its own number. A build with tests and no `<forkCount>` gets a review line saying so |
 
 Reported, not translated:
 
@@ -1838,7 +1890,9 @@ the conventional declarative subset, and is explicit about the fact:
   as there is no `test.cwd`). A `-javaagent:` in `jvmArgs` is a path into
   Gradle's cache and is reported, except Mockito's recipe, which becomes
   `test.java-agents = ["org.mockito:mockito-core"]`.
-- `maxParallelForks` on the `test` task, when literal → `test.forks`. A
+- `maxParallelForks` on the `test` task, when literal → `test.forks`, `1`
+  included, and without it a review line says that jrs splits a large suite
+  among JVMs unless `forks = 1`. A
   computed value, usually worked out from `availableProcessors()`, is
   reported, and so is `forkEvery`: jrs never restarts a test JVM part of the
   way through its share.

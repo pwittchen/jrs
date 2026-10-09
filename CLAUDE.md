@@ -166,6 +166,10 @@ regression, not a style nit.
   its own source, an API change also compiles everything that transitively
   refers to it, and anything the index cannot account for — a new or deleted
   source, a changed constant, a processor, another language — compiles the unit whole.
+  Test selection follows it too (`compile/impact.rs`, `target/.jrs/test.tested`):
+  `jrs test` runs the test classes a changed class reaches through the constant
+  pools, and anything it cannot vouch for — a resource, an added class, a class
+  only reflection could reach — runs the whole suite.
 - **Nearest-wins mediation, breadth-first by level** (`resolve/mod.rs`), ties broken on
   manifest declaration order — which is why `manifest.rs` parses a `toml::Table` by
   hand instead of using a `serde` derive (order preservation, per-key diagnostics,

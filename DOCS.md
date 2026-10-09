@@ -247,7 +247,7 @@ jacoco-version = "0.8.15"                    # for `jrs test --coverage`; option
 java-agents = ["org.mockito:mockito-core"]
 env = { TZ = "UTC" }
 retries = 2                                  # run failed tests again; optional
-forks = 4                                    # test JVMs to split the classes among; optional
+forks = 4                                    # test JVMs to split the classes among; jrs picks unless set
 coverage-minimum = { line = 0.80, branch = 0.70 }   # for `jrs test --coverage`; optional
 
 [package]
@@ -505,7 +505,7 @@ for any repository.
 | Command | Behaviour |
 | --- | --- |
 | `jrs build [--watch]` | Resolve → compile main sources → copy resources. `--watch` rebuilds on every change. |
-| `jrs test` | `build` + compile test sources + run the tests. The tests are not recompiled for a main change that leaves the main classes' API alone. See [Tests](#tests) for its flags. |
+| `jrs test` | `build` + compile test sources + run the tests a change since the last run reaches. The tests are not recompiled for a main change that leaves the main classes' API alone. See [Tests](#tests) for its flags. |
 | `jrs run [--debug[=<port>]] [-- args...]` | `build` + run `main-class` with `args`. `--debug` waits for a debugger first; see below. |
 | `jrs package` | `build` + produce `target/<name>-<version>.jar`. |
 | `jrs package --portable` | Same, with the runtime dependencies copied into `target/lib/`. |
@@ -647,6 +647,10 @@ exactly what those projects' lockfiles name, their pinned compilers included.
 It also drops the parent POMs, BOMs, test launchers and JaCoCo jars that only
 a fresh resolution or a `--coverage` run needs; those are downloaded again
 when they are next wanted.
+The cache also holds `cds/`, where jrs keeps a class-data-sharing archive
+for each compiler on each JDK: `javac`, kotlinc, scalac and groovyc start
+faster from one. The first compile after a new JDK or compiler writes it, and
+`prune` drops the directory like any other; the next compile writes it again.
 `--unused-for` goes by when each artifact was last used. jrs records that in
 the file's access time at most once a day, so it works even on filesystems
 mounted `noatime`.
@@ -748,6 +752,7 @@ the JDK it picked.
 | `--retries <n>` | Run failing tests again up to `n` times; overrides `[test] retries`. |
 | `--forks <n>` | Split the test classes among `n` test JVMs run at once; overrides `[test] forks`. |
 | `--suite <name>` | Run the suite `[test.suites.<name>]` declares instead of the tests under `test-dir`. |
+| `--all` | Run every test class, not only those a change since the last run reaches. |
 
 JUnit XML reports land in `target/test-reports`, where CI systems look for
 them. `[test] jvm-args` sets the test JVM's arguments, and `[test] env` and
@@ -776,10 +781,33 @@ reports go to `target/suites/e2e/test-reports`, so `--rerun-failed` reruns
 the suite's failures. Plain `jrs test` never runs a suite, and the suites use
 the dev-dependencies: there is no per-suite dependency table.
 
+**Only what a change reaches.** `jrs test` remembers the class directories as
+the last run left them, in `target/.jrs/test.tested`, and runs only the test
+classes whose class files refer to a class that changed since, directly or
+through the project's other classes. Nothing changed prints `no test class
+reaches a change since the last run` and runs nothing. Whatever the class
+files cannot account for runs every test class: the first run, a changed
+resource, a class added or removed, other JVM arguments, environment or
+dependencies, Groovy classes, and a changed class no test refers to, since
+something loads it by name. A test class that reaches Spring's or another
+framework's test support, the JUnit suite engine, Cucumber, ArchUnit,
+`ServiceLoader` or `java.lang.reflect` finds classes itself, so it runs on
+every change. A test class that failed, or passed only on a retry, runs again
+next time whatever changed. `--all` runs everything, as do `--coverage` and
+`--debug`; `--filter`, the tag flags, `--method` and `--rerun-failed` run
+what they select and leave the record alone. A test that reads files outside
+the class directories — fixtures under `src/test/data`, say — is not
+something jrs can see: run it with `--all`, or keep the files in the test
+resources.
+
 `[test] forks = n`, or `--forks n`, splits the test classes among `n` test
-JVMs that run at once, as Gradle's `maxParallelForks` does. Each JVM is dealt
-every `n`-th class in name order and still scans for it, so `--filter` and the
-tags apply as before. Each JVM's output is printed whole, one after another,
+JVMs that run at once, as Gradle's `maxParallelForks` does. Unset, jrs picks
+a number: one JVM per 8 test classes, up to half the machine's cores, so a
+suite of fewer than 16 classes runs in one. `forks = 1` keeps every class in
+one JVM. Each JVM is dealt its share of the classes by their time in the
+last run, the slowest first, each to the JVM with the least time so far;
+classes with no recorded time are dealt out in name order. Each JVM still
+scans for its share, so `--filter` and the tags apply as before. Each JVM's output is printed whole, one after another,
 once all have finished; their XML lands side by side in `target/test-reports`
 as `TEST-<engine>-fork-<k>.xml`, and their coverage goes into the one
 `target/jacoco.exec`. Retries, `--rerun-failed`, `--method`, `--fail-fast`
@@ -1146,8 +1174,11 @@ classpath, or a `main` task over the plugin's own `<dependencies>`.
 ones, or one waiting only on a property being unset, such as `!skipDocs` —
 are merged in first, the way Maven merges them, and the others are listed
 with what activates them. Gradle's `maxParallelForks` and surefire's
-`<forkCount>` become `test.forks` when they are numbers; one worked out from
-the machine's cores is reported.
+`<forkCount>` become `test.forks` when they are numbers, `1` included, since
+jrs would otherwise pick its own number; one worked out from the machine's
+cores is reported. A build with tests and no fork count gets a review line
+saying that jrs splits a large suite among several JVMs and that `forks = 1`
+keeps one.
 
 Kotlin, Scala and Groovy builds migrate too. The Kotlin Gradle plugin,
 `id 'groovy'` and `id 'scala'`, and Maven's `kotlin-maven-plugin`,

@@ -850,7 +850,7 @@ cwd = "work"</pre>
     <tr><td><code>java-agents</code></td><td><code>[]</code></td><td>As <code>run.java-agents</code>, looked up on the test classpath (dev-dependencies included), ahead of JaCoCo's agent.</td></tr>
     <tr><td><code>env</code></td><td><code>{}</code></td><td>Environment variables for the test JVM. There is no <code>test.cwd</code>: the tests run where jrs does.</td></tr>
     <tr><td><code>retries</code></td><td><code>0</code></td><td>Run a failed test again up to this many times. One that passes on a retry is reported as flaky. <code>--retries</code> overrides it.</td></tr>
-    <tr><td><code>forks</code></td><td><code>1</code></td><td>Test JVMs the classes are split among, run at once. <code>--forks</code> overrides it.</td></tr>
+    <tr><td><code>forks</code></td><td>one per 8 test classes, up to half the cores</td><td>Test JVMs the classes are split among, run at once. <code>1</code> keeps one JVM; <code>--forks</code> overrides it.</td></tr>
     <tr><td><code>jacoco-version</code></td><td>jrs's default</td><td>The JaCoCo release for <code>--coverage</code>.</td></tr>
     <tr><td><code>coverage-minimum</code></td><td><code>{}</code></td><td>Ratios from 0 to 1 that <code>--coverage</code> must reach, per JaCoCo counter: <code>line</code>, <code>branch</code>, <code>instruction</code>, <code>method</code>, <code>class</code>, <code>complexity</code>.</td></tr>
   </tbody>
@@ -1209,7 +1209,7 @@ jrs -q run -- input.txt &gt; output.txt   # only the program's output</pre>
 <h2><code>jrs test</code></h2>
 <pre data-lang="plain">jrs test [--filter PATTERN] [--include-tag TAG]... [--exclude-tag TAG]... [--method CLASS#METHOD]...
          [--coverage] [--watch] [--debug[=[HOST:]PORT]] [--rerun-failed] [--fail-fast]
-         [--retries N] [--forks N] [--timings]</pre>
+         [--retries N] [--forks N] [--all] [--timings]</pre>
 <p>
   Builds, runs <code>pre-test</code>, compiles the test sources into
   <code>target/test-classes</code>, runs them on the JUnit Platform, then runs
@@ -1231,6 +1231,7 @@ jrs -q run -- input.txt &gt; output.txt   # only the program's output</pre>
     <tr><td><code>--retries &lt;N&gt;</code></td><td>Run failing tests again up to <code>N</code> times; overrides <code>[test] retries</code>.</td></tr>
     <tr><td><code>--forks &lt;N&gt;</code></td><td>Split the test classes among <code>N</code> JVMs run at once; overrides <code>[test] forks</code>.</td></tr>
     <tr><td><code>--suite &lt;NAME&gt;</code></td><td>Run the suite <code>[test.suites.&lt;NAME&gt;]</code> declares instead of the default tests.</td></tr>
+    <tr><td><code>--all</code></td><td>Run every test class, not only those a change since the last run reaches.</td></tr>
     <tr><td><code>--timings</code></td><td>Print the phase timings after the run.</td></tr>
   </tbody>
 </table>
@@ -1774,6 +1775,21 @@ jrs test --exclude-tag 'slow | docker'</pre>
   no earlier run at all it exits <code>2</code>.
 </p>
 
+<h3>Only what a change reaches</h3>
+<p>
+  <code>jrs test</code> runs only the test classes whose class files refer to a class that changed
+  since the last run, directly or through the project's other classes; with nothing changed it says
+  so and runs nothing. Anything the class files cannot account for runs every class: the first run,
+  a changed resource, a class added or removed, other JVM arguments, environment or dependencies,
+  Groovy classes, and a changed class no test refers to, since something loads it by name. Test
+  classes that reach Spring's or another framework's test support, the JUnit suite engine,
+  Cucumber, ArchUnit, <code>ServiceLoader</code> or <code>java.lang.reflect</code> run on every
+  change, and a class that failed or was flaky runs again next time. <code>--all</code>,
+  <code>--coverage</code> and <code>--debug</code> run everything; <code>--filter</code>, tags,
+  <code>--method</code> and <code>--rerun-failed</code> run what they select. A test that reads
+  files outside the class directories needs <code>--all</code>.
+</p>
+
 <h3>Retries and flaky tests</h3>
 <p>
   <code>[test] retries = n</code>, or <code>--retries n</code>, runs failing tests again up to
@@ -1795,8 +1811,11 @@ jrs test --exclude-tag 'slow | docker'</pre>
 <h3>Parallel test JVMs</h3>
 <p>
   <code>[test] forks = n</code>, or <code>--forks n</code>, splits the test classes among
-  <code>n</code> JVMs running at once, like Gradle's <code>maxParallelForks</code>. Each JVM gets
-  every <code>n</code>-th class in name order, so <code>--filter</code> and tags still apply. Their
+  <code>n</code> JVMs running at once, like Gradle's <code>maxParallelForks</code>. Unset, jrs
+  runs one JVM per 8 test classes, up to half the cores, so a suite of fewer than 16 classes runs in
+  one; <code>forks = 1</code> keeps one. The classes are split by their time in the last run, the
+  slowest first, each to the JVM with the least time so far; those with no time follow in name
+  order. Each JVM still scans for its share, so <code>--filter</code> and tags still apply. Their
   output is printed whole, one after another, once all finish; their XML lands side by side as
   <code>TEST-&lt;engine&gt;-fork-&lt;k&gt;.xml</code>. Retries, <code>--rerun-failed</code>,
   <code>--method</code>, <code>--fail-fast</code> and <code>--debug</code> run in one JVM. Tests
@@ -2416,6 +2435,9 @@ jrs cache prune --unused-for 30       # drop what no build has used in 30 days</
   longer exist are forgotten, and one that cannot be read stops the prune rather than risk a guess.
   It also drops parent POMs, BOMs, test launchers and JaCoCo jars, which only a fresh resolution or
   a <code>--coverage</code> run needs and which are downloaded again when wanted.
+  The cache also holds <code>cds/</code>: a class-data-sharing archive per compiler and JDK, which
+  makes <code>javac</code>, kotlinc, scalac and groovyc start faster. The first compile after a new
+  JDK or compiler writes it; <code>prune</code> drops it like anything else.
   <code>--unused-for</code> goes by when each artifact was last used, recorded in its access time
   at most once a day, so it works even on filesystems mounted <code>noatime</code>.
 </p>
@@ -2647,7 +2669,7 @@ jrs migrate                # write jrs.toml; the original build file is untouche
     <tr><td class="wrap"><code>Exec</code> and <code>JavaExec</code> tasks, aggregate tasks, <code>exec-maven-plugin</code></td><td class="wrap"><code>[tasks]</code></td></tr>
     <tr><td class="wrap"><code>compileJava.dependsOn</code>, <code>test.dependsOn</code>, <code>run.dependsOn</code>, <code>jar.finalizedBy</code>, an execution's <code>&lt;phase&gt;</code></td><td class="wrap"><code>[hooks]</code></td></tr>
     <tr><td class="wrap"><code>environment</code>, <code>workingDir</code> on <code>run</code> / <code>test</code></td><td class="wrap"><code>run.env</code>, <code>run.cwd</code>, <code>test.env</code></td></tr>
-    <tr><td class="wrap"><code>maxParallelForks</code>, surefire's <code>&lt;forkCount&gt;</code></td><td class="wrap"><code>test.forks</code>, when a number</td></tr>
+    <tr><td class="wrap"><code>maxParallelForks</code>, surefire's <code>&lt;forkCount&gt;</code></td><td class="wrap"><code>test.forks</code>, when a number, <code>1</code> included; without one, a review line on jrs's own default</td></tr>
     <tr><td class="wrap"><code>jar { manifest { attributes(…) } }</code>, <code>&lt;manifestEntries&gt;</code></td><td class="wrap"><code>[package.manifest]</code></td></tr>
     <tr><td class="wrap"><code>processResources { filesMatching(…) { expand(…) } }</code></td><td class="wrap"><code>[resources]</code></td></tr>
     <tr><td class="wrap">A <code>Test</code> task over another source set (<code>testClassesDirs = sourceSets.e2e.output.classesDirs</code>)</td><td class="wrap"><code>[test.suites.&lt;name&gt;]</code></td></tr>
