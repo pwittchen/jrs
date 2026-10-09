@@ -1944,9 +1944,11 @@ mod tests {
         let t = toolchain();
         let p = prepare(&m.tasks[0], &context(&m, &t), &[]).unwrap();
         let path = tree.0.join("target/.jrs/tasks/format.sources.args");
+        let listed = std::fs::read_to_string(&path).unwrap();
+        assert!(listed.ends_with('\n'), "{listed}");
         assert_eq!(
-            std::fs::read_to_string(&path).unwrap(),
-            format!("{}\n{}\n", main.display(), test.display())
+            listed.lines().map(Path::new).collect::<Vec<_>>(),
+            [main.as_path(), test.as_path()]
         );
         let Launch::Exec { args, .. } = &p.launch else {
             panic!()
