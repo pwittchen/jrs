@@ -2147,10 +2147,17 @@ mod tests {
                 .unwrap()
         };
         let first = key(&m);
-        let root = std::path::absolute(&tree.0).unwrap().display().to_string();
-        assert!(!first.contains(&root), "{first}");
-        assert!(first.contains("{root}/target/gen"), "{first}");
-        assert!(first.contains("missing {root}/absent.txt"), "{first}");
+        let root = std::path::absolute(&tree.0).unwrap();
+        let shown = |p: &Path| cache.relative(&p.display().to_string());
+        assert!(!first.contains(&root.display().to_string()), "{first}");
+        assert!(
+            first.contains(&format!("output {}", shown(&root.join("target/gen")))),
+            "{first}"
+        );
+        assert!(
+            first.contains(&format!("missing {}", shown(&root.join("absent.txt")))),
+            "{first}"
+        );
         assert!(first.starts_with("task gen\nexec java\u{1}"), "{first}");
 
         // The same bytes written again: the same key.
@@ -2254,11 +2261,15 @@ mod tests {
                 .unwrap()
         };
         let before = key(&reads);
+        let shown = |p: &Path| cache.relative(&p.display().to_string());
         assert!(
-            before.contains("classes {root}/target/classes "),
+            before.contains(&format!("classes {} ", shown(&classpaths.runtime[0]))),
             "{before}"
         );
-        assert!(before.contains("missing {root}/missing.jar"), "{before}");
+        assert!(
+            before.contains(&format!("missing {}", shown(&classpaths.runtime[1]))),
+            "{before}"
+        );
         assert!(
             !before.contains("test-classes"),
             "only what it reads: {before}"
