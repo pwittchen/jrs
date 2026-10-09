@@ -1539,7 +1539,7 @@ mod tests {
             share_flags: vec!["-XX:SharedArchiveFile=/a.jsa".into()],
             ..share_layout(&base, &tree.join("entries")).unwrap()
         };
-        assert_eq!(shared.classpath, [jar.clone()]);
+        assert_eq!(shared.classpath, std::slice::from_ref(&jar));
         let args = shared.args();
         assert_eq!(
             &args[..4],
