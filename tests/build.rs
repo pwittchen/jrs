@@ -3507,6 +3507,73 @@ class StopTest {
 /// for it, their counts added up, and what failed retried in a launcher of
 /// its own. `--forks 1`, `--fail-fast` and `--method` run in one JVM.
 #[test]
+fn a_test_run_runs_only_the_test_classes_a_change_reaches() {
+    let toolchain = require_jdk!();
+    let scratch = Scratch::new("tests-impact");
+    let p = junit_project(
+        &scratch,
+        &toolchain,
+        FAKE_LAUNCHER_6,
+        "",
+        &[("AddTest.java", ADD_TEST), ("OtherTest.java", OTHER_TEST)],
+    );
+    let calc = p.root.join("src/main/java/com/example/Calc.java");
+
+    let (code, stdout, stderr) = p.jrs(&["test"]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stderr.contains("Testing 2 test sources"), "{stderr}");
+    assert_eq!(launches(&stdout).len(), 1, "{stdout}");
+
+    // Nothing changed: nothing to run.
+    let (code, stdout, stderr) = p.jrs(&["test"]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(
+        stderr.contains("no test class reaches a change since the last run"),
+        "{stderr}"
+    );
+    assert!(launches(&stdout).is_empty(), "{stdout}");
+
+    // A body change in Calc reaches AddTest, and OtherTest never uses it.
+    let source = std::fs::read_to_string(&calc).unwrap();
+    std::fs::write(&calc, source.replace("return a + b;", "return b + a;")).unwrap();
+    let (code, stdout, stderr) = p.jrs(&["test"]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(
+        stderr.contains("Testing 1 of 2 test classes a change reaches"),
+        "{stderr}"
+    );
+    let run = launches(&stdout)[0];
+    assert!(run.contains(r"\Qcom.example.AddTest\E"), "{run}");
+    assert!(!run.contains("OtherTest"), "{run}");
+    assert!(
+        stdout.contains("adds()") && !stdout.contains("passes()"),
+        "{stdout}"
+    );
+
+    // `--all` runs everything, and a class no test refers to could be
+    // reached by reflection: everything again.
+    let (_, stdout, stderr) = p.jrs(&["test", "--all"]);
+    assert!(stderr.contains("Testing 2 test sources"), "{stderr}");
+    assert!(stdout.contains("passes()"), "{stdout}");
+    scratch.write(
+        "app/src/main/java/com/example/Plugin.java",
+        "package com.example;\n\npublic final class Plugin {}\n",
+    );
+    let (_, stdout, stderr) = p.jrs(&["test"]);
+    assert!(stderr.contains("Testing 2 test sources"), "{stderr}");
+    assert!(
+        stdout.contains("adds()") && stdout.contains("passes()"),
+        "{stdout}"
+    );
+
+    // A filtered run neither uses nor moves the recorded state.
+    let (_, stdout, _) = p.jrs(&["test", "--filter", ".*OtherTest"]);
+    assert!(stdout.contains("passes()"), "{stdout}");
+    let (_, stdout, _) = p.jrs(&["test"]);
+    assert!(launches(&stdout).is_empty(), "{stdout}");
+}
+
+#[test]
 fn forks_split_the_classes_among_launchers_and_add_them_up() {
     let toolchain = require_jdk!();
     let scratch = Scratch::new("tests-forks");
@@ -3584,8 +3651,8 @@ fn forks_split_the_classes_among_launchers_and_add_them_up() {
 
     // One JVM when asked for, and for runs that cannot be split.
     for args in [
-        &["test", "--forks", "1"][..],
-        &["test", "--fail-fast"][..],
+        &["test", "--all", "--forks", "1"][..],
+        &["test", "--all", "--fail-fast"][..],
         &["test", "--method", "com.example.AddTest#adds"][..],
     ] {
         let (code, stdout, stderr) = p.jrs(args);

@@ -15,8 +15,8 @@ use std::time::{Duration, Instant};
 use clap::{Args, CommandFactory, Parser, Subcommand, ValueEnum};
 use rayon::prelude::*;
 
-use crate::compile::lang;
 use crate::compile::{self, CompileUnit, DocTool, DocUnit, ForeignCompiler, ForeignDoc, Language};
+use crate::compile::{impact, lang};
 use crate::completions;
 use crate::config::Config;
 use crate::dist;
@@ -447,6 +447,10 @@ pub struct TestArgs {
     /// under `project.test-dir`.
     #[arg(long, value_name = "NAME")]
     pub suite: Option<String>,
+    /// Run every test class, not only those a change since the last run
+    /// reaches.
+    #[arg(long)]
+    pub all: bool,
 }
 
 #[derive(Debug, Default, Args)]
@@ -1661,8 +1665,57 @@ impl<'a> Session<'a> {
             classes: Vec::new(),
             fail_fast: args.fail_fast,
         };
-        let forks = Self::forks(&run, args, forks, rerun.is_some())?;
-        self.announce_tests(&mut run, rerun.as_ref(), &sources, forks.len());
+        let label = suite.map_or_else(|| "test".to_string(), |s| format!("suite-{}", s.name));
+        let state = project.work_dir().join(format!("{label}.tested"));
+        let times = project.work_dir().join(format!("{label}.times"));
+        let classes = junit::test_classes(&run.scan_dir)?;
+        // Only a run of the whole suite says anything about the next one.
+        let whole = args.filter.is_none()
+            && args.include_tag.is_empty()
+            && args.exclude_tag.is_empty()
+            && args.method.is_empty()
+            && rerun.is_none();
+        let impact = if whole {
+            Some(self.test_impact(&run, &state)?)
+        } else {
+            None
+        };
+        let selected = match &impact {
+            Some((impact::Selection::Only(only), _))
+                if !args.all && !args.coverage && args.debug.is_none() =>
+            {
+                Some(only.clone())
+            }
+            _ => None,
+        };
+        if let Some(only) = &selected
+            && only.is_empty()
+        {
+            self.ui.phase(
+                "Testing",
+                "no test class reaches a change since the last run (`--all` runs them all)",
+            );
+            if let Some((_, snapshot)) = &impact {
+                snapshot.record(&state, [])?;
+            }
+            return Ok(None);
+        }
+
+        let forks = Self::forks(
+            &run,
+            args,
+            forks,
+            rerun.is_some(),
+            selected.as_deref().unwrap_or(&classes),
+            &junit::load_times(&times),
+        );
+        if forks.is_empty()
+            && let Some(only) = &selected
+        {
+            run.filter = Some(junit::fork_pattern(only, run.filter.as_deref()));
+        }
+        let reached = selected.as_ref().map(|only| (only.len(), classes.len()));
+        self.announce_tests(&mut run, rerun.as_ref(), &sources, reached, forks.len());
         let started = Instant::now();
         let outcome = self
             .launch_tests(&toolchain, &run, &forks, args.debug.as_ref())
@@ -1671,7 +1724,43 @@ impl<'a> Session<'a> {
                 Ok(outcome)
             });
         self.timings.since("test JVM", started);
+        if outcome.is_err() {
+            impact::forget(&state);
+        }
         let mut outcome = outcome?;
+        let results = run
+            .reports_dir
+            .as_deref()
+            .and_then(|dir| test_report::load(dir).ok().flatten());
+        if let Some(results) = &results {
+            junit::record_times(&times, &junit::class_times(results), &classes);
+        }
+        if let Some((_, snapshot)) = &impact {
+            // What failed, or passed only on a retry, runs again next time
+            // whatever changes: by class when the reports say which, and
+            // otherwise everything that ran.
+            let unsettled = |results: &test_report::Results| -> Vec<String> {
+                results
+                    .failed()
+                    .into_iter()
+                    .chain(results.flaky())
+                    .map(|case| junit::top_level_class(&case.class))
+                    .collect()
+            };
+            let pending: Vec<String> = match &results {
+                Some(results) if outcome.ok() || !outcome.stopped_early => {
+                    let pending = unsettled(results);
+                    if pending.is_empty() && !outcome.ok() {
+                        selected.unwrap_or(classes)
+                    } else {
+                        pending
+                    }
+                }
+                _ if outcome.ok() => Vec::new(),
+                _ => selected.unwrap_or(classes),
+            };
+            snapshot.record(&state, pending)?;
+        }
 
         // Coverage is reported for a failing run too: which code the failing
         // tests reached is part of working out why.
@@ -1788,28 +1877,91 @@ impl<'a> Session<'a> {
         Ok(runner::jvm_prefix(args.debug.as_ref(), &agents))
     }
 
-    /// The launchers `test.forks` (or `--forks`) splits the scan among, each
-    /// with the number of classes it was dealt; none for a run in one JVM. An
-    /// explicit selection — `--method`, `--rerun-failed` — runs whole in one,
-    /// and so does a run under `--debug`, which waits for one debugger, or
-    /// `--fail-fast`, which stops the whole run at its first failure.
+    /// The launchers `test.forks` (or `--forks`) splits `classes` among,
+    /// each with the number of classes it was dealt; none for a run in one
+    /// JVM. Unset, the number follows from the classes and the machine's
+    /// cores, and `times` balances the split. An explicit selection —
+    /// `--method`, `--rerun-failed` — runs whole in one, and so does a run
+    /// under `--debug`, which waits for one debugger, or `--fail-fast`, which
+    /// stops the whole run at its first failure.
     fn forks(
         run: &junit::TestRun,
         args: &TestArgs,
-        configured: u32,
+        configured: Option<u32>,
         rerun: bool,
-    ) -> Result<Vec<(junit::TestRun, usize)>> {
-        let forks = args.forks.unwrap_or(configured);
-        if forks < 2 || rerun || !run.methods.is_empty() || args.debug.is_some() || args.fail_fast {
-            return Ok(Vec::new());
+        classes: &[String],
+        times: &std::collections::BTreeMap<String, u64>,
+    ) -> Vec<(junit::TestRun, usize)> {
+        let asked = args.forks.or(configured);
+        if asked.is_some_and(|forks| forks < 2)
+            || rerun
+            || !run.methods.is_empty()
+            || args.debug.is_some()
+            || args.fail_fast
+        {
+            return Vec::new();
         }
-        let classes = junit::test_classes(&run.scan_dir)?;
-        let shares = junit::split(&classes, usize::try_from(forks).unwrap_or(usize::MAX));
+        let forks = asked.map_or_else(
+            || {
+                let cores = std::thread::available_parallelism().map_or(1, usize::from);
+                junit::default_forks(classes.len(), cores)
+            },
+            |forks| usize::try_from(forks).unwrap_or(usize::MAX),
+        );
+        let shares = junit::split(classes, forks, times);
         if shares.len() < 2 {
-            return Ok(Vec::new());
+            return Vec::new();
         }
         let sizes = shares.iter().map(Vec::len);
-        Ok(junit::forked(run, &shares).into_iter().zip(sizes).collect())
+        junit::forked(run, &shares).into_iter().zip(sizes).collect()
+    }
+
+    /// Which test classes a change since the last run reaches, and the class
+    /// directories as they are now, to record once this run is over. The
+    /// settings are what else the outcome depends on: the JVM's flags and
+    /// environment, the launcher, and each jar by its size and time.
+    fn test_impact(
+        &self,
+        run: &junit::TestRun,
+        state: &Path,
+    ) -> Result<(impact::Selection, impact::Snapshot)> {
+        let mut settings = format!(
+            "{}\n{}\n{}\n",
+            run.jvm_args.join("\u{1}"),
+            run.launcher_version,
+            run.scan_dir.display()
+        );
+        for (key, value) in &run.environment.vars {
+            let _ = writeln!(settings, "env {key}={value}");
+        }
+        let mut dirs = Vec::new();
+        for entry in &run.classpath {
+            if entry.is_dir() {
+                dirs.push(entry.clone());
+                let _ = writeln!(settings, "dir {}", entry.display());
+            } else {
+                let stamp = std::fs::metadata(entry)
+                    .ok()
+                    .map(|m| {
+                        let modified = m
+                            .modified()
+                            .ok()
+                            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                            .map_or(0, |d| d.as_nanos());
+                        format!("{} {modified}", m.len())
+                    })
+                    .unwrap_or_default();
+                let _ = writeln!(settings, "jar {} {stamp}", entry.display());
+            }
+        }
+        let checking = Instant::now();
+        let (selection, snapshot) = impact::select(state, &settings, &dirs, &run.scan_dir)?;
+        self.timings.since("test impact", checking);
+        if let impact::Selection::All(reason) = &selection {
+            self.ui
+                .verbose(format!("running every test class: {reason}"));
+        }
+        Ok((selection, snapshot))
     }
 
     /// Run the launcher under the live test counter, or, when the JVM waits
@@ -1867,6 +2019,7 @@ impl<'a> Session<'a> {
         run: &mut junit::TestRun,
         rerun: Option<&(usize, test_report::Selection)>,
         sources: &Sources,
+        reached: Option<(usize, usize)>,
         forks: usize,
     ) {
         if let Some((_, selection)) = rerun {
@@ -1884,16 +2037,21 @@ impl<'a> Session<'a> {
                 run.launcher_version
             ));
         }
-        match rerun {
-            Some((failed, _)) => self.ui.phase(
+        if let Some((failed, _)) = rerun {
+            self.ui.phase(
                 "Testing",
                 format!("{} that failed in the last run", counted(*failed, "test")),
-            ),
-            None if forks > 1 => self.ui.phase(
-                "Testing",
-                format!("{} in {forks} JVMs", sources.describe("test sources")),
-            ),
-            None => self.ui.phase("Testing", sources.describe("test sources")),
+            );
+            return;
+        }
+        let what = match reached {
+            Some((n, of)) => format!("{n} of {of} test classes a change reaches"),
+            None => sources.describe("test sources"),
+        };
+        if forks > 1 {
+            self.ui.phase("Testing", format!("{what} in {forks} JVMs"));
+        } else {
+            self.ui.phase("Testing", what);
         }
     }
 

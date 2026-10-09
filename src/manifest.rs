@@ -337,7 +337,8 @@ pub struct TestConfig {
     /// counts as failed. One that passes on a retry is reported as flaky.
     pub retries: u32,
     /// `test.forks`: how many test JVMs a run's classes are split among. `0`
-    /// when the key is not set, which runs one, as `1` does.
+    /// when the key is not set, which leaves it to jrs
+    /// ([`crate::test::default_forks`]).
     pub forks: u32,
     /// `test.coverage-minimum`: project-wide totals `jrs test --coverage`
     /// must reach, in declaration order. Ignored without `--coverage`.
@@ -369,18 +370,19 @@ pub struct TestSuite {
 }
 
 impl TestSuite {
-    /// How many test JVMs to run: `forks`, and one when it is not set.
+    /// How many test JVMs to run: `forks`, or `None` when it is not set.
     #[must_use]
-    pub fn forks(&self) -> u32 {
-        self.forks.max(1)
+    pub fn forks(&self) -> Option<u32> {
+        (self.forks > 0).then_some(self.forks)
     }
 }
 
 impl TestConfig {
-    /// How many test JVMs to run: `test.forks`, and one when it is not set.
+    /// How many test JVMs to run: `test.forks`, or `None` when it is not
+    /// set and jrs picks a number from the suite's size and the machine.
     #[must_use]
-    pub fn forks(&self) -> u32 {
-        self.forks.max(1)
+    pub fn forks(&self) -> Option<u32> {
+        (self.forks > 0).then_some(self.forks)
     }
 
     /// The suite `[test.suites.<name>]` declares.
@@ -3802,7 +3804,7 @@ version = "1"
         assert_eq!(m.run.jvm_args, vec!["-Xmx256m", "--enable-preview"]);
         assert_eq!(m.test.jvm_args, vec!["-Dmode=test"]);
         assert_eq!(m.test.jacoco_version.as_deref(), Some("0.8.15"));
-        assert_eq!(m.test.forks(), 4);
+        assert_eq!(m.test.forks(), Some(4));
         assert_eq!(m.package.add_modules, vec!["jdk.crypto.ec"]);
 
         let again = parse(&m.render(None)).unwrap();
@@ -3816,7 +3818,7 @@ version = "1"
         assert!(err.to_string().contains("run.jvm-args"), "{err}");
 
         let one = parse("[project]\nname='a'\nversion='1'\n").unwrap();
-        assert_eq!(one.test.forks(), 1, "one test JVM when the key is not set");
+        assert_eq!(one.test.forks(), None, "jrs picks when the key is not set");
         for bad in ["forks = 0", "forks = -2", "forks = 'auto'"] {
             let err = parse(&format!("[project]\nname='a'\nversion='1'\n[test]\n{bad}"))
                 .unwrap_err()
@@ -3852,10 +3854,10 @@ version = "1"
         assert_eq!(e2e.test_dir, PathBuf::from("src/e2e/java"));
         assert_eq!(e2e.test_resource_dir, PathBuf::from("src/e2e/resources"));
         assert_eq!(e2e.jvm_args, vec!["-Dheadless=true"]);
-        assert_eq!(e2e.forks(), 2);
+        assert_eq!(e2e.forks(), Some(2));
         let it = m.test.suite("integration").unwrap();
         assert_eq!(it.test_resource_dir, PathBuf::from("it/data"));
-        assert_eq!(it.forks(), 1);
+        assert_eq!(it.forks(), None);
 
         let text = m.render(None);
         assert!(

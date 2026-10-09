@@ -1187,8 +1187,6 @@ fn read_forks(effective: &Effective, config: &Element, out: &mut Manifest, repor
     if let Some(raw) = config.text_of("forkCount") {
         let count = pom::interpolate(raw, &effective.properties);
         match count.parse::<u32>() {
-            // Maven's default, and jrs's.
-            Ok(1) => {}
             Ok(0) => report.review(
                 "surefire <forkCount>0</forkCount> runs the tests inside Maven's own JVM; \
                  jrs runs them in a test JVM of their own",

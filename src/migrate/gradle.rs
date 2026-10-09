@@ -1273,8 +1273,8 @@ fn setting<'a>(line: &'a str, key: &str) -> Option<&'a str> {
 /// machine's cores, which a committed jrs.toml cannot, so that is reported.
 fn read_max_parallel_forks(line: &str, value: &str, out: &mut Manifest, report: &mut Report) {
     match value.parse::<u32>() {
-        // Gradle's default, and jrs's.
-        Ok(0 | 1) => {}
+        Ok(0) => {}
+        // Gradle's default, but not jrs's, which splits a large suite.
         Ok(n) => {
             out.test.forks = n;
             report.migrated(format!("test.forks = {n} (from maxParallelForks)"));
@@ -3186,8 +3186,11 @@ application {
         );
         assert!(!skipped.contains("Extra"), "another setting: {skipped}");
 
-        let default = dir.migrate("test {\n  maxParallelForks = 1\n}\n");
-        assert_eq!(default.manifest.test.forks, 0, "one JVM is the default");
+        let one = dir.migrate("test {\n  maxParallelForks = 1\n}\n");
+        assert_eq!(
+            one.manifest.test.forks, 1,
+            "one JVM asked for is kept: jrs would pick its own number"
+        );
     }
 
     #[test]

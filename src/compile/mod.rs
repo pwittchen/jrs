@@ -20,6 +20,7 @@
 
 pub mod abi;
 pub mod doc;
+pub mod impact;
 mod incremental;
 pub mod javac;
 pub mod lang;

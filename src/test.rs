@@ -572,17 +572,110 @@ pub fn test_classes(dir: &Path) -> Result<Vec<String>> {
     Ok(classes)
 }
 
-/// Deal `classes` out to at most `forks` test JVMs in turn, each getting every
-/// `forks`-th class in name order. No share is empty: there are never more
-/// shares than classes.
+/// How many test classes each test JVM jrs starts on its own should have:
+/// fewer, and starting the JVM costs more than the classes it takes off the
+/// others.
+pub const CLASSES_PER_FORK: usize = 8;
+
+/// How many test JVMs to run when `test.forks` does not say: one per
+/// [`CLASSES_PER_FORK`] test classes, up to half the machine's `cores`, as
+/// Gradle's own advice for `maxParallelForks` has it. A small suite runs in
+/// one.
 #[must_use]
-pub fn split(classes: &[String], forks: usize) -> Vec<Vec<String>> {
+pub fn default_forks(classes: usize, cores: usize) -> usize {
+    (cores / 2).min(classes / CLASSES_PER_FORK).max(1)
+}
+
+/// Deal `classes` out to at most `forks` test JVMs. No share is empty: there
+/// are never more shares than classes.
+///
+/// A class with a time in `times` — its milliseconds in the last run that
+/// ran it — is placed by it: the slowest first, each on the share with the
+/// least time so far, so a few slow classes do not keep one JVM running
+/// while the others sit idle. The rest are dealt out in name order, each to
+/// the share with the fewest classes, which without any times is every
+/// `forks`-th class to each. Ties go to the earlier share, so the same
+/// classes and times always split the same way.
+#[must_use]
+pub fn split(
+    classes: &[String],
+    forks: usize,
+    times: &std::collections::BTreeMap<String, u64>,
+) -> Vec<Vec<String>> {
     let forks = forks.min(classes.len()).max(1);
     let mut shares = vec![Vec::new(); forks];
-    for (i, class) in classes.iter().enumerate() {
-        shares[i % forks].push(class.clone());
+    let mut load = vec![0_u64; forks];
+    let (mut measured, unmeasured): (Vec<&String>, Vec<&String>) =
+        classes.iter().partition(|c| times.contains_key(*c));
+    measured.sort_by(|a, b| times[*b].cmp(&times[*a]).then(a.cmp(b)));
+    for class in measured {
+        let i = (0..forks)
+            .min_by_key(|&i| (load[i], shares[i].len(), i))
+            .unwrap_or(0);
+        load[i] += times[class];
+        shares[i].push(class.clone());
+    }
+    for class in unmeasured {
+        let i = (0..forks)
+            .min_by_key(|&i| (shares[i].len(), i))
+            .unwrap_or(0);
+        shares[i].push(class.clone());
+    }
+    for share in &mut shares {
+        share.sort();
     }
     shares
+}
+
+/// Each test class's time in a run's XML: the milliseconds of its test
+/// cases, nested classes' with their top-level class's, retries included.
+#[must_use]
+pub fn class_times(
+    results: &crate::test_report::Results,
+) -> std::collections::BTreeMap<String, u64> {
+    let mut times = std::collections::BTreeMap::new();
+    for case in &results.cases {
+        *times.entry(top_level_class(&case.class)).or_insert(0) += case.millis;
+    }
+    times
+}
+
+/// `com.example.CalcTest$Inner` → `com.example.CalcTest`.
+#[must_use]
+pub fn top_level_class(class: &str) -> String {
+    class.split('$').next().unwrap_or(class).to_string()
+}
+
+/// The times kept in `path`: one `<millis> <class>` line each.
+#[must_use]
+pub fn load_times(path: &Path) -> std::collections::BTreeMap<String, u64> {
+    std::fs::read_to_string(path)
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|line| {
+            let (millis, class) = line.split_once(' ')?;
+            Some((class.to_string(), millis.parse().ok()?))
+        })
+        .collect()
+}
+
+/// Keep `measured` in `path` for the next split, over what it held for the
+/// same classes, and drop the classes no longer among `classes`. Losing it
+/// costs only the balance, so a failure to write is not an error.
+pub fn record_times(
+    path: &Path,
+    measured: &std::collections::BTreeMap<String, u64>,
+    classes: &[String],
+) {
+    let mut times = load_times(path);
+    times.extend(measured.iter().map(|(c, t)| (c.clone(), *t)));
+    let mut out = String::new();
+    for (class, millis) in &times {
+        if classes.binary_search(class).is_ok() {
+            let _ = writeln!(out, "{millis} {class}");
+        }
+    }
+    let _ = std::fs::write(path, out);
 }
 
 /// The `--include-classname` pattern of a fork: the classes in its `share`,
@@ -1682,13 +1775,73 @@ mod tests {
 
     #[test]
     fn classes_are_dealt_out_in_turn_and_no_fork_is_left_empty() {
+        let none = std::collections::BTreeMap::new();
         let classes = strings(&["a.A", "a.B", "a.C", "b.D", "b.E"]);
         assert_eq!(
-            split(&classes, 2),
+            split(&classes, 2, &none),
             [strings(&["a.A", "a.C", "b.E"]), strings(&["a.B", "b.D"])]
         );
-        assert_eq!(split(&classes, 9).len(), 5, "no more forks than classes");
-        assert_eq!(split(&[], 4), [Vec::<String>::new()]);
+        assert_eq!(
+            split(&classes, 9, &none).len(),
+            5,
+            "no more forks than classes"
+        );
+        assert_eq!(split(&[], 4, &none), [Vec::<String>::new()]);
+    }
+
+    #[test]
+    fn classes_with_a_time_are_split_by_it_the_slowest_first() {
+        let classes = strings(&["A", "B", "C", "D", "E", "F"]);
+        let times: std::collections::BTreeMap<String, u64> = [
+            ("A", 9000),
+            ("B", 100),
+            ("C", 100),
+            ("D", 4000),
+            ("E", 4000),
+        ]
+        .iter()
+        .map(|(c, t)| ((*c).to_string(), *t))
+        .collect();
+        // In name order, A and C and E would share one JVM: 13 seconds
+        // against the other's 4.
+        assert_eq!(
+            split(&classes, 2, &times),
+            [strings(&["A", "F"]), strings(&["B", "C", "D", "E"])],
+            "9s against 8.2s, and F, with no time, on the share with fewer classes"
+        );
+        assert_eq!(split(&classes, 2, &times), split(&classes, 2, &times));
+
+        // Zero times still spread out.
+        let zero = classes.iter().map(|c| (c.clone(), 0)).collect();
+        assert!(split(&classes, 3, &zero).iter().all(|s| s.len() == 2));
+    }
+
+    #[test]
+    fn a_suite_is_split_by_default_only_when_it_is_large_enough() {
+        assert_eq!(default_forks(5, 16), 1);
+        assert_eq!(default_forks(40, 16), 5);
+        assert_eq!(default_forks(400, 16), 8, "half the cores at most");
+        assert_eq!(default_forks(400, 1), 1);
+    }
+
+    #[test]
+    fn times_are_kept_for_classes_that_still_exist() {
+        let dir = std::env::temp_dir().join(format!("jrs-times-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("test.times");
+        let measured = |pairs: &[(&str, u64)]| -> std::collections::BTreeMap<String, u64> {
+            pairs.iter().map(|(c, t)| ((*c).to_string(), *t)).collect()
+        };
+        record_times(
+            &path,
+            &measured(&[("p.A", 5), ("p.B", 7)]),
+            &strings(&["p.A", "p.B"]),
+        );
+        record_times(&path, &measured(&[("p.A", 9)]), &strings(&["p.A", "p.B"]));
+        assert_eq!(load_times(&path), measured(&[("p.A", 9), ("p.B", 7)]));
+        record_times(&path, &measured(&[]), &strings(&["p.B"]));
+        assert_eq!(load_times(&path), measured(&[("p.B", 7)]));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
