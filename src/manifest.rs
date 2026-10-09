@@ -346,10 +346,26 @@ pub struct TestConfig {
     /// `test.share-classes`: map the dependency jars' classes into the test
     /// JVM from a class-data-sharing archive, which puts the class
     /// directories on the launcher's own class loader (SPEC §10.2).
-    pub share_classes: bool,
+    pub share_classes: ShareClasses,
     /// `[test.suites.<name>]`, in declaration order: test sources of their
     /// own, run by `jrs test --suite <name>` and never by plain `jrs test`.
     pub suites: Vec<TestSuite>,
+}
+
+/// `test.share-classes`: whether, and how, the test JVM maps the dependency
+/// jars' classes from an archive (SPEC §10.2).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ShareClasses {
+    /// `false`, the default: the usual layout, no archive.
+    #[default]
+    Off,
+    /// `true`: a dynamic class-data-sharing archive, on every JDK jrs
+    /// supports.
+    Archive,
+    /// `"aot"`: the AOT cache of JEP 483 on JDK 24 and later, which also
+    /// keeps classes linked and, from JDK 25, method profiles; the dynamic
+    /// archive on an older JDK.
+    Aot,
 }
 
 /// One `[test.suites.<name>]`: Gradle's extra source set with its own `Test`
@@ -1371,7 +1387,7 @@ impl Manifest {
                 retries: optional_count(t, "retries", "test")?,
                 forks: test_forks(t)?,
                 coverage_minimum: coverage_minimum(t, &mut warnings)?,
-                share_classes: bool_key(t, "share-classes", "`test.share-classes`")?,
+                share_classes: share_classes(t)?,
                 suites: parse_suites(t, &mut warnings)?,
             },
         };
@@ -1777,8 +1793,14 @@ impl Manifest {
                     .collect();
                 let _ = writeln!(s, "coverage-minimum = {{ {} }}", entries.join(", "));
             }
-            if self.test.share_classes {
-                let _ = writeln!(s, "share-classes = true");
+            match self.test.share_classes {
+                ShareClasses::Off => {}
+                ShareClasses::Archive => {
+                    let _ = writeln!(s, "share-classes = true");
+                }
+                ShareClasses::Aot => {
+                    let _ = writeln!(s, "share-classes = \"aot\"");
+                }
             }
         }
         for suite in &self.test.suites {
@@ -3404,6 +3426,18 @@ fn optional_count(t: &toml::Table, key: &str, section: &str) -> Result<u32> {
     }
 }
 
+/// `test.share-classes`: `true`, `false` or `"aot"`.
+fn share_classes(t: &toml::Table) -> Result<ShareClasses> {
+    match t.get("share-classes") {
+        None | Some(toml::Value::Boolean(false)) => Ok(ShareClasses::Off),
+        Some(toml::Value::Boolean(true)) => Ok(ShareClasses::Archive),
+        Some(toml::Value::String(s)) if s == "aot" => Ok(ShareClasses::Aot),
+        Some(_) => Err(JrsError::manifest(
+            "`test.share-classes` must be `true`, `false` or `\"aot\"`".to_string(),
+        )),
+    }
+}
+
 /// `test.forks`: a whole number of test JVMs, 1 or more; `0` when absent.
 fn test_forks(t: &toml::Table) -> Result<u32> {
     let invalid = || {
@@ -4721,18 +4755,25 @@ version = "1"
     fn share_classes_is_off_unless_asked_for() {
         let m = parse("[project]\nname='a'\nversion='1'\n[test]\nshare-classes = true\n").unwrap();
         assert!(m.warnings.is_empty(), "{:?}", m.warnings);
-        assert!(m.test.share_classes);
+        assert_eq!(m.test.share_classes, ShareClasses::Archive);
         let rendered = m.render(None);
         assert!(rendered.contains("share-classes = true\n"), "{rendered}");
         assert_eq!(parse(&rendered).unwrap().test, m.test);
 
+        let aot =
+            parse("[project]\nname='a'\nversion='1'\n[test]\nshare-classes = 'aot'\n").unwrap();
+        assert_eq!(aot.test.share_classes, ShareClasses::Aot);
+        let rendered = aot.render(None);
+        assert!(rendered.contains("share-classes = \"aot\"\n"), "{rendered}");
+        assert_eq!(parse(&rendered).unwrap().test, aot.test);
+
         let plain = parse("[project]\nname='a'\nversion='1'\n[test]\n").unwrap();
-        assert!(!plain.test.share_classes);
+        assert_eq!(plain.test.share_classes, ShareClasses::Off);
         let err = parse("[project]\nname='a'\nversion='1'\n[test]\nshare-classes = 'yes'\n")
             .unwrap_err()
             .to_string();
         assert!(
-            err.contains("`test.share-classes` must be `true` or `false`"),
+            err.contains("`test.share-classes` must be `true`, `false` or `\"aot\"`"),
             "{err}"
         );
     }

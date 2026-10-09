@@ -65,6 +65,7 @@ cargo test resolve::                                # unit tests in one module
 cargo test --features network-tests --test network  # the Maven Central tests
 cargo bench --bench resolution                      # SPEC §12 M5: network vs jrs vs renderer
 cargo bench --bench incremental                     # SPEC §7.2: rebuild time after one edit, javac's share
+JRS_BENCH_PROJECT=<path> cargo bench --bench test_jvm  # SPEC §10.2: share-classes off/true/"aot" on a real project
 ```
 
 Driving jrs against a Java project:

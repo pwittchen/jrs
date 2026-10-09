@@ -33,3 +33,9 @@ harness = false
 [[bench]]
 name = "incremental"
 harness = false
+
+# SPEC §10.2: `test.share-classes` on a real project, by JRS_BENCH_PROJECT:
+# the test JVM in each mode, and whether its outcome changed.
+[[bench]]
+name = "test_jvm"
+harness = false

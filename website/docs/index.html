@@ -868,7 +868,7 @@ cwd = "work"</pre>
     <tr><td><code>forks</code></td><td>one per 8 test classes, up to half the cores</td><td>Test JVMs the classes are split among, run at once. <code>1</code> keeps one JVM; <code>--forks</code> overrides it.</td></tr>
     <tr><td><code>jacoco-version</code></td><td>jrs's default</td><td>The JaCoCo release for <code>--coverage</code>.</td></tr>
     <tr><td><code>coverage-minimum</code></td><td><code>{}</code></td><td>Ratios from 0 to 1 that <code>--coverage</code> must reach, per JaCoCo counter: <code>line</code>, <code>branch</code>, <code>instruction</code>, <code>method</code>, <code>class</code>, <code>complexity</code>.</td></tr>
-    <tr><td><code>share-classes</code></td><td><code>false</code></td><td>Start the test JVM from a class-data-sharing archive of the dependency jars. See <a href="#testing-share-classes">Starting the test JVM faster</a>.</td></tr>
+    <tr><td><code>share-classes</code></td><td><code>false</code></td><td>Start the test JVM from a class-data-sharing archive of the dependency jars; <code>"aot"</code> uses the AOT cache on JDK 24+. See <a href="#testing-share-classes">Starting the test JVM faster</a>.</td></tr>
   </tbody>
 </table>
 <pre data-lang="toml">[test]
@@ -1922,6 +1922,14 @@ jvm-args = [
   <code>java.class.path</code> itself no longer sees the class directories — hence opt-in.
   <code>--debug</code>, <code>--coverage</code> and <code>test.java-agents</code> turn it off for
   the run, and forked JVMs only read an archive a single-JVM run wrote.
+</p>
+<p>
+  <code>share-classes = "aot"</code> uses the JDK's AOT cache instead (JDK 24 and later; an older
+  JDK gets the archive). It also keeps the classes linked and, from JDK 25, method profiles, which
+  helps a large test context most. The first run records what it loaded and jrs then builds the
+  cache in a JVM of its own, so that run is slower; later runs map it. To see what either mode buys
+  on your project, and whether its tests still pass, run
+  <code>JRS_BENCH_PROJECT=&lt;path&gt; cargo bench --bench test_jvm</code> from a jrs checkout.
 </p>
 
 <h3>Coverage</h3>

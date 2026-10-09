@@ -783,7 +783,11 @@ entry lists are cached in `<cache>/cds/entries/`), and `Share::for_tests`
 picks `cds/test-<project>-<deps>.jsa`: read if there, dumped otherwise by a
 run in one JVM (`test::run_sharing`, which retries without the flags a JVM
 that never got to the launcher), only read by forks. `--debug`, `--coverage`
-and `test.java-agents` keep the usual layout.
+and `test.java-agents` keep the usual layout. With `share-classes = "aot"` on
+JDK 24+, the file is `….aot`, an AOT cache: the run records into a temporary
+configuration (`-XX:AOTMode=record`, VM output off), and `Share::finish`
+assembles the cache from it in a `-XX:AOTMode=create` JVM whose output is
+dropped, then renames it into place.
 
 `--fail-fast` is the launcher's own from JUnit 6 on (`TestRun::fail_fast_mode`).
 A 1.x launcher has none, and prints its tree only once the run is over, so
@@ -1114,7 +1118,13 @@ can never lose user data, and task-generated sources must live under
  └── benches/resolution.rs SPEC §12 M5: network vs jrs vs renderer cost
 
  cargo bench --bench incremental
- └── benches/incremental.rs SPEC §7.2: rebuilds after one edit, javac's share
+ └── benches/incremental.rs SPEC §7.2: rebuilds after one edit, javac's share;
+                           a clean build restored from the build cache
+
+ JRS_BENCH_PROJECT=<path> cargo bench --bench test_jvm
+ └── benches/test_jvm.rs   SPEC §10.2: `jrs test` on a real project with
+                           share-classes off, true and "aot", and whether
+                           the outcome changed (specs/TEST_JVM_BENCHMARK.md)
 ```
 
 ## 15. Invariants

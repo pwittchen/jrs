@@ -3853,6 +3853,65 @@ fn shared_test_classes_map_an_archive_and_still_run_new_code() {
     assert!(!launches(&stdout)[0].contains("--class-path"), "{stdout}");
 }
 
+/// `test.share-classes = "aot"`: on JDK 24 and later the first run records,
+/// jrs assembles an AOT cache out of sight, and the next run maps the
+/// launcher from it; the recording leaves nothing in the tests' output.
+#[test]
+fn an_aot_cache_is_recorded_assembled_and_mapped_quietly() {
+    let toolchain = require_jdk!();
+    if toolchain.version < jrs::compile::share::AOT_SINCE {
+        eprintln!("SKIPPED: JDK {} has no AOT cache", toolchain.version);
+        return;
+    }
+    let scratch = Scratch::new("tests-aot-cache");
+    let p = junit_project(
+        &scratch,
+        &toolchain,
+        FAKE_LAUNCHER_6,
+        "share-classes = \"aot\"\nforks = 1",
+        &[("AddTest.java", ADD_TEST)],
+    );
+    let log = scratch.join("class-load.log");
+    let manifest = p.root.join("jrs.toml");
+    let text = std::fs::read_to_string(&manifest).unwrap();
+    let logged = format!(
+        "jvm-args = ['-Xlog:class+load=info:file=\"{}\"', ",
+        log.display().to_string().replace('\\', "/")
+    );
+    std::fs::write(&manifest, text.replacen("jvm-args = [", &logged, 1)).unwrap();
+
+    let (code, stdout, stderr) = p.jrs(&["-v", "test"]);
+    assert_eq!(code, 0, "{stdout}\n{stderr}");
+    assert!(
+        stderr.contains("test JVM: recording for the AOT cache"),
+        "{stderr}"
+    );
+    for stream in [&stdout, &stderr] {
+        assert!(
+            !stream.contains("AOTConfiguration recorded") && !stream.contains("AOTCache creation"),
+            "the recording and the assembly are quiet: {stream}"
+        );
+    }
+    let caches: Vec<PathBuf> = std::fs::read_dir(p.cache.join("cds"))
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .filter(|p| p.extension().is_some_and(|e| e == "aot"))
+        .collect();
+    assert_eq!(caches.len(), 1, "assembled after the run");
+
+    let (code, stdout, stderr) = p.jrs(&["-v", "test", "--all", "--no-build-cache"]);
+    assert_eq!(code, 0, "{stdout}\n{stderr}");
+    assert!(
+        stderr.contains("test JVM: mapping the AOT cache"),
+        "{stderr}"
+    );
+    let mapped = std::fs::read_to_string(&log).unwrap().lines().any(|l| {
+        l.contains("org.junit.platform.console.ConsoleLauncher ")
+            && l.contains("shared objects file")
+    });
+    assert!(mapped, "the launcher came from the AOT cache");
+}
+
 /// A whole test run that passed is kept in the build cache: a second
 /// checkout of the same classes takes its reports instead of starting the
 /// JVM, `--all` runs them anyway, and a failing run is never kept.

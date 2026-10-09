@@ -250,7 +250,7 @@ env = { TZ = "UTC" }
 retries = 2                                  # run failed tests again; optional
 forks = 4                                    # test JVMs to split the classes among; jrs picks unless set
 coverage-minimum = { line = 0.80, branch = 0.70 }   # for `jrs test --coverage`; optional
-share-classes = true                         # start the test JVM from a CDS archive; off by default
+share-classes = true                         # start the test JVM from a CDS archive ("aot": the AOT cache); off by default
 
 [package]
 add-modules = ["jdk.crypto.ec"]              # for --jlink / --jpackage images
@@ -319,6 +319,15 @@ order of `META-INF/services` entries or `spring.factories`, and code that
 reads `java.class.path` itself no longer sees the class directories — hence
 opt-in. `--debug`, `--coverage` and `test.java-agents` turn it off for the
 run, and forked JVMs only read an archive a single-JVM run wrote.
+
+`share-classes = "aot"` uses the JDK's AOT cache instead (JDK 24 and later;
+an older JDK gets the archive). Besides the classes it keeps them linked,
+and from JDK 25 it keeps method profiles too, which helps a large test
+context most. The first run records what it loaded and jrs then builds the
+cache (`cds/test-*.aot`) in a JVM of its own, which makes that first run
+slower; later runs map it. To see what either mode buys on your project,
+and whether its tests still pass, run `JRS_BENCH_PROJECT=<path> cargo bench
+--bench test_jvm` from a jrs checkout.
 
 `[package.manifest]` adds attributes to the jar's `META-INF/MANIFEST.MF` — the
 thin, portable and fat jar alike — after the ones jrs writes, in the order they

@@ -28,6 +28,16 @@
 //! suite, `test-<project>-<deps>.jsa`: writing a new one deletes the older
 //! ones, since a project whose dependencies change daily must not fill the
 //! cache with archives a hundred megabytes each.
+//!
+//! `test.share-classes = "aot"` asks for JEP 483's AOT cache instead, on a
+//! JDK 24 or later: the same classpath rule, but classes kept linked, and
+//! from JDK 25 method profiles too. It is made in two steps, both jrs's: the
+//! test run records which classes it used (`-XX:AOTMode=record`), and once it
+//! is over jrs assembles the cache from that record in a JVM of its own
+//! (`-XX:AOTMode=create`) whose output it keeps to itself. JDK 25's one-step
+//! `-XX:AOTCacheOutput` would print its progress between the tests' own
+//! lines, and so would the recording run, unless the VM's own output is
+//! turned off for it (`-XX:-DisplayVMOutput`).
 
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
@@ -50,7 +60,14 @@ const USER_FLAGS: &[&str] = &[
     "-XX:+AutoCreateSharedArchive",
     "-XX:AOTCache",
     "-XX:AOTMode",
+    "-XX:AOTConfiguration",
 ];
+
+/// The AOT cache's own messages, off as [`QUIET`] turns off CDS's.
+const AOT_QUIET: &str = "-Xlog:aot*=off";
+
+/// The first JDK with the AOT cache (JEP 483).
+pub const AOT_SINCE: u32 = 24;
 
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -65,6 +82,19 @@ pub struct Share {
     /// The file-name prefix of the archives this one replaces, deleted once
     /// it is in place: a project's older test archives.
     replaces: Option<String>,
+    /// For an AOT cache, how to assemble it from what the run recorded
+    /// into the temporary file.
+    assemble: Option<Assemble>,
+}
+
+/// The `-XX:AOTMode=create` run that turns a recorded configuration into
+/// an AOT cache.
+#[derive(Debug)]
+struct Assemble {
+    java: PathBuf,
+    classpath: Vec<PathBuf>,
+    /// The run's own flags that change what is cached.
+    flags: Vec<String>,
 }
 
 impl Share {
@@ -79,7 +109,7 @@ impl Share {
         classpath: &[PathBuf],
         user_args: &[String],
     ) -> Option<Share> {
-        let home = usable(dir, toolchain, user_args)?;
+        let home = usable(dir, toolchain, user_args, true)?;
         let archive = dir.join(format!(
             "{}-jdk{}-{}.jsa",
             file_safe(tool),
@@ -94,7 +124,8 @@ impl Share {
     /// `-cp` — jars only — and `jvm_args` its other flags, of which
     /// `-javaagent` and `-XX:` ones change what is archived. Without `dump`
     /// it only reads an archive that is already there: forks read one,
-    /// and none of them writes it.
+    /// and none of them writes it. With `aot`, on a JDK that has it, the
+    /// archive is an AOT cache.
     #[must_use]
     pub fn for_tests(
         dir: &Path,
@@ -103,20 +134,60 @@ impl Share {
         classpath: &[PathBuf],
         jvm_args: &[String],
         dump: bool,
+        aot: bool,
     ) -> Option<Share> {
-        let home = usable(dir, toolchain, jvm_args)?;
-        let archived: Vec<&str> = jvm_args
+        let aot = aot && toolchain.version >= AOT_SINCE;
+        let home = usable(dir, toolchain, jvm_args, !aot)?;
+        let archived: Vec<String> = jvm_args
             .iter()
             .filter(|a| a.starts_with("-javaagent") || a.starts_with("-XX:"))
-            .map(String::as_str)
+            .cloned()
             .collect();
-        let tool = format!("junit\u{1}{}", archived.join("\u{1}"));
+        let kind = if aot { "aot" } else { "jsa" };
+        let tool = format!("junit-{kind}\u{1}{}", archived.join("\u{1}"));
         let prefix = format!("test-{}-", &sha256_hex(project.as_bytes())[..16]);
         let archive = dir.join(format!(
-            "{prefix}{}.jsa",
+            "{prefix}{}.{kind}",
             key(&home, toolchain, &tool, classpath)
         ));
-        Share::at(dir, archive, dump, Some(prefix))
+        if !aot {
+            return Share::at(dir, archive, dump, Some(prefix));
+        }
+        if archive.is_file() {
+            return Some(Share {
+                flags: vec![
+                    format!("-XX:AOTCache={}", archive.display()),
+                    AOT_QUIET.to_string(),
+                    QUIET.to_string(),
+                ],
+                dump: None,
+                replaces: None,
+                assemble: None,
+            });
+        }
+        if !dump {
+            return None;
+        }
+        let temp = temporary(dir, &archive)?;
+        Some(Share {
+            flags: vec![
+                "-XX:AOTMode=record".to_string(),
+                format!("-XX:AOTConfiguration={}", temp.display()),
+                // The recording run says that it recorded, on stdout, between
+                // the tests' own lines, whatever its logging is set to.
+                "-XX:+UnlockDiagnosticVMOptions".to_string(),
+                "-XX:-DisplayVMOutput".to_string(),
+                AOT_QUIET.to_string(),
+                QUIET.to_string(),
+            ],
+            dump: Some((temp, archive)),
+            replaces: Some(prefix),
+            assemble: Some(Assemble {
+                java: toolchain.java.clone(),
+                classpath: classpath.to_vec(),
+                flags: archived,
+            }),
+        })
     }
 
     /// Read `archive` if it is there, or else dump into a temporary file
@@ -130,21 +201,13 @@ impl Share {
                 ],
                 dump: None,
                 replaces: None,
+                assemble: None,
             });
         }
         if !dump {
             return None;
         }
-        let name = archive.file_name()?.to_string_lossy().into_owned();
-        sweep(dir, &name);
-        let temp = dir.join(format!(
-            ".{name}.{}-{}.tmp",
-            std::process::id(),
-            TEMP_COUNTER.fetch_add(1, Ordering::Relaxed)
-        ));
-        // A JVM that cannot write its dump does not start at all, so jrs
-        // makes sure it can before asking.
-        std::fs::File::create(&temp).ok()?;
+        let temp = temporary(dir, &archive)?;
         Some(Share {
             flags: vec![
                 format!("-XX:ArchiveClassesAtExit={}", temp.display()),
@@ -152,6 +215,7 @@ impl Share {
             ],
             dump: Some((temp, archive)),
             replaces,
+            assemble: None,
         })
     }
 
@@ -169,9 +233,20 @@ impl Share {
             None => self
                 .flags
                 .first()
-                .and_then(|f| f.strip_prefix("-XX:SharedArchiveFile="))
+                .and_then(|f| {
+                    f.strip_prefix("-XX:SharedArchiveFile=")
+                        .or_else(|| f.strip_prefix("-XX:AOTCache="))
+                })
                 .map(Path::new),
         }
+    }
+
+    /// Whether the archive is an AOT cache rather than a dynamic archive.
+    #[must_use]
+    pub fn is_aot(&self) -> bool {
+        self.flags
+            .iter()
+            .any(|f| f.starts_with("-XX:AOTCache=") || f == "-XX:AOTMode=record")
     }
 
     /// After the run: put a dumped archive in place if the run succeeded,
@@ -182,9 +257,16 @@ impl Share {
             return;
         };
         let written = std::fs::metadata(&temp).is_ok_and(|m| m.len() > 0);
-        if !(ok && written && std::fs::rename(&temp, &archive).is_ok()) {
+        let placed = match &self.assemble {
+            None => ok && written && std::fs::rename(&temp, &archive).is_ok(),
+            Some(assemble) => ok && written && assemble.run(&temp, &archive),
+        };
+        if !placed {
             let _ = std::fs::remove_file(&temp);
             return;
+        }
+        if self.assemble.is_some() {
+            let _ = std::fs::remove_file(&temp);
         }
         let (Some(prefix), Some(dir)) = (self.replaces, archive.parent()) else {
             return;
@@ -194,12 +276,61 @@ impl Share {
             let name = entry.file_name().to_string_lossy().into_owned();
             if path != archive
                 && name.starts_with(&prefix)
-                && path.extension().is_some_and(|e| e == "jsa")
+                && path.extension().is_some_and(|e| e == "jsa" || e == "aot")
             {
                 let _ = std::fs::remove_file(path);
             }
         }
     }
+}
+
+impl Assemble {
+    /// Assemble the AOT cache `archive` from the configuration recorded in
+    /// `recorded`, by way of a temporary file. Its output is the JVM's
+    /// account of its work, which no one needs to read: it is dropped.
+    fn run(&self, recorded: &Path, archive: &Path) -> bool {
+        let Some(dir) = archive.parent() else {
+            return false;
+        };
+        let Some(temp) = temporary(dir, archive) else {
+            return false;
+        };
+        let assembled = std::process::Command::new(&self.java)
+            .arg("-XX:AOTMode=create")
+            .arg(format!("-XX:AOTConfiguration={}", recorded.display()))
+            .arg(format!("-XX:AOTCache={}", temp.display()))
+            .args([AOT_QUIET, QUIET])
+            .args(&self.flags)
+            .arg("-cp")
+            .arg(Toolchain::classpath(&self.classpath))
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_ok_and(|s| s.success());
+        let written = std::fs::metadata(&temp).is_ok_and(|m| m.len() > 0);
+        if assembled && written && std::fs::rename(&temp, archive).is_ok() {
+            return true;
+        }
+        let _ = std::fs::remove_file(&temp);
+        false
+    }
+}
+
+/// A new temporary file beside `archive`, for a run to write it into, once
+/// whatever earlier runs abandoned there is swept away. A JVM that cannot
+/// write its dump does not start at all, so jrs makes sure it can before
+/// asking.
+fn temporary(dir: &Path, archive: &Path) -> Option<PathBuf> {
+    let name = archive.file_name()?.to_string_lossy().into_owned();
+    sweep(dir, &name);
+    let temp = dir.join(format!(
+        ".{name}.{}-{}.tmp",
+        std::process::id(),
+        TEMP_COUNTER.fetch_add(1, Ordering::Relaxed)
+    ));
+    std::fs::File::create(&temp).ok()?;
+    Some(temp)
 }
 
 /// Delete the dumps of `archive` that a run abandoned: a `--watch`
@@ -230,9 +361,9 @@ const ABANDONED: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// The JDK's home, when a JVM started with `user_args` may use an archive
 /// under `dir`: the user has not taken class-data sharing into their own
-/// hands, the JDK has the base archive a dynamic one is layered on, and the
-/// directory can be created.
-fn usable(dir: &Path, toolchain: &Toolchain, user_args: &[String]) -> Option<PathBuf> {
+/// hands, the JDK has the base archive a dynamic one is layered on (`base`;
+/// an AOT cache stands alone), and the directory can be created.
+fn usable(dir: &Path, toolchain: &Toolchain, user_args: &[String], base: bool) -> Option<PathBuf> {
     if user_args
         .iter()
         .any(|a| USER_FLAGS.iter().any(|f| a.starts_with(f)))
@@ -240,7 +371,7 @@ fn usable(dir: &Path, toolchain: &Toolchain, user_args: &[String]) -> Option<Pat
         return None;
     }
     let home = jdk_home(toolchain)?;
-    if !has_base_archive(&home) {
+    if base && !has_base_archive(&home) {
         return None;
     }
     // A missing directory is fatal to a JVM asked to dump into it.
@@ -518,9 +649,16 @@ mod tests {
         let jar = tree.root.join("dep.jar");
         std::fs::write(&jar, "one").unwrap();
         let dump = |project: &str| {
-            let share =
-                Share::for_tests(&dir, &jdk, project, std::slice::from_ref(&jar), &[], true)
-                    .unwrap();
+            let share = Share::for_tests(
+                &dir,
+                &jdk,
+                project,
+                std::slice::from_ref(&jar),
+                &[],
+                true,
+                false,
+            )
+            .unwrap();
             assert!(share.dumps());
             let temp = PathBuf::from(flag(&share, "-XX:ArchiveClassesAtExit=").unwrap());
             std::fs::write(&temp, "archive").unwrap();
@@ -529,13 +667,30 @@ mod tests {
             archive
         };
         assert!(
-            Share::for_tests(&dir, &jdk, "app", std::slice::from_ref(&jar), &[], false).is_none(),
+            Share::for_tests(
+                &dir,
+                &jdk,
+                "app",
+                std::slice::from_ref(&jar),
+                &[],
+                false,
+                false
+            )
+            .is_none(),
             "a fork does not dump"
         );
         let first = dump("app");
         let other = dump("another project");
-        let read =
-            Share::for_tests(&dir, &jdk, "app", std::slice::from_ref(&jar), &[], false).unwrap();
+        let read = Share::for_tests(
+            &dir,
+            &jdk,
+            "app",
+            std::slice::from_ref(&jar),
+            &[],
+            false,
+            false,
+        )
+        .unwrap();
         assert_eq!(read.archive(), Some(first.as_path()));
 
         std::thread::sleep(std::time::Duration::from_millis(20));
@@ -546,10 +701,46 @@ mod tests {
         assert!(other.exists(), "another project's is not");
 
         let agent = ["-javaagent:/x.jar".to_string()];
-        let with_agent =
-            Share::for_tests(&dir, &jdk, "app", std::slice::from_ref(&jar), &agent, true).unwrap();
+        let with_agent = Share::for_tests(
+            &dir,
+            &jdk,
+            "app",
+            std::slice::from_ref(&jar),
+            &agent,
+            true,
+            false,
+        )
+        .unwrap();
         assert!(with_agent.dumps(), "an agent changes what is archived");
         with_agent.finish(false);
+    }
+
+    #[test]
+    fn the_aot_cache_needs_jdk_24_and_records_quietly() {
+        let tree = Tree::new("aot");
+        let dir = tree.root.join("cds");
+        let mut jdk = tree.jdk(false);
+        let for_tests = |jdk: &Toolchain| Share::for_tests(&dir, jdk, "app", &[], &[], true, true);
+        assert!(
+            for_tests(&jdk).is_none(),
+            "JDK 21 falls back to the dynamic archive, which needs a base archive"
+        );
+        jdk.version = AOT_SINCE;
+        let share = for_tests(&jdk).unwrap();
+        assert!(share.is_aot() && share.dumps());
+        assert!(share.flags.contains(&"-XX:AOTMode=record".to_string()));
+        assert!(share.flags.contains(&"-XX:-DisplayVMOutput".to_string()));
+        let archive = share.archive().unwrap().to_path_buf();
+        assert!(archive.extension().is_some_and(|e| e == "aot"));
+        share.finish(false);
+
+        std::fs::write(&archive, "cache").unwrap();
+        let share = for_tests(&jdk).unwrap();
+        assert!(share.is_aot() && !share.dumps());
+        assert_eq!(
+            share.flags[0],
+            format!("-XX:AOTCache={}", archive.display())
+        );
     }
 
     #[test]

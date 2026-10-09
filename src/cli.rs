@@ -29,7 +29,7 @@ use crate::image;
 use crate::lockfile::Lockfile;
 use crate::manifest::{
     self, Action, Builtin, Dependency, Hook, JavaAgent, LanguageConfig, MANIFEST_FILE, Manifest,
-    Repository, TaskDef, TaskRef, Template,
+    Repository, ShareClasses, TaskDef, TaskRef, Template,
 };
 use crate::migrate;
 use crate::model;
@@ -2125,7 +2125,7 @@ impl<'a> Session<'a> {
     /// a java agent's class-file hook, or a class directory sharing a name
     /// with a jar (SPEC §10.2).
     fn share_layout(&self, run: &mut junit::TestRun, args: &TestArgs) -> Option<PathBuf> {
-        if !self.manifest.test.share_classes {
+        if self.manifest.test.share_classes == ShareClasses::Off {
             return None;
         }
         let skipped = if args.debug.is_some() {
@@ -2175,13 +2175,17 @@ impl<'a> Session<'a> {
             &run.classpath,
             &run.jvm_args,
             forks.is_empty(),
+            self.manifest.test.share_classes == ShareClasses::Aot,
         )?;
         if let Some(archive) = share.archive() {
-            self.ui.verbose(format!(
-                "test JVM: {} the class-data archive {}",
-                if share.dumps() { "dumping" } else { "mapping" },
-                archive.display()
-            ));
+            let what = match (share.is_aot(), share.dumps()) {
+                (true, true) => "recording for the AOT cache",
+                (true, false) => "mapping the AOT cache",
+                (false, true) => "dumping the class-data archive",
+                (false, false) => "mapping the class-data archive",
+            };
+            self.ui
+                .verbose(format!("test JVM: {what} {}", archive.display()));
         }
         if forks.is_empty() {
             return Some(share);

@@ -218,7 +218,7 @@ post-package = ["checksum"]
 | `test.env` | no | `{}` | As `run.env`, for the test JVM. |
 | `test.retries` | no | `0` | Run a failed test again up to this many times (§10.2). One that passes on a retry is reported as flaky, not as passed. `jrs test --retries <n>` overrides it. |
 | `test.forks` | no | one per 8 test classes, up to half the cores | Test JVMs a run's classes are split among, run at once (§10.2): Gradle's `maxParallelForks`, surefire's `<forkCount>`. `jrs test --forks <n>` overrides it; `1` keeps one JVM. |
-| `test.share-classes` | no | `false` | Map the dependency jars' classes into the test JVM from a class-data-sharing archive (§10.2). The class directories then load through the launcher's own class loader, which is why it is opt-in. |
+| `test.share-classes` | no | `false` | Map the dependency jars' classes into the test JVM from an archive (§10.2): `true` a dynamic class-data-sharing archive, `"aot"` the AOT cache on JDK 24 and later (the archive on an older JDK). The class directories then load through the launcher's own class loader, which is why it is opt-in. |
 | `test.suites.<name>.*` | no | — | A test suite (§10.2): `test-dir` (required), `test-resource-dir` (beside `test-dir`), `jvm-args`, `env`, `forks`, `retries`. Compiled against the main and default test classes and the test classpath into `target/suites/<name>/classes`, and run by `jrs test --suite <name>` only. |
 | `test.coverage-minimum` | no | `{}` | Ratios from 0 to 1 that `jrs test --coverage` must reach, per JaCoCo counter: `instruction`, `branch`, `line`, `complexity`, `method`, `class` — e.g. `{ line = 0.80, branch = 0.70 }` (§10.2). Ignored without `--coverage`. |
 | `package.add-modules` | no | `[]` | Modules a runtime image needs beyond what `jdeps` finds (§9.4). |
@@ -1964,8 +1964,20 @@ files, and all it touches is names.
   since the dump is loaded from its file, never from the archive. A
   `--debug` or `--coverage` run, a run with `test.java-agents`, and one whose
   `test.jvm-args` hold CDS flags of their own share nothing and keep the
-  usual layout. The JDK 24+ AOT cache (`specs/FASTER_BUILDS.md` §3.5) waits
-  until it has been measured against this archive.
+  usual layout.
+- `test.share-classes = "aot"` uses JEP 483's AOT cache instead, on JDK 24
+  and later (`<cache>/cds/test-<project>-<deps>.aot`; an older JDK gets the
+  dynamic archive). It has the same classpath rule, and also keeps classes
+  linked and, from JDK 25, method profiles. It is made in two steps, both
+  jrs's: the test run records what it loaded (`-XX:AOTMode=record`, with the
+  VM's own output turned off by `-XX:-DisplayVMOutput`, since the recording
+  run says so on stdout between the tests' lines), and once the run is over
+  jrs assembles the cache from that record (`-XX:AOTMode=create`) in a JVM
+  whose output it drops. JDK 25's one-step `-XX:AOTCacheOutput` is not used:
+  it prints its progress into the test output whatever the logging. A run
+  that cannot map the cache runs without it, silently. Whether either mode
+  becomes the default is decided by measurement on the corpus
+  (`specs/TEST_JVM_BENCHMARK.md`, `cargo bench --bench test_jvm`).
 - `test.forks = n` (or `--forks n`) splits a class-path scan among `n`
   launchers run at once, Gradle's `maxParallelForks`. Unset, jrs runs one
   launcher per 8 top-level test classes, up to half the available cores, and
@@ -2349,8 +2361,10 @@ produces something runnable.
   on, and `jrs build --verify-cache` (F4, §7.8)
 - ☑ passing test runs in the build cache (F5, §7.8)
 - ☑ downloads in two waves, the test jars behind the main compile (F6, §8.3)
-- The JDK 25 AOT cache for the test JVM (F7) waits for its measurement
-  against the dynamic archive on the corpus.
+- ☑ the AOT cache for the test JVM, opt-in as `test.share-classes = "aot"`
+  (F7, §10.2); whether it, or the archive, becomes the default waits for
+  the corpus measurement [TEST_JVM_BENCHMARK.md](specs/TEST_JVM_BENCHMARK.md)
+  plans
 - Added after M8; the design, and the argument for the line §1.2 now draws
   between a compiler daemon and a `--watch` worker, is in
   [FASTER_BUILDS.md](specs/FASTER_BUILDS.md).
