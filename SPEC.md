@@ -39,6 +39,9 @@ in [§12.1](#121-where-the-implementation-diverges), and the decisions taken on
 - JVM languages beyond Java, Kotlin, Scala and Groovy; and for those three,
   anything off the JVM (Multiplatform, JS, Native, Android), compiler
   plugins, kapt/KSP, incremental compilation and compiler daemons (§7.7).
+  A compiler daemon is a process that outlives the jrs command that started
+  it; a `--watch` session may keep one `javac` worker for its own lifetime
+  (§7.5), which no later command can reach.
 - Android, JPMS module descriptors, annotation-processor configuration,
   built-in code generators, or IDE project file generation. A generator can
   run as a task (§7.6); jrs does not ship one.
@@ -215,6 +218,7 @@ post-package = ["checksum"]
 | `test.env` | no | `{}` | As `run.env`, for the test JVM. |
 | `test.retries` | no | `0` | Run a failed test again up to this many times (§10.2). One that passes on a retry is reported as flaky, not as passed. `jrs test --retries <n>` overrides it. |
 | `test.forks` | no | one per 8 test classes, up to half the cores | Test JVMs a run's classes are split among, run at once (§10.2): Gradle's `maxParallelForks`, surefire's `<forkCount>`. `jrs test --forks <n>` overrides it; `1` keeps one JVM. |
+| `test.share-classes` | no | `false` | Map the dependency jars' classes into the test JVM from a class-data-sharing archive (§10.2). The class directories then load through the launcher's own class loader, which is why it is opt-in. |
 | `test.suites.<name>.*` | no | — | A test suite (§10.2): `test-dir` (required), `test-resource-dir` (beside `test-dir`), `jvm-args`, `env`, `forks`, `retries`. Compiled against the main and default test classes and the test classpath into `target/suites/<name>/classes`, and run by `jrs test --suite <name>` only. |
 | `test.coverage-minimum` | no | `{}` | Ratios from 0 to 1 that `jrs test --coverage` must reach, per JaCoCo counter: `instruction`, `branch`, `line`, `complexity`, `method`, `class` — e.g. `{ line = 0.80, branch = 0.70 }` (§10.2). Ignored without `--coverage`. |
 | `package.add-modules` | no | `[]` | Modules a runtime image needs beyond what `jdeps` finds (§9.4). |
@@ -316,7 +320,7 @@ jrs <command> [options]
 | Command | Behaviour |
 | --- | --- |
 | `jrs build [--watch]` | Resolve → compile main sources → copy resources. `--watch` repeats on every change (§7.5). |
-| `jrs test [--debug[=port]]` | `build` + compile test sources + run the test engine (§10.2). `--rerun-failed` runs only what failed last time, `--fail-fast` stops at the first failure, `--retries <n>` overrides `test.retries`, `--forks <n>` overrides `test.forks`, `--all` runs every test class rather than those a change reaches. |
+| `jrs test [--debug[=port]]` | `build` + compile test sources + run the test engine (§10.2). `--rerun-failed` runs only what failed last time, `--fail-fast` stops at the first failure, `--retries <n>` overrides `test.retries`, `--forks <n>` overrides `test.forks`, `--all` runs every test class rather than those a change reaches, and never takes a passing run from the build cache (§7.8). |
 | `jrs run [--debug[=port]] [-- args...]` | `build` + `java [<jdwp>] [<run.java-agents>] <run.jvm-args> -cp <cp> <main-class> args...`, in `run.cwd` with `run.env`. |
 | `jrs package` | `build` + produce `target/<name>-<version>.jar`. |
 | `jrs package --portable` | Same, with the runtime dependencies in `target/lib/` (§9.3). |
@@ -341,6 +345,8 @@ jrs <command> [options]
 | `jrs task <name> [-- args...]` | Run a user-defined task and whatever it depends on (§7.6). |
 | `jrs task <name> --watch` | The same, repeated on every change to the task's inputs, the manifest or the source trees (§7.5). |
 | `jrs task --list` | List the tasks, their descriptions and the hooks that run them, to stdout. |
+| `jrs build --verify-cache` | Compile every unit even when it is up to date, and fail (exit `1`) if the build cache holds other classes under the same key (§7.8). |
+| `--no-build-cache` on `build`, `test`, `run`, `package` | Neither restore from nor store into the build cache (§7.8). |
 | `--timings` on `build`, `test`, `run`, `package` | Report the wall time of each phase after the summary, with a copy in `target/.jrs/timings.txt` (§5.3.9). |
 | `jrs metadata [--no-deps]` | Print the project model as versioned JSON on stdout, for editors and tools; resolves but never compiles (§5.4). |
 | `jrs fetch [--sources]` | Resolve and download the dependencies, the compilers, the tasks' tools and the test launcher into the cache without building; `--sources` adds each dependency's `-sources.jar` (§5.4). |
@@ -423,6 +429,8 @@ Cargo-style, right-aligned in 12 columns, verb in bold green:
 
 A task prints `Task <name>`, with the hook that ran it in parentheses, or
 `Fresh <name> (task)` when its up-to-date check lets it be skipped (§7.6).
+A compile unit whose classes came from the build cache prints `Restored
+my-app v1.0.0 (from the build cache)` in place of `Compiling` (§7.8).
 
 #### 5.3.3 Spinners
 
@@ -692,14 +700,23 @@ jrs.toml ──parse──► Manifest
                        │
                        ├──► Project (layout, source file list)
                        │
-                       └──► Resolver ──► jrs.lock ──► Classpath
-                                              │
-Project + Classpath ──► Compiler ──► target/classes/
-                                              │
-                                              ├──► Packager ──► *.jar
-                                              ├──► Runner   ──► java
-                                              └──► Tester   ──► junit
+                       └──► Resolver ──► wave 1: compile classpath + compilers
+                                  │                  │
+                                  │                  ▼
+                                  │   Project + Classpath ──► Compiler ──► target/classes/
+                                  │                                (or the build cache, §7.8)
+                                  └──► wave 2: the other jars, behind the compile
+                                                     │
+                                    join ◄───────────┘ ──► jrs.lock ──► full Classpath
+                                                                            │
+                                              ├──► Packager ──► *.jar  ◄────┤
+                                              ├──► Runner   ──► java   ◄────┤
+                                              └──► Tester   ──► junit  ◄────┘
 ```
+
+The two waves of downloads are §8.4's: on a cold cache the main compile
+waits only for its own classpath, and everything after it waits for the
+join.
 
 ### 6.2 Key design decisions
 
@@ -822,8 +839,17 @@ own.
   does not start. No archive is used on a JDK without its default CDS
   archive, or when `compiler-jvm-args` hold CDS flags of their own. The
   archive changes nothing a compiler writes, so it is not in the
-  fingerprint. The test JVM gets none: CDS refuses a classpath with a
-  non-empty class directory, and `target/classes` is one.
+  fingerprint. The test JVM gets one only with `test.share-classes`, which
+  moves the class directories off its `-cp` (§10.2): CDS refuses to dump a
+  classpath with a non-empty class directory, and `target/classes` is one.
+  A temporary dump a minute old that was never put in place — a `--watch`
+  session's worker ended with ctrl-c — is deleted when the next one starts.
+- A stale unit is first looked up in the build cache (§7.8): an entry for
+  its inputs as they are now is extracted into an emptied output directory,
+  the fingerprint and the index are written as a compile would write them,
+  and the phase line says `Restored` instead of `Compiling`. After every
+  successful compile, whole or file by file, the unit's output — less what
+  the resource sync put there — is stored under the same key.
 - A unit with Kotlin, Scala or Groovy sources runs that language's compiler
   first, into the same output directory and under the same fingerprint; such
   a unit is all-or-nothing (§7.7).
@@ -895,6 +921,34 @@ re-read on every run.
 The `inputs` of every task (§7.6) are watched too, and `jrs task <name>
 --watch` runs the same loop. Nothing under `project.target-dir` is ever
 watched, so a task's output cannot retrigger it.
+
+**A warm `javac`.** A watch session keeps one `javac` worker JVM for its
+own lifetime, started the first time a `javac` step runs and sent every
+later one, the first build's included. The worker is a hundred lines of
+Java (`compile/JavacWorker.java`) embedded in jrs and compiled on first use
+with the project's own `javac` into
+`<cache>/worker/<jrs version>-jdk<n>/worker.jar`, so jrs ships no binary and
+downloads nothing; a jar rather than a class directory, so that it gets a
+class-data-sharing archive of its own (§7.2). Each request is one line on
+its stdin, an id and the argfile jrs writes for a forked `javac` anyway; the
+worker runs `ToolProvider.getSystemJavaCompiler().run(…, "@" + argfile)`,
+which builds a new context and file manager for every call, and answers on
+stdout with `jrs-worker <id> <exit code> <stdout bytes> <stderr bytes>` and
+both streams, which pass through verbatim as a forked run's do. While a
+request runs, `System.out` and `System.err` are that request's, so an
+annotation processor printing cannot break the protocol. Under `-v` jrs
+says `started a javac worker (pid <n>)` and names each request.
+
+The worker is a child of the jrs process and nothing else can reach it: it
+exits when its stdin closes, which happens however jrs exits, `SIGKILL`
+included. jrs starts a new one after 50 compilations, to bound what a
+processor's leaked class loaders cost, and whenever the JDK changes. A
+worker that dies, answers garbage or takes far longer than a forked `javac`
+would (two minutes, or ten times its slowest answer) is killed, and that
+step runs as a forked `javac`, whose output alone reaches the terminal.
+Outside `--watch` nothing changes: a single build would pay the worker's
+start-up for one compile. This is not a compiler daemon (§1.2): a daemon
+outlives the command that started it and is found again by later ones.
 
 ### 7.6 Tasks and hooks
 
@@ -1131,6 +1185,100 @@ prune` cover the pinned compilers (§8.6). Resolution warns about a Scala 2
 library newer than its compiler, two Scala lines' builds of one library, and a
 pre-1.8 `kotlin-stdlib-jdk7`/`-jdk8` beside a Kotlin 2 stdlib.
 
+### 7.8 Build cache
+
+The fingerprints in `target/.jrs/` say whether `target/` is up to date; they
+cannot bring back what a branch switch, a `git stash` or a `jrs clean` threw
+away. The build cache can (`build_cache.rs`). It holds two kinds of entry,
+both content-addressed: a compile unit's output, and a passing test run's
+reports. The design record is `specs/FASTER_BUILDS.md` §5.
+
+**Keys.** An entry's key is a SHA-256 over a text that holds no absolute path
+and no modification time, so that two checkouts of one commit, in two
+directories or on two machines, share their entries. A compile unit's text
+holds:
+
+- jrs's version, which generates the flags, and the JDK: its `release` file,
+  which names the vendor, the version and the build, or `javac -version`'s
+  output on a JDK without one;
+- the unit's generated and user `javac` flags without `-cp`, with the project
+  root written `{root}` and the shared cache's `{cache}`;
+- each classpath entry: a resolved jar by its coordinate and the checksum
+  `jrs.lock` pins, a local or unresolved jar by its content hash, a class
+  directory by the main classes' API digest (§7.2), which the test unit
+  already counts;
+- the other language's compiler: its language, version, JVM and compiler
+  flags, and its own graph's jars as above;
+- each source by its path, placeholders applied, and the SHA-256 of its
+  contents (taken from the unit's index while a source's size and mtime
+  match it).
+
+A unit that cannot be keyed — a jar that cannot be read, a class directory no
+API digest stands for — is compiled, as it would have been without a cache.
+An annotation processor on the classpath is covered by its jar, and its
+options by the flags. A processor or AST transformation that reads a file it
+was not given, or an environment variable, is outside the key: such a build
+runs with `--no-build-cache`. That is the trust Gradle's cache asks of a
+task's declared inputs.
+
+**Compile entries.** A stale unit is looked up before it is compiled (§7.2).
+A hit empties the output directory, writes the entry's files into it, then
+the fingerprint, then the incremental index by the same pass a whole compile
+ends with — the index holds paths and mtimes, so it is rebuilt, never stored.
+Resources are not in an entry: the resource sync copies them after a restore
+as after a compile. Every successful compile, whole or file by file, stores
+every file in the output directory that the resource sync did not put there
+(`resources-<unit>*.list` say which), so a processor's generated resources
+are kept. Restored classes are byte-identical to compiled ones because both
+are what the compiler wrote.
+
+**Test entries.** A `jrs test` run of the whole suite — no `--filter`, tags,
+`--method` or `--rerun-failed` — that ran every test class and passed with
+no flaky test is stored, its reports and its counts, under a key over the
+test record's settings (§10.2: the JVM's arguments and environment, the
+launcher, the scan directory) with jars by identity and paths relative, and
+every file in the class directories by its hash. A later run whose class
+directories hash the same, after a branch switch or on another machine,
+puts the reports back and prints
+
+```
+     Testing 214 test classes: passed in the cached run (`--all` runs them)
+```
+
+instead of starting the JVM; the `post-test` hook still runs. `--all`,
+`--coverage` and `--debug` neither read nor write test entries. A run that
+finds no test class reaching a change (§10.2) says so before the cache is
+asked.
+
+**Storage.** An entry is a zip written as jars are: entries sorted, the fixed
+1980 timestamp, fixed permissions. It lives at
+`<cache>/build/<k[0..2]>/<key>.zip`, written to a temporary file and renamed.
+A hit records its use in the entry's access time, as a cached jar does
+(§8.3). An entry that does not read back as a zip, or names a path outside
+its directory, is a miss and is deleted, so the next store writes it again.
+
+**Remote.** A remote cache is the same keys over HTTP, or a directory behind
+a `file://` URL: `GET <url>/<key>.zip` on a local miss, kept locally on a
+hit, and `PUT <url>/<key>.zip` after a store **only** when pushing is turned
+on. It is configured per machine (§8.5), reached through the `[proxy]`
+settings with the credentials it names, with a 5-second connect and a
+2-minute overall timeout. A remote that fails or answers anything but 200, 404
+or 410 is reported once under `-v` and left alone for the rest of the command.
+
+**Trust.** Anyone who can push can put classes into every build that reads
+the cache. So pushing is off unless asked for, push rights belong to CI
+alone, and an entry is only ever read by its content key: a client cannot be
+served an entry for other inputs, only a wrong value under the right key.
+`jrs build --verify-cache` compiles every unit, up to date or not, and fails
+(exit `1`) naming the first file that differs from what the cache holds under
+the unit's key; with nothing held, it stores what it compiled.
+
+**Turning it off.** `--no-build-cache` on `build`, `test`, `run` and
+`package`, `JRS_BUILD_CACHE=off`, or `[build-cache] enabled = false` (§8.5).
+The local cache is on by default, as the dependency cache is; a remote one
+exists only when configured. None of it can fail a build: a cache that
+cannot be read or written costs the speed-up, and nothing else.
+
 ---
 
 ## 8. Dependency resolution
@@ -1217,12 +1365,40 @@ v1 rather than silently mishandled.
 - A cached file's last use is recorded in its access time, at most once a
   day, for `jrs cache prune --unused-for` (§8.6). Its modification time, which
   the compile fingerprint reads, is left alone.
+- On a cold cache a build downloads in **two waves**. The first is the main
+  compile's classpath (`compile` and `provided` jars) and the compilers'
+  graphs, in the foreground under the `Downloading` line and its bars; the
+  second, every other jar of the graph (runtime-only and test jars), starts
+  on a thread of its own once the first is in, and downloads while the main
+  sources compile. Starting it only then, rather than as soon as the first
+  wave is handed to the worker pool (`specs/FASTER_BUILDS.md` §4.2), is a
+  deliberate simplification: the second wave can never take bandwidth or a
+  worker from the jars the compiler waits for. The build joins it at the end
+  of `build()`, before anything that may need its jars — the post-compile
+  hook's tasks, compiling the tests, packaging, running — or earlier, when a
+  pre-compile task asks for a classpath.
+- `Downloading <n> artifacts` is printed once, before `Compiling`, with `n`
+  counting both waves, so `--progress never` prints today's transcript. If
+  the second wave is still running at the join, the download bars take over
+  with what it has left. An error it met is held and reported at the join,
+  with the message and exit code it would have had before; a main compile
+  that fails first is reported first. Warnings it collects are said at the
+  join.
+- A freshly resolved `jrs.lock` is written only once every jar's checksum is
+  known, at the join: a fresh resolution whose main compile fails leaves no
+  lockfile, and the next build resolves again. With everything cached there
+  is no second wave and no thread. `jrs fetch`, `jrs metadata`, `jrs tree` and
+  the other commands that do not compile download in one wave. The test
+  launcher is not part of the second wave: `jrs test` fetches it after the
+  build as before, so its `Downloading` line keeps its place.
 
 ### 8.4 Parallelism
 
 - POM fetches and jar downloads run concurrently, bounded by `--jobs`
   (default: core count, min 4 for network-bound work).
 - Resolution is breadth-first by level so each level's fetches batch together.
+- Both download waves (§8.3) use `--jobs` workers; the second runs only once
+  the first is done.
 - Resource copying parallelises trivially; `javac` is invoked once and
   parallelises internally.
 
@@ -1241,6 +1417,10 @@ unknown keys warn, errors name the key — and a missing file means every defaul
 | `mirrors.<repo>` | Fetch repository `<repo>` (Central included) from another URL; `*` covers every repository without a mirror of its own. `file://` repositories are never mirrored. |
 | `credentials.<repo>` | `username` + `password`, or `token`; each secret may instead be read from a variable named by `password-env` / `token-env`. |
 | `jdks.<n>` | The home of JDK `n`, for a pinned version jrs would not find on its own (§7.1). |
+| `build-cache.enabled` | `false` turns the build cache off (§7.8); it is on by default. |
+| `build-cache.url` | A remote build cache, `http(s)://` or `file://`, read on a local miss. |
+| `build-cache.push` | Whether this machine writes to the remote: `true` on CI, and nowhere else. Default `false`. |
+| `build-cache.credentials` | The `[credentials.<name>]` entry the remote is reached with; `JRS_REPO_<NAME>_*` apply to it as to a repository. |
 
 - Credentials from `JRS_REPO_<NAME>_USERNAME` + `JRS_REPO_<NAME>_PASSWORD` or
   `JRS_REPO_<NAME>_TOKEN` override the file. They are sent only to the
@@ -1254,6 +1434,10 @@ unknown keys warn, errors name the key — and a missing file means every defaul
   retried up to three attempts in total with a doubling backoff. A 404 or 410
   moves on to the next repository; a 401 or 403 fails at once and says where
   credentials go.
+- CI configures the build cache through its environment:
+  `JRS_BUILD_CACHE=off` turns it off, `JRS_BUILD_CACHE_URL` sets the remote
+  and `JRS_BUILD_CACHE_PUSH=true` (or `1`) turns pushing on, each overriding
+  the file.
 
 ### 8.6 Cache maintenance
 
@@ -1273,7 +1457,13 @@ left empty go too:
 
 Either takes `--dry-run`. What a lockfile does not name — parent POMs, BOMs,
 the test launcher, JaCoCo — is pruned too, and downloaded again when next
-wanted.
+wanted. So are the class-data-sharing archives under `cds/`, which the next
+run dumps again, and the `javac` worker's program under `worker/`.
+
+The build cache's entries under `build/` (§7.8) go one by one rather than by
+directory, each by its own last use: `--unused-for` keeps the entries builds
+still hit, and a plain prune drops all of `build/`, since no lockfile names
+an entry.
 
 ### 8.7 Repository groups
 
@@ -1730,6 +1920,52 @@ files, and all it touches is names.
   `--method` and `--rerun-failed` run what they select and neither read nor
   write the record. Gradle reruns a test task whole or skips it; selecting
   tests is Develocity's paid Predictive Test Selection.
+- A whole run that passed may stand for a later one through the build cache
+  (§7.8): when the class directories hash the same as a stored run's, with
+  the same settings, its reports are put back and the JVM is not started.
+- `test.share-classes = true` maps the dependency jars' classes into the test
+  JVM from a class-data-sharing archive, as the compilers' are (§7.2). CDS
+  refuses to dump a classpath holding a non-empty class directory, and lets
+  a run append to the classpath it was dumped with but not change what
+  comes first, so the JVM's own `-cp` holds the jars alone — dependencies,
+  then the launcher — and the class directories go to the launcher's
+  `--class-path`:
+  ```
+  java [agents] [jvm-args] -XX:SharedArchiveFile=… -cp <jars>:<launcher> \
+       ConsoleLauncher execute --class-path target/test-classes:target/classes \
+       --scan-class-path target/test-classes …
+  ```
+  The launcher loads those in a class loader of its own whose parent is the
+  JVM's, and makes it the thread's context loader. That makes delegation
+  parent-first: a class or resource a class directory shares with a jar is
+  found in the jar. So before it uses the layout, jrs lists every file in
+  the class directories and every jar's entries, and any name in both —
+  outside `META-INF/`, and other than `module-info.class` — keeps the usual
+  layout for that run, with a `-v` line naming it and where it is. Each
+  jar's entry list is cached in `<cache>/cds/entries/`, keyed by its size
+  and modification time, so after the first run the check costs a walk of
+  `target/`. Order-sensitive registries (`META-INF/services/*`,
+  `spring.factories`) cannot be checked by name — the project's entries come
+  after the jars' — and code that reads `java.class.path` rather than the
+  context loader no longer sees the class directories; that is why the key
+  is opt-in.
+- The test archive is `<cache>/cds/test-<project>-<deps>.jsa`: `<project>`
+  hashes the manifest's path and the suite (`test` or `suite-<name>`),
+  `<deps>` the JVM's `-cp` entries by path, size and modification time, the
+  JDK by its home and module image, and the JVM flags that change what is
+  archived (`-javaagent`, `-XX:`). A new one deletes the project's older
+  ones, so dependencies that change daily do not fill the cache. A run in
+  one JVM without an archive dumps one into a temporary file, renamed into
+  place once the JVM has run, whether the tests passed or not; a JVM that
+  did not get as far as the launcher while dumping runs again without the
+  flags. Forks only read an archive, so a suite that always forks gets one
+  from its first single-JVM run (`--forks 1`). `-Xlog:cds*=off` keeps the
+  JVM quiet about an archive it cannot map. A class whose bytes changed
+  since the dump is loaded from its file, never from the archive. A
+  `--debug` or `--coverage` run, a run with `test.java-agents`, and one whose
+  `test.jvm-args` hold CDS flags of their own share nothing and keep the
+  usual layout. The JDK 24+ AOT cache (`specs/FASTER_BUILDS.md` §3.5) waits
+  until it has been measured against this archive.
 - `test.forks = n` (or `--forks n`) splits a class-path scan among `n`
   launchers run at once, Gradle's `maxParallelForks`. Unset, jrs runs one
   launcher per 8 top-level test classes, up to half the available cores, and
@@ -2102,6 +2338,22 @@ produces something runnable.
   [JVM_LANGUAGES.md](specs/JVM_LANGUAGES.md), and §7.7 is the condensed contract.
   Scaladoc and Groovydoc for `jrs doc` came later (§7.4); Kotlin's Dokka is
   still out.
+
+### M9 — Faster builds
+- ☑ class-data sharing for the test JVM, opt-in with `test.share-classes`
+  (F1, §10.2)
+- ☑ a local build cache for compile units, `--no-build-cache` and
+  `jrs cache prune` over it (F2, §7.8)
+- ☑ a warm `javac` worker for the length of a `--watch` session (F3, §7.5)
+- ☑ a remote build cache, read everywhere and written only where pushing is
+  on, and `jrs build --verify-cache` (F4, §7.8)
+- ☑ passing test runs in the build cache (F5, §7.8)
+- ☑ downloads in two waves, the test jars behind the main compile (F6, §8.3)
+- The JDK 25 AOT cache for the test JVM (F7) waits for its measurement
+  against the dynamic archive on the corpus.
+- Added after M8; the design, and the argument for the line §1.2 now draws
+  between a compiler daemon and a `--watch` worker, is in
+  [FASTER_BUILDS.md](specs/FASTER_BUILDS.md).
 
 Tick the corresponding README boxes as each lands — the README is the
 user-facing progress tracker, this document is the design behind it.

@@ -82,11 +82,15 @@ src/
 ├── project.rs         layout, source globbing, target/, resource sync, snapshots
 ├── expand.rs          [resources]: ${name} expansion of resources as they are copied
 ├── toolchain.rs       finding the JDK; running subprocesses (captured/inherited)
+├── build_cache.rs     the build cache: keys, deterministic zips, local and remote stores
 ├── compile/
 │   ├── mod.rs         CompileUnit: steps, fingerprint, staleness, argfiles
 │   ├── abi.rs         class-file API digests: compile avoidance, per-class reads
 │   ├── incremental.rs file-by-file compilation of a Java unit: <unit>.index
-│   ├── share.rs       class-data-sharing archives for the compiler JVMs: <cache>/cds
+│   ├── share.rs       class-data-sharing archives for the compilers, the test JVM
+│   │                  and the javac worker: <cache>/cds
+│   ├── worker.rs      the warm javac of a --watch session, and its protocol
+│   ├── JavacWorker.java  the worker's program, embedded with include_str!
 │   ├── impact.rs      which test classes a change reaches: <suite>.tested
 │   ├── javac.rs       javac and javadoc
 │   ├── doc.rs         Scaladoc and Groovydoc
@@ -187,6 +191,11 @@ What the layering buys:
   subprocess writes to the terminal, and pass that output through verbatim.
 - **`cli` is the only module that decides what a user sees**, and the only one
   that renders an error.
+- **`build_cache` sits beside `compile`.** It knows keys, zips and stores,
+  and borrows hashing, atomic writes and the HTTP agent's pieces from
+  `resolve`; `compile` works out a unit's key text and calls it, and `cli`
+  hands it the resolved jars' identities. It takes a `&Ui` only for `-v`
+  lines.
 
 ## 4. From `main` to an exit code
 
@@ -242,8 +251,17 @@ it, it runs **at most once per invocation**.
  ├── ran        : RefCell<HashSet<String>>  tasks already run or found fresh
  ├── done       : RefCell<HashSet<Builtin>> built-ins a depends-on already ran
  ├── jar        : RefCell<Option<PathBuf>>  set once package has written it
- └── timings    : Timings                   one row per leaf phase, for --timings
+ ├── timings    : Timings                   one row per leaf phase, for --timings
+ ├── pending    : RefCell<Option<Pending>>  the second wave of downloads, on its
+ │                                          own thread behind the main compile
+ ├── build_cache: OnceCell<Option<Arc<BuildCache>>>
+ │                                          the build cache, once every jar is in
+ ├── cache_use  : CacheUse                  On, Off (--no-build-cache), Verify
+ └── worker     : Option<Arc<Worker>>       the --watch session's warm javac
 ```
+
+`watch()` creates the `Worker` once and hands it to each `Session` it opens,
+so the worker outlives every build of the session but not the command.
 
 The commands nest. `build()` is the shared spine; the others call it first and
 add to it:
@@ -251,24 +269,33 @@ add to it:
 ```
  build()                                                   jrs build
  │  toolchain()                  JAVA_HOME / PATH / pinned JDK (§7.1)
- │  resolved() ─► dependencies() lockfile or fresh resolution, downloads (§6)
+ │  compile_resolution() ─► gather(pipelined) lockfile or fresh resolution;
+ │                         wave 1 downloaded, wave 2 on a thread (§6.1)
  │  hook(pre-compile)            code generators run before sources are globbed
  │  project.sources(Main, generated)
- │  compile_unit("main") ─► is_stale? ─► compile::compile   or   "Fresh"
+ │  compile_unit("main") ─► is_stale? ─► compile::restore   "Restored"
+ │                                       or compile::compile "Compiling"
+ │                                       or                  "Fresh"
  │  sync_resources  src/main/resources ─► target/classes
  │  sync_generated  task-generated resources ─► target/classes
- └  hook(post-compile)
+ │  hook(post-compile)
+ └  resolved() ─► join_dependencies: wave 2's jars, warnings, a fresh jrs.lock
 
  test()                                                     jrs test
  │  --rerun-failed: the last run's XML ─► what to select, before it is replaced
  │  build()
  │  hook(pre-test)
  │  compile_unit("test")  classpath = target/classes + test classpath,
- │                        main_api = api_digest(target/classes)
+ │                        main_api = api_digest(target/classes); restored
+ │                        from the build cache like the main unit
  │  sync test resources
  │  fetch_internal: JUnit console launcher (+ JaCoCo agent/cli with --coverage)
  │  impact::select: class dirs vs test.tested ─► every test class, or those a
  │    change reaches (none: say so, record, stop)
+ │  cached_tests: a passing whole run of these class files in the build
+ │    cache? ─► restore its reports, "passed in the cached run", stop
+ │  share_layout (test.share-classes): class dirs to the launcher's
+ │    --class-path, and the test archive to read or dump (§8)
  │  test::run  ─► java … ConsoleLauncher --scan-class-path …   (+ test.env)
  │    or, with test.forks (or by default, one per 8 classes up to half the
  │    cores): the classes split by test.times, test::run_forks, one launcher
@@ -276,6 +303,7 @@ add to it:
  │  retries (test.retries): what still fails, one launcher each
  │  test_report: XML read back ─► flaky count, test-reports/index.html
  │  record test.times, and test.tested with what failed or was flaky
+ │  store_tests: a whole run that passed, no flaky test ─► the build cache
  │  coverage report (even when tests failed), then test.coverage-minimum
  └  hook(post-test)      only if the tests passed and met the minimums
 
@@ -319,8 +347,9 @@ and the manifest into a `json::Json` document printed on stdout.
 
 ### 6.1 Lockfile or fresh resolution
 
-`Session::dependencies()` decides whether the graph comes from `jrs.lock` or
-from the network:
+`Session::gather()` — `dependencies()` for every command, pipelined for
+`build()` — decides whether the graph comes from `jrs.lock` or from the
+network:
 
 ```
                Manifest::effective_dependencies()
@@ -346,6 +375,7 @@ from the network:
                  │ locate_cached → fetch_jars      "Downloading"    │
                  │ (pinned checksums from jrs.lock checked on       │
                  │  download; cached jars are not re-hashed)        │
+                 │ pipelined, cold: fetch_jars_where(compiles) only │
                  └───────────────────────┬──────────────────────────┘
                                          ▼
                        fresh? ─► write jrs.lock ([[package]] + [[tool]])
@@ -353,6 +383,29 @@ from the network:
                                          ▼
                                      Resolution
 ```
+
+On a cold cache, `build()` takes the graph in two waves (SPEC §8.3).
+`download` fetches the compile classpath in the foreground, under the one
+`Downloading <n> artifacts` line that counts both waves, and once that is in,
+spawns a thread that fetches the rest with a `Fetcher` of its own. The thread
+and the partial graph wait in `Session::pending`; `jrs.lock` is not written
+yet.
+
+```
+ compile_resolution()  ─► wave 1 in, wave 2 running ─► the main compile
+                                                       (build cache keys see
+                                                        wave 1's jars only,
+                                                        so it is not memoised)
+ resolved()            ─► join_dependencies(): download bars for what is left,
+                          wave 2's jars and warnings merged, its error raised,
+                          a fresh jrs.lock written ─► OnceCell<Resolution>
+```
+
+`resolved()` is what everything after the main compile calls, and the end of
+`build()` calls it, so nothing but the main compile ever sees the partial
+graph. `tools()` does not join: the compilers are downloaded with wave 1. A
+compile that fails returns before the join, so its error is the one
+reported, and the detached thread dies with the process.
 
 `jrs.lock` records coordinates and checksums, never absolute paths; cache paths
 are recomputed on load. It is `version = 1` byte for byte until a `[[tool]]`
@@ -567,6 +620,44 @@ starts with C1 and the serial collector.
  run it again without the flags (a JVM that cannot dump does not start)
 ```
 
+A stale unit asks the build cache (`build_cache.rs`, SPEC §7.8) before it
+compiles. `CompileUnit::cache_text` writes out what the fingerprint holds,
+but with every path relative (`{root}`, `{cache}`), `-cp` dropped, each jar
+by the identity `cli` gave it (coordinate and pinned checksum) or its content
+hash, and each source by its hash, taken from the index where the source's
+stat still matches it. `BuildCache::key` hashes that with jrs's version and
+the JDK's `release` file.
+
+```
+ is_stale ─► compile::restore
+               cache_text ─ a jar unreadable, an unkeyed class dir ─► compile
+               │ key remembered for the store
+               ├── --verify-cache ─────────────────────────────────► compile
+               ▼
+             load: <cache>/build/<k..2>/<key>.zip, else the remote
+               │ miss, or a zip that does not read back ───────────► compile
+               ▼
+             forget fingerprint + index; empty the output dir; extract;
+             Tracker::record_all (the index); write the fingerprint
+               ─► Outcome::Restored, "Restored" (cli.rs)
+
+ compile_timed succeeded (whole or file by file) ─► store:
+     collect output dir − resources-<unit>*.list ─► zip, sorted, 1980
+       --verify-cache and an entry held ─► compare, fail on a difference
+       otherwise ─► save locally (temp + rename), PUT to the remote if push
+```
+
+Under `--watch`, `javac::run` hands its argfile to the session's
+`compile/worker.rs` first: one `java -cp worker.jar JavacWorker` child, with
+a CDS archive of its own, compiled from the embedded `JavacWorker.java` on
+first use. A request is `<id> <argfile>` on its stdin; the answer is
+`jrs-worker <id> <exit> <stdout bytes> <stderr bytes>` and the bytes, read
+on a helper thread so that a hung worker can be given up on. Any failure —
+an exit, garbage, no answer within two minutes or ten times the slowest one
+— kills the worker and returns `None`, and `javac::run` forks `javac` as it
+always did. The worker is replaced after 50 compilations or a new JDK, and
+stops when its stdin closes; its archive is put in place only then.
+
 The test unit compiles against `target/classes`, which is a directory, not a
 jar, so its size and mtime say nothing. What its fingerprint holds instead is
 `compile::api_digest` of it (`compile/abi.rs`): a hand-written class-file
@@ -676,6 +767,23 @@ reaches the launcher as a fork's does, a lookahead `--include-classname`.
       ▼
  run them; record test.tested with what failed or was flaky
 ```
+
+Between that selection and the launcher, two shortcuts. A whole-suite run
+(no selectors, not `--all`, `--coverage` or `--debug`) is keyed over the
+same settings with jars by identity and every class-directory file by the
+hash the snapshot already took (`Snapshot::files`); a build-cache hit puts
+the stored reports in `test-reports/` and returns the stored counts without
+a JVM. A run that ran every class and passed without a flaky test is stored
+after it, with a `jrs-test-outcome.txt` entry for the counts.
+
+With `test.share-classes`, `test::share_layout` moves the class directories
+from the head of the JVM's `-cp` to the launcher's `--class-path`, unless a
+file in them shares a name with a jar's entry (outside `META-INF/`; the jars'
+entry lists are cached in `<cache>/cds/entries/`), and `Share::for_tests`
+picks `cds/test-<project>-<deps>.jsa`: read if there, dumped otherwise by a
+run in one JVM (`test::run_sharing`, which retries without the flags a JVM
+that never got to the launcher), only read by forks. `--debug`, `--coverage`
+and `test.java-agents` keep the usual layout.
 
 `--fail-fast` is the launcher's own from JUnit 6 on (`TestRun::fail_fast_mode`).
 A 1.x launcher has none, and prints its tree only once the run is over, so
@@ -952,12 +1060,20 @@ poisoning, which is documented under each function's `# Panics`.
  │     (and guava-33.0.0-jre-sources.jar, once `jrs fetch --sources` ran)
  ├── cds/                         <compiler>-jdk<n>-<key>.jsa: CDS archives for
  │                                the compiler JVMs, rewritten when pruned
+ │   ├── test-<project>-<deps>.jsa  the test JVM's, one per project and suite
+ │   │                              (test.share-classes)
+ │   └── entries/                 each jar's entry list, for the overlap check
+ ├── build/<k..2>/<key>.zip       the build cache: compile units' output and
+ │                                passing test runs' reports, pruned one by one
+ ├── worker/<version>-jdk<n>/worker.jar   the --watch javac worker's program
+ │   └── (worker/cds/)            and its CDS archive
  └── .jrs/projects                the lockfiles of every project built with it,
                                   which `jrs cache prune` keeps alive
 
  user config   (JRS_CONFIG, or $XDG_CONFIG_HOME/jrs/config.toml,
                ~/.config/jrs/config.toml, %APPDATA%\jrs\config.toml)
-               jobs, [proxy], [mirrors], [credentials.<repo>], [jdks]
+               jobs, [proxy], [mirrors], [credentials.<repo>], [jdks],
+               [build-cache]
 ```
 
 Nothing is written into `target/` that cannot be regenerated, so `jrs clean`
@@ -984,6 +1100,9 @@ can never lose user data, and task-generated sources must live under
  │                                kotlinc/scalac/groovyc and proguard.ProGuard main
  │                                classes, compiled and published into the fixture repo,
  │                                run with their own JRS_CACHE_DIR
+ │                           (the in-process `jrs()` helper passes --no-build-cache:
+ │                            it shares the user's cache, and identical fixture
+ │                            projects must not restore each other's classes)
  │
  └── require_jdk!          tests needing javac skip loudly (SKIPPED) without one
 
@@ -1014,6 +1133,8 @@ design regression, not a style nit.
 | Sources and classpaths go through argfiles | `compile/`, `test.rs` |
 | Nearest-wins, breadth-first by level, ties on declaration order; no ranges | `resolve/mod.rs`, `manifest.rs` |
 | Atomic, checksum-verified cache writes | `resolve/cache.rs`, `resolve/repo.rs` |
+| A build-cache key holds no absolute path and no mtime; what cannot be keyed is compiled; no cache failure fails a build | `build_cache.rs`, `compile/mod.rs` |
+| The `javac` worker lives no longer than its `--watch` command, and any failure of it falls back to a forked `javac` | `compile/worker.rs` |
 | Fat-jar merge rules: `META-INF/services/*`, Groovy extension modules and Spring's registries merged, never overwritten; the project's copy first | `package.rs` |
 | Relocation rewrites only a class's `CONSTANT_Utf8` entries, never their number or order; a class it cannot read fails the jar | `relocate.rs` |
 | Toolchain output passed through verbatim | `compile/`, `test.rs`, `image.rs` |

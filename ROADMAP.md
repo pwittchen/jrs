@@ -296,13 +296,12 @@ listed so the discussion has a home, not because they are planned.
 | Multi-module builds / workspaces | Non-goal: one module per manifest. Planned in section 7, which starts with the spec change |
 | Composite builds (Gradle's `includeBuild`), dependency substitution with a local checkout | Non-goal: one module per manifest. Without them, the way to try a change to a library in the project that uses it is a `-SNAPSHOT` in `~/.m2` through a `file://` repository |
 | Publishing (Gradle's `maven-publish`, `publishToMavenLocal`) | Non-goal: SPEC §1.2 rules out `deploy`/`publish`. Done properly it means generating a POM from the manifest, sources and Javadoc jars (`jrs package --sources --javadoc` writes them), signing, and uploading with credentials. A `jrs install` into `~/.m2` is the smallest version, and it is the one that makes library development across projects bearable without a reactor |
-| A build cache (Gradle's local and remote build cache) | New shared state beside the dependency cache, holding compile, test and task outputs keyed by their inputs' hash. The fingerprints already exist; the cache would reuse outputs across branches, checkouts and CI machines |
 | JDK auto-provisioning (Gradle's toolchain resolvers, foojay) | Downloads from a host that is not a Maven repository. Unix JDKs ship as tar.gz, which means new crates. Today a pinned JDK that is not installed is an error listing the ones that are (SPEC §7.1) |
 | A wrapper that fetches the pinned jrs (Gradle's `gradlew`) | jrs would download and run executables. Today `project.jrs-version` (SPEC §4.3) makes an older jrs stop and name the version the project needs |
 | Per-suite dependencies, `java-test-fixtures`, multi-release jars | `[test.suites]` (SPEC §10.2) gives a second test suite its own sources, JVM and `jrs test --suite` selection on the one test classpath. Dependencies of its own, as Gradle's JVM Test Suite plugin has them, would put a graph per suite in the lockfile; multi-release jars need a source root per Java release |
 | Build variants (Gradle `-P` properties, Maven profiles) | The manifest is one fixed configuration. Conditional configuration is the start of a DSL |
 | PGP signature verification (Gradle's dependency verification) | An OpenPGP crate and a trust store. `jrs.lock` already pins a checksum for every non-snapshot jar, which covers the "bytes changed under the same version" case |
-| A compiler daemon (the Gradle daemon) | Non-goal: SPEC §1.2 rules out compiler daemons. kotlinc and scalac add a second or so of JVM start-up to a changed build ([JVM_LANGUAGES.md §14.1](specs/JVM_LANGUAGES.md#14-open-questions)); a daemon would hide it, and the Gradle daemon does so for `javac` too, by running it in-process. The cost is jrs managing a long-lived process, worth it only if real projects feel the start-up |
+| A compiler daemon (the Gradle daemon) | Non-goal: SPEC §1.2 rules out a compiler process that outlives the command that started it. A `--watch` session already keeps a `javac` worker for its own lifetime (SPEC §7.5). What is left is a daemon across commands, which jrs would have to find and manage, and a worker for kotlinc and scalac, which add a second or so of JVM start-up to a changed build ([JVM_LANGUAGES.md §14.1](specs/JVM_LANGUAGES.md#14-open-questions)) and wait for a measurement saying it is felt |
 | A Build Server Protocol server | A long-lived JSON-RPC process that IntelliJ, Metals and VS Code can talk to. `jrs metadata` (SPEC §5.4) is the first step and needs no daemon |
 | Annotation-processor path in the manifest | Non-goal: no annotation-processor configuration. Processors on the compile classpath, as `compile-only` dependencies with `-proc:full`, work today. Error Prone, NullAway and other `javac` plugins need a processor path too |
 | JPMS (`module-info.java`, module path) | Non-goal |
@@ -321,42 +320,30 @@ listed so the discussion has a home, not because they are planned.
 ## 6. Faster than Gradle
 
 jrs starts faster than Gradle: it is a native binary with no configuration
-phase. Where Gradle still wins is the JVM work itself. Its warm daemon runs
-`javac` in-process with a hot JIT, and its build cache skips work outright.
-The compiler JVMs now start from a class-data-sharing archive and, for a
-file-by-file compile, with C1 and the serial collector; `jrs test` runs only
-the test classes a change reaches, splits a large suite among JVMs by
-default and balances the split by each class's last time. What is left is
-below, and [specs/FASTER_BUILDS.md](specs/FASTER_BUILDS.md) designs it. The
-benchmarks in section 2 say which gap is real, and every item here is judged
-by them.
+phase. Where Gradle still wins is the JVM work itself. Most of that gap is
+closed now ([specs/FASTER_BUILDS.md](specs/FASTER_BUILDS.md)): the compiler
+JVMs start from class-data-sharing archives, and the test JVM can too
+(`test.share-classes`, SPEC §10.2); a build cache restores compiled classes
+and passing test runs across branches, checkouts and CI machines, locally
+and from a remote (SPEC §7.8); `--watch` compiles in one warm `javac` worker
+(SPEC §7.5); and a cold build downloads the test jars behind the main
+compile (SPEC §8.3). What is left is below. The benchmarks in section 2 say
+which gap is real, and every item here is judged by them.
 
-- **Class-data sharing for the test JVM.** The compilers have it; the test
-  JVM cannot, since CDS refuses a classpath holding a non-empty class
-  directory, and `target/classes` and `target/test-classes` are two. The
-  JDK 24+ AOT cache (`-XX:AOTCache`, JEP 483), which Spring Boot test suites
-  with their thousands of classes would feel first, has the same rule. Both
-  would need the class directories on the test classpath as jars, or an
-  archive of the dependency jars alone.
-- **A local build cache.** Already a row in section 5. The fingerprints exist,
-  so `target/classes` and test results stored in the shared cache under their
-  fingerprint would survive a branch switch, a `git stash` or a `jrs clean`. A
-  remote cache for CI is the same keys over HTTP, which `ureq` already speaks.
-- **A warm compiler that lives as long as `--watch`.** `--watch` already
-  keeps jrs alive for the session. Inside it, one `javac` worker JVM (a small
-  Java shim reading argfile paths on stdin and calling `javax.tools`) would
-  compile every rebuild after the first with a hot JIT, which is the warm
-  daemon's advantage. Kotlin's Build Tools API would do the same for kotlinc,
-  and opens incremental Kotlin compilation (section 5). The worker dies with
-  the command, so jrs never manages a background process. It still needs a
-  line in SPEC §1.2 saying that a worker scoped to one command is not the
-  compiler daemon the non-goal rules out.
-- **Pipelining.** Download test-only dependencies while the main unit
-  compiles, and prepare the test unit's launcher before main is done. Today
-  `dependencies()` downloads every jar before the first compile, so that a
-  fresh `jrs.lock` pins their checksums, and the output layer has one live
-  region, which a download and a compile would share. It only pays on a cold
-  cache. The phase lines stay in the order they are today.
+- **The JDK 25 AOT cache for the test JVM** (`-XX:AOTCache`, JEP 483 and
+  514). It also stores linked classes and method profiles, the larger win
+  for a Spring Boot suite, under the same classpath rule the dynamic archive
+  follows. It ships once it has been measured against the dynamic archive
+  on the corpus.
+- **`test.share-classes` on by default**, once the corpus of section 1 runs
+  green with it on: the launcher's class loader changes which copy of a
+  name a test finds first, and registries cannot be checked by name.
+- **Task outputs in the build cache.** A task with `inputs` and `outputs`
+  has what a key needs, but its outputs are arbitrary paths, some outside
+  `target/`, and restoring them is a design of its own.
+- **Per-class test results in the build cache**, keyed by each class's
+  reach, so that a branch switch reuses part of a suite's results rather
+  than all or nothing.
 
 What stays out: a background daemon and an in-house compiler. Both would trade
 away the "no daemon, just a driver" defaults the Why page rests on.

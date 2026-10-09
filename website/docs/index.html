@@ -868,6 +868,7 @@ cwd = "work"</pre>
     <tr><td><code>forks</code></td><td>one per 8 test classes, up to half the cores</td><td>Test JVMs the classes are split among, run at once. <code>1</code> keeps one JVM; <code>--forks</code> overrides it.</td></tr>
     <tr><td><code>jacoco-version</code></td><td>jrs's default</td><td>The JaCoCo release for <code>--coverage</code>.</td></tr>
     <tr><td><code>coverage-minimum</code></td><td><code>{}</code></td><td>Ratios from 0 to 1 that <code>--coverage</code> must reach, per JaCoCo counter: <code>line</code>, <code>branch</code>, <code>instruction</code>, <code>method</code>, <code>class</code>, <code>complexity</code>.</td></tr>
+    <tr><td><code>share-classes</code></td><td><code>false</code></td><td>Start the test JVM from a class-data-sharing archive of the dependency jars. See <a href="#testing-share-classes">Starting the test JVM faster</a>.</td></tr>
   </tbody>
 </table>
 <pre data-lang="toml">[test]
@@ -878,6 +879,7 @@ retries = 2
 forks = 4
 jacoco-version = "0.8.15"
 coverage-minimum = { line = 0.80, branch = 0.70 }
+share-classes = true
 
 [test.suites.e2e]                            # jrs test --suite e2e
 test-dir = "src/e2e/java"
@@ -1175,13 +1177,13 @@ jrs metadata | jq '.classpaths.test[].jar'</pre>
 
 <section id="cmd-build">
 <h2><code>jrs build</code></h2>
-<pre data-lang="plain">jrs build [--watch] [--timings]</pre>
+<pre data-lang="plain">jrs build [--watch] [--timings] [--no-build-cache] [--verify-cache]</pre>
 <p>Builds the main code. In order:</p>
 <ol>
   <li>Resolve dependencies: from <code>jrs.lock</code> when it matches the manifest, afresh otherwise.</li>
-  <li>Download what the cache is missing, in parallel, checksum-verified.</li>
+  <li>Download what the cache is missing, in parallel, checksum-verified. On a cold cache only the jars the main code compiles against come first; the rest download while it compiles.</li>
   <li>Run the <code>pre-compile</code> hook.</li>
-  <li>Compile the main unit into <code>target/classes</code>, or print <code>Fresh</code> and skip it when nothing it depends on changed.</li>
+  <li>Compile the main unit into <code>target/classes</code>, restore it from the <a href="#build-cache">build cache</a> (<code>Restored</code>), or print <code>Fresh</code> and skip it when nothing it depends on changed.</li>
   <li>Copy <code>src/main/resources</code> into <code>target/classes</code>, skipping files that did not change and deleting ones you deleted.</li>
   <li>Run the <code>post-compile</code> hook.</li>
 </ol>
@@ -1190,6 +1192,8 @@ jrs metadata | jq '.classpaths.test[].jar'</pre>
   <tbody>
     <tr><td><code>--watch</code></td><td>Build again whenever a source, a resource, a task input or <code>jrs.toml</code> changes. See <a href="#watch">Watch mode</a>.</td></tr>
     <tr><td><code>--timings</code></td><td>Print the wall time of each phase after the summary. See <a href="#output-timings">Timings</a>.</td></tr>
+    <tr><td><code>--no-build-cache</code></td><td>Neither restore from nor store into the <a href="#build-cache">build cache</a>. <code>test</code>, <code>run</code> and <code>package</code> take it too.</td></tr>
+    <tr><td><code>--verify-cache</code></td><td>Compile every unit, up to date or not, and fail if the build cache holds different classes for the same inputs.</td></tr>
   </tbody>
 </table>
 <p><code>test</code>, <code>run</code> and <code>package</code> all start with exactly this build.</p>
@@ -1224,7 +1228,7 @@ jrs -q run -- input.txt &gt; output.txt   # only the program's output</pre>
 <h2><code>jrs test</code></h2>
 <pre data-lang="plain">jrs test [--filter PATTERN] [--include-tag TAG]... [--exclude-tag TAG]... [--method CLASS#METHOD]...
          [--coverage] [--watch] [--debug[=[HOST:]PORT]] [--rerun-failed] [--fail-fast]
-         [--retries N] [--forks N] [--all] [--timings]</pre>
+         [--retries N] [--forks N] [--all] [--no-build-cache] [--timings]</pre>
 <p>
   Builds, runs <code>pre-test</code>, compiles the test sources into
   <code>target/test-classes</code>, runs them on the JUnit Platform, then runs
@@ -1246,7 +1250,8 @@ jrs -q run -- input.txt &gt; output.txt   # only the program's output</pre>
     <tr><td><code>--retries &lt;N&gt;</code></td><td>Run failing tests again up to <code>N</code> times; overrides <code>[test] retries</code>.</td></tr>
     <tr><td><code>--forks &lt;N&gt;</code></td><td>Split the test classes among <code>N</code> JVMs run at once; overrides <code>[test] forks</code>.</td></tr>
     <tr><td><code>--suite &lt;NAME&gt;</code></td><td>Run the suite <code>[test.suites.&lt;NAME&gt;]</code> declares instead of the default tests.</td></tr>
-    <tr><td><code>--all</code></td><td>Run every test class, not only those a change since the last run reaches.</td></tr>
+    <tr><td><code>--all</code></td><td>Run every test class, not only those a change since the last run reaches, and never take a passing run from the build cache.</td></tr>
+    <tr><td><code>--no-build-cache</code></td><td>Neither restore from nor store into the build cache.</td></tr>
     <tr><td><code>--timings</code></td><td>Print the phase timings after the run.</td></tr>
   </tbody>
 </table>
@@ -1724,6 +1729,56 @@ jrs tree --why org.checkerframework:checker-qual   # who brings this in?</pre>
 jrs build --timings     # how long each step took</pre>
 </section>
 
+<section id="build-cache">
+<h2>Build cache</h2>
+<p>
+  The fingerprints in <code>target/.jrs</code> say whether <code>target/</code> is up to date, but
+  a branch switch, a <code>git stash</code> or a <code>jrs clean</code> throws the work away. The
+  build cache keeps it. After every compile, jrs stores the classes a unit compiled under a hash of
+  everything that went into them: the sources' contents, the flags, each dependency by its
+  coordinate and pinned checksum, the compiler, the JDK build and jrs's version. Before compiling a
+  stale unit it looks that hash up, and a hit prints
+</p>
+<pre>    Restored my-app v1.0.0 (from the build cache)</pre>
+<p>
+  instead of <code>Compiling</code>, leaving the bytes <code>javac</code> would have written. The
+  hash holds no path of the checkout, so two clones of one commit, in two directories or on two
+  machines, share their entries. A <code>jrs test</code> run of the whole suite that passed, with no
+  flaky test, is kept too: a later run over the same class files puts its reports back and prints
+  <code>Testing 214 test classes: passed in the cached run</code> without starting the JVM.
+  <code>--all</code> runs them anyway.
+</p>
+<p>
+  Entries live in the dependency cache, under <code>build/</code>. A plain
+  <code>jrs cache prune</code> drops them all; <code>--unused-for</code> drops those no build has
+  hit in that long. <code>--no-build-cache</code>, <code>JRS_BUILD_CACHE=off</code> or
+  <code>enabled = false</code> under <code>[build-cache]</code> turns it off. An annotation processor
+  or Groovy AST transformation that reads a file it was not given, or an environment variable, is
+  outside the hash, as it is for Gradle's cache: build such a project with
+  <code>--no-build-cache</code>.
+</p>
+
+<h3>A remote cache for CI</h3>
+<p>
+  A remote cache is a plain HTTP server — nginx, an S3 bucket behind presigned URLs, a Gradle cache
+  node — or a shared directory behind a <code>file://</code> URL. jrs <code>GET</code>s
+  <code>&lt;url&gt;/&lt;key&gt;.zip</code> on a local miss and, only when pushing is on,
+  <code>PUT</code>s what it compiled:
+</p>
+<pre data-lang="toml" data-file="~/.config/jrs/config.toml">[build-cache]
+url = "https://cache.example.com/jrs"     # or file:///mnt/shared/jrs-cache
+push = false                              # CI sets true
+credentials = "build-cache"               # a [credentials.&lt;name&gt;] entry</pre>
+<p>
+  CI can set the same with <code>JRS_BUILD_CACHE_URL</code> and
+  <code>JRS_BUILD_CACHE_PUSH=true</code>. Whoever can push can put classes into every build that
+  reads the cache, so give push rights to CI alone. A remote that fails or times out is skipped for
+  the rest of the command (<code>-v</code> says why) and never fails a build.
+  <code>jrs build --verify-cache</code> compiles every unit and fails if the cache holds different
+  classes under the same key; a CI job can run it nightly.
+</p>
+</section>
+
 <section id="watch">
 <h2>Watch mode</h2>
 <pre>jrs build --watch
@@ -1740,6 +1795,12 @@ jrs task generate --watch</pre>
   A failure is reported and waited out rather than ending the loop, since the next save is usually
   the fix. Nothing under the target directory is watched, so a generator's output can never
   retrigger it. Stop with <kbd>Ctrl</kbd>&nbsp;<kbd>C</kbd>.
+</p>
+<p>
+  Watch mode keeps one <code>javac</code> JVM running for the session and hands it every rebuild,
+  so the second and later compiles skip the JVM's start-up and run with a warm JIT. It is a child
+  of <code>jrs</code> and stops with it: nothing keeps running between commands. If it ever fails,
+  that compile runs in a fresh <code>javac</code> as usual, and <code>-v</code> says so.
 </p>
 </section>
 
@@ -1842,6 +1903,26 @@ jvm-args = [
   "-Djunit.jupiter.execution.parallel.enabled=true",
   "-Djunit.jupiter.execution.parallel.mode.default=concurrent",
 ]</pre>
+
+<h3 id="testing-share-classes">Starting the test JVM faster</h3>
+<p>
+  <code>[test] share-classes = true</code> starts the test JVM from a class-data-sharing archive of
+  the dependency jars, as jrs already does for the compilers. A Spring Boot suite, which loads
+  thousands of library classes before its first test, starts noticeably sooner. The first
+  <code>jrs test</code> writes the archive into the cache (one per project, replaced when the
+  dependencies change); later runs map it. A class you change is always loaded from its file.
+</p>
+<p>
+  To allow it, <code>target/classes</code> and <code>target/test-classes</code> are loaded by the
+  launcher's own class loader instead of being on the JVM's <code>-cp</code>. That changes one thing
+  a test can see: when a class directory and a jar hold a class or resource of the same name, the
+  jar's is found first. jrs checks for such a name before every run and keeps the usual layout when
+  it finds one (<code>-v</code> says which), but it cannot check the order of
+  <code>META-INF/services</code> entries or <code>spring.factories</code>, and code that reads
+  <code>java.class.path</code> itself no longer sees the class directories — hence opt-in.
+  <code>--debug</code>, <code>--coverage</code> and <code>test.java-agents</code> turn it off for
+  the run, and forked JVMs only read an archive a single-JVM run wrote.
+</p>
 
 <h3>Coverage</h3>
 <pre>jrs test --coverage</pre>
@@ -2451,8 +2532,11 @@ jrs cache prune --unused-for 30       # drop what no build has used in 30 days</
   It also drops parent POMs, BOMs, test launchers and JaCoCo jars, which only a fresh resolution or
   a <code>--coverage</code> run needs and which are downloaded again when wanted.
   The cache also holds <code>cds/</code>: a class-data-sharing archive per compiler and JDK, which
-  makes <code>javac</code>, kotlinc, scalac and groovyc start faster. The first compile after a new
-  JDK or compiler writes it; <code>prune</code> drops it like anything else.
+  makes <code>javac</code>, kotlinc, scalac and groovyc start faster, and the test JVM's with
+  <code>share-classes</code>. The first compile after a new JDK or compiler writes it;
+  <code>prune</code> drops it like anything else. The <a href="#build-cache">build cache</a> lives
+  under <code>build/</code>: a plain <code>prune</code> drops all of it, <code>--unused-for</code>
+  the entries no build has hit.
   <code>--unused-for</code> goes by when each artifact was last used, recorded in its access time
   at most once a day, so it works even on filesystems mounted <code>noatime</code>.
 </p>
@@ -2486,7 +2570,11 @@ username = "ci"
 password-env = "NEXUS_PASSWORD"           # or password, token, token-env
 
 [jdks]                                    # JDKs jrs would not find on its own
-21 = "/opt/jdks/temurin-21"</pre>
+21 = "/opt/jdks/temurin-21"
+
+[build-cache]                             # see Build cache
+url = "https://cache.example.com/jrs"
+push = false</pre>
 
 <h3>Credentials</h3>
 <p>
@@ -2524,6 +2612,13 @@ export JRS_REPO_MY_REPO_TOKEN=…          # for a repository named my-repo</pre
   <code>[jdks]</code> maps a Java feature version to a JDK home, for a pinned version installed
   where jrs does not look. <code>jobs</code> sets the default for <code>--jobs</code>.
 </p>
+
+<h3>Build cache</h3>
+<p>
+  <code>[build-cache]</code> turns the local cache off (<code>enabled = false</code>) or adds a
+  remote one (<code>url</code>, <code>push</code>, <code>credentials</code>). See
+  <a href="#build-cache">Build cache</a>.
+</p>
 </section>
 
 <section id="ci">
@@ -2537,6 +2632,7 @@ export JRS_REPO_MY_REPO_TOKEN=…          # for a repository named my-repo</pre
   <li><strong>Collect reports</strong> from <code>target/test-reports</code> (JUnit XML and <code>index.html</code>) and <code>target/coverage</code>.</li>
   <li><strong>Gate on coverage</strong> with <code>[test] coverage-minimum</code> and <code>jrs test --coverage</code>.</li>
   <li><strong>Keep timings</strong>: <code>--timings</code> writes <code>target/.jrs/timings.txt</code> even under <code>-q</code>.</li>
+  <li><strong>Share compiled classes</strong> through a <a href="#build-cache">remote build cache</a>: CI sets <code>JRS_BUILD_CACHE_URL</code> and <code>JRS_BUILD_CACHE_PUSH=true</code>, developers only the URL.</li>
 </ul>
 
 <h3>GitHub Actions</h3>
@@ -2762,6 +2858,8 @@ jrs migrate                # write jrs.toml; the original build file is untouche
     <tr><td><code>JAVA_HOME_&lt;n&gt;_&lt;arch&gt;</code></td><td class="wrap">JDKs exported by <code>actions/setup-java</code>, searched for a pinned version.</td></tr>
     <tr><td><code>JRS_CACHE_DIR</code></td><td class="wrap">Where the shared dependency cache lives.</td></tr>
     <tr><td><code>JRS_CONFIG</code></td><td class="wrap">The user configuration file to read.</td></tr>
+    <tr><td><code>JRS_BUILD_CACHE</code></td><td class="wrap"><code>off</code> turns the build cache off.</td></tr>
+    <tr><td><code>JRS_BUILD_CACHE_URL</code>, <code>JRS_BUILD_CACHE_PUSH</code></td><td class="wrap">The remote build cache, and whether to write to it (<code>true</code> or <code>1</code>). They override <code>[build-cache]</code>.</td></tr>
     <tr><td><code>JRS_REPO_&lt;NAME&gt;_USERNAME</code><br /><code>JRS_REPO_&lt;NAME&gt;_PASSWORD</code><br /><code>JRS_REPO_&lt;NAME&gt;_TOKEN</code></td><td class="wrap">Credentials for the repository named <code>&lt;name&gt;</code>, upper-cased with other characters as <code>_</code>. They override the configuration file.</td></tr>
     <tr><td><code>HTTPS_PROXY</code>, <code>HTTP_PROXY</code>, <code>ALL_PROXY</code>, <code>NO_PROXY</code></td><td class="wrap">The proxy, when the configuration has no <code>[proxy]</code>.</td></tr>
     <tr><td><code>XDG_CACHE_HOME</code>, <code>XDG_CONFIG_HOME</code></td><td class="wrap">Base directories for the cache and configuration on Unix.</td></tr>
@@ -2826,7 +2924,7 @@ jrs migrate                # write jrs.toml; the original build file is untouche
 <table>
   <thead><tr><th>What</th><th>Where</th></tr></thead>
   <tbody>
-    <tr><td>Dependency cache</td><td class="wrap"><code>JRS_CACHE_DIR</code>, or <code>~/Library/Caches/jrs</code>, <code>$XDG_CACHE_HOME/jrs</code> / <code>~/.cache/jrs</code>, <code>%LOCALAPPDATA%\jrs\cache</code>. It also keeps <code>.jrs/projects</code>, the lockfiles <code>jrs cache prune</code> keeps alive.</td></tr>
+    <tr><td>Dependency cache</td><td class="wrap"><code>JRS_CACHE_DIR</code>, or <code>~/Library/Caches/jrs</code>, <code>$XDG_CACHE_HOME/jrs</code> / <code>~/.cache/jrs</code>, <code>%LOCALAPPDATA%\jrs\cache</code>. It also keeps <code>.jrs/projects</code>, the lockfiles <code>jrs cache prune</code> keeps alive; <code>cds/</code>, the class-data-sharing archives; <code>build/</code>, the build cache; and <code>worker/</code>, the <code>--watch</code> <code>javac</code> worker.</td></tr>
     <tr><td>Configuration</td><td class="wrap"><code>JRS_CONFIG</code>, or <code>$XDG_CONFIG_HOME/jrs/config.toml</code> / <code>~/.config/jrs/config.toml</code>, <code>%APPDATA%\jrs\config.toml</code>.</td></tr>
     <tr><td>The binary</td><td class="wrap"><code>~/.local/bin/jrs</code> from the install script, <code>~/.cargo/bin/jrs</code> from source.</td></tr>
   </tbody>

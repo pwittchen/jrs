@@ -13,6 +13,7 @@ published at [getjrs.dev/docs](https://getjrs.dev/docs/).
 - [The manifest](#the-manifest)
 - [Commands](#commands)
 - [Dependency cache](#dependency-cache)
+- [Build cache](#build-cache)
 - [User configuration](#user-configuration)
 - [Choosing the JDK](#choosing-the-jdk)
 - [Tests](#tests)
@@ -249,6 +250,7 @@ env = { TZ = "UTC" }
 retries = 2                                  # run failed tests again; optional
 forks = 4                                    # test JVMs to split the classes among; jrs picks unless set
 coverage-minimum = { line = 0.80, branch = 0.70 }   # for `jrs test --coverage`; optional
+share-classes = true                         # start the test JVM from a CDS archive; off by default
 
 [package]
 add-modules = ["jdk.crypto.ec"]              # for --jlink / --jpackage images
@@ -301,6 +303,22 @@ and the URL built from it agree (`PORT = "{free-port.web}"`,
 `URL = "http://localhost:{free-port.web}"`). There is no `test.cwd`: the test
 JVM runs where jrs does. `env` and `cwd` belong to `jrs run` and `jrs test`,
 so an image's launchers do not take them.
+
+`share-classes = true` starts the test JVM from a class-data-sharing archive
+of the dependency jars, as jrs already does for the compilers: a Spring Boot
+suite that loads thousands of library classes before its first test starts
+noticeably sooner. The first `jrs test` writes the archive into the cache
+(`cds/test-*.jsa`, one per project, replaced when the dependencies change),
+and later runs map it. To make that possible, `target/classes` and
+`target/test-classes` are loaded by the launcher's own class loader instead
+of being on the JVM's `-cp`, and that changes one thing a test can see: when
+a class directory and a jar hold a class or resource of the same name, the
+jar's is found first. jrs checks for such a name before every run and keeps
+the usual layout when it finds one (`-v` says which), but it cannot check the
+order of `META-INF/services` entries or `spring.factories`, and code that
+reads `java.class.path` itself no longer sees the class directories — hence
+opt-in. `--debug`, `--coverage` and `test.java-agents` turn it off for the
+run, and forked JVMs only read an archive a single-JVM run wrote.
 
 `[package.manifest]` adds attributes to the jar's `META-INF/MANIFEST.MF` — the
 thin, portable and fat jar alike — after the ones jrs writes, in the order they
@@ -504,7 +522,8 @@ for any repository.
 
 | Command | Behaviour |
 | --- | --- |
-| `jrs build [--watch]` | Resolve → compile main sources → copy resources. `--watch` rebuilds on every change. |
+| `jrs build [--watch]` | Resolve → compile main sources → copy resources. `--watch` rebuilds on every change, compiling in one warm `javac` for the whole session. |
+| `jrs build --verify-cache` | Compile everything, and fail if the [build cache](#build-cache) holds different classes for the same inputs. |
 | `jrs test` | `build` + compile test sources + run the tests a change since the last run reaches. The tests are not recompiled for a main change that leaves the main classes' API alone. See [Tests](#tests) for its flags. |
 | `jrs run [--debug[=<port>]] [-- args...]` | `build` + run `main-class` with `args`. `--debug` waits for a debugger first; see below. |
 | `jrs package` | `build` + produce `target/<name>-<version>.jar`. |
@@ -534,6 +553,15 @@ for any repository.
 | `jrs task --list` | List the tasks, their descriptions and the hooks that run them. |
 | `jrs metadata [--no-deps]` | Print the project model as JSON, for editors and tools. |
 | `jrs fetch [--sources]` | Download the dependencies into the cache without building, and with `--sources` their `-sources.jar`s. |
+
+`--no-build-cache` on `build`, `test`, `run` and `package` leaves the
+[build cache](#build-cache) alone for that command.
+
+`--watch` keeps one `javac` JVM running for the session and hands it every
+rebuild, so the second and later compiles skip the JVM's start-up and run
+with a warm JIT. It is a child of `jrs` and stops with it: nothing runs in the
+background between commands. If it ever fails, that compile runs in a fresh
+`javac` as usual; `-v` says so.
 
 Global flags: `-v/--verbose`, `-q/--quiet`, `--offline`, `-j/--jobs <n>`,
 `--manifest-path <p>`, `--progress <auto|always|never>`,
@@ -655,6 +683,63 @@ faster from one. The first compile after a new JDK or compiler writes it, and
 the file's access time at most once a day, so it works even on filesystems
 mounted `noatime`.
 
+On a cold cache a build downloads in two waves: the jars the main sources
+compile against (and the compilers) first, then the runtime-only and test
+jars on a thread of their own while `javac` runs. The output is the same as
+it would be in one wave; `jrs.lock` is written once every jar is in.
+
+## Build cache
+
+The `target/.jrs` fingerprints say whether `target/` is up to date, but a
+branch switch, a `git stash` or a `jrs clean` throws the work away. The build
+cache keeps it. After every compile, jrs stores the classes a unit compiled
+under a hash of everything that went into them — the sources' contents,
+the flags, each dependency by its coordinate and pinned checksum, the
+compiler, the JDK build and jrs's version — and before compiling a stale unit
+it looks that hash up. A hit prints
+
+```
+    Restored my-app v1.0.0 (from the build cache)
+```
+
+instead of `Compiling`, and leaves the same bytes `javac` would have written.
+The hash holds no path of the checkout, so two clones of one commit, in two
+directories or on two machines, share their entries. A `jrs test` run of the
+whole suite that passed, with no flaky test, is kept the same way: a later
+run over the same class files puts its reports back and says
+`Testing 214 test classes: passed in the cached run` instead of starting the
+JVM. `--all` runs them anyway.
+
+Entries live in the dependency cache's directory, under `build/`. A plain
+`jrs cache prune` drops them all; `--unused-for` drops those no build has hit
+in that long. `--no-build-cache` on `build`, `test`, `run` or `package`,
+`JRS_BUILD_CACHE=off`, or `enabled = false` under `[build-cache]` in the
+[user configuration](#user-configuration) turns the cache off.
+
+An annotation processor or Groovy AST transformation that reads a file it was
+not given, or an environment variable, is outside the hash, as it is for
+Gradle's cache: build such a project with `--no-build-cache`.
+
+**Sharing it with CI.** A remote cache is a plain HTTP server — nginx, an S3
+bucket behind presigned URLs, a Gradle cache node — or a shared directory
+behind a `file://` URL. jrs `GET`s `<url>/<key>.zip` on a local miss and,
+only when pushing is on, `PUT`s what it compiled:
+
+```toml
+[build-cache]                             # in ~/.config/jrs/config.toml
+url = "https://cache.example.com/jrs"     # or file:///mnt/shared/jrs-cache
+push = false                              # CI sets true
+credentials = "build-cache"               # a [credentials.<name>] entry
+```
+
+CI can set the same through `JRS_BUILD_CACHE_URL` and
+`JRS_BUILD_CACHE_PUSH=true`. Whoever can push can put classes into every build
+that reads the cache, so give push rights to CI alone. A remote that fails or
+times out is skipped for the rest of the command (`-v` says why), and never
+fails a build. `jrs build --verify-cache` compiles every unit and fails if the
+cache holds different classes under the same key — a CI job can run it
+nightly.
+
 ## User configuration
 
 Settings that belong to a person or a machine rather than to the project live
@@ -684,6 +769,10 @@ password-env = "NEXUS_PASSWORD"           # or `password`, `token`, `token-env`
 
 [jdks]                                    # JDKs jrs would not find on its own
 21 = "/opt/jdks/temurin-21"
+
+[build-cache]                             # see "Build cache"
+url = "https://cache.example.com/jrs"
+push = false
 ```
 
 - **Credentials** are sent as HTTP basic auth (`username` + `password`) or as a
@@ -699,6 +788,10 @@ password-env = "NEXUS_PASSWORD"           # or `password`, `token`, `token-env`
   `ALL_PROXY` and `NO_PROXY` from the environment apply.
 - **JDKs**: `[jdks]` maps a Java feature version to a JDK home, for a
   project that pins a version installed somewhere jrs does not look.
+- **Build cache**: `[build-cache]` turns the local cache off
+  (`enabled = false`) or adds a remote one (`url`, `push`, `credentials`);
+  see [Build cache](#build-cache). `JRS_BUILD_CACHE=off`,
+  `JRS_BUILD_CACHE_URL` and `JRS_BUILD_CACHE_PUSH` override it.
 
 A dropped connection or an HTTP 429/5xx from a repository is retried twice,
 with a backoff, before the build fails. A 404 or a 401 is believed the first
@@ -752,7 +845,8 @@ the JDK it picked.
 | `--retries <n>` | Run failing tests again up to `n` times; overrides `[test] retries`. |
 | `--forks <n>` | Split the test classes among `n` test JVMs run at once; overrides `[test] forks`. |
 | `--suite <name>` | Run the suite `[test.suites.<name>]` declares instead of the tests under `test-dir`. |
-| `--all` | Run every test class, not only those a change since the last run reaches. |
+| `--all` | Run every test class, not only those a change since the last run reaches, and never take a passing run from the [build cache](#build-cache). |
+| `--no-build-cache` | Neither restore from nor store into the build cache. |
 
 JUnit XML reports land in `target/test-reports`, where CI systems look for
 them. `[test] jvm-args` sets the test JVM's arguments, and `[test] env` and

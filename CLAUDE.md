@@ -194,6 +194,17 @@ regression, not a style nit.
   `CONSTANT_Utf8` entries in place — never their number or order — so every index
   stays valid and the rest of the class file is copied through. A class it cannot
   read fails the jar rather than shipping unrelocated.
+- **A build-cache key holds no absolute path and no mtime** (`build_cache.rs`,
+  `CompileUnit::cache_text`): sources by relative path and hash, jars by
+  coordinate and pinned checksum, paths as `{root}`/`{cache}`. That is what
+  lets two checkouts share entries; a path in it costs only hits, but an input
+  left out of it serves wrong classes. A unit that cannot be keyed compiles,
+  and no cache failure fails a build. The in-process `jrs()` test helper
+  passes `--no-build-cache`, since it shares the user's cache.
+- **The `--watch` `javac` worker never outlives the command** (`compile/worker.rs`):
+  it is a child reading a pipe jrs holds, and any failure of it falls back to
+  a forked `javac`. A process that outlives the command is the compiler daemon
+  SPEC §1.2 rules out.
 - **Toolchain output is passed through verbatim.** `javac` and the JUnit launcher have
   good diagnostics; jrs never reformats them, it only tears the live region down first.
 - **`jrs.lock` records no absolute paths.** Cache paths are recomputed on load; the

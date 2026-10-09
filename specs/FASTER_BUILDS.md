@@ -5,14 +5,17 @@ Design proposal for the four items still open in
 test JVM, pipelined downloads, a build cache, and a warm `javac` for
 `--watch`.
 
-Status: **proposal, nothing implemented.** Two of the four cross a line drawn
-elsewhere: the build cache is a row in
-[ROADMAP §5](../ROADMAP.md#5-needs-a-spec-decision-first) ("new shared state
-beside the dependency cache"), and the warm compiler touches the
-compiler-daemon non-goal in [SPEC §1.2](../SPEC.md#12-non-goals). §7 lists
-the SPEC.md edits each part needs before it has code. As with
-[TASKS.md](TASKS.md), this document is the design record; once a part lands,
-the SPEC section it names becomes the contract.
+Status: **F1–F6 implemented** (§9.1); F7, the JDK 25 AOT cache, waits for
+its measurement against the dynamic archive. The SPEC.md edits of §7 are in:
+SPEC §1.2 draws the line between a compiler daemon and a `--watch` worker,
+§7.5 has the worker, §7.8 the build cache, §8.3–§8.6 the two download waves,
+`[build-cache]` and pruning, and §10.2 the test JVM's archive. Those sections
+are the contract now; this document stays the design record. Where the code
+settled a question this proposal left open, the SPEC section says how: the
+second download wave starts once the first is in rather than beside it
+(SPEC §8.3), forks read an archive but never dump one (§8, question 2), and
+units with annotation processors are cached, trusting their declared inputs
+(§8, question 4).
 
 ---
 
