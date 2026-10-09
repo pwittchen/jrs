@@ -330,20 +330,19 @@ and from a remote (SPEC §7.8); `--watch` compiles in one warm `javac` worker
 compile (SPEC §8.3). What is left is below. The benchmarks in section 2 say
 which gap is real, and every item here is judged by them.
 
-- **The JDK 25 AOT cache for the test JVM** (`-XX:AOTCache`, JEP 483 and
-  514). It also stores linked classes and method profiles, the larger win
-  for a Spring Boot suite, under the same classpath rule the dynamic archive
-  follows. It ships once it has been measured against the dynamic archive
-  on the corpus.
-- **`test.share-classes` on by default**, once the corpus of section 1 runs
-  green with it on: the launcher's class loader changes which copy of a
-  name a test finds first, and registries cannot be checked by name.
-- **Task outputs in the build cache.** A task with `inputs` and `outputs`
-  has what a key needs, but its outputs are arbitrary paths, some outside
-  `target/`, and restoring them is a design of its own.
+- **`test.share-classes` on by default, and the AOT cache as what it means
+  on JDK 24+.** Both modes are in, opt-in (`true`, `"aot"`; SPEC §10.2).
+  The launcher's class loader changes which copy of a name a test finds
+  first and registries cannot be checked by name, so the default waits for
+  the corpus of section 1 to run green with it on.
+  [specs/TEST_JVM_BENCHMARK.md](specs/TEST_JVM_BENCHMARK.md) is the plan
+  and its decision rules; `cargo bench --bench test_jvm` is the harness.
+- **Task outputs in the build cache**, opt-in per task with `cache = true`:
+  [specs/TASK_OUTPUT_CACHE.md](specs/TASK_OUTPUT_CACHE.md), a proposal.
 - **Per-class test results in the build cache**, keyed by each class's
   reach, so that a branch switch reuses part of a suite's results rather
-  than all or nothing.
+  than all or nothing: [specs/TEST_RESULT_CACHE.md](specs/TEST_RESULT_CACHE.md),
+  a proposal.
 
 What stays out: a background daemon and an in-house compiler. Both would trade
 away the "no daemon, just a driver" defaults the Why page rests on.

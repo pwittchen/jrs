@@ -5,8 +5,13 @@ Design proposal for the four items still open in
 test JVM, pipelined downloads, a build cache, and a warm `javac` for
 `--watch`.
 
-Status: **F1–F6 implemented** (§9.1); F7, the JDK 25 AOT cache, waits for
-its measurement against the dynamic archive. The SPEC.md edits of §7 are in:
+Status: **F1–F7 implemented** (§9.1), F7 opt-in as `test.share-classes =
+"aot"`, in two steps (record, then assemble) rather than JDK 25's one-step
+flag, which prints into the test output. Which mode becomes the default is
+decided by measurement: [TEST_JVM_BENCHMARK.md](TEST_JVM_BENCHMARK.md). Open
+questions 5 and 7 have proposals of their own:
+[TASK_OUTPUT_CACHE.md](TASK_OUTPUT_CACHE.md) and
+[TEST_RESULT_CACHE.md](TEST_RESULT_CACHE.md). The SPEC.md edits of §7 are in:
 SPEC §1.2 draws the line between a compiler daemon and a `--watch` worker,
 §7.5 has the worker, §7.8 the build cache, §8.3–§8.6 the two download waves,
 `[build-cache]` and pruning, and §10.2 the test JVM's archive. Those sections
