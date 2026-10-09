@@ -340,6 +340,7 @@ jrs <command> [options]
 | `jrs verify` | Re-hash the cached jars against the checksums in `jrs.lock`; exit `1` on a mismatch. |
 | `jrs outdated` | List declared dependencies and `[managed]` entries with newer releases, from `maven-metadata.xml`. |
 | `jrs licenses [--runtime]` | List each dependency's licences from its POM or the nearest parent's, and warn about each that declares none (§8.11). |
+| `jrs audit [--runtime] [--ignore id]` | Check the resolved graph against the OSV vulnerability database; exit `1` on an advisory not ignored (§8.12). |
 | `jrs add` / `jrs remove` | Edit `[dependencies]` / `[dev-dependencies]` in place, then re-resolve (§4.5). `jrs add` leaves the version out of what `[managed]` covers (§8.9). |
 | `jrs cache path` / `jrs cache prune` | Show or prune the shared cache (§8.6). |
 | `jrs init [--lib] [--lang java\|kotlin\|scala\|groovy]` | Scaffold `jrs.toml`, a starter class and a starter test: JUnit 5 for Java and Kotlin, MUnit for Scala, and for Groovy Java code with Spock specs (§7.7). `--check` adds a `check` task running PMD's `quickstart` rules as a tool (§7.6), in the `post-compile` hook; it is refused for Kotlin and Scala, whose starters have no Java sources. `--format` adds a `format` task and a `format-check` task in the `post-compile` hook: google-java-format (AOSP style) for Java and Groovy, ktfmt (kotlinlang style) for Kotlin, as the starters are written; refused for Scala. |
@@ -1024,7 +1025,7 @@ compile hooks, `test`, `package` and `run` add their own, and `doc` fires
 `pre-compile`, since it documents generated sources too. A hook runs every time
 its point is reached, whether or not `javac` had work to do; skipping work is
 the task's own business. `tree`, `classpath`, `update`, `verify`, `outdated`,
-`licenses`, `add`, `remove`, `cache`, `init`, `migrate`, `completions`, `self` and `clean` never
+`licenses`, `audit`, `add`, `remove`, `cache`, `init`, `migrate`, `completions`, `self` and `clean` never
 run a task. That is a guarantee: inspecting a freshly cloned project is safe.
 
 **Ordering.** Tasks run serially, and each runs at most once per invocation.
@@ -1491,6 +1492,7 @@ unknown keys warn, errors name the key — and a missing file means every defaul
 | `build-cache.url` | A remote build cache, `http(s)://` or `file://`, read on a local miss. |
 | `build-cache.push` | Whether this machine writes to the remote: `true` on CI, and nowhere else. Default `false`. |
 | `build-cache.credentials` | The `[credentials.<name>]` entry the remote is reached with; `JRS_REPO_<NAME>_*` apply to it as to a repository. |
+| `audit.url` | An OSV-compatible API for `jrs audit` (§8.12), instead of `https://api.osv.dev`; `JRS_AUDIT_URL` overrides it. |
 | `build-cache.tasks` | Whether the remote also serves, and with `push` takes, the entries of tasks that say `cache = true` (§7.6, §7.8). Default `false`: the remote holds compile and test entries only. |
 
 - Credentials from `JRS_REPO_<NAME>_USERNAME` + `JRS_REPO_<NAME>_PASSWORD` or
@@ -1647,6 +1649,40 @@ spellings in Maven Central (`The Apache Software License, Version 2.0` is
 package that declares none is listed as such and warned about; a local jar
 has no POM to declare one. Nothing fails: what a project accepts is a policy
 jrs does not hold. It reads POMs only, from the cache where they are.
+
+### 8.12 Vulnerability audit
+
+`jrs audit` checks every package of the graph that has a jar — `--runtime`,
+only those on the runtime classpath — against [OSV](https://osv.dev), the
+database that carries the GitHub advisories and NVD's for the Maven
+ecosystem. It is the one command that talks to a host that is not a Maven
+repository besides `jrs self`, and it says so: the phase line names the URL.
+What it sends is what `jrs.lock` pins, `group:artifact` and a version per
+package, and nothing about the project itself.
+
+- One `POST /v1/querybatch` asks about the whole graph (in batches of 1000)
+  and answers with advisory IDs; a package whose answer has a next page is
+  asked again with `/v1/query`. `GET /v1/vulns/<id>` then reads each
+  advisory, `jobs` at a time, for its aliases, summary, the GitHub rating
+  (`database_specific.severity`) and the `fixed` events of the ranges that
+  name the package. A jar with a classifier is asked about once, with its
+  version.
+- Each advisory is a row: the dependency, the ID with its first CVE alias,
+  the severity, the lowest fixed version past the current one, and the
+  summary. Nothing is cached, since an advisory published since the last run
+  is what the command is for.
+- An advisory not ignored fails the command, exit `1`, so CI can gate on it.
+  `--ignore <id>` (repeatable) accepts one by its ID or any alias; an ignore
+  that matches nothing is warned about. What a project accepts for good is
+  its CI configuration's business, not the manifest's: `jrs.toml` holds no
+  list of accepted advisories.
+- A local jar (§8.8) has no coordinate and is warned about. Compilers and
+  tool graphs (§7.6, §7.7) are not audited: they run at build time and ship
+  nothing.
+- `audit.url` in the user configuration (§8.5), or `JRS_AUDIT_URL`, points
+  it at an OSV-compatible mirror; the proxy settings apply. A failure to
+  reach the API, or an answer that is not OSV's, is an error rather than an
+  empty report: a silent pass would be worse than none.
 
 ---
 

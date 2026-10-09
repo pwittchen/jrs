@@ -231,6 +231,33 @@ fn centrals_version_list_names_newer_releases() {
     );
 }
 
+/// The real OSV database knows Log4Shell by its coordinate, names the
+/// version that fixed it, and `--ignore` accepts it by its CVE alias.
+#[test]
+fn osv_knows_log4shell_and_its_fix() {
+    let osv = jrs::audit::Osv::new(jrs::audit::DEFAULT_URL, None).unwrap();
+    let coords = [
+        jrs::resolve::coord::Coord::new("org.apache.logging.log4j", "log4j-core", "2.14.1"),
+        jrs::resolve::coord::Coord::new("org.apache.logging.log4j", "log4j-core", "2.24.3"),
+    ];
+    let ids = osv.query(&coords).unwrap();
+    assert!(
+        ids[0].iter().any(|id| id == "GHSA-jfh8-c2jp-5v3q"),
+        "{ids:?}"
+    );
+    assert!(
+        !ids[1].iter().any(|id| id == "GHSA-jfh8-c2jp-5v3q"),
+        "{ids:?}"
+    );
+    let wanted = [(
+        "GHSA-jfh8-c2jp-5v3q".to_string(),
+        "org.apache.logging.log4j:log4j-core".to_string(),
+    )];
+    let advisory = &osv.advisories(&wanted, 1).unwrap()[0];
+    assert!(advisory.is_named("CVE-2021-44228"));
+    assert_eq!(advisory.fixed_after("2.14.1"), Some("2.15.0"));
+}
+
 // ---- Kotlin, Scala and Groovy with their real compilers (JVM_LANGUAGES.md) --
 //
 // One small mixed project per language, driven through the jrs binary as a

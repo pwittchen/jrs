@@ -1611,6 +1611,107 @@ fn licenses_lists_each_dependencys_licence_and_flags_the_ones_without() {
     assert!(!stdout.contains("lic:testing"), "{stdout}");
 }
 
+/// A stand-in for the OSV API: `lic:bare` has one advisory, fixed in `2`,
+/// and every other package none. Serves until the test process ends.
+fn fake_osv() -> String {
+    use std::io::{Read, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { break };
+            let mut head = Vec::new();
+            let mut byte = [0u8; 1];
+            while !head.ends_with(b"\r\n\r\n") && stream.read(&mut byte).unwrap_or(0) == 1 {
+                head.push(byte[0]);
+            }
+            let head = String::from_utf8_lossy(&head).to_string();
+            let length = head
+                .lines()
+                .find_map(|l| {
+                    let (k, v) = l.split_once(':')?;
+                    k.eq_ignore_ascii_case("content-length")
+                        .then(|| v.trim().parse::<usize>().ok())?
+                })
+                .unwrap_or(0);
+            let mut body = vec![0u8; length];
+            stream.read_exact(&mut body).unwrap();
+            let path = head.split_whitespace().nth(1).unwrap_or("").to_string();
+            let reply = if path == "/v1/querybatch" {
+                let doc = jrs::json::Json::parse(&String::from_utf8_lossy(&body)).unwrap();
+                let results: Vec<&str> = doc
+                    .get("queries")
+                    .unwrap()
+                    .items()
+                    .iter()
+                    .map(|q| {
+                        let name = q.get("package").unwrap().get("name").unwrap();
+                        if name.as_str() == Some("lic:bare") {
+                            r#"{"vulns": [{"id": "GHSA-test-0001"}]}"#
+                        } else {
+                            "{}"
+                        }
+                    })
+                    .collect();
+                format!(r#"{{"results": [{}]}}"#, results.join(", "))
+            } else {
+                r#"{"id": "GHSA-test-0001", "aliases": ["CVE-2026-0001"],
+                    "summary": "Bare is unsafe",
+                    "affected": [{"package": {"ecosystem": "Maven", "name": "lic:bare"},
+                      "ranges": [{"type": "ECOSYSTEM", "events": [{"introduced": "0"}, {"fixed": "2"}]}]}],
+                    "database_specific": {"severity": "HIGH"}}"#
+                    .to_string()
+            };
+            let _ = write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{reply}",
+                reply.len()
+            );
+        }
+    });
+    url
+}
+
+#[test]
+fn audit_lists_each_advisory_and_fails_until_it_is_ignored() {
+    let scratch = Scratch::new("audit");
+    let root = licensed_project(&scratch);
+    // `jrs_isolated` reads its config from here.
+    scratch.write(
+        "no-config.toml",
+        &format!("[audit]\nurl = \"{}\"\n", fake_osv()),
+    );
+
+    let (code, stdout, stderr) = jrs_isolated(&scratch, &root, &["audit"]);
+    assert_eq!(code, 1, "{stderr}");
+    let line = stdout
+        .lines()
+        .find(|l| l.starts_with("lic:bare:1"))
+        .unwrap_or_else(|| panic!("no lic:bare in:\n{stdout}"));
+    for column in [
+        "GHSA-test-0001 (CVE-2026-0001)",
+        "high",
+        "  2  ",
+        "Bare is unsafe",
+    ] {
+        assert!(line.contains(column), "{column}: {line}");
+    }
+    assert!(!stdout.contains("lic:child"), "{stdout}");
+    assert!(
+        stderr.contains("1 advisory affects 1 of 3 dependencies"),
+        "{stderr}"
+    );
+
+    let (code, stdout, stderr) =
+        jrs_isolated(&scratch, &root, &["audit", "--ignore", "cve-2026-0001"]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stdout.is_empty(), "{stdout}");
+    assert!(
+        stderr.contains("3 dependencies, no known vulnerabilities, 1 advisory ignored"),
+        "{stderr}"
+    );
+}
+
 #[test]
 fn package_sbom_writes_the_runtime_graph_as_cyclonedx() {
     let _toolchain = require_jdk!();

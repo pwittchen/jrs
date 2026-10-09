@@ -36,8 +36,8 @@ backing it with evidence and for aiming the work at the people it fits.
    and `go.mod`, and have nobody who owns a Gradle build.
 4. **Builds with supply-chain requirements.** A lockfile, checksums,
    reproducible jars and no build scripts are auditable by reading two files.
-   `jrs package --sbom`, `jrs licenses` and a vulnerability audit
-   (section 5) complete the picture.
+   `jrs package --sbom`, `jrs licenses` and `jrs audit` complete the
+   picture.
 5. **Coding agents.** A declarative TOML manifest, `jrs add` and `jrs
    remove`, plain output with `--progress never`, `jrs metadata` as JSON and
    a fast edit–build–test loop are what an agent needs from a build, and what
@@ -58,7 +58,7 @@ the page says what jrs does and leaves out how it compares:
 | Fast start, no daemon | No-op and incremental rebuild times against Maven and Gradle (warm daemon and `--no-daemon`) | Section 2 |
 | It builds real projects | The corpus's compatibility table | Section 1 |
 | Reproducible by default | Two builds of every example compared byte for byte in CI | The `reproducible` job in `rust.yml` |
-| Auditable supply chain | `jrs package --sbom`, `jrs licenses` | Built in |
+| Auditable supply chain | `jrs package --sbom`, `jrs licenses`, `jrs audit` | Built in |
 | Works in the IDE | The IntelliJ plugin | Section 4 |
 
 **Order of work.** The plan follows from the table: first what stops people
@@ -290,7 +290,6 @@ listed so the discussion has a home, not because they are planned.
 | TestNG | SPEC §13.7: the JUnit Platform only (Jupiter and Vintage) |
 | Version ranges | SPEC §8.2 rejects them rather than guessing |
 | Container images (Jib, Boot's `bootBuildImage`) | A layered OCI image written without Docker, pushed to a registry: a host that is not a Maven repository, registry credentials, and tar layers. `jrs package --jlink` already builds the runtime such an image would hold |
-| A vulnerability audit (`jrs audit`, OWASP Dependency-Check) | Queries a host that is not a Maven repository (OSV, GitHub advisories). `jrs.lock` holds exactly the coordinates to ask about, and `jrs outdated` already says what to upgrade to |
 | Incremental Kotlin compilation (the Kotlin Build Tools API) | `compile/incremental.rs` compiles a Java-only unit file by file; a Kotlin unit is compiled whole. Kotlin's own incremental compiler keeps caches of its own and wants to run in-process, which is close to the compiler-daemon non-goal |
 | Highest-wins mediation (opt-in) | SPEC §13.6 chose nearest-wins. It is Gradle's default, so migrated Gradle builds can resolve to different versions; the migration report could flag where the two strategies disagree |
 | Gradle Module Metadata (`.module` files) beyond the JVM variant | jrs reads a `.module` only to follow a Multiplatform library's root to its JVM artifact (`resolve/gradle_module.rs`). Its rich versions (`strictly`, `prefer`, `reject`, ranges), dependency constraints and capabilities do not fit nearest-wins and the no-ranges rule (SPEC §8.2); honouring them means a different resolver |

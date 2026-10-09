@@ -16,6 +16,7 @@ use std::time::{Duration, Instant};
 use clap::{Args, CommandFactory, Parser, Subcommand, ValueEnum};
 use rayon::prelude::*;
 
+use crate::audit::{self, Osv};
 use crate::build_cache::{self, BuildCache};
 use crate::checkers;
 use crate::compile::worker::Worker;
@@ -299,6 +300,18 @@ pub enum Command {
         /// compile-only dependencies.
         #[arg(long)]
         runtime: bool,
+    },
+
+    /// Check the resolved dependencies against the OSV vulnerability
+    /// database, and fail if any has a known advisory.
+    Audit {
+        /// Only what the program runs with and a package ships: no test or
+        /// compile-only dependencies.
+        #[arg(long)]
+        runtime: bool,
+        /// Accept an advisory, by its ID or an alias (`GHSA-…`, `CVE-…`).
+        #[arg(long, value_name = "ID")]
+        ignore: Vec<String>,
     },
 
     /// Add dependencies to jrs.toml, at their newest release unless a version
@@ -741,6 +754,7 @@ fn dispatch(cli: &Cli, ui: &Ui) -> Result<i32> {
         Command::Verify => session.verify_command(),
         Command::Outdated => session.outdated_command(),
         Command::Licenses { runtime } => session.licenses_command(*runtime),
+        Command::Audit { runtime, ignore } => session.audit_command(*runtime, ignore),
         Command::Metadata { no_deps } => session.metadata_command(*no_deps),
         Command::Fetch { sources } => session.fetch_command(*sources),
         Command::Init { .. }
@@ -3202,6 +3216,136 @@ impl<'a> Session<'a> {
         Ok(exit::SUCCESS)
     }
 
+    fn audit_command(&self, runtime: bool, ignore: &[String]) -> Result<i32> {
+        let resolution = self.dependencies(false)?;
+        for l in &resolution.local {
+            if !runtime || l.classpath.runs() {
+                self.ui.warn(format!(
+                    "the local jar `{}` has no coordinate to audit",
+                    l.name
+                ));
+            }
+        }
+        // A classifier's jar shares its version's advisories: ask once.
+        let mut seen = HashSet::new();
+        let packages: Vec<&resolve::ResolvedPackage> = resolution
+            .packages
+            .iter()
+            .filter(|p| p.packaging != "pom" && (!runtime || p.classpath.runs()))
+            .filter(|p| seen.insert((&p.coord.group, &p.coord.artifact, &p.coord.version)))
+            .collect();
+        if packages.is_empty() {
+            self.ui
+                .phase("Finished", "there are no dependencies to audit");
+            return Ok(exit::SUCCESS);
+        }
+        let coords: Vec<Coord> = packages
+            .iter()
+            .map(|p| Coord::new(&p.coord.group, &p.coord.artifact, &p.coord.version))
+            .collect();
+        let found = self.advisories_of(&coords)?;
+
+        let mut rows = Vec::new();
+        let mut affected = 0;
+        let mut ignored = 0;
+        let mut used = vec![false; ignore.len()];
+        for ((p, c), advisories) in packages.iter().zip(&coords).zip(found) {
+            let mut hit = false;
+            for advisory in advisories {
+                if let Some(i) = ignore.iter().position(|name| advisory.is_named(name)) {
+                    used[i] = true;
+                    ignored += 1;
+                    self.ui
+                        .verbose(format!("{} in {c}: ignored", advisory.label()));
+                    continue;
+                }
+                hit = true;
+                rows.push([
+                    format!("{c}{}", classpath_suffix(p.classpath)),
+                    advisory.label(),
+                    advisory.severity.clone().unwrap_or_else(|| "-".into()),
+                    advisory.fixed_after(&c.version).unwrap_or("-").to_string(),
+                    advisory.summary.clone(),
+                ]);
+            }
+            affected += usize::from(hit);
+        }
+        for (name, used) in ignore.iter().zip(used) {
+            if !used {
+                self.ui.warn(format!(
+                    "`--ignore {name}` matches no advisory of any dependency"
+                ));
+            }
+        }
+        let ignored = match ignored {
+            0 => String::new(),
+            1 => ", 1 advisory ignored".to_string(),
+            n => format!(", {n} advisories ignored"),
+        };
+        if rows.is_empty() {
+            self.ui.phase(
+                "Finished",
+                format!(
+                    "{} dependencies, no known vulnerabilities{ignored}",
+                    coords.len()
+                ),
+            );
+            return Ok(exit::SUCCESS);
+        }
+
+        let header =
+            ["dependency", "advisory", "severity", "fixed in", "summary"].map(String::from);
+        self.ui.suspend();
+        for line in columns(std::iter::once(&header).chain(&rows)) {
+            self.ui.println_out(line);
+        }
+        let advisories = if rows.len() == 1 {
+            "1 advisory affects".to_string()
+        } else {
+            format!("{} advisories affect", rows.len())
+        };
+        Err(JrsError::build(format!(
+            "{advisories} {affected} of {} dependencies{ignored}\n\n\
+             upgrade to a fixed version (`jrs tree --why <artifact>` shows what \
+             brings one in), or pass `--ignore <ID>` for an advisory that does not apply",
+            coords.len()
+        )))
+    }
+
+    /// The advisories the OSV API (SPEC §8.12) knows for each of `coords`.
+    fn advisories_of(&self, coords: &[Coord]) -> Result<Vec<Vec<audit::Advisory>>> {
+        let url = self
+            .config
+            .audit_url
+            .as_deref()
+            .unwrap_or(audit::DEFAULT_URL);
+        let osv = Osv::new(url, self.config.proxy.as_ref())?;
+        self.ui.phase(
+            "Auditing",
+            format!("{} dependencies against {url}", coords.len()),
+        );
+        let scope = self
+            .ui
+            .spinner("Auditing", format!("{} dependencies", coords.len()));
+        let found = osv.query(coords).and_then(|ids| {
+            let wanted: Vec<(String, String)> = coords
+                .iter()
+                .zip(&ids)
+                .flat_map(|(c, ids)| {
+                    ids.iter()
+                        .map(move |id| (id.clone(), format!("{}:{}", c.group, c.artifact)))
+                })
+                .collect();
+            let mut advisories = osv.advisories(&wanted, self.jobs)?.into_iter();
+            Ok(ids
+                .iter()
+                .map(|ids| advisories.by_ref().take(ids.len()).collect())
+                .collect())
+        });
+        scope.finish();
+        found
+    }
+
     /// The licences each of `packages` declares, by its POM or the nearest
     /// parent's, fetched `jobs` at a time.
     fn licenses_of(
@@ -5110,6 +5254,30 @@ fn classpath_suffix(classpath: Classpath) -> &'static str {
         Classpath::Runtime => " (runtime-only)",
         Classpath::Compile => "",
     }
+}
+
+/// Rows as left-aligned columns two spaces apart, the last one unpadded.
+fn columns<'a, const N: usize>(rows: impl Iterator<Item = &'a [String; N]> + Clone) -> Vec<String> {
+    let widths: Vec<usize> = (0..N)
+        .map(|i| {
+            rows.clone()
+                .map(|r| r[i].chars().count())
+                .max()
+                .unwrap_or(0)
+        })
+        .collect();
+    rows.map(|row| {
+        let mut line = String::new();
+        for (i, cell) in row.iter().enumerate() {
+            if i + 1 < N {
+                let _ = write!(line, "{cell:<w$}  ", w = widths[i]);
+            } else {
+                line.push_str(cell);
+            }
+        }
+        line.trim_end().to_string()
+    })
+    .collect()
 }
 
 /// A local jar as `jrs tree` draws it: its name, then the path it is at.

@@ -115,6 +115,7 @@ src/
 ├── obfuscate.rs       --obfuscate: ProGuard over the assembled jar, by config file
 ├── relocate.rs        [package.relocate]: a fat jar's packages moved, constant pools rewritten
 ├── sbom.rs            --sbom: the runtime graph as a CycloneDX document
+├── audit.rs           `jrs audit`: the graph's coordinates against the OSV API
 ├── runner.rs          `jrs run`'s command line: debugger, java agents, jvm-args
 ├── selfupdate.rs      `jrs self check|update`: GitHub releases, checksum, binary swap
 ├── task.rs            [tasks] and [hooks]: plan, cycles, placeholders, freshness
@@ -230,7 +231,8 @@ What the layering buys:
            ▼
          session.<command>()           build · test · run · package · doc · task
            │                           clean · tree · classpath · update
-           │                           verify · outdated · metadata · fetch
+           │                           verify · outdated · licenses · audit
+           │                           metadata · fetch
            ▼
          Result<i32>
            ├── Ok(code) ─────────────────────────────────────────────────► code
@@ -898,6 +900,9 @@ that declares any, `jobs` at a time) and its checksum (`jrs.lock`'s pin, or
 the jar's SHA-256), and `sbom::cyclonedx` turns them and the graph's edges
 into a `json::Json` document — CycloneDX 1.5, no timestamp, so the same
 inputs give the same bytes. `jrs licenses` reads the licences the same way.
+`jrs audit` sends the same packages' coordinates to the OSV API (`audit.rs`,
+one batch query, then each advisory `jobs` at a time) and fails on any
+advisory not named by `--ignore`.
 
 `--obfuscate` lives in `obfuscate.rs` and runs last, over the assembled jar, so
 it composes with the merge rules above instead of redoing them. ProGuard is

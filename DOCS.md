@@ -595,6 +595,7 @@ for any repository.
 | `jrs verify` | Re-hash the cached dependency jars against the checksums in `jrs.lock`. |
 | `jrs outdated` | List declared dependencies and `[managed]` versions that have newer releases. |
 | `jrs licenses [--runtime]` | List each dependency's licence, as its POM or its parent's declares it, and flag those that declare none. |
+| `jrs audit [--runtime] [--ignore <id>]...` | Check every dependency against the [OSV](https://osv.dev) vulnerability database, and fail if one has a known advisory. |
 | `jrs add <group:artifact[:version[:classifier]]>... [--dev] [--compile-only \| --runtime-only]` | Add dependencies to `jrs.toml`, at their newest release unless given a version; what `[managed]` covers goes in without one. |
 | `jrs remove <group:artifact \| name>... [--dev]` | Remove dependencies from `jrs.toml`; a local jar goes by its name. |
 | `jrs cache path` / `jrs cache prune` | Print where the cache is, or remove what no project uses. See [Dependency cache](#dependency-cache). |
@@ -689,6 +690,28 @@ the nearest parent POM's, as Maven inherits them, and warns about each
 dependency that declares none. `--runtime` leaves out test and compile-only
 dependencies, for what a package actually ships. It reads POMs only, from the
 cache when they are there; it never interprets a licence.
+
+`jrs audit` asks the [OSV](https://osv.dev) database — which carries the
+GitHub advisories and NVD's for Maven — about every package in the resolved
+graph, by the coordinate and version `jrs.lock` pins, and lists each
+advisory: the dependency, the advisory's ID with its CVE, its severity, the
+nearest version that fixes it, and its summary.
+
+```
+dependency                                  advisory                              severity  fixed in  summary
+org.apache.logging.log4j:log4j-core:2.14.1  GHSA-jfh8-c2jp-5v3q (CVE-2021-44228)  critical  2.15.0    Remote code injection in Log4j
+```
+
+It exits `1` when any advisory is found, so a CI step fails on it.
+`--ignore <id>` accepts one advisory, by its ID or an alias (`GHSA-…`,
+`CVE-…`), and can be repeated; an `--ignore` that matches nothing is warned
+about, so stale ones get noticed. `--runtime` leaves out test and
+compile-only dependencies. A local jar has no coordinate to ask about and is
+warned about. `jrs tree --why <artifact>` shows which dependency brings a
+vulnerable one in, and `[managed]` pins a transitive one to its fix. The
+request goes to `https://api.osv.dev` unless `[audit] url` in the user
+configuration, or `JRS_AUDIT_URL`, names an OSV-compatible mirror; it holds
+the coordinates of the project's dependencies and nothing else.
 
 `jrs add` and `jrs remove` edit `jrs.toml` in place, keeping its comments and
 order. An edit that jrs cannot make safely is refused, with a message saying to
@@ -856,6 +879,9 @@ password-env = "NEXUS_PASSWORD"           # or `password`, `token`, `token-env`
 [build-cache]                             # see "Build cache"
 url = "https://cache.example.com/jrs"
 push = false
+
+[audit]                                   # an OSV mirror for `jrs audit`
+url = "https://osv.example.com"
 ```
 
 - **Credentials** are sent as HTTP basic auth (`username` + `password`) or as a
@@ -875,6 +901,8 @@ push = false
   (`enabled = false`) or adds a remote one (`url`, `push`, `credentials`);
   see [Build cache](#build-cache). `JRS_BUILD_CACHE=off`,
   `JRS_BUILD_CACHE_URL` and `JRS_BUILD_CACHE_PUSH` override it.
+- **Audit**: `[audit] url` points `jrs audit` at an OSV-compatible API
+  instead of `https://api.osv.dev`; `JRS_AUDIT_URL` overrides it.
 
 A dropped connection or an HTTP 429/5xx from a repository is retried twice,
 with a backoff, before the build fails. A 404 or a 401 is believed the first
@@ -1291,7 +1319,7 @@ returns the program's.
 **Tasks run code.** `jrs build` on a freshly cloned project runs whatever its
 `[hooks]` name, as `gradle build` or `npm install` would. Read a project's
 `jrs.toml` before building it if you do not trust it. `tree`, `classpath`,
-`update`, `verify`, `outdated`, `licenses`, `add`, `remove`, `cache`, `init`,
+`update`, `verify`, `outdated`, `licenses`, `audit`, `add`, `remove`, `cache`, `init`,
 `migrate`, `completions`, `self` and `clean` never run a task, so inspecting a project with them
 is always safe.
 

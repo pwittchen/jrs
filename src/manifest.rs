@@ -1217,6 +1217,7 @@ pub const RESERVED_TASK_NAMES: &[&str] = &[
     "verify",
     "outdated",
     "licenses",
+    "audit",
     "add",
     "remove",
     "cache",

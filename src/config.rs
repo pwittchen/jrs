@@ -25,6 +25,9 @@
 //! url = "https://cache.example.com/jrs"
 //! push = false                        # CI sets true
 //! credentials = "build-cache"         # a [credentials.<name>] entry
+//!
+//! [audit]                             # SPEC §8.12
+//! url = "https://osv.example.com"     # an OSV-compatible API
 //! ```
 //!
 //! Like the manifest it is parsed by hand, so an unknown key is a warning and
@@ -87,6 +90,9 @@ pub struct Config {
     /// `[build-cache]`, with `JRS_BUILD_CACHE`, `JRS_BUILD_CACHE_URL` and
     /// `JRS_BUILD_CACHE_PUSH` applied.
     pub build_cache: BuildCacheConfig,
+    /// The OSV-compatible API `jrs audit` asks, from `audit.url` or
+    /// `JRS_AUDIT_URL`; `None` for the public one.
+    pub audit_url: Option<String>,
     pub warnings: Vec<String>,
 }
 
@@ -126,7 +132,9 @@ const TOP_KEYS: &[&str] = &[
     "credentials",
     "jdks",
     "build-cache",
+    "audit",
 ];
+const AUDIT_KEYS: &[&str] = &["url"];
 const BUILD_CACHE_KEYS: &[&str] = &["enabled", "url", "push", "credentials", "tasks"];
 const PROXY_KEYS: &[&str] = &["url", "no-proxy"];
 const CREDENTIAL_KEYS: &[&str] = &["username", "password", "password-env", "token", "token-env"];
@@ -270,6 +278,13 @@ impl Config {
         }
         if let Some(push) = env("JRS_BUILD_CACHE_PUSH") {
             config.build_cache.push = matches!(push.to_ascii_lowercase().as_str(), "true" | "1");
+        }
+
+        if let Some(value) = table.get("audit") {
+            config.audit_url = parse_audit(value, &shown, &fail, &mut config.warnings)?;
+        }
+        if let Some(url) = env("JRS_AUDIT_URL") {
+            config.audit_url = Some(url.trim_end_matches('/').to_string());
         }
 
         Ok(config)
@@ -431,6 +446,26 @@ fn parse_build_cache(
         credentials: text("credentials")?,
         tasks: flag("tasks", false)?,
     })
+}
+
+/// `[audit]`: the OSV-compatible API `jrs audit` asks (SPEC §8.12).
+fn parse_audit(
+    value: &toml::Value,
+    shown: &str,
+    fail: &dyn Fn(String) -> JrsError,
+    warnings: &mut Vec<String>,
+) -> Result<Option<String>> {
+    let t = value
+        .as_table()
+        .ok_or_else(|| fail("`audit` must be a table".into()))?;
+    warn_unknown(t, AUDIT_KEYS, "audit.", shown, warnings);
+    t.get("url")
+        .map(|url| {
+            url.as_str()
+                .map(|u| u.trim_end_matches('/').to_string())
+                .ok_or_else(|| fail("`audit.url` must be a URL string".into()))
+        })
+        .transpose()
 }
 
 fn string_list(t: &toml::Table, key: &str) -> std::result::Result<Vec<String>, ()> {
@@ -633,6 +668,17 @@ token = "ghp_x"
             Some(Credentials::Bearer("t".into()))
         );
         assert_eq!(config.credentials_for("unknown", &no_env), None);
+    }
+
+    #[test]
+    fn the_audit_api_is_the_public_one_unless_configured_and_the_environment_wins() {
+        assert_eq!(parse("").unwrap().audit_url, None);
+        let config = parse("[audit]\nurl = 'https://osv.example.com/'").unwrap();
+        assert_eq!(config.audit_url.as_deref(), Some("https://osv.example.com"));
+        let env = |name: &str| (name == "JRS_AUDIT_URL").then(|| "http://localhost:1".to_string());
+        let config = Config::parse("[audit]\nurl = 'https://osv.example.com'", None, &env).unwrap();
+        assert_eq!(config.audit_url.as_deref(), Some("http://localhost:1"));
+        assert!(parse("[audit]\nurl = 1").is_err());
     }
 
     #[test]

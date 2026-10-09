@@ -1163,6 +1163,7 @@ checksum = "sha1:…"</pre>
     <tr><td><a href="#cmd-update"><code>update</code></a></td><td>Re-resolve and rewrite <code>jrs.lock</code>.</td></tr>
     <tr><td><a href="#cmd-outdated"><code>outdated</code></a></td><td>List dependencies with newer releases.</td></tr>
     <tr><td><a href="#cmd-licenses"><code>licenses</code></a></td><td>List each dependency's licence.</td></tr>
+    <tr><td><a href="#cmd-audit"><code>audit</code></a></td><td>Check dependencies for known vulnerabilities.</td></tr>
     <tr><td><a href="#cmd-verify"><code>verify</code></a></td><td>Re-hash cached jars against <code>jrs.lock</code>.</td></tr>
     <tr><td><a href="#cmd-fetch"><code>fetch</code></a></td><td>Download everything a build needs, without building.</td></tr>
     <tr><td><a href="#cmd-metadata"><code>metadata</code></a></td><td>Print the project model as JSON.</td></tr>
@@ -1528,6 +1529,35 @@ jrs remove org.assertj:assertj-core --dev</pre>
   </tbody>
 </table>
 <p>For a machine-readable list, see <a href="#packaging-software-bill-of-materials"><code>jrs package --sbom</code></a>.</p>
+</section>
+
+<section id="cmd-audit">
+<h2><code>jrs audit</code></h2>
+<pre data-lang="plain">jrs audit [--runtime] [--ignore ID]...</pre>
+<p>
+  Asks the <a href="https://osv.dev">OSV</a> database, which carries the GitHub advisories and
+  NVD's for Maven, about every dependency in the resolved graph, by the coordinate and version
+  <code>jrs.lock</code> pins, and lists each advisory: the dependency, the advisory's ID with its
+  CVE, its severity, the nearest version that fixes it, and its summary.
+</p>
+<pre data-lang="plain">dependency                                  advisory                              severity  fixed in  summary
+org.apache.logging.log4j:log4j-core:2.14.1  GHSA-jfh8-c2jp-5v3q (CVE-2021-44228)  critical  2.15.0    Remote code injection in Log4j</pre>
+<p>
+  It exits <code>1</code> when any advisory is found, so a CI step fails on it.
+  <code>jrs tree --why &lt;artifact&gt;</code> shows which dependency brings a vulnerable one in,
+  and <code>[managed]</code> pins a transitive one to its fix. A local jar has no coordinate to
+  ask about and is warned about. The request holds the coordinates of the project's dependencies
+  and nothing else; it goes to <code>https://api.osv.dev</code> unless <code>[audit] url</code> in the
+  <a href="#user-config">user configuration</a>, or <code>JRS_AUDIT_URL</code>, names an
+  OSV-compatible mirror.
+</p>
+<table>
+  <thead><tr><th>Flag</th><th>Effect</th></tr></thead>
+  <tbody>
+    <tr><td><code>--runtime</code></td><td>Leave out test and compile-only dependencies, for what a package actually ships.</td></tr>
+    <tr><td><code>--ignore ID</code></td><td>Accept one advisory, by its ID or an alias (<code>GHSA-…</code>, <code>CVE-…</code>). Repeatable; one that matches nothing is warned about.</td></tr>
+  </tbody>
+</table>
 </section>
 
 <section id="cmd-verify">
@@ -2596,7 +2626,7 @@ env = { JDK_JAVA_OPTIONS = "--add-exports=jdk.compiler/com.sun.tools.javac.api=A
     as <code>gradle build</code> or <code>npm install</code> would. Read a project's
     <code>jrs.toml</code> before building it if you do not trust it. <code>tree</code>,
     <code>classpath</code>, <code>update</code>, <code>verify</code>, <code>outdated</code>,
-    <code>licenses</code>, <code>add</code>, <code>remove</code>, <code>cache</code>, <code>init</code>,
+    <code>licenses</code>, <code>audit</code>, <code>add</code>, <code>remove</code>, <code>cache</code>, <code>init</code>,
     <code>migrate</code>, <code>completions</code>, <code>self</code> and <code>clean</code> never run a task, so
     inspecting a project with them is always safe.
   </p>
@@ -2748,7 +2778,10 @@ password-env = "NEXUS_PASSWORD"           # or password, token, token-env
 
 [build-cache]                             # see Build cache
 url = "https://cache.example.com/jrs"
-push = false</pre>
+push = false
+
+[audit]                                   # an OSV mirror for jrs audit
+url = "https://osv.example.com"</pre>
 
 <h3>Credentials</h3>
 <p>
@@ -2793,6 +2826,12 @@ export JRS_REPO_MY_REPO_TOKEN=…          # for a repository named my-repo</pre
   remote one (<code>url</code>, <code>push</code>, <code>credentials</code>). See
   <a href="#build-cache">Build cache</a>.
 </p>
+
+<h3>Audit</h3>
+<p>
+  <code>[audit] url</code> points <a href="#cmd-audit"><code>jrs audit</code></a> at an
+  OSV-compatible API instead of <code>https://api.osv.dev</code>.
+</p>
 </section>
 
 <section id="ci">
@@ -2805,6 +2844,7 @@ export JRS_REPO_MY_REPO_TOKEN=…          # for a repository named my-repo</pre
   <li><strong>Output adapts by itself.</strong> Animation is off whenever <code>CI</code>, <code>GITHUB_ACTIONS</code>, <code>GITLAB_CI</code>, <code>TRAVIS</code>, <code>CIRCLECI</code>, <code>BUILDKITE</code>, <code>TEAMCITY_VERSION</code> or <code>JENKINS_URL</code> is set, or stderr is not a terminal.</li>
   <li><strong>Collect reports</strong> from <code>target/test-reports</code> (JUnit XML and <code>index.html</code>) and <code>target/coverage</code>.</li>
   <li><strong>Shard a long suite</strong> over several jobs with <code>jrs test --shard &lt;i&gt;/&lt;n&gt;</code>; see <a href="#testing-sharding-across-machines">Sharding across machines</a>.</li>
+  <li><strong>Gate on vulnerabilities</strong> with <code>jrs audit</code>, which fails on a known advisory; <code>--ignore</code> accepts one that does not apply.</li>
   <li><strong>Gate on coverage</strong> with <code>[test] coverage-minimum</code> and <code>jrs test --coverage</code>.</li>
   <li><strong>Keep timings</strong>: <code>--timings</code> writes <code>target/.jrs/timings.txt</code> even under <code>-q</code>.</li>
   <li><strong>Share compiled classes</strong> through a <a href="#build-cache">remote build cache</a>: CI sets <code>JRS_BUILD_CACHE_URL</code> and <code>JRS_BUILD_CACHE_PUSH=true</code>, developers only the URL.</li>
@@ -3045,6 +3085,7 @@ jrs migrate                # write jrs.toml; the original build file is untouche
     <tr><td><code>JRS_OS_CLASSIFIER</code></td><td class="wrap">The classifier <code>{os-classifier}</code> stands for, instead of the host's, to package for another platform.</td></tr>
     <tr><td><code>JRS_BUILD_CACHE</code></td><td class="wrap"><code>off</code> turns the build cache off.</td></tr>
     <tr><td><code>JRS_BUILD_CACHE_URL</code>, <code>JRS_BUILD_CACHE_PUSH</code></td><td class="wrap">The remote build cache, and whether to write to it (<code>true</code> or <code>1</code>). They override <code>[build-cache]</code>.</td></tr>
+    <tr><td><code>JRS_AUDIT_URL</code></td><td class="wrap">The OSV-compatible API <code>jrs audit</code> asks. It overrides <code>[audit] url</code>.</td></tr>
     <tr><td><code>JRS_REPO_&lt;NAME&gt;_USERNAME</code><br /><code>JRS_REPO_&lt;NAME&gt;_PASSWORD</code><br /><code>JRS_REPO_&lt;NAME&gt;_TOKEN</code></td><td class="wrap">Credentials for the repository named <code>&lt;name&gt;</code>, upper-cased with other characters as <code>_</code>. They override the configuration file.</td></tr>
     <tr><td><code>HTTPS_PROXY</code>, <code>HTTP_PROXY</code>, <code>ALL_PROXY</code>, <code>NO_PROXY</code></td><td class="wrap">The proxy, when the configuration has no <code>[proxy]</code>.</td></tr>
     <tr><td><code>XDG_CACHE_HOME</code>, <code>XDG_CONFIG_HOME</code></td><td class="wrap">Base directories for the cache and configuration on Unix.</td></tr>

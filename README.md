@@ -61,7 +61,8 @@ Android. The longer case, and where jrs is not the right choice, is at
   JVMs, sharding across CI machines, retries, reports and JaCoCo coverage
 - Plain, portable and fat jars, distributions, `jlink` images, `jpackage`
   installers, GraalVM native executables and ProGuard obfuscation
-- A CycloneDX SBOM beside the jar, and a licence report
+- A CycloneDX SBOM beside the jar, a licence report, and a vulnerability
+  audit against the OSV database
 - User-defined tasks and lifecycle hooks, with Java tools from Maven Central:
   formatters and checkers such as google-java-format, ktfmt, Checkstyle, PMD
   and SpotBugs need no plugin
