@@ -57,10 +57,14 @@ fn compile_main(manifest: &Manifest, toolchain: &Toolchain, classpath: Vec<PathB
         foreign: None,
         main_api: None,
         share_dir: None,
+        build_cache: None,
+        worker: None,
     };
     match compile::compile(toolchain, &unit, &silent_ui()).unwrap() {
         compile::Outcome::Compiled { classes, .. } => classes,
-        compile::Outcome::UpToDate => panic!("a fresh output directory cannot be up to date"),
+        compile::Outcome::UpToDate | compile::Outcome::Restored { .. } => {
+            panic!("a fresh output directory with no build cache is compiled")
+        }
     }
 }
 
@@ -198,6 +202,8 @@ fn a_second_build_is_up_to_date_and_a_touched_source_is_not() {
         foreign: None,
         main_api: None,
         share_dir: None,
+        build_cache: None,
+        worker: None,
     };
 
     compile::compile(&toolchain, &unit(), &silent_ui()).unwrap();
@@ -257,6 +263,8 @@ fn tests_recompile_when_the_main_api_changes_and_only_then() {
         foreign: None,
         main_api: None,
         share_dir: None,
+        build_cache: None,
+        worker: None,
     };
     let main = || unit("main", &calc, classes.clone(), Vec::new());
     // As `jrs test` builds it: the main classes' API, taken after main built.
@@ -367,6 +375,8 @@ fn a_compilation_error_fails_the_build_and_leaves_no_fingerprint() {
         foreign: None,
         main_api: None,
         share_dir: None,
+        build_cache: None,
+        worker: None,
     };
     let error = compile::compile(&toolchain, &unit, &silent_ui()).unwrap_err();
     assert!(error.to_string().contains("compilation failed"), "{error}");
@@ -392,6 +402,8 @@ fn java_unit(toolchain: &Toolchain, root: &Path, out: &str) -> CompileUnit {
         foreign: None,
         main_api: None,
         share_dir: None,
+        build_cache: None,
+        worker: None,
     }
 }
 
@@ -403,7 +415,7 @@ fn rebuild(toolchain: &Toolchain, root: &Path) -> Result<usize, jrs::JrsError> {
         &silent_ui(),
     )? {
         compile::Outcome::Compiled { sources, .. } => Ok(sources),
-        compile::Outcome::UpToDate => Ok(0),
+        compile::Outcome::UpToDate | compile::Outcome::Restored { .. } => Ok(0),
     }
 }
 
@@ -809,6 +821,11 @@ fn jrs(root: &Path, args: &[&str]) -> (i32, String, String) {
         root.display().to_string(),
     ];
     argv.extend(args.iter().map(ToString::to_string));
+    // In process, jrs uses the user's own cache: these tests' identical
+    // projects must not restore each other's classes from its build cache.
+    if matches!(args.first(), Some(&("build" | "test" | "run" | "package"))) {
+        argv.insert(4, "--no-build-cache".to_string());
+    }
     let code = cli::run_with(argv, &ui);
     (code, capture.stdout(), capture.stderr())
 }
@@ -1502,6 +1519,316 @@ fn jrs_isolated(scratch: &Scratch, root: &Path, args: &[&str]) -> (i32, String, 
     )
 }
 
+/// `jrs build --watch` keeps one `javac` worker for the session: three
+/// edits, three rebuilds, one worker started.
+#[test]
+fn a_watch_session_compiles_every_rebuild_in_one_javac_worker() {
+    use std::io::BufRead as _;
+    let _toolchain = require_jdk!();
+    let scratch = Scratch::new("watch-worker");
+    let root = hello_project(&scratch).root;
+    let _ = std::fs::remove_dir_all(root.join("target"));
+    /// Stops the session however the test ends: a watch never stops itself.
+    struct Session(std::process::Child);
+    impl Drop for Session {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+    let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_jrs"))
+        .arg("--manifest-path")
+        .arg(&root)
+        .args([
+            "--progress",
+            "never",
+            "--color",
+            "never",
+            "-v",
+            "build",
+            "--watch",
+        ])
+        .env("JRS_CACHE_DIR", scratch.join("jrs-cache"))
+        .env("JRS_CONFIG", scratch.join("no-config.toml"))
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let stderr = child.stderr.take().unwrap();
+    let session = Session(child);
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        for line in std::io::BufReader::new(stderr)
+            .lines()
+            .map_while(Result::ok)
+        {
+            if tx.send(line).is_err() {
+                break;
+            }
+        }
+    });
+    let mut seen = Vec::new();
+    let wait_for_watching = |seen: &mut Vec<String>| loop {
+        match rx.recv_timeout(std::time::Duration::from_secs(60)) {
+            Ok(line) => {
+                let watching = line.contains("Watching for changes");
+                seen.push(line);
+                if watching {
+                    return;
+                }
+            }
+            Err(e) => panic!("no rebuild ({e}):\n{}", seen.join("\n")),
+        }
+    };
+    wait_for_watching(&mut seen);
+    let greeter = root.join("src/main/java/com/example/Greeter.java");
+    let source = std::fs::read_to_string(&greeter).unwrap();
+    for edit in 1..=3 {
+        // The watcher pictures the tree just after it says it is watching.
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        let mark = "!".repeat(edit);
+        std::fs::write(&greeter, format!("{source}\n// edit {mark}\n")).unwrap();
+        wait_for_watching(&mut seen);
+    }
+    drop(session);
+    let transcript = seen.join("\n");
+    let compiles = seen
+        .iter()
+        .filter(|l| l.contains("Compiling hello"))
+        .count();
+    assert_eq!(compiles, 4, "{transcript}");
+    let started = seen
+        .iter()
+        .filter(|l| l.contains("started a javac worker"))
+        .count();
+    assert_eq!(started, 1, "{transcript}");
+    let served = seen
+        .iter()
+        .filter(|l| l.contains("javac worker (pid ") && l.contains("): @"))
+        .count();
+    assert_eq!(served, 4, "{transcript}");
+}
+
+// ---- the build cache ---------------------------------------------------------
+
+/// Run the jrs binary against `root` with the shared cache at `cache` and
+/// the user configuration at `config`.
+fn jrs_with(cache: &Path, config: &Path, root: &Path, args: &[&str]) -> (i32, String, String) {
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_jrs"))
+        .arg("--manifest-path")
+        .arg(root)
+        .args([
+            "--progress",
+            "never",
+            "--color",
+            "never",
+            "--charset",
+            "ascii",
+        ])
+        .args(args)
+        .env("JRS_CACHE_DIR", cache)
+        .env("JRS_CONFIG", config)
+        .env_remove("JRS_BUILD_CACHE")
+        .env_remove("JRS_BUILD_CACHE_URL")
+        .env_remove("JRS_BUILD_CACHE_PUSH")
+        .output()
+        .unwrap();
+    (
+        output.status.code().unwrap_or(-1),
+        String::from_utf8_lossy(&output.stdout).into_owned(),
+        String::from_utf8_lossy(&output.stderr).into_owned(),
+    )
+}
+
+/// A checkout of the cached project at `scratch/<name>`, a copy of the
+/// first one when there is one.
+fn checkout(scratch: &Scratch, name: &str) -> PathBuf {
+    let root = scratch.join(name);
+    if name == "a" {
+        scratch.write(
+            "a/jrs.toml",
+            "[project]\nname = \"cached\"\nversion = \"1.0.0\"\nmain-class = \"com.example.App\"\n\n\
+             [dependencies]\nshouter = { path = \"libs/shouter.jar\" }\n",
+        );
+        scratch.write("a/src/main/java/com/example/App.java", SHOUTING_APP);
+        scratch.write("a/src/main/resources/app.properties", "greeting=hi\n");
+    } else {
+        common::copy_dir(&scratch.join("a"), &root);
+        let _ = std::fs::remove_dir_all(root.join("target"));
+    }
+    root
+}
+
+/// The build cache entries under `cache`.
+fn entries_in(cache: &Path) -> Vec<PathBuf> {
+    project::find_all(&cache.join("build"))
+        .unwrap()
+        .into_iter()
+        .filter(|p| p.extension().is_some_and(|e| e == "zip"))
+        .collect()
+}
+
+/// Two checkouts of one project share their compiled classes through the
+/// build cache, byte for byte; what changes the inputs misses; a corrupt
+/// entry is compiled over; a `file://` remote serves a machine with an empty
+/// cache, and is written only by one that pushes.
+#[test]
+fn the_build_cache_restores_a_second_checkout_byte_for_byte() {
+    let toolchain = require_jdk!();
+    let scratch = Scratch::new("build-cache");
+    let cache = scratch.join("jrs-cache");
+    let no_config = scratch.join("no-config.toml");
+    let a = checkout(&scratch, "a");
+    class_jar(
+        &toolchain,
+        &scratch,
+        "org.example.Shouter",
+        SHOUTER,
+        &a.join("libs/shouter.jar"),
+    );
+    let jrs = |root: &Path, args: &[&str]| jrs_with(&cache, &no_config, root, args);
+
+    let (code, _, stderr) = jrs(&a, &["build"]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stderr.contains("Compiling cached v1.0.0"), "{stderr}");
+    assert_eq!(entries_in(&cache).len(), 1, "the compile was stored");
+
+    let b = checkout(&scratch, "b");
+    let (code, _, stderr) = jrs(&b, &["build"]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(
+        stderr.contains("Restored cached v1.0.0 (from the build cache)"),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("Compiling"), "{stderr}");
+    assert_eq!(
+        tree_of(&a.join("target/classes")),
+        tree_of(&b.join("target/classes")),
+        "the classes and the resource, byte for byte"
+    );
+    let entry = &entries_in(&cache)[0];
+    let names = zip_names(entry);
+    assert_eq!(names, ["com/example/App.class"], "resources are not stored");
+    let (code, stdout, stderr) = jrs(&b, &["run"]);
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(stdout.trim(), "HI!");
+    assert!(stderr.contains("Fresh cached v1.0.0"), "{stderr}");
+    // A restored unit has an index: a body change compiles one source.
+    let app = b.join("src/main/java/com/example/App.java");
+    let source = std::fs::read_to_string(&app).unwrap();
+    std::fs::write(&app, source.replace("\"hi\"", "\"hey\"")).unwrap();
+    let (code, _, stderr) = jrs(&b, &["-v", "build"]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(
+        stderr.contains("Compiling cached v1.0.0"),
+        "a changed source misses: {stderr}"
+    );
+    assert_eq!(entries_in(&cache).len(), 2);
+
+    // A flag, or another jar, misses too.
+    let c = checkout(&scratch, "c");
+    let manifest = c.join("jrs.toml");
+    let text = std::fs::read_to_string(&manifest).unwrap();
+    std::fs::write(
+        &manifest,
+        format!("{text}\n[java]\njavac-args = [\"-g:none\"]\n"),
+    )
+    .unwrap();
+    let (code, _, stderr) = jrs(&c, &["build"]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(
+        stderr.contains("Compiling cached v1.0.0"),
+        "another flag: {stderr}"
+    );
+    std::fs::write(&manifest, &text).unwrap();
+    class_jar(
+        &toolchain,
+        &scratch,
+        "org.example.Shouter",
+        &format!("{SHOUTER}\n    public static int extra() {{ return 1; }}"),
+        &c.join("libs/shouter.jar"),
+    );
+    let (code, _, stderr) = jrs(&c, &["update"]);
+    assert_eq!(code, 0, "{stderr}");
+    let (code, _, stderr) = jrs(&c, &["build"]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(
+        stderr.contains("Compiling cached v1.0.0"),
+        "another jar: {stderr}"
+    );
+
+    // A corrupt entry is a miss, and the compile writes it again.
+    std::fs::write(entry, "not a zip").unwrap();
+    let d = checkout(&scratch, "d");
+    let (code, _, stderr) = jrs(&d, &["build", "--no-build-cache"]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stderr.contains("Compiling"), "{stderr}");
+    assert_eq!(
+        std::fs::read(entry).unwrap(),
+        b"not a zip",
+        "--no-build-cache stores nothing"
+    );
+    let (code, _, stderr) = jrs(&d, &["clean"]);
+    assert_eq!(code, 0, "{stderr}");
+    let (code, _, stderr) = jrs(&d, &["build"]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stderr.contains("Compiling cached v1.0.0"), "{stderr}");
+    assert_eq!(zip_names(entry), ["com/example/App.class"], "stored again");
+
+    // `--verify-cache` compiles and compares.
+    let (code, _, stderr) = jrs(&d, &["build", "--verify-cache"]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stderr.contains("Compiling cached v1.0.0"), "{stderr}");
+    let forged = jrs::build_cache::zip(&vec![(
+        "com/example/App.class".to_string(),
+        b"other bytes".to_vec(),
+    )])
+    .unwrap();
+    std::fs::write(entry, forged).unwrap();
+    let (code, _, stderr) = jrs(&d, &["build", "--verify-cache"]);
+    assert_eq!(code, 1, "{stderr}");
+    assert!(
+        stderr.contains("differs from what was compiled: `com/example/App.class`"),
+        "{stderr}"
+    );
+
+    // A remote: written by the machine that pushes, read by the others.
+    let remote = scratch.join("remote");
+    std::fs::create_dir_all(&remote).unwrap();
+    let url = resolve::repo::file_url(&remote);
+    let pusher = scratch.write(
+        "pusher.toml",
+        &format!("[build-cache]\nurl = \"{url}\"\npush = true\n"),
+    );
+    let reader = scratch.write("reader.toml", &format!("[build-cache]\nurl = \"{url}\"\n"));
+    let e = checkout(&scratch, "e");
+    let (code, _, stderr) = jrs_with(&scratch.join("reader-cache"), &reader, &e, &["build"]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stderr.contains("Compiling cached v1.0.0"), "{stderr}");
+    assert_eq!(
+        std::fs::read_dir(&remote).unwrap().count(),
+        0,
+        "never written without push"
+    );
+    let (code, _, stderr) = jrs_with(
+        &scratch.join("pusher-cache"),
+        &pusher,
+        &e,
+        &["build", "--verify-cache"],
+    );
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(std::fs::read_dir(&remote).unwrap().count(), 1, "pushed");
+    let f = checkout(&scratch, "f");
+    let (code, _, stderr) = jrs_with(&scratch.join("empty-cache"), &reader, &f, &["build"]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stderr.contains("Restored cached v1.0.0"), "{stderr}");
+    assert_eq!(
+        entries_in(&scratch.join("empty-cache")).len(),
+        1,
+        "kept locally"
+    );
+}
+
 /// Compile one class, `class` (fully qualified) holding `body`, into a jar at
 /// `jar`.
 fn class_jar(toolchain: &Toolchain, scratch: &Scratch, class: &str, body: &str, jar: &Path) {
@@ -2005,6 +2332,7 @@ fn a_local_jar_builds_runs_ships_and_is_pinned_by_its_path() {
 /// A project with the fake compilers published beside it, run through the jrs
 /// binary with a cache of its own: these tests resolve, and the fake
 /// compilers must never land in the user's cache.
+#[derive(Clone)]
 struct Polyglot {
     root: PathBuf,
     cache: PathBuf,
@@ -2717,6 +3045,7 @@ fn quiet_timings_print_nothing_but_still_write_the_file() {
             "-q",
             "build",
             "--timings",
+            "--no-build-cache",
         ],
         &ui,
     );
@@ -3416,6 +3745,179 @@ fn a_test_suite_runs_apart_from_the_tests_on_top_of_them() {
         stderr.contains("there is no test suite `nope` in jrs.toml (declared: `e2e`)"),
         "{stderr}"
     );
+}
+
+/// `test.share-classes`: the first run dumps the test JVM's archive, the
+/// next maps the launcher's classes from it, a changed class still runs its
+/// new code, and a class directory shadowing a jar keeps the usual layout.
+#[test]
+fn shared_test_classes_map_an_archive_and_still_run_new_code() {
+    let toolchain = require_jdk!();
+    let scratch = Scratch::new("tests-share-classes");
+    let p = junit_project(
+        &scratch,
+        &toolchain,
+        FAKE_LAUNCHER_6,
+        "share-classes = true\nforks = 1",
+        &[("AddTest.java", ADD_TEST)],
+    );
+    let log = scratch.join("class-load.log");
+    let manifest = p.root.join("jrs.toml");
+    let text = std::fs::read_to_string(&manifest).unwrap();
+    let logged = format!(
+        "jvm-args = ['-Xlog:class+load=info:file=\"{}\"', ",
+        log.display().to_string().replace('\\', "/")
+    );
+    std::fs::write(&manifest, text.replacen("jvm-args = [", &logged, 1)).unwrap();
+    let mapped = |log: &Path| {
+        std::fs::read_to_string(log).unwrap().lines().any(|l| {
+            l.contains("org.junit.platform.console.ConsoleLauncher ")
+                && l.contains("shared objects file")
+        })
+    };
+
+    let (code, stdout, stderr) = p.jrs(&["-v", "test"]);
+    assert_eq!(code, 0, "{stdout}\n{stderr}");
+    if !stderr.contains("test JVM: dumping the class-data archive") {
+        // A JDK without a base archive gets none, and runs as before.
+        eprintln!("SKIPPED: this JDK cannot dump a class-data archive\n{stderr}");
+        return;
+    }
+    let launch = launches(&stdout)[0];
+    assert!(launch.contains(" --class-path "), "{launch}");
+    let archives: Vec<PathBuf> = std::fs::read_dir(p.cache.join("cds"))
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .filter(|p| {
+            p.file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with("test-")
+        })
+        .collect();
+    assert_eq!(archives.len(), 1, "{archives:?}");
+
+    let (code, stdout, stderr) = p.jrs(&["-v", "test", "--all"]);
+    assert_eq!(code, 0, "{stdout}\n{stderr}");
+    assert!(
+        stderr.contains("test JVM: mapping the class-data archive"),
+        "{stderr}"
+    );
+    assert!(mapped(&log), "the launcher came from the archive");
+
+    // The project's classes are never served from the archive.
+    let calc = p.root.join("src/main/java/com/example/Calc.java");
+    let source = std::fs::read_to_string(&calc).unwrap();
+    std::fs::write(&calc, source.replace("return a + b;", "return a + b + 1;")).unwrap();
+    let (code, stdout, _) = p.jrs(&["test"]);
+    assert_eq!(code, 1, "the changed class ran: {stdout}");
+    assert!(stdout.contains("2 + 2"), "{stdout}");
+    std::fs::write(&calc, source).unwrap();
+
+    // A jar holding a class the tests patch keeps the usual layout, where
+    // the project's copy wins.
+    class_jar(
+        &toolchain,
+        &scratch,
+        "com.example.Patched",
+        "    public static String who() {\n        return \"jar\";\n    }",
+        &p.root.join("libs/patched.jar"),
+    );
+    let text = std::fs::read_to_string(&manifest).unwrap();
+    std::fs::write(
+        &manifest,
+        text.replace(
+            "[dev-dependencies]\n",
+            "[dev-dependencies]\npatched = { path = \"libs/patched.jar\" }\n",
+        ),
+    )
+    .unwrap();
+    scratch.write(
+        "app/src/test/java/com/example/Patched.java",
+        "package com.example;\n\npublic final class Patched {\n    \
+         public static String who() {\n        return \"project\";\n    }\n}\n",
+    );
+    scratch.write(
+        "app/src/test/java/com/example/PatchedTest.java",
+        "package com.example;\n\nimport org.junit.jupiter.api.Test;\n\n\
+         class PatchedTest {\n    @Test\n    void theProjectsCopyWins() {\n        \
+         if (!Patched.who().equals(\"project\")) throw new AssertionError(Patched.who());\n    \
+         }\n}\n",
+    );
+    let (code, stdout, stderr) = p.jrs(&["-v", "test"]);
+    assert_eq!(code, 0, "{stdout}\n{stderr}");
+    assert!(
+        stderr.contains("test classes not shared: `com/example/Patched.class` is in both"),
+        "{stderr}"
+    );
+    assert!(!launches(&stdout)[0].contains("--class-path"), "{stdout}");
+}
+
+/// A whole test run that passed is kept in the build cache: a second
+/// checkout of the same classes takes its reports instead of starting the
+/// JVM, `--all` runs them anyway, and a failing run is never kept.
+#[test]
+fn a_passing_run_is_taken_from_the_build_cache_by_another_checkout() {
+    let toolchain = require_jdk!();
+    let scratch = Scratch::new("tests-build-cache");
+    let p = junit_project(
+        &scratch,
+        &toolchain,
+        FAKE_LAUNCHER_6,
+        "",
+        &[("AddTest.java", ADD_TEST), ("OtherTest.java", OTHER_TEST)],
+    );
+    let (code, stdout, stderr) = p.jrs(&["test"]);
+    assert_eq!(code, 0, "{stdout}\n{stderr}");
+    assert_eq!(launches(&stdout).len(), 1);
+
+    let second = Polyglot {
+        root: scratch.join("second"),
+        ..p.clone()
+    };
+    common::copy_dir(&p.root, &second.root);
+    std::fs::remove_dir_all(second.root.join("target")).unwrap();
+    let (code, stdout, stderr) = second.jrs(&["test"]);
+    assert_eq!(code, 0, "{stdout}\n{stderr}");
+    assert!(stderr.contains("Restored tested v1.0.0"), "{stderr}");
+    assert!(
+        stderr.contains("Restored 2 test sources (from the build cache)"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("Testing 2 test classes: passed in the cached run (`--all` runs them)"),
+        "{stderr}"
+    );
+    assert!(launches(&stdout).is_empty(), "no JVM: {stdout}");
+    assert!(stderr.contains("Finished 2 tests, 2 passed"), "{stderr}");
+    assert!(
+        second
+            .root
+            .join("target/test-reports/TEST-junit-jupiter.xml")
+            .is_file()
+    );
+
+    let (code, stdout, stderr) = second.jrs(&["test", "--all"]);
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(launches(&stdout).len(), 1, "--all runs them");
+
+    // A failing run is never kept.
+    let broken = Polyglot {
+        root: scratch.join("broken"),
+        ..p.clone()
+    };
+    common::copy_dir(&p.root, &broken.root);
+    std::fs::remove_dir_all(broken.root.join("target")).unwrap();
+    scratch.write(
+        "broken/src/test/java/com/example/BrokenTest.java",
+        BROKEN_TEST,
+    );
+    let (code, _, _) = broken.jrs(&["test"]);
+    assert_eq!(code, 1);
+    std::fs::remove_dir_all(broken.root.join("target")).unwrap();
+    let (code, stdout, _) = broken.jrs(&["test"]);
+    assert_eq!(code, 1);
+    assert_eq!(launches(&stdout).len(), 1, "the failure ran again");
 }
 
 /// Every launch of the fake launcher, as the argument line it starts with.

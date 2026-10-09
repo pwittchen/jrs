@@ -81,23 +81,16 @@ pub(super) fn run(
     )
     .path(&argfile)?;
 
-    // JVM flags reach `javac`'s JVM as `-J` options, which only its command
-    // line may hold, never an argfile.
-    let quick: &[&str] = if quick { QUICK_JVM_FLAGS } else { &[] };
-    let share = unit
-        .share_dir
-        .as_deref()
-        .and_then(|dir| Share::new(dir, toolchain, "jdk.compiler", &[], &[]));
-    let output = share::run(share, CapturedOutput::ok, |shared| {
-        let mut args: Vec<String> = quick
-            .iter()
-            .map(|f| (*f).to_string())
-            .chain(shared.iter().cloned())
-            .map(|f| format!("-J{f}"))
-            .collect();
-        args.push(format!("@{}", argfile.display()));
-        run_captured(ui, &toolchain.javac, &args)
-    })?;
+    // Under `--watch`, the session's warm `javac` first; a worker that
+    // cannot answer hands the step back to a forked one.
+    let warm = unit
+        .worker
+        .as_ref()
+        .and_then(|worker| worker.compile(toolchain, &argfile, ui));
+    let output = match warm {
+        Some(output) => output,
+        None => fork(toolchain, unit, &argfile, quick, ui)?,
+    };
 
     // The live region comes down before any diagnostic reaches the terminal.
     if !output.stderr.trim().is_empty() {
@@ -110,6 +103,32 @@ pub(super) fn run(
         return Err(JrsError::build(format!("compilation failed ({what})")));
     }
     Ok(())
+}
+
+/// `javac @argfile` in a JVM of its own. JVM flags reach it as `-J`
+/// options, which only its command line may hold, never an argfile.
+fn fork(
+    toolchain: &Toolchain,
+    unit: &CompileUnit,
+    argfile: &Path,
+    quick: bool,
+    ui: &Ui,
+) -> Result<CapturedOutput> {
+    let quick: &[&str] = if quick { QUICK_JVM_FLAGS } else { &[] };
+    let share = unit
+        .share_dir
+        .as_deref()
+        .and_then(|dir| Share::new(dir, toolchain, "jdk.compiler", &[], &[]));
+    share::run(share, CapturedOutput::ok, |shared| {
+        let mut args: Vec<String> = quick
+            .iter()
+            .map(|f| (*f).to_string())
+            .chain(shared.iter().cloned())
+            .map(|f| format!("-J{f}"))
+            .collect();
+        args.push(format!("@{}", argfile.display()));
+        run_captured(ui, &toolchain.javac, &args)
+    })
 }
 
 /// One `javadoc` run over the main sources.

@@ -210,7 +210,9 @@ impl Cache {
     }
 
     /// Remove whole version directories — an artifact's jar, POM, checksums
-    /// and snapshot records go together — according to `rule`.
+    /// and snapshot records go together — according to `rule`. The build
+    /// cache's entries under `build/` go one by one, each by its own last
+    /// use; no lockfile names them, so a plain prune drops them all.
     ///
     /// # Errors
     ///
@@ -219,11 +221,17 @@ impl Cache {
     pub fn prune(&self, rule: &Prune, dry_run: bool) -> Result<Pruned> {
         let mut groups: BTreeMap<PathBuf, (u64, SystemTime)> = BTreeMap::new();
         let bookkeeping = self.root.join(".jrs");
+        let build = self.root.join("build");
         for file in crate::project::find_all(&self.root)? {
             if file.starts_with(&bookkeeping) {
                 continue;
             }
-            let Some(dir) = file.parent() else { continue };
+            let dir = if file.starts_with(&build) {
+                Some(file.as_path())
+            } else {
+                file.parent()
+            };
+            let Some(dir) = dir else { continue };
             let meta = std::fs::metadata(&file).path(&file)?;
             let used = meta
                 .accessed()
@@ -251,7 +259,11 @@ impl Cache {
                 continue;
             }
             if !dry_run {
-                std::fs::remove_dir_all(&dir).path(&dir)?;
+                if dir.is_file() {
+                    std::fs::remove_file(&dir).path(&dir)?;
+                } else {
+                    std::fs::remove_dir_all(&dir).path(&dir)?;
+                }
                 self.remove_empty_parents(&dir);
             }
             pruned.bytes += bytes;
@@ -465,6 +477,40 @@ mod tests {
             .prune(&Prune::UnusedFor(Duration::from_secs(3600)), false)
             .unwrap();
         assert!(fresh.removed.is_empty());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn build_cache_entries_are_pruned_one_by_one() {
+        let dir = temp_dir("prune-build");
+        let cache = Cache::with_root(&dir);
+        let used = dir.join("build/ab/ab12.zip");
+        let old = dir.join("build/ab/ab34.zip");
+        for entry in [&used, &old] {
+            write_atomic(entry, b"entry").unwrap();
+        }
+        let long_ago = SystemTime::now() - Duration::from_secs(30 * 24 * 60 * 60);
+        std::fs::File::options()
+            .write(true)
+            .open(&old)
+            .unwrap()
+            .set_times(
+                std::fs::FileTimes::new()
+                    .set_accessed(long_ago)
+                    .set_modified(long_ago),
+            )
+            .unwrap();
+        let pruned = cache
+            .prune(&Prune::UnusedFor(Duration::from_secs(24 * 60 * 60)), false)
+            .unwrap();
+        assert_eq!(pruned.removed, vec!["build/ab/ab34.zip".to_string()]);
+        assert!(used.is_file());
+
+        let all = cache
+            .prune(&Prune::Unreferenced(HashSet::new()), false)
+            .unwrap();
+        assert_eq!(all.removed, vec!["build/ab/ab12.zip".to_string()]);
+        assert!(!dir.join("build").exists(), "no lockfile names an entry");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

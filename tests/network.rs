@@ -140,6 +140,8 @@ fn a_project_with_dependencies_compiles_tests_and_runs_them() {
         foreign: None,
         main_api: None,
         share_dir: None,
+        build_cache: None,
+        worker: None,
     };
 
     compile::compile(

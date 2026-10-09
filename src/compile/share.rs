@@ -20,8 +20,14 @@
 //! without its own base archive, or a user who passes CDS flags of their own,
 //! gets no archive from jrs at all.
 //!
-//! The test JVM is left out: CDS refuses a classpath holding a non-empty
-//! class directory, and `target/classes` is one.
+//! The test JVM gets an archive too, when `test.share-classes` asks for one
+//! (SPEC §10.2). CDS refuses to dump a classpath holding a non-empty class
+//! directory, and lets a run append to the classpath it was dumped with, so
+//! the test JVM's `-cp` holds the jars alone and the class directories go to
+//! the launcher's own class loader. Its archive is one per project and
+//! suite, `test-<project>-<deps>.jsa`: writing a new one deletes the older
+//! ones, since a project whose dependencies change daily must not fill the
+//! cache with archives a hundred megabytes each.
 
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
@@ -48,14 +54,17 @@ const USER_FLAGS: &[&str] = &[
 
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
-/// One compiler run's use of its archive.
+/// One JVM run's use of its archive.
 #[derive(Debug)]
-pub(super) struct Share {
+pub struct Share {
     /// The JVM flags: read the archive, or dump one.
     pub flags: Vec<String>,
     /// When dumping: the temporary file, and where it goes once the run
     /// succeeded.
     dump: Option<(PathBuf, PathBuf)>,
+    /// The file-name prefix of the archives this one replaces, deleted once
+    /// it is in place: a project's older test archives.
+    replaces: Option<String>,
 }
 
 impl Share {
@@ -63,31 +72,56 @@ impl Share {
     /// tool is the program the JVM runs — `javac`'s module, a compiler's
     /// main class — and `classpath` what it is loaded from; `user_args` are
     /// the JVM flags the user gave it.
-    pub(super) fn new(
+    pub(crate) fn new(
         dir: &Path,
         toolchain: &Toolchain,
         tool: &str,
         classpath: &[PathBuf],
         user_args: &[String],
     ) -> Option<Share> {
-        if user_args
-            .iter()
-            .any(|a| USER_FLAGS.iter().any(|f| a.starts_with(f)))
-        {
-            return None;
-        }
-        let home = jdk_home(toolchain)?;
-        if !has_base_archive(&home) {
-            return None;
-        }
-        // A missing directory is fatal to a JVM asked to dump into it.
-        std::fs::create_dir_all(dir).ok()?;
+        let home = usable(dir, toolchain, user_args)?;
         let archive = dir.join(format!(
             "{}-jdk{}-{}.jsa",
             file_safe(tool),
             toolchain.version,
             key(&home, toolchain, tool, classpath)
         ));
+        Share::at(dir, archive, true, None)
+    }
+
+    /// The test JVM's archive under `dir`, or `None` when it gets none.
+    /// `project` names the project and suite, `classpath` is the JVM's own
+    /// `-cp` — jars only — and `jvm_args` its other flags, of which
+    /// `-javaagent` and `-XX:` ones change what is archived. Without `dump`
+    /// it only reads an archive that is already there: forks read one,
+    /// and none of them writes it.
+    #[must_use]
+    pub fn for_tests(
+        dir: &Path,
+        toolchain: &Toolchain,
+        project: &str,
+        classpath: &[PathBuf],
+        jvm_args: &[String],
+        dump: bool,
+    ) -> Option<Share> {
+        let home = usable(dir, toolchain, jvm_args)?;
+        let archived: Vec<&str> = jvm_args
+            .iter()
+            .filter(|a| a.starts_with("-javaagent") || a.starts_with("-XX:"))
+            .map(String::as_str)
+            .collect();
+        let tool = format!("junit\u{1}{}", archived.join("\u{1}"));
+        let prefix = format!("test-{}-", &sha256_hex(project.as_bytes())[..16]);
+        let archive = dir.join(format!(
+            "{prefix}{}.jsa",
+            key(&home, toolchain, &tool, classpath)
+        ));
+        Share::at(dir, archive, dump, Some(prefix))
+    }
+
+    /// Read `archive` if it is there, or else dump into a temporary file
+    /// beside it when `dump` allows.
+    fn at(dir: &Path, archive: PathBuf, dump: bool, replaces: Option<String>) -> Option<Share> {
         if archive.is_file() {
             return Some(Share {
                 flags: vec![
@@ -95,11 +129,16 @@ impl Share {
                     QUIET.to_string(),
                 ],
                 dump: None,
+                replaces: None,
             });
         }
+        if !dump {
+            return None;
+        }
+        let name = archive.file_name()?.to_string_lossy().into_owned();
+        sweep(dir, &name);
         let temp = dir.join(format!(
-            ".{}.{}-{}.tmp",
-            archive.file_name()?.to_string_lossy(),
+            ".{name}.{}-{}.tmp",
             std::process::id(),
             TEMP_COUNTER.fetch_add(1, Ordering::Relaxed)
         ));
@@ -112,21 +151,101 @@ impl Share {
                 QUIET.to_string(),
             ],
             dump: Some((temp, archive)),
+            replaces,
         })
+    }
+
+    /// Whether this run writes the archive rather than reading it.
+    #[must_use]
+    pub fn dumps(&self) -> bool {
+        self.dump.is_some()
+    }
+
+    /// The archive this run reads or writes.
+    #[must_use]
+    pub fn archive(&self) -> Option<&Path> {
+        match &self.dump {
+            Some((_, archive)) => Some(archive),
+            None => self
+                .flags
+                .first()
+                .and_then(|f| f.strip_prefix("-XX:SharedArchiveFile="))
+                .map(Path::new),
+        }
     }
 
     /// After the run: put a dumped archive in place if the run succeeded,
     /// and drop it otherwise. A failure here only costs the next run its
     /// archive.
-    pub(super) fn finish(self, ok: bool) {
+    pub fn finish(self, ok: bool) {
         let Some((temp, archive)) = self.dump else {
             return;
         };
         let written = std::fs::metadata(&temp).is_ok_and(|m| m.len() > 0);
         if !(ok && written && std::fs::rename(&temp, &archive).is_ok()) {
             let _ = std::fs::remove_file(&temp);
+            return;
+        }
+        let (Some(prefix), Some(dir)) = (self.replaces, archive.parent()) else {
+            return;
+        };
+        for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+            let path = entry.path();
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if path != archive
+                && name.starts_with(&prefix)
+                && path.extension().is_some_and(|e| e == "jsa")
+            {
+                let _ = std::fs::remove_file(path);
+            }
         }
     }
+}
+
+/// Delete the dumps of `archive` that a run abandoned: a `--watch`
+/// session's `javac` worker dumps only when it exits, and a session ended
+/// with ctrl-c never puts its dump in place. A temporary file a minute old
+/// is either one of those or a run still going, whose JVM writes its dump
+/// afresh at exit; either way it is not worth the disk it takes.
+fn sweep(dir: &Path, archive: &str) {
+    let prefix = format!(".{archive}.");
+    for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let abandoned = entry
+            .metadata()
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| t.elapsed().ok())
+            .is_some_and(|age| age > ABANDONED);
+        let temp = Path::new(&name).extension().is_some_and(|e| e == "tmp");
+        if name.starts_with(&prefix) && temp && abandoned {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+}
+
+/// How old a temporary dump has to be before [`sweep`] takes it for
+/// abandoned.
+const ABANDONED: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// The JDK's home, when a JVM started with `user_args` may use an archive
+/// under `dir`: the user has not taken class-data sharing into their own
+/// hands, the JDK has the base archive a dynamic one is layered on, and the
+/// directory can be created.
+fn usable(dir: &Path, toolchain: &Toolchain, user_args: &[String]) -> Option<PathBuf> {
+    if user_args
+        .iter()
+        .any(|a| USER_FLAGS.iter().any(|f| a.starts_with(f)))
+    {
+        return None;
+    }
+    let home = jdk_home(toolchain)?;
+    if !has_base_archive(&home) {
+        return None;
+    }
+    // A missing directory is fatal to a JVM asked to dump into it.
+    std::fs::create_dir_all(dir).ok()?;
+    Some(home)
 }
 
 /// Run a compiler with `share`'s flags, which `launch` puts where its JVM
@@ -138,7 +257,7 @@ impl Share {
 /// # Errors
 ///
 /// Whatever `launch` returns.
-pub(super) fn run<T>(
+pub(crate) fn run<T>(
     share: Option<Share>,
     ok: impl Fn(&T) -> bool,
     mut launch: impl FnMut(&[String]) -> crate::error::Result<T>,
@@ -389,6 +508,70 @@ mod tests {
         .unwrap();
         assert!(!ok);
         assert_eq!(runs, 1);
+    }
+
+    #[test]
+    fn a_projects_test_archive_replaces_its_older_ones_and_forks_only_read() {
+        let tree = Tree::new("tests");
+        let jdk = tree.jdk(true);
+        let dir = tree.root.join("cds");
+        let jar = tree.root.join("dep.jar");
+        std::fs::write(&jar, "one").unwrap();
+        let dump = |project: &str| {
+            let share =
+                Share::for_tests(&dir, &jdk, project, std::slice::from_ref(&jar), &[], true)
+                    .unwrap();
+            assert!(share.dumps());
+            let temp = PathBuf::from(flag(&share, "-XX:ArchiveClassesAtExit=").unwrap());
+            std::fs::write(&temp, "archive").unwrap();
+            let archive = share.archive().unwrap().to_path_buf();
+            share.finish(true);
+            archive
+        };
+        assert!(
+            Share::for_tests(&dir, &jdk, "app", std::slice::from_ref(&jar), &[], false).is_none(),
+            "a fork does not dump"
+        );
+        let first = dump("app");
+        let other = dump("another project");
+        let read =
+            Share::for_tests(&dir, &jdk, "app", std::slice::from_ref(&jar), &[], false).unwrap();
+        assert_eq!(read.archive(), Some(first.as_path()));
+
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        std::fs::write(&jar, "a new release").unwrap();
+        let second = dump("app");
+        assert_ne!(first, second);
+        assert!(!first.exists(), "the project's older archive is gone");
+        assert!(other.exists(), "another project's is not");
+
+        let agent = ["-javaagent:/x.jar".to_string()];
+        let with_agent =
+            Share::for_tests(&dir, &jdk, "app", std::slice::from_ref(&jar), &agent, true).unwrap();
+        assert!(with_agent.dumps(), "an agent changes what is archived");
+        with_agent.finish(false);
+    }
+
+    #[test]
+    fn an_abandoned_dump_is_swept_and_a_recent_one_is_not() {
+        let tree = Tree::new("sweep");
+        let jdk = tree.jdk(true);
+        let dir = tree.root.join("cds");
+        let first = Share::new(&dir, &jdk, "JavacWorker", &[], &[]).unwrap();
+        let temp = PathBuf::from(flag(&first, "-XX:ArchiveClassesAtExit=").unwrap());
+        let second = Share::new(&dir, &jdk, "JavacWorker", &[], &[]).unwrap();
+        assert!(temp.exists(), "a dump a moment old may still be written");
+        let long_ago = std::time::SystemTime::now() - std::time::Duration::from_secs(3600);
+        std::fs::File::options()
+            .write(true)
+            .open(&temp)
+            .unwrap()
+            .set_modified(long_ago)
+            .unwrap();
+        let third = Share::new(&dir, &jdk, "JavacWorker", &[], &[]).unwrap();
+        assert!(!temp.exists(), "an abandoned one is gone");
+        second.finish(false);
+        third.finish(false);
     }
 
     #[test]

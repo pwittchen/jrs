@@ -990,3 +990,95 @@ fn metadata_without_dependencies_resolves_nothing() {
     assert!(!root.join("jrs.lock").exists(), "nothing was resolved");
     assert!(!fixture.cache.exists(), "nothing was downloaded");
 }
+
+// ---- downloads in two waves -------------------------------------------------
+//
+// SPEC §8.4: on a cold cache, the main compile waits only for its own
+// classpath; the test jars download behind it.
+
+/// A project whose only dependency is a test one, so its main compile needs
+/// no jar at all.
+fn tested_project(scratch: &Scratch, fixture: &FixtureRepo) -> std::path::PathBuf {
+    scratch.write(
+        "app/jrs.toml",
+        &format!(
+            "[project]\nname = \"app\"\nversion = \"1.0.0\"\n\n\
+             [dev-dependencies]\n\"org.example:lib\" = \"1.0.0\"\n\n{}",
+            fixture.manifest_section()
+        ),
+    );
+    scratch.write(
+        "app/src/main/java/com/example/App.java",
+        "package com.example;\n\npublic class App {}\n",
+    );
+    scratch.join("app")
+}
+
+#[test]
+fn a_cold_build_downloads_the_test_jars_behind_the_compile_and_pins_them_all() {
+    let _toolchain = require_jdk!();
+    let scratch = Scratch::new("two-waves");
+    let fixture = FixtureRepo::new(&scratch);
+    let root = tested_project(&scratch, &fixture);
+
+    let (code, _, stderr) = jrs(&fixture, &scratch, &root, &["build"]);
+    assert_eq!(code, 0, "{stderr}");
+    let phases: Vec<&str> = stderr
+        .lines()
+        .filter_map(|l| l.split_whitespace().next())
+        .filter(|verb| ["Resolving", "Downloading", "Compiling", "Finished"].contains(verb))
+        .collect();
+    assert_eq!(
+        phases,
+        ["Resolving", "Downloading", "Compiling", "Finished"],
+        "today's transcript: {stderr}"
+    );
+    assert!(
+        stderr.contains(" Downloading 2 artifacts\n"),
+        "both waves: {stderr}"
+    );
+    assert!(stderr.contains("deps 2       2 downloaded"), "{stderr}");
+
+    let cache = jrs::resolve::cache::Cache::with_root(&fixture.cache);
+    assert!(cache.contains(&Coord::new("org.example", "lib", "1.0.0"), "jar"));
+    assert!(cache.contains(&Coord::new("org.example", "core", "1.0.0"), "jar"));
+    let lock = std::fs::read_to_string(root.join("jrs.lock")).unwrap();
+    assert_eq!(
+        lock.matches("checksum = \"sha1:").count(),
+        2,
+        "every jar is pinned, the second wave's too:\n{lock}"
+    );
+}
+
+#[test]
+fn a_failing_second_wave_fails_the_build_after_the_compile_with_todays_message() {
+    let _toolchain = require_jdk!();
+    let scratch = Scratch::new("two-waves-failing");
+    let fixture = FixtureRepo::new(&scratch);
+    let root = tested_project(&scratch, &fixture);
+    std::fs::remove_file(
+        fixture
+            .root
+            .join(Coord::new("org.example", "core", "1.0.0").repo_path("jar")),
+    )
+    .unwrap();
+
+    // `jrs fetch` downloads in one wave: its message is today's.
+    let (code, _, fetched) = jrs(&fixture, &scratch, &root, &["fetch"]);
+    assert_eq!(code, 1, "{fetched}");
+    let message = fetched
+        .lines()
+        .find(|l| l.starts_with("error:"))
+        .unwrap()
+        .to_string();
+
+    let (code, _, stderr) = jrs(&fixture, &scratch, &root, &["build"]);
+    assert_eq!(code, 1, "{stderr}");
+    let compiled = stderr.find("Compiling app v1.0.0").expect(&stderr);
+    let failed = stderr.find(&message).expect(&stderr);
+    assert!(compiled < failed, "the compile ran first: {stderr}");
+    assert!(
+        !root.join("jrs.lock").exists(),
+        "no lockfile without every checksum"
+    );
+}

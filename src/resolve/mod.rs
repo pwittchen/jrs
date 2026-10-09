@@ -877,6 +877,22 @@ type FetchedJar = (usize, Option<PathBuf>, Option<String>);
 /// found or downloaded, or it does not match its repository or locked
 /// checksum; [`JrsError::Io`] when the cache cannot be read or written.
 pub fn fetch_jars(resolution: &mut Resolution, fetcher: &Fetcher, jobs: usize) -> Result<()> {
+    fetch_jars_where(resolution, fetcher, jobs, |_| true)
+}
+
+/// [`fetch_jars`] for the packages `wanted` picks, leaving the others as
+/// they are: the two waves of a build's downloads (SPEC §8.4), the compile
+/// classpath first and the rest behind the compiler.
+///
+/// # Errors
+///
+/// As for [`fetch_jars`].
+pub fn fetch_jars_where(
+    resolution: &mut Resolution,
+    fetcher: &Fetcher,
+    jobs: usize,
+    wanted: impl Fn(&ResolvedPackage) -> bool + Sync,
+) -> Result<()> {
     let pool = rayon::ThreadPoolBuilder::new()
         .num_threads(jobs.max(1))
         .build()
@@ -887,6 +903,7 @@ pub fn fetch_jars(resolution: &mut Resolution, fetcher: &Fetcher, jobs: usize) -
             .packages
             .par_iter()
             .enumerate()
+            .filter(|(_, p)| wanted(p))
             .map(|(i, p)| {
                 if p.packaging == "pom" {
                     // An aggregate or BOM has no jar to link against; it earned

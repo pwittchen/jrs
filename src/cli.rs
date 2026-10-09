@@ -10,13 +10,16 @@ use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use clap::{Args, CommandFactory, Parser, Subcommand, ValueEnum};
 use rayon::prelude::*;
 
+use crate::build_cache::{self, BuildCache};
+use crate::compile::worker::Worker;
 use crate::compile::{self, CompileUnit, DocTool, DocUnit, ForeignCompiler, ForeignDoc, Language};
-use crate::compile::{impact, lang};
+use crate::compile::{impact, lang, share};
 use crate::completions;
 use crate::config::Config;
 use crate::dist;
@@ -198,6 +201,13 @@ pub enum Command {
         /// Report the wall time of each phase after the summary.
         #[arg(long)]
         timings: bool,
+        /// Neither restore from nor store into the build cache.
+        #[arg(long)]
+        no_build_cache: bool,
+        /// Compile every unit, and fail if the build cache holds other
+        /// classes for the same inputs.
+        #[arg(long, conflicts_with_all = ["no_build_cache", "watch"])]
+        verify_cache: bool,
     },
 
     /// Build, compile test sources, and run the test engine.
@@ -211,6 +221,9 @@ pub enum Command {
         /// Report the wall time of each phase before the program starts.
         #[arg(long)]
         timings: bool,
+        /// Neither restore from nor store into the build cache.
+        #[arg(long)]
+        no_build_cache: bool,
         /// Wait for a debugger before the program starts: JDWP on PORT, 5005
         /// unless given, on localhost unless given as HOST:PORT (`*:5005`).
         #[arg(
@@ -448,9 +461,12 @@ pub struct TestArgs {
     #[arg(long, value_name = "NAME")]
     pub suite: Option<String>,
     /// Run every test class, not only those a change since the last run
-    /// reaches.
+    /// reaches, and never take a passing run from the build cache.
     #[arg(long)]
     pub all: bool,
+    /// Neither restore from nor store into the build cache.
+    #[arg(long)]
+    pub no_build_cache: bool,
 }
 
 #[derive(Debug, Default, Args)]
@@ -497,6 +513,9 @@ pub struct PackageArgs {
     /// information, leaving behaviour untouched.
     #[arg(long)]
     pub obfuscate: bool,
+    /// Neither restore from nor store into the build cache.
+    #[arg(long)]
+    pub no_build_cache: bool,
 }
 
 #[derive(Debug, Subcommand)]
@@ -531,6 +550,20 @@ impl Command {
             Command::Build { timings, .. } | Command::Run { timings, .. } => *timings,
             Command::Test(args) => args.timings,
             Command::Package(args) => args.timings,
+            _ => false,
+        }
+    }
+
+    /// Whether the command was given `--no-build-cache`, which `build`,
+    /// `test`, `run` and `package` take.
+    #[must_use]
+    pub fn no_build_cache(&self) -> bool {
+        match self {
+            Command::Build { no_build_cache, .. } | Command::Run { no_build_cache, .. } => {
+                *no_build_cache
+            }
+            Command::Test(args) => args.no_build_cache,
+            Command::Package(args) => args.no_build_cache,
             _ => false,
         }
     }
@@ -672,6 +705,10 @@ fn dispatch(cli: &Cli, ui: &Ui) -> Result<i32> {
     }
 }
 
+/// The entry of a cached test run that holds its counts, beside its
+/// reports.
+const TEST_OUTCOME: &str = "jrs-test-outcome.txt";
+
 /// `1 test`, `2 tests`.
 fn counted(n: usize, noun: &str) -> String {
     if n == 1 {
@@ -731,6 +768,41 @@ struct Session<'a> {
     timings: Timings,
     /// Whether the command asked for `--timings`.
     timings_wanted: bool,
+    /// The build cache (SPEC §7.8), once the graph it keys jars by is
+    /// known; `None` inside when it is turned off.
+    build_cache: OnceCell<Option<Arc<BuildCache>>>,
+    /// What the command asked of the build cache.
+    cache_use: CacheUse,
+    /// The `--watch` session's warm `javac`, which outlives each build's
+    /// `Session` but not the command (SPEC §7.5).
+    worker: Option<Arc<Worker>>,
+    /// The second wave of downloads, while it runs behind the main compile
+    /// (SPEC §8.4).
+    pending: RefCell<Option<Pending>>,
+}
+
+/// The jars the main compile does not need, downloading on a thread of
+/// their own while it runs, and what the graph waits on until they are in.
+struct Pending {
+    thread: std::thread::JoinHandle<Result<Resolution>>,
+    /// How many jars it downloads.
+    count: usize,
+    /// The graph with the first wave's jars in place.
+    resolution: Resolution,
+    /// Whether the graph was resolved afresh, so that `jrs.lock` is written
+    /// once every jar's checksum is known.
+    fresh: bool,
+}
+
+/// What a command asks of the build cache.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CacheUse {
+    /// Restore and store.
+    On,
+    /// `--no-build-cache`: neither.
+    Off,
+    /// `jrs build --verify-cache`: compile, and compare with what it holds.
+    Verify,
 }
 
 impl<'a> Session<'a> {
@@ -763,7 +835,23 @@ impl<'a> Session<'a> {
             jar: RefCell::new(None),
             timings: Timings::new(),
             timings_wanted: cli.command.timings(),
+            build_cache: OnceCell::new(),
+            cache_use: match cli.command {
+                Command::Build {
+                    verify_cache: true, ..
+                } => CacheUse::Verify,
+                _ if cli.command.no_build_cache() => CacheUse::Off,
+                _ => CacheUse::On,
+            },
+            worker: None,
+            pending: RefCell::new(None),
         })
+    }
+
+    /// Send every `javac` step of this build to `worker`.
+    fn with_worker(mut self, worker: Option<Arc<Worker>>) -> Session<'a> {
+        self.worker = worker;
+        self
     }
 
     fn project(&self) -> Project<'_> {
@@ -1664,6 +1752,8 @@ impl<'a> Session<'a> {
             unique_ids: Vec::new(),
             classes: Vec::new(),
             fail_fast: args.fail_fast,
+            class_path: Vec::new(),
+            share_flags: Vec::new(),
         };
         let label = suite.map_or_else(|| "test".to_string(), |s| format!("suite-{}", s.name));
         let state = project.work_dir().join(format!("{label}.tested"));
@@ -1701,7 +1791,26 @@ impl<'a> Session<'a> {
             return Ok(None);
         }
 
-        let forks = Self::forks(
+        // A passing run of these very classes, here or on another machine,
+        // stands for this one (SPEC §7.8).
+        let cached = match &impact {
+            Some((_, snapshot)) if !args.all && !args.coverage && args.debug.is_none() => {
+                self.cached_tests(&run, snapshot)
+            }
+            _ => None,
+        };
+        if let Some((cache, key)) = &cached
+            && let Some(outcome) = self.restore_tests(cache, key, &run, classes.len())?
+        {
+            if let Some((_, snapshot)) = &impact {
+                snapshot.record(&state, [])?;
+            }
+            self.hook(Hook::PostTest)?;
+            return Ok(Some(outcome));
+        }
+
+        let cds = self.share_layout(&mut run, args);
+        let mut forks = Self::forks(
             &run,
             args,
             forks,
@@ -1714,11 +1823,13 @@ impl<'a> Session<'a> {
         {
             run.filter = Some(junit::fork_pattern(only, run.filter.as_deref()));
         }
+        let share =
+            cds.and_then(|dir| self.test_archive(&dir, &toolchain, &run, &label, &mut forks));
         let reached = selected.as_ref().map(|only| (only.len(), classes.len()));
         self.announce_tests(&mut run, rerun.as_ref(), &sources, reached, forks.len());
         let started = Instant::now();
         let outcome = self
-            .launch_tests(&toolchain, &run, &forks, args.debug.as_ref())
+            .launch_tests(&toolchain, &run, &forks, share, args.debug.as_ref())
             .and_then(|mut outcome| {
                 self.conclude_tests(&toolchain, &run, args, retries, &mut outcome)?;
                 Ok(outcome)
@@ -1735,6 +1846,7 @@ impl<'a> Session<'a> {
         if let Some(results) = &results {
             junit::record_times(&times, &junit::class_times(results), &classes);
         }
+        let ran_all = selected.is_none();
         if let Some((_, snapshot)) = &impact {
             // What failed, or passed only on a retry, runs again next time
             // whatever changes: by class when the reports say which, and
@@ -1760,6 +1872,15 @@ impl<'a> Session<'a> {
                 _ => selected.unwrap_or(classes),
             };
             snapshot.record(&state, pending)?;
+        }
+
+        if let Some((cache, key)) = &cached
+            && ran_all
+            && outcome.ok()
+            && outcome.flaky == 0
+            && !outcome.stopped_early
+        {
+            Self::store_tests(cache, key, &run, &outcome, self.ui);
         }
 
         // Coverage is reported for a failing run too: which code the failing
@@ -1797,7 +1918,20 @@ impl<'a> Session<'a> {
         // Compile avoidance: the tests see the main classes' API, not their
         // bytes, so a changed method body leaves them fresh (SPEC §7.2).
         unit.main_api = Some(compile::api_digest(&project.classes_dir())?);
-        if compile::is_stale(&unit)? {
+        if self.cache_use == CacheUse::Verify {
+            compile::forget(&unit);
+        }
+        let stale = compile::is_stale(&unit)?;
+        if stale && compile::restore(&unit, self.ui)?.is_some() {
+            self.ui.phase(
+                "Restored",
+                format!(
+                    "{} (from the build cache)",
+                    sources.describe("test sources")
+                ),
+            );
+            self.timings.since("compile test (restored)", checking);
+        } else if stale {
             let what = sources.describe("test sources");
             self.ui.phase("Compiling", &what);
             let scope = self.ui.spinner("Compiling", &what);
@@ -1846,7 +1980,18 @@ impl<'a> Session<'a> {
             compile::api_digest(&project.classes_dir())?,
             compile::api_digest(&project.test_classes_dir())?
         ));
-        if compile::is_stale(&unit)? {
+        let stale = compile::is_stale(&unit)?;
+        if stale && compile::restore(&unit, self.ui)?.is_some() {
+            self.ui.phase(
+                "Restored",
+                format!(
+                    "{} (from the build cache)",
+                    sources.describe(&format!("{} sources", suite.name))
+                ),
+            );
+            self.timings
+                .since(format!("compile {label} (restored)"), checking);
+        } else if stale {
             let what = sources.describe(&format!("{} sources", suite.name));
             self.ui.phase("Compiling", &what);
             let scope = self.ui.spinner("Compiling", &what);
@@ -1866,6 +2011,185 @@ impl<'a> Session<'a> {
             None,
         )?;
         Ok((sources, classpath))
+    }
+
+    /// The build cache and the key a whole run of `run` is kept under: its
+    /// settings, as the test record's are, with jars by identity, paths
+    /// relative to the project and the shared cache, and every file in the
+    /// class directories by its contents.
+    fn cached_tests(
+        &self,
+        run: &junit::TestRun,
+        snapshot: &impact::Snapshot,
+    ) -> Option<(Arc<BuildCache>, String)> {
+        let cache = self.build_cache()?;
+        let mut text = format!(
+            "{}\n{}\n{}\n",
+            cache.relative(&run.jvm_args.join("\u{1}")),
+            run.launcher_version,
+            cache.relative(&run.scan_dir.display().to_string())
+        );
+        for (key, value) in &run.environment.vars {
+            let _ = writeln!(text, "env {key}={}", cache.relative(value));
+        }
+        for entry in &run.classpath {
+            let shown = cache.relative(&entry.display().to_string());
+            if entry.is_dir() {
+                let _ = writeln!(text, "dir {shown}");
+            } else {
+                let _ = writeln!(text, "jar {}", cache.jar(entry)?);
+            }
+        }
+        for (path, hash) in snapshot.files() {
+            let _ = writeln!(
+                text,
+                "file {hash} {}",
+                cache.relative(&path.display().to_string())
+            );
+        }
+        let key = cache.key("test", &text);
+        Some((cache, key))
+    }
+
+    /// Put a cached passing run's reports in place of a run, and say so.
+    /// `None` on a miss.
+    fn restore_tests(
+        &self,
+        cache: &BuildCache,
+        key: &str,
+        run: &junit::TestRun,
+        classes: usize,
+    ) -> Result<Option<junit::TestOutcome>> {
+        let Some(reports) = &run.reports_dir else {
+            return Ok(None);
+        };
+        let Some(mut entries) = cache.load(key, self.ui) else {
+            return Ok(None);
+        };
+        let Some(at) = entries.iter().position(|(name, _)| name == TEST_OUTCOME) else {
+            return Ok(None);
+        };
+        let (_, counts) = entries.remove(at);
+        let mut outcome = junit::TestOutcome::default();
+        for line in String::from_utf8_lossy(&counts).lines() {
+            match line.split_once(' ') {
+                Some(("found", n)) => outcome.found = n.parse().unwrap_or_default(),
+                Some(("passed", n)) => outcome.passed = n.parse().unwrap_or_default(),
+                Some(("skipped", n)) => outcome.skipped = n.parse().unwrap_or_default(),
+                _ => {}
+            }
+        }
+        build_cache::extract(&entries, reports)?;
+        self.ui.phase(
+            "Testing",
+            format!(
+                "{classes} test {}: passed in the cached run (`--all` runs them)",
+                if classes == 1 { "class" } else { "classes" }
+            ),
+        );
+        self.ui
+            .verbose(format!("build cache: restored the test reports from {key}"));
+        Ok(Some(outcome))
+    }
+
+    /// Keep a passing whole run's reports and counts under `key`.
+    fn store_tests(
+        cache: &BuildCache,
+        key: &str,
+        run: &junit::TestRun,
+        outcome: &junit::TestOutcome,
+        ui: &Ui,
+    ) {
+        let Some(reports) = &run.reports_dir else {
+            return;
+        };
+        let Ok(mut entries) = build_cache::collect(reports, &HashSet::<String>::new()) else {
+            return;
+        };
+        entries.push((
+            TEST_OUTCOME.to_string(),
+            format!(
+                "found {}\npassed {}\nskipped {}\n",
+                outcome.found, outcome.passed, outcome.skipped
+            )
+            .into_bytes(),
+        ));
+        cache.save(key, &entries, ui);
+    }
+
+    /// `test.share-classes`: move the class directories to the launcher's
+    /// own class loader, so the test JVM's classpath holds jars alone and
+    /// can be mapped from a class-data-sharing archive. Returns where the
+    /// archives live, or `None` — having said why under `-v` — when this
+    /// run keeps the usual layout: a debugger attaching while classes load,
+    /// a java agent's class-file hook, or a class directory sharing a name
+    /// with a jar (SPEC §10.2).
+    fn share_layout(&self, run: &mut junit::TestRun, args: &TestArgs) -> Option<PathBuf> {
+        if !self.manifest.test.share_classes {
+            return None;
+        }
+        let skipped = if args.debug.is_some() {
+            Some("a --debug run")
+        } else if args.coverage {
+            Some("a --coverage run")
+        } else if !self.manifest.test.java_agents.is_empty() {
+            Some("a run with `test.java-agents`")
+        } else {
+            None
+        };
+        if let Some(why) = skipped {
+            self.ui.verbose(format!(
+                "test classes not shared: {why} keeps the usual layout"
+            ));
+            return None;
+        }
+        let dir = Cache::discover().ok()?.root().join("cds");
+        match junit::share_layout(run, &dir.join("entries")) {
+            Ok(shared) => {
+                *run = shared;
+                Some(dir)
+            }
+            Err(why) => {
+                self.ui.verbose(format!("test classes not shared: {why}"));
+                None
+            }
+        }
+    }
+
+    /// The test JVM's class-data-sharing archive under `dir`, for a run in
+    /// one JVM: read, or dumped by this run. Forks only read one, which
+    /// they get here, so that no two JVMs dump at once.
+    fn test_archive(
+        &self,
+        dir: &Path,
+        toolchain: &Toolchain,
+        run: &junit::TestRun,
+        label: &str,
+        forks: &mut [(junit::TestRun, usize)],
+    ) -> Option<share::Share> {
+        let project = format!("{}\n{label}", self.manifest.path.display());
+        let share = share::Share::for_tests(
+            dir,
+            toolchain,
+            &project,
+            &run.classpath,
+            &run.jvm_args,
+            forks.is_empty(),
+        )?;
+        if let Some(archive) = share.archive() {
+            self.ui.verbose(format!(
+                "test JVM: {} the class-data archive {}",
+                if share.dumps() { "dumping" } else { "mapping" },
+                archive.display()
+            ));
+        }
+        if forks.is_empty() {
+            return Some(share);
+        }
+        for (fork, _) in forks {
+            fork.share_flags.clone_from(&share.flags);
+        }
+        None
     }
 
     /// What goes ahead of the test JVM's other arguments: the debugger's
@@ -1976,6 +2300,7 @@ impl<'a> Session<'a> {
         toolchain: &Toolchain,
         run: &junit::TestRun,
         forks: &[(junit::TestRun, usize)],
+        share: Option<share::Share>,
         debug: Option<&runner::DebugAddress>,
     ) -> Result<junit::TestOutcome> {
         if let Some(debug) = debug {
@@ -1983,7 +2308,7 @@ impl<'a> Session<'a> {
         }
         let scope = debug.is_none().then(|| self.ui.tests());
         if forks.is_empty() {
-            let outcome = junit::run(toolchain, run, self.ui);
+            let outcome = junit::run_sharing(toolchain, run, share, self.ui);
             if let Some(scope) = scope {
                 scope.finish();
             }
@@ -2948,7 +3273,7 @@ impl<'a> Session<'a> {
             return Ok(built.clone());
         }
         let toolchain = self.toolchain()?;
-        let resolution = self.resolved()?;
+        let resolution = self.compile_resolution()?;
         let project = self.project();
 
         // Code generators run before the source tree is globbed, so what they
@@ -2975,7 +3300,21 @@ impl<'a> Session<'a> {
         )?;
 
         let checking = Instant::now();
-        let outcome = if compile::is_stale(&unit)? {
+        if self.cache_use == CacheUse::Verify {
+            compile::forget(&unit);
+        }
+        let stale = compile::is_stale(&unit)?;
+        let outcome = if stale && let Some(outcome) = compile::restore(&unit, self.ui)? {
+            self.ui.phase(
+                "Restored",
+                format!(
+                    "{} v{} (from the build cache)",
+                    self.manifest.name, self.manifest.version
+                ),
+            );
+            self.timings.since("compile main (restored)", checking);
+            outcome
+        } else if stale {
             self.ui.phase(
                 "Compiling",
                 format!(
@@ -3025,14 +3364,17 @@ impl<'a> Session<'a> {
         self.hook(Hook::PostCompile)?;
 
         let classes = match outcome {
-            compile::Outcome::Compiled { classes, .. } => classes,
+            compile::Outcome::Compiled { classes, .. } | compile::Outcome::Restored { classes } => {
+                classes
+            }
             compile::Outcome::UpToDate => {
                 project::find_by_extension(&project.classes_dir(), "class")?.len()
             }
         };
 
+        // Whatever comes after the main compile may need any jar.
         let built = Built {
-            resolution,
+            resolution: self.resolved()?,
             classes,
         };
         Ok(self.built.get_or_init(|| built).clone())
@@ -3063,13 +3405,33 @@ impl<'a> Session<'a> {
         if let Some(resolution) = self.resolution.get() {
             return Ok(resolution.clone());
         }
-        let resolution = self.dependencies(false)?;
+        let resolution = match self.join_dependencies()? {
+            Some(resolution) => resolution,
+            None => self.dependencies(false)?,
+        };
         Ok(self.resolution.get_or_init(|| resolution).clone())
     }
 
-    /// The compilers' graphs, resolved with the project's.
+    /// The graph the main compile needs: the whole of it once it is in,
+    /// or else its compile classpath, with the rest downloading behind the
+    /// compile until [`resolved`](Self::resolved) joins it.
+    fn compile_resolution(&self) -> Result<Resolution> {
+        if let Some(resolution) = self.current_resolution() {
+            return Ok(resolution);
+        }
+        let resolution = self.gather(false, true)?;
+        if self.pending.borrow().is_some() {
+            return Ok(resolution);
+        }
+        Ok(self.resolution.get_or_init(|| resolution).clone())
+    }
+
+    /// The compilers' graphs, resolved with the project's: in place before
+    /// any compile, whichever wave of downloads is still running.
     fn tools(&self) -> Result<Vec<Tool>> {
-        self.resolved()?;
+        if self.tools.get().is_none() {
+            self.resolved()?;
+        }
         Ok(self.tools.get().cloned().unwrap_or_default())
     }
 
@@ -3131,7 +3493,82 @@ impl<'a> Session<'a> {
             foreign,
             main_api: None,
             share_dir: Cache::discover().ok().map(|c| c.root().join("cds")),
+            build_cache: self.build_cache(),
+            worker: self.worker.clone(),
         })
+    }
+
+    /// The build cache (SPEC §7.8), unless `--no-build-cache`,
+    /// `JRS_BUILD_CACHE=off` or `[build-cache] enabled = false` turned it
+    /// off, or there is no shared cache to keep it in. Its keys name the
+    /// resolved jars by coordinate and pinned checksum, so it is set up once
+    /// the graphs are.
+    fn build_cache(&self) -> Option<Arc<BuildCache>> {
+        // While the second wave downloads, its jars are not known by their
+        // identity yet: a cache for this compile alone, not memoised.
+        if self.pending.borrow().is_some() {
+            return self.new_build_cache();
+        }
+        self.build_cache
+            .get_or_init(|| self.new_build_cache())
+            .clone()
+    }
+
+    /// A build cache over the graph as it is now, or `None` when it is off.
+    fn new_build_cache(&self) -> Option<Arc<BuildCache>> {
+        if self.cache_use == CacheUse::Off || !self.config.build_cache.enabled {
+            return None;
+        }
+        let toolchain = self.toolchain().ok()?;
+        let cache = Cache::discover().ok()?;
+        let mut jars = HashMap::new();
+        let mut add = |resolution: &Resolution| {
+            for p in &resolution.packages {
+                if let (Some(jar), Some(sum)) = (&p.jar, &p.checksum) {
+                    jars.insert(jar.clone(), format!("{} {sum}", p.coord));
+                }
+            }
+            for l in &resolution.local {
+                if let (Some(jar), Some(sum)) = (&l.jar, &l.checksum) {
+                    jars.insert(jar.clone(), sum.clone());
+                }
+            }
+        };
+        if let Some(resolution) = self.current_resolution() {
+            add(&resolution);
+        }
+        for tool in self.tools.get().into_iter().flatten() {
+            add(&tool.resolution);
+        }
+        let config = &self.config.build_cache;
+        let env = |name: &str| std::env::var(name).ok().filter(|v| !v.is_empty());
+        let credentials = config
+            .credentials
+            .as_ref()
+            .and_then(|name| self.config.credentials_for(name, &env));
+        let remote = match build_cache::Remote::new(
+            config,
+            credentials.as_ref(),
+            self.config.proxy.as_ref(),
+        ) {
+            Ok(remote) => remote,
+            Err(e) => {
+                self.ui
+                    .verbose(format!("build cache: no remote cache: {e}"));
+                None
+            }
+        };
+        Some(Arc::new(
+            BuildCache::new(
+                cache.root().join("build"),
+                &self.manifest.root,
+                cache.root(),
+                &toolchain,
+            )
+            .with_jars(jars)
+            .with_remote(remote)
+            .verifying(self.cache_use == CacheUse::Verify),
+        ))
     }
 
     // ---- tasks and hooks --------------------------------------------------
@@ -3359,6 +3796,15 @@ impl<'a> Session<'a> {
     /// manifest — and with it each language's compiler graph, which
     /// `jrs.lock` pins beside the project's (`JVM_LANGUAGES.md` §5.2).
     fn dependencies(&self, force_update: bool) -> Result<Resolution> {
+        self.gather(force_update, false)
+    }
+
+    /// The graph, as [`dependencies`](Self::dependencies) works it out. With
+    /// `pipelined`, only the main compile's jars and its compiler are
+    /// downloaded before this returns; the rest download on a thread behind
+    /// it, and the graph it returns lacks them until
+    /// [`resolved`](Self::resolved) joins that thread (SPEC §8.4).
+    fn gather(&self, force_update: bool, pipelined: bool) -> Result<Resolution> {
         let manifest = &self.manifest;
         let declared = manifest.dependencies.len() + manifest.dev_dependencies.len();
         let tasks_with_tools: Vec<&TaskDef> = manifest
@@ -3414,7 +3860,7 @@ impl<'a> Session<'a> {
             resolving,
         );
 
-        self.download(&mut resolution, &fetcher)?;
+        let background = self.download(&mut resolution, &fetcher, pipelined)?;
 
         self.fetch_tools(&mut tools, &fetcher)?;
         // A fresh graph is downloaded now, so that jrs.lock pins its jars'
@@ -3435,15 +3881,12 @@ impl<'a> Session<'a> {
             }
         }
 
-        if fresh {
-            self.write_lock(
-                &lock_path,
-                &resolution,
-                &tools,
-                &task_tools,
-                obfuscator.as_ref(),
-                &agents,
-            )?;
+        let _ = self.tools.set(tools);
+        let _ = self.task_tools.set(task_tools);
+        let _ = self.obfuscator.set(obfuscator);
+        let _ = self.agents.set(agents);
+        if fresh && background.is_none() {
+            self.write_lock(&lock_path, &resolution)?;
         }
         // So that `jrs cache prune` knows this project still wants these
         // artifacts. Bookkeeping: a cache that cannot record it still builds.
@@ -3457,11 +3900,62 @@ impl<'a> Session<'a> {
         for warning in &resolution.warnings {
             self.ui.warn(warning);
         }
-        let _ = self.tools.set(tools);
-        let _ = self.task_tools.set(task_tools);
-        let _ = self.obfuscator.set(obfuscator);
-        let _ = self.agents.set(agents);
+        if let Some((thread, count)) = background {
+            *self.pending.borrow_mut() = Some(Pending {
+                thread,
+                count,
+                resolution: resolution.clone(),
+                fresh,
+            });
+        }
         Ok(resolution)
+    }
+
+    /// Wait for the second wave of downloads, if one is running: its jars
+    /// join the graph, its warnings are said, and a fresh graph's `jrs.lock`
+    /// is written now that every jar's checksum is known. An error it held
+    /// is reported here, as it would have been before the compile.
+    fn join_dependencies(&self) -> Result<Option<Resolution>> {
+        let Some(pending) = self.pending.borrow_mut().take() else {
+            return Ok(None);
+        };
+        let waiting = Instant::now();
+        // Still running: the download bars take over with what is left.
+        let scope = (!pending.thread.is_finished()).then(|| self.ui.downloads(pending.count));
+        let joined = pending
+            .thread
+            .join()
+            .unwrap_or_else(|_| Err(JrsError::resolve("the downloads' thread panicked")));
+        if let Some(scope) = scope {
+            scope.finish();
+            self.timings.since("downloads (waited for)", waiting);
+        }
+        let background = joined?;
+        let mut resolution = pending.resolution;
+        for (package, fetched) in resolution.packages.iter_mut().zip(background.packages) {
+            if !package.classpath.compiles() {
+                package.jar = fetched.jar;
+                package.checksum = fetched.checksum;
+            }
+        }
+        resolution.downloaded += background.downloaded;
+        for warning in &background.warnings {
+            self.ui.warn(warning);
+        }
+        resolution.warnings.extend(background.warnings);
+        if pending.fresh {
+            self.write_lock(&self.manifest.lock_path(), &resolution)?;
+        }
+        Ok(Some(resolution))
+    }
+
+    /// The graph as the build has it so far: every jar in place, or, while
+    /// the second wave downloads, the main compile's.
+    fn current_resolution(&self) -> Option<Resolution> {
+        self.resolution
+            .get()
+            .cloned()
+            .or_else(|| self.pending.borrow().as_ref().map(|p| p.resolution.clone()))
     }
 
     /// What `dependencies` resolves, read from a `jrs.lock` that still
@@ -3500,26 +3994,57 @@ impl<'a> Session<'a> {
     /// Point `resolution`'s packages at their jars: the cached ones and the
     /// local ones as they are, the rest downloaded — under a `Downloading`
     /// line when there is anything to fetch and jrs is online.
-    fn download(&self, resolution: &mut Resolution, fetcher: &Fetcher) -> Result<()> {
+    ///
+    /// With `pipelined`, that is two waves (SPEC §8.4): the main compile's
+    /// jars now, and the rest — runtime-only and test jars — on a thread
+    /// started once the first wave is in, so that it never takes bandwidth
+    /// from what the compiler waits for. The thread, and how many jars it
+    /// downloads, come back; [`join_dependencies`](Self::join_dependencies)
+    /// waits for it. With nothing left to download there is no thread.
+    fn download(
+        &self,
+        resolution: &mut Resolution,
+        fetcher: &Fetcher,
+        pipelined: bool,
+    ) -> Result<Option<(std::thread::JoinHandle<Result<Resolution>>, usize)>> {
         let downloading = Instant::now();
         resolve::locate_cached(resolution, fetcher);
         resolve::attach_local(resolution, &self.manifest.root)?;
-        let missing = resolution
-            .packages
-            .iter()
-            .filter(|p| p.jar.is_none() && p.packaging != "pom")
-            .count();
-        if missing > 0 && !self.offline {
-            self.ui.phase("Downloading", format!("{missing} artifacts"));
-            let scope = self.ui.downloads(missing);
-            let result = resolve::fetch_jars(resolution, fetcher, self.jobs);
+        let missing = |p: &resolve::ResolvedPackage| p.jar.is_none() && p.packaging != "pom";
+        let total = resolution.packages.iter().filter(|p| missing(p)).count();
+        let later = if pipelined && !self.offline {
+            resolution
+                .packages
+                .iter()
+                .filter(|p| missing(p) && !p.classpath.compiles())
+                .count()
+        } else {
+            0
+        };
+        let first_wave = |p: &resolve::ResolvedPackage| later == 0 || p.classpath.compiles();
+        if total > 0 && !self.offline {
+            self.ui.phase("Downloading", format!("{total} artifacts"));
+            let scope = self.ui.downloads(total - later);
+            let result = resolve::fetch_jars_where(resolution, fetcher, self.jobs, first_wave);
             scope.finish();
             result?;
         } else {
             resolve::fetch_jars(resolution, fetcher, self.jobs)?;
         }
         self.timings.since("downloads", downloading);
-        Ok(())
+        if later == 0 {
+            return Ok(None);
+        }
+        let mut second = resolution.clone();
+        let fetcher = self.fetcher()?;
+        let jobs = self.jobs;
+        let thread = std::thread::spawn(move || {
+            // Only what this wave has to say comes back.
+            second.warnings.clear();
+            resolve::fetch_jars_where(&mut second, &fetcher, jobs, |p| !p.classpath.compiles())?;
+            Ok(second)
+        });
+        Ok(Some((thread, later)))
     }
 
     /// What the `Resolving` line names: the declared dependencies, and the
@@ -3554,28 +4079,20 @@ impl<'a> Session<'a> {
 
     /// Pin a freshly resolved graph in `jrs.lock`, with the compilers', the
     /// tasks', the obfuscator's and the pinned agents' graphs beside it.
-    fn write_lock(
-        &self,
-        lock_path: &Path,
-        resolution: &Resolution,
-        tools: &[Tool],
-        task_tools: &[(String, Resolution)],
-        obfuscator: Option<&Resolution>,
-        agents: &[(String, Resolution)],
-    ) -> Result<()> {
+    fn write_lock(&self, lock_path: &Path, resolution: &Resolution) -> Result<()> {
         let mut lock = Lockfile::from_resolution(&self.manifest, resolution);
-        for tool in tools {
+        for tool in self.tools.get().into_iter().flatten() {
             lock = lock.with_tool(&tool.language.tool_name(), &tool.resolution);
         }
-        for (name, graph) in task_tools {
+        for (name, graph) in self.task_tools.get().into_iter().flatten() {
             if let Some(def) = self.manifest.task(name) {
                 lock = lock.with_tool(&def.tool_name(), graph);
             }
         }
-        if let Some(graph) = obfuscator {
+        if let Some(graph) = self.obfuscator.get().and_then(Option::as_ref) {
             lock = lock.with_tool(obfuscate::TOOL_NAME, graph);
         }
-        for (name, graph) in agents {
+        for (name, graph) in self.agents.get().into_iter().flatten() {
             lock = lock.with_tool(name, graph);
         }
         lock.write(lock_path)?;
@@ -4179,8 +4696,13 @@ const WATCH_INTERVAL: Duration = Duration::from_millis(300);
 /// interrupted. A failure is reported and waited out rather than ending the
 /// loop: the next save is usually the fix.
 fn watch(cli: &Cli, ui: &Ui, run: impl Fn(&Session) -> Result<i32>) -> Result<i32> {
+    // One warm `javac` for the whole session: a child of this process, which
+    // nothing else can reach and which exits with it (SPEC §7.5).
+    let worker = Cache::discover()
+        .ok()
+        .map(|cache| Arc::new(Worker::new(cache.root().join("worker"))));
     loop {
-        let watched = match Session::open(cli, ui) {
+        let watched = match Session::open(cli, ui).map(|s| s.with_worker(worker.clone())) {
             Ok(session) => {
                 if let Err(e) = run(&session) {
                     report(ui, &e);
@@ -5132,6 +5654,11 @@ mod tests {
             vec!["jrs", "task", "format"],
             vec!["jrs", "task", "format", "--watch"],
             vec!["jrs", "task", "format", "--", "--check", "src"],
+            vec!["jrs", "build", "--no-build-cache"],
+            vec!["jrs", "build", "--verify-cache"],
+            vec!["jrs", "test", "--no-build-cache"],
+            vec!["jrs", "run", "--no-build-cache"],
+            vec!["jrs", "package", "--no-build-cache"],
         ] {
             assert!(Cli::try_parse_from(&args).is_ok(), "{args:?} did not parse");
         }

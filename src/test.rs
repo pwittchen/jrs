@@ -274,12 +274,21 @@ pub struct TestRun {
     /// `jrs test --fail-fast`: stop at the first failure, as [`FailFast`]
     /// says this launcher can.
     pub fail_fast: bool,
+    /// The class directories, when they go to the launcher's own class
+    /// loader (`--class-path`) instead of the JVM's `-cp`, which then holds
+    /// jars alone and can be mapped from a class-data-sharing archive
+    /// ([`share_layout`]). Empty for the usual layout.
+    pub class_path: Vec<PathBuf>,
+    /// The class-data-sharing flags this JVM reads or dumps its archive
+    /// with, after `jvm_args`.
+    pub share_flags: Vec<String>,
 }
 
 impl TestRun {
     #[must_use]
     pub fn args(&self) -> Vec<String> {
         let mut args = self.jvm_args.clone();
+        args.extend(self.share_flags.iter().cloned());
         args.extend([
             "-cp".to_string(),
             Toolchain::classpath(&self.classpath),
@@ -289,6 +298,10 @@ impl TestRun {
             != std::cmp::Ordering::Less
         {
             args.push("execute".to_string());
+        }
+        if !self.class_path.is_empty() {
+            args.push("--class-path".to_string());
+            args.push(Toolchain::classpath(&self.class_path));
         }
         // Scanning and explicit selectors cannot be combined: the launcher
         // refuses. A method selection replaces the scan.
@@ -538,6 +551,140 @@ fn follow(
     }
     outcome.stopped_early = streamed.stopped || cancelled;
     Ok((outcome, streamed))
+}
+
+// ---- class-data sharing -----------------------------------------------------
+
+/// `run` with its class directories moved from the JVM's `-cp` to the
+/// launcher's `--class-path` (SPEC §10.2), so that the JVM's own classpath
+/// holds jars alone and can be dumped to and mapped from a class-data-sharing
+/// archive. The launcher loads them in a class loader whose parent is the
+/// JVM's, which makes the jars win a name both have: so a class or resource
+/// a class directory shares with a jar, outside `META-INF/`, keeps the usual
+/// layout. `Err` says why the layout is kept.
+///
+/// Each jar's entry list is cached under `entries_dir`, keyed by the jar's
+/// size and modification time, so after the first run the check costs a
+/// walk of the class directories. Nothing here fails the run: a jar or
+/// directory that cannot be read keeps the usual layout.
+///
+/// # Errors
+///
+/// The reason the usual layout is kept.
+pub fn share_layout(run: &TestRun, entries_dir: &Path) -> std::result::Result<TestRun, String> {
+    let dirs: Vec<PathBuf> = run
+        .classpath
+        .iter()
+        .take_while(|p| p.is_dir())
+        .cloned()
+        .collect();
+    let jars = &run.classpath[dirs.len()..];
+    if jars.iter().any(|p| p.is_dir()) {
+        return Err("a class directory comes after a jar on the test classpath".to_string());
+    }
+    let mut own: std::collections::HashMap<String, &Path> = std::collections::HashMap::new();
+    for dir in &dirs {
+        let files = crate::project::find_all(dir).map_err(|e| e.to_string())?;
+        for file in files {
+            let name = crate::project::slash_path(file.strip_prefix(dir).unwrap_or(&file));
+            if shadows(&name) {
+                own.entry(name).or_insert(dir);
+            }
+        }
+    }
+    for jar in jars {
+        for name in jar_entries(jar, entries_dir)? {
+            if let Some(dir) = own.get(&name) {
+                return Err(format!(
+                    "`{name}` is in both {} and {}",
+                    dir.display(),
+                    jar.display()
+                ));
+            }
+        }
+    }
+    Ok(TestRun {
+        classpath: jars.to_vec(),
+        class_path: dirs,
+        ..run.clone()
+    })
+}
+
+/// Whether a class directory's file of this name would be shadowed by a
+/// jar's under the launcher's parent-first class loader in a way a test can
+/// tell. `META-INF/` holds registries that list both copies anyway, and a
+/// `module-info.class` means nothing on a classpath.
+fn shadows(name: &str) -> bool {
+    !name.starts_with("META-INF/") && name != "module-info.class" && !name.ends_with('/')
+}
+
+/// The files `jar` holds, from the cache under `dir` while the jar's size
+/// and modification time match it, or else from its central directory.
+fn jar_entries(jar: &Path, dir: &Path) -> std::result::Result<Vec<String>, String> {
+    let meta = std::fs::metadata(jar).map_err(|e| format!("{}: {e}", jar.display()))?;
+    let modified = meta
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map_or(0, |d| d.as_nanos());
+    let stamp = format!("{} {modified}", meta.len());
+    let cached = dir.join(format!(
+        "{}.list",
+        &crate::resolve::repo::sha256_hex(jar.display().to_string().as_bytes())[..16]
+    ));
+    if let Ok(text) = std::fs::read_to_string(&cached)
+        && let Some(rest) = text.strip_prefix(&stamp).and_then(|r| r.strip_prefix('\n'))
+    {
+        return Ok(rest.lines().map(str::to_string).collect());
+    }
+    let file = std::fs::File::open(jar).map_err(|e| format!("{}: {e}", jar.display()))?;
+    let archive = zip::ZipArchive::new(file).map_err(|e| format!("{}: {e}", jar.display()))?;
+    let names: Vec<String> = archive
+        .file_names()
+        .filter(|n| shadows(n))
+        .map(str::to_string)
+        .collect();
+    let mut text = format!("{stamp}\n");
+    for name in &names {
+        text.push_str(name);
+        text.push('\n');
+    }
+    // Bookkeeping: a list that cannot be written is read from the jar again.
+    let _ = crate::resolve::cache::write_atomic(&cached, text.as_bytes());
+    Ok(names)
+}
+
+/// Run the launcher with `share`'s flags, which read the test JVM's
+/// class-data-sharing archive or dump it. The dump is put in place once the
+/// JVM has run, whether the tests passed or not: a failing test is not a
+/// failing archive. A JVM that did not get as far as running the launcher
+/// while dumping — one that cannot write the dump does not start — runs
+/// again without the flags, so that sharing never fails a run.
+///
+/// # Errors
+///
+/// As for [`run`].
+pub fn run_sharing(
+    toolchain: &Toolchain,
+    test_run: &TestRun,
+    share: Option<crate::compile::share::Share>,
+    ui: &Ui,
+) -> Result<TestOutcome> {
+    let Some(share) = share else {
+        return run(toolchain, test_run, ui);
+    };
+    let shared = TestRun {
+        share_flags: share.flags.clone(),
+        ..test_run.clone()
+    };
+    let outcome = run(toolchain, &shared, ui)?;
+    let started = outcome.ok() || outcome.found > 0 || outcome.stopped_early;
+    let dumping = share.dumps();
+    share.finish(started);
+    if started || !dumping {
+        return Ok(outcome);
+    }
+    run(toolchain, test_run, ui)
 }
 
 // ---- several test JVMs ------------------------------------------------------
@@ -1363,6 +1510,60 @@ mod tests {
         let args = run.args();
         assert_eq!(&args[..2], &["-Xmx256m", "-javaagent:/a.jar=destfile=/x"]);
         assert_eq!(args[2], "-cp");
+    }
+
+    #[test]
+    fn shared_classes_put_the_class_directories_on_the_launchers_loader() {
+        let tree = std::env::temp_dir().join(format!("jrs-share-layout-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tree);
+        let classes = tree.join("classes");
+        std::fs::create_dir_all(classes.join("com/example")).unwrap();
+        std::fs::write(classes.join("com/example/Own.class"), "x").unwrap();
+        std::fs::write(classes.join("module-info.class"), "x").unwrap();
+        let jar = tree.join("dep.jar");
+        let write_jar = |names: &[&str]| {
+            let mut zip = zip::ZipWriter::new(std::fs::File::create(&jar).unwrap());
+            for name in names {
+                zip.start_file(*name, zip::write::SimpleFileOptions::default())
+                    .unwrap();
+            }
+            zip.finish().unwrap();
+        };
+        write_jar(&["com/example/", "com/example/Dep.class", "module-info.class"]);
+        let base = TestRun {
+            jvm_args: vec!["-Xmx1g".into()],
+            classpath: vec![classes.clone(), jar.clone()],
+            ..run("1.10.2")
+        };
+        let shared = TestRun {
+            share_flags: vec!["-XX:SharedArchiveFile=/a.jsa".into()],
+            ..share_layout(&base, &tree.join("entries")).unwrap()
+        };
+        assert_eq!(shared.classpath, [jar.clone()]);
+        let args = shared.args();
+        assert_eq!(
+            &args[..4],
+            &[
+                "-Xmx1g",
+                "-XX:SharedArchiveFile=/a.jsa",
+                "-cp",
+                &jar.display().to_string()
+            ]
+        );
+        assert_eq!(
+            &args[5..8],
+            &["execute", "--class-path", &classes.display().to_string()]
+        );
+
+        // A jar rewritten with one of the project's classes in it.
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        write_jar(&["com/example/Own.class"]);
+        let why = share_layout(&base, &tree.join("entries")).unwrap_err();
+        assert!(
+            why.starts_with("`com/example/Own.class` is in both"),
+            "{why}"
+        );
+        let _ = std::fs::remove_dir_all(&tree);
     }
 
     #[test]

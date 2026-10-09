@@ -14,6 +14,12 @@
 //! - the API of the class everything depends on, which compiles every source
 //!   that reaches it — here, all of them, in a second `javac` run.
 //!
+//! Those builds run with `--no-build-cache`, since an edit that alternates
+//! between two versions would otherwise be restored from it every time. One
+//! more row measures the build cache itself (SPEC §7.8): a clean build whose
+//! classes the cache already holds, as after a branch switch or `jrs clean`,
+//! and, beside it, what an incremental build pays for storing its entry.
+//!
 //! ```text
 //! cargo bench --bench incremental
 //! JRS_BENCH_CLASSES=1000 JRS_BENCH_RUNS=7 cargo bench --bench incremental
@@ -64,6 +70,14 @@ fn main() {
             bench.build()
         })
         .collect();
+    // The cache holds the clean build's classes once one build stored them.
+    bench.build_cached();
+    let restored: Vec<Sample> = (0..runs)
+        .map(|_| {
+            let _ = std::fs::remove_dir_all(project.join("target"));
+            bench.build_cached()
+        })
+        .collect();
     let noop: Vec<Sample> = (0..runs).map(|_| bench.build()).collect();
     let scenario = |change: &dyn Fn(bool)| -> Vec<Sample> {
         let samples = (0..runs)
@@ -78,6 +92,20 @@ fn main() {
         samples
     };
     let body = scenario(&body);
+    // The same edit with the cache on, every run a new version, so that
+    // each one compiles and stores an entry.
+    let stored: Vec<Sample> = (0..runs)
+        .map(|run| {
+            std::fs::write(
+                &root,
+                std::fs::read_to_string(&root)
+                    .expect("read the edited source")
+                    .replacen("return v + ", &format!("return v + {run} + "), 1),
+            )
+            .expect("edit the source");
+            bench.build_cached()
+        })
+        .collect();
     let api_leaf = scenario(&api_leaf);
     let api_root = scenario(&api_root);
 
@@ -93,8 +121,10 @@ fn main() {
     );
     for (label, samples) in [
         ("clean build", &clean),
+        ("clean build, from the build cache", &restored),
         ("no-op rebuild", &noop),
         ("body of the most-used class", &body),
+        ("  the same, storing its entry", &stored),
         ("API of an unused class", &api_leaf),
         ("API of the most-used class", &api_root),
     ] {
@@ -129,13 +159,24 @@ struct Sample {
 }
 
 impl Bench {
+    /// A build that neither restores from nor stores into the build cache.
     fn build(&self) -> Sample {
+        self.run(&["--no-build-cache"])
+    }
+
+    /// A build with the build cache on.
+    fn build_cached(&self) -> Sample {
+        self.run(&[])
+    }
+
+    fn run(&self, extra: &[&str]) -> Sample {
         let stderr = File::create(&self.stderr).expect("create the stderr log");
         let start = Instant::now();
         let status = Command::new(env!("CARGO_BIN_EXE_jrs"))
             .arg("--manifest-path")
             .arg(&self.project)
             .args(["build", "--progress", "never", "--timings", "--verbose"])
+            .args(extra)
             .env("JRS_CACHE_DIR", &self.cache)
             .env("JRS_CONFIG", &self.config)
             .stdin(Stdio::null())
@@ -164,6 +205,8 @@ impl Bench {
                 .to_string()
         } else if log.contains("Fresh") {
             "none".to_string()
+        } else if log.contains("Restored") {
+            "restored".to_string()
         } else {
             "all".to_string()
         };

@@ -24,10 +24,13 @@ pub mod impact;
 mod incremental;
 pub mod javac;
 pub mod lang;
-mod share;
+pub mod share;
+pub mod worker;
 
+use std::collections::HashSet;
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 pub use abi::api_digest;
@@ -35,8 +38,10 @@ pub use doc::{ForeignDoc, document};
 pub use javac::{DocUnit, javadoc};
 pub use lang::{DocTool, Language};
 
+use crate::build_cache::{self, BuildCache};
 use crate::error::{IoResultExt, JrsError, Result};
 use crate::project;
+use crate::resolve::repo::sha256_hex;
 use crate::toolchain::{CapturedOutput, Toolchain, run_captured};
 use crate::ui::{Stream, Ui};
 
@@ -68,6 +73,12 @@ pub struct CompileUnit {
     /// fingerprint: it changes how fast a compiler starts, not what it
     /// writes.
     pub share_dir: Option<PathBuf>,
+    /// The build cache the unit's output is restored from and stored in
+    /// (SPEC §7.8); `None` leaves it out.
+    pub build_cache: Option<Arc<BuildCache>>,
+    /// The `--watch` session's warm `javac` (`worker.rs`), which every
+    /// `javac` step asks first; `None` forks `javac` for each.
+    pub worker: Option<Arc<worker::Worker>>,
 }
 
 /// A Kotlin, Scala or Groovy compiler, and what its run needs beyond the
@@ -106,6 +117,8 @@ pub enum Outcome {
         /// The sources compiled: all of them, or those a change reached.
         sources: usize,
     },
+    /// Brought back from the build cache instead of compiled.
+    Restored { classes: usize },
 }
 
 impl CompileUnit {
@@ -194,6 +207,237 @@ impl CompileUnit {
     }
 }
 
+impl CompileUnit {
+    /// What the unit's build-cache key is worked out from (SPEC §7.8): its
+    /// settings and sources, with every path relative to the project and
+    /// the shared cache, and every jar by its identity rather than its
+    /// size and modification time. `None` when the unit cannot be keyed: a
+    /// jar that cannot be read, or a class directory on the classpath that
+    /// no API digest stands for.
+    ///
+    /// # Errors
+    ///
+    /// `JrsError::Io` if a source cannot be read.
+    fn cache_text(&self, cache: &BuildCache) -> Result<Option<String>> {
+        let mut s = format!("unit {}\n", self.label);
+        // The classpath is keyed jar by jar below, not by where the jars are.
+        let mut flags = Vec::new();
+        let mut generated = self.javac_flags(false).into_iter();
+        while let Some(flag) = generated.next() {
+            if flag == "-cp" {
+                generated.next();
+            } else {
+                flags.push(flag);
+            }
+        }
+        let _ = writeln!(s, "javac {}", cache.relative(&flags.join("\u{1}")));
+        let mut jars: Vec<&PathBuf> = self.classpath.iter().collect();
+        if let Some(foreign) = &self.foreign {
+            let joint = !self.sources_in(Language::Java).is_empty();
+            let _ = writeln!(
+                s,
+                "{} {} {} {}",
+                foreign.language.key(),
+                foreign.version,
+                cache.relative(&lang::jvm_flags(self, foreign).join("\u{1}")),
+                cache.relative(
+                    &lang::flags(self, foreign, joint)
+                        .unwrap_or_default()
+                        .join("\u{1}")
+                )
+            );
+            jars.extend(&foreign.classpath);
+        }
+        for entry in jars {
+            if entry.is_dir() {
+                if self.main_api.is_none() {
+                    return Ok(None);
+                }
+                let _ = writeln!(s, "dir {}", cache.relative(&entry.display().to_string()));
+            } else if entry.exists() {
+                let Some(identity) = cache.jar(entry) else {
+                    return Ok(None);
+                };
+                let _ = writeln!(s, "jar {identity}");
+            } else {
+                let _ = writeln!(s, "none {}", cache.relative(&entry.display().to_string()));
+            }
+        }
+        if let Some(api) = &self.main_api {
+            let _ = writeln!(s, "main-api {api}");
+        }
+        let known = incremental::known_hashes(self);
+        for source in &self.sources {
+            let hash = match known.get(source) {
+                Some(hash) => hash.clone(),
+                None => sha256_hex(&std::fs::read(source).path(source)?),
+            };
+            let _ = writeln!(
+                s,
+                "source {hash} {}",
+                cache.relative(&source.display().to_string())
+            );
+        }
+        Ok(Some(s))
+    }
+
+    /// The unit's build-cache key, remembered for the store that follows a
+    /// compile.
+    fn cache_key(&self, cache: &BuildCache, ui: &Ui) -> Result<Option<String>> {
+        let Some(text) = self.cache_text(cache)? else {
+            ui.verbose(format!(
+                "build cache: the {} unit cannot be keyed, so it is compiled",
+                self.label
+            ));
+            return Ok(None);
+        };
+        let key = cache.key("compile", &text);
+        cache.remember(&self.output_dir, &key);
+        Ok(Some(key))
+    }
+
+    /// What the resource sync put in the output directory, by the records
+    /// it keeps (`resources-<unit>.list` and one per generated directory):
+    /// the build cache stores only what the compilers wrote.
+    fn synced_resources(&self) -> HashSet<String> {
+        let own = format!("resources-{}.list", self.label);
+        let generated = format!("resources-{}-generated-", self.label);
+        let mut names = HashSet::new();
+        for entry in std::fs::read_dir(&self.work_dir)
+            .into_iter()
+            .flatten()
+            .flatten()
+        {
+            let file = entry.file_name().to_string_lossy().into_owned();
+            let list = Path::new(&file).extension().is_some_and(|e| e == "list");
+            if file == own || (file.starts_with(&generated) && list) {
+                let text = std::fs::read_to_string(entry.path()).unwrap_or_default();
+                names.extend(text.lines().filter(|l| !l.is_empty()).map(str::to_string));
+            }
+        }
+        names
+    }
+}
+
+/// Drop the unit's fingerprint and index, so that its next build compiles
+/// it whole: `--verify-cache` compiles what is up to date too.
+pub fn forget(unit: &CompileUnit) {
+    let _ = std::fs::remove_file(unit.fingerprint_path());
+    incremental::forget(unit);
+}
+
+/// Bring a stale unit's output back from the build cache, when it holds an
+/// entry for the unit's inputs as they are (SPEC §7.8): the output
+/// directory is emptied and filled from the entry, and the fingerprint and
+/// the incremental index are written as a compile would have. `None` on a
+/// miss, and always under `--verify-cache`; the caller compiles then.
+/// Resources are not in the entry: the resource sync copies them after a
+/// restore as after a compile.
+///
+/// # Errors
+///
+/// `JrsError::Io` if a source cannot be read, or the output directory, the
+/// fingerprint or the index cannot be written.
+pub fn restore(unit: &CompileUnit, ui: &Ui) -> Result<Option<Outcome>> {
+    let Some(cache) = &unit.build_cache else {
+        return Ok(None);
+    };
+    if unit.sources.is_empty() {
+        return Ok(None);
+    }
+    let Some(key) = unit.cache_key(cache, ui)? else {
+        return Ok(None);
+    };
+    if cache.verifies() {
+        return Ok(None);
+    }
+    let Some(entries) = cache.load(&key, ui) else {
+        return Ok(None);
+    };
+    std::fs::create_dir_all(&unit.work_dir).path(&unit.work_dir)?;
+    // Until the entry is in place, nothing may say the output is current.
+    forget(unit);
+    build_cache::extract(&entries, &unit.output_dir)?;
+    if let Some(tracker) = incremental::Tracker::new(unit)? {
+        tracker.record_all(unit)?;
+    }
+    let classes = match finish(unit, unit.sources.len())? {
+        Outcome::Compiled { classes, .. } | Outcome::Restored { classes } => classes,
+        Outcome::UpToDate => 0,
+    };
+    ui.verbose(format!(
+        "build cache: restored the {} unit from {key}",
+        unit.label
+    ));
+    Ok(Some(Outcome::Restored { classes }))
+}
+
+/// After a successful compile: store what the compilers wrote, or under
+/// `--verify-cache`, compare it with what the cache holds.
+///
+/// # Errors
+///
+/// `JrsError::Build` under `--verify-cache` when the cache holds other
+/// bytes than the compilers wrote; `JrsError::Io` if a source cannot be
+/// read for the key.
+fn store(unit: &CompileUnit, ui: &Ui) -> Result<()> {
+    let Some(cache) = &unit.build_cache else {
+        return Ok(());
+    };
+    let key = match cache.recall(&unit.output_dir) {
+        Some(key) => key,
+        None => match unit.cache_key(cache, ui)? {
+            Some(key) => key,
+            None => return Ok(()),
+        },
+    };
+    let entries = match build_cache::collect(&unit.output_dir, &unit.synced_resources()) {
+        Ok(entries) => entries,
+        Err(e) => {
+            ui.verbose(format!("build cache: could not read the output: {e}"));
+            return Ok(());
+        }
+    };
+    if cache.verifies()
+        && let Some(held) = cache.load(&key, ui)
+    {
+        return verify(unit, &key, &held, &entries);
+    }
+    cache.save(&key, &entries, ui);
+    Ok(())
+}
+
+/// `--verify-cache`: the entry the cache holds for the unit must be what
+/// was just compiled, file for file.
+fn verify(
+    unit: &CompileUnit,
+    key: &str,
+    held: &build_cache::Entries,
+    compiled: &build_cache::Entries,
+) -> Result<()> {
+    let held: std::collections::BTreeMap<&str, &[u8]> = held
+        .iter()
+        .map(|(n, b)| (n.as_str(), b.as_slice()))
+        .collect();
+    let compiled: std::collections::BTreeMap<&str, &[u8]> = compiled
+        .iter()
+        .map(|(n, b)| (n.as_str(), b.as_slice()))
+        .collect();
+    let differs = held
+        .keys()
+        .chain(compiled.keys())
+        .find(|name| held.get(*name) != compiled.get(*name));
+    match differs {
+        None => Ok(()),
+        Some(name) => Err(JrsError::build(format!(
+            "the build cache's entry {key} for the {} unit differs from what was compiled: \
+             `{name}`\n\nsomething wrote that entry from other inputs than its key says; \
+             whoever can push to the remote cache should look into it",
+            unit.label
+        ))),
+    }
+}
+
 /// Whether the unit has to be compiled again: its fingerprint changed, or a
 /// source did. A unit with an index knows each source's contents, so a
 /// source touched but not changed is not a change; one without compares the
@@ -272,7 +516,9 @@ pub fn compile_timed(
     if let Some(tracker) = &tracker
         && let Some(sources) = tracker.recompile(toolchain, unit, ui, steps)?
     {
-        return finish(unit, sources);
+        let outcome = finish(unit, sources)?;
+        store(unit, ui)?;
+        return Ok(outcome);
     }
 
     // The whole unit compiles into an empty directory: a class whose source
@@ -293,7 +539,9 @@ pub fn compile_timed(
     if let Some(tracker) = &tracker {
         tracker.record_all(unit)?;
     }
-    finish(unit, unit.sources.len())
+    let outcome = finish(unit, unit.sources.len())?;
+    store(unit, ui)?;
+    Ok(outcome)
 }
 
 /// Record a compiled unit as up to date.
@@ -469,6 +717,8 @@ mod tests {
             foreign: None,
             main_api: None,
             share_dir: None,
+            build_cache: None,
+            worker: None,
         }
     }
 

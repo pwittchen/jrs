@@ -135,6 +135,15 @@ impl Snapshot {
         out
     }
 
+    /// Every file in the class directories, with the hash of its contents,
+    /// in the order the directories were walked: what a run's outcome
+    /// depends on besides its settings, for the build cache's key.
+    pub fn files(&self) -> impl Iterator<Item = (&Path, &str)> {
+        self.files
+            .iter()
+            .map(|e| (e.path.as_path(), e.hash.as_str()))
+    }
+
     /// Record this snapshot as what the next run compares with, with
     /// `failed` — top-level test classes by binary name — to run again
     /// then whatever changes.

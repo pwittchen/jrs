@@ -343,6 +343,10 @@ pub struct TestConfig {
     /// `test.coverage-minimum`: project-wide totals `jrs test --coverage`
     /// must reach, in declaration order. Ignored without `--coverage`.
     pub coverage_minimum: Vec<CoverageMinimum>,
+    /// `test.share-classes`: map the dependency jars' classes into the test
+    /// JVM from a class-data-sharing archive, which puts the class
+    /// directories on the launcher's own class loader (SPEC §10.2).
+    pub share_classes: bool,
     /// `[test.suites.<name>]`, in declaration order: test sources of their
     /// own, run by `jrs test --suite <name>` and never by plain `jrs test`.
     pub suites: Vec<TestSuite>,
@@ -1113,6 +1117,7 @@ const TEST_KEYS: &[&str] = &[
     "retries",
     "forks",
     "coverage-minimum",
+    "share-classes",
     "suites",
 ];
 const SUITE_KEYS: &[&str] = &[
@@ -1366,6 +1371,7 @@ impl Manifest {
                 retries: optional_count(t, "retries", "test")?,
                 forks: test_forks(t)?,
                 coverage_minimum: coverage_minimum(t, &mut warnings)?,
+                share_classes: bool_key(t, "share-classes", "`test.share-classes`")?,
                 suites: parse_suites(t, &mut warnings)?,
             },
         };
@@ -1770,6 +1776,9 @@ impl Manifest {
                     .map(|m| format!("{} = {}", m.counter.key(), m.ratio()))
                     .collect();
                 let _ = writeln!(s, "coverage-minimum = {{ {} }}", entries.join(", "));
+            }
+            if self.test.share_classes {
+                let _ = writeln!(s, "share-classes = true");
             }
         }
         for suite in &self.test.suites {
@@ -4706,6 +4715,26 @@ version = "1"
         let plain = parse("[project]\nname='a'\nversion='1'\n[test]\n").unwrap();
         assert_eq!(plain.test.retries, 0);
         assert!(plain.test.coverage_minimum.is_empty());
+    }
+
+    #[test]
+    fn share_classes_is_off_unless_asked_for() {
+        let m = parse("[project]\nname='a'\nversion='1'\n[test]\nshare-classes = true\n").unwrap();
+        assert!(m.warnings.is_empty(), "{:?}", m.warnings);
+        assert!(m.test.share_classes);
+        let rendered = m.render(None);
+        assert!(rendered.contains("share-classes = true\n"), "{rendered}");
+        assert_eq!(parse(&rendered).unwrap().test, m.test);
+
+        let plain = parse("[project]\nname='a'\nversion='1'\n[test]\n").unwrap();
+        assert!(!plain.test.share_classes);
+        let err = parse("[project]\nname='a'\nversion='1'\n[test]\nshare-classes = 'yes'\n")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("`test.share-classes` must be `true` or `false`"),
+            "{err}"
+        );
     }
 
     #[test]

@@ -5,6 +5,8 @@ import java.io.PrintWriter;
 import java.io.StringWriter;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
+import java.net.URL;
+import java.net.URLClassLoader;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -22,7 +24,9 @@ import java.util.stream.Stream;
  * pipeline runs end to end without the network.
  *
  * <p>It speaks the part of the real launcher's language jrs uses: the
- * `execute` subcommand, `--scan-class-path`, `--select-method`,
+ * `execute` subcommand, `--class-path` (a class loader of its own, whose
+ * parent is the JVM's, as the thread's context loader), `--scan-class-path`,
+ * `--select-method`,
  * `--select-unique-id`, `--select-class`, `--include-classname`, the tree
  * details in both themes, `--reports-dir` with the legacy XML report, the
  * closing summary block, and `--fail-fast`. Tests are methods annotated with
@@ -51,10 +55,16 @@ public final class ConsoleLauncher {
         boolean testfeed = false;
         List<String> selected = new ArrayList<>();
         List<String> classes = new ArrayList<>();
+        List<URL> classPath = new ArrayList<>();
         for (int i = 0; i < args.length; i++) {
             String arg = args[i];
             switch (arg) {
                 case "execute" -> {}
+                case "--class-path" -> {
+                    for (String entry : args[++i].split(java.io.File.pathSeparator)) {
+                        classPath.add(Path.of(entry).toUri().toURL());
+                    }
+                }
                 case "--scan-class-path" -> scan = args[++i];
                 case "--select-method" -> selected.add(args[++i]);
                 case "--select-unique-id" -> selected.add(fromUniqueId(args[++i]));
@@ -73,22 +83,27 @@ public final class ConsoleLauncher {
             }
         }
 
+        ClassLoader loader = ConsoleLauncher.class.getClassLoader();
+        if (!classPath.isEmpty()) {
+            loader = new URLClassLoader(classPath.toArray(new URL[0]), loader);
+            Thread.currentThread().setContextClassLoader(loader);
+        }
         List<Method> tests = new ArrayList<>();
         if (scan != null) {
             Pattern pattern = Pattern.compile(include);
             for (String name : scanned(Path.of(scan))) {
                 if (pattern.matcher(name).matches()) {
-                    tests.addAll(testsOf(Class.forName(name)));
+                    tests.addAll(testsOf(Class.forName(name, true, loader)));
                 }
             }
         }
         for (String name : classes) {
-            tests.addAll(testsOf(Class.forName(name)));
+            tests.addAll(testsOf(Class.forName(name, true, loader)));
         }
         for (String selector : selected) {
             String[] parts = selector.split("#", 2);
             String method = parts[1].replaceAll("\\(.*\\)$", "");
-            tests.add(Class.forName(parts[0]).getDeclaredMethod(method));
+            tests.add(Class.forName(parts[0], true, loader).getDeclaredMethod(method));
         }
 
         String branch = ascii ? "+-- " : "├─ ";

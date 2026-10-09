@@ -20,6 +20,11 @@
 //! [credentials.internal]              # a repository name from jrs.toml
 //! username = "ci"
 //! password-env = "NEXUS_PASSWORD"     # or `password`, `token`, `token-env`
+//!
+//! [build-cache]                       # SPEC §7.8
+//! url = "https://cache.example.com/jrs"
+//! push = false                        # CI sets true
+//! credentials = "build-cache"         # a [credentials.<name>] entry
 //! ```
 //!
 //! Like the manifest it is parsed by hand, so an unknown key is a warning and
@@ -79,10 +84,46 @@ pub struct Config {
     /// JDK feature version → its home, for a JDK a project pins that jrs would
     /// not find on its own.
     pub jdks: BTreeMap<u32, PathBuf>,
+    /// `[build-cache]`, with `JRS_BUILD_CACHE`, `JRS_BUILD_CACHE_URL` and
+    /// `JRS_BUILD_CACHE_PUSH` applied.
+    pub build_cache: BuildCacheConfig,
     pub warnings: Vec<String>,
 }
 
-const TOP_KEYS: &[&str] = &["jobs", "proxy", "mirrors", "credentials", "jdks"];
+/// `[build-cache]`: the build cache of SPEC §7.8. It names infrastructure,
+/// so it is per machine, never in `jrs.toml`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BuildCacheConfig {
+    /// The local cache is on unless this is turned off.
+    pub enabled: bool,
+    /// A remote cache, `http(s)://` or `file://`, read on a local miss.
+    pub url: Option<String>,
+    /// Whether this machine writes to the remote cache: CI, and no one else.
+    pub push: bool,
+    /// The `[credentials.<name>]` entry the remote cache is reached with.
+    pub credentials: Option<String>,
+}
+
+impl Default for BuildCacheConfig {
+    fn default() -> Self {
+        BuildCacheConfig {
+            enabled: true,
+            url: None,
+            push: false,
+            credentials: None,
+        }
+    }
+}
+
+const TOP_KEYS: &[&str] = &[
+    "jobs",
+    "proxy",
+    "mirrors",
+    "credentials",
+    "jdks",
+    "build-cache",
+];
+const BUILD_CACHE_KEYS: &[&str] = &["enabled", "url", "push", "credentials"];
 const PROXY_KEYS: &[&str] = &["url", "no-proxy"];
 const CREDENTIAL_KEYS: &[&str] = &["username", "password", "password-env", "token", "token-env"];
 
@@ -213,6 +254,20 @@ impl Config {
             }
         }
 
+        if let Some(value) = table.get("build-cache") {
+            config.build_cache = parse_build_cache(value, &shown, &fail, &mut config.warnings)?;
+        }
+        // CI configures the cache through its environment.
+        if env("JRS_BUILD_CACHE").is_some_and(|v| v.eq_ignore_ascii_case("off")) {
+            config.build_cache.enabled = false;
+        }
+        if let Some(url) = env("JRS_BUILD_CACHE_URL") {
+            config.build_cache.url = Some(url.trim_end_matches('/').to_string());
+        }
+        if let Some(push) = env("JRS_BUILD_CACHE_PUSH") {
+            config.build_cache.push = matches!(push.to_ascii_lowercase().as_str(), "true" | "1");
+        }
+
         Ok(config)
     }
 
@@ -340,6 +395,39 @@ fn parse_credentials(
     }
 }
 
+/// `[build-cache]`. `shown` names the file in warnings, and `fail` turns a
+/// message into an error naming it.
+fn parse_build_cache(
+    value: &toml::Value,
+    shown: &str,
+    fail: &dyn Fn(String) -> JrsError,
+    warnings: &mut Vec<String>,
+) -> Result<BuildCacheConfig> {
+    let t = value
+        .as_table()
+        .ok_or_else(|| fail("`build-cache` must be a table".into()))?;
+    warn_unknown(t, BUILD_CACHE_KEYS, "build-cache.", shown, warnings);
+    let flag = |key: &str, default: bool| match t.get(key) {
+        None => Ok(default),
+        Some(v) => v
+            .as_bool()
+            .ok_or_else(|| fail(format!("`build-cache.{key}` must be `true` or `false`"))),
+    };
+    let text = |key: &str| match t.get(key) {
+        None => Ok(None),
+        Some(v) => v
+            .as_str()
+            .map(|s| Some(s.to_string()))
+            .ok_or_else(|| fail(format!("`build-cache.{key}` must be a string"))),
+    };
+    Ok(BuildCacheConfig {
+        enabled: flag("enabled", true)?,
+        url: text("url")?.map(|u| u.trim_end_matches('/').to_string()),
+        push: flag("push", false)?,
+        credentials: text("credentials")?,
+    })
+}
+
 fn string_list(t: &toml::Table, key: &str) -> std::result::Result<Vec<String>, ()> {
     match t.get(key) {
         None => Ok(Vec::new()),
@@ -441,6 +529,47 @@ token = "ghp_x"
             Credentials::Bearer("ghp_x".into())
         );
         assert!(config.warnings.is_empty(), "{:?}", config.warnings);
+    }
+
+    #[test]
+    fn the_build_cache_is_local_unless_configured_and_the_environment_wins() {
+        let plain = parse("").unwrap();
+        assert_eq!(plain.build_cache, BuildCacheConfig::default());
+        assert!(plain.build_cache.enabled);
+
+        let config = parse(
+            "[build-cache]\nurl = \"https://cache.example.com/jrs/\"\npush = true\n\
+             credentials = \"build-cache\"\n",
+        )
+        .unwrap();
+        assert_eq!(
+            config.build_cache,
+            BuildCacheConfig {
+                enabled: true,
+                url: Some("https://cache.example.com/jrs".into()),
+                push: true,
+                credentials: Some("build-cache".into()),
+            }
+        );
+
+        let env = |name: &str| match name {
+            "JRS_BUILD_CACHE" => Some("off".to_string()),
+            "JRS_BUILD_CACHE_URL" => Some("file:///mnt/cache".to_string()),
+            "JRS_BUILD_CACHE_PUSH" => Some("false".to_string()),
+            _ => None,
+        };
+        let config = Config::parse("[build-cache]\npush = true\n", None, &env).unwrap();
+        assert!(!config.build_cache.enabled);
+        assert_eq!(config.build_cache.url.as_deref(), Some("file:///mnt/cache"));
+        assert!(!config.build_cache.push);
+
+        assert!(parse("[build-cache]\npush = 'yes'\n").is_err());
+        let warned = parse("[build-cache]\nttl = 3\n").unwrap();
+        assert!(
+            warned.warnings[0].contains("`build-cache.ttl`"),
+            "{:?}",
+            warned.warnings
+        );
     }
 
     #[test]

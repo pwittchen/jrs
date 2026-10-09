@@ -9,6 +9,7 @@
 //! reporting progress into shared state; `cli` is the only module that decides
 //! what a user sees.
 
+pub mod build_cache;
 pub mod cli;
 pub mod compile;
 pub mod completions;

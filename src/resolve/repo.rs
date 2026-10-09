@@ -751,7 +751,7 @@ fn is_transient(e: &ureq::Error) -> bool {
 }
 
 /// The `Authorization` header value for `credentials`.
-fn authorization(credentials: &Credentials) -> String {
+pub(crate) fn authorization(credentials: &Credentials) -> String {
     match credentials {
         Credentials::Basic { username, password } => {
             format!(
@@ -836,7 +836,7 @@ pub fn digest_as(pin: &str, bytes: &[u8]) -> Option<String> {
 }
 
 /// The filesystem root behind a `file://` URL, if that is what this is.
-fn local_repo_root(url: &str) -> Option<PathBuf> {
+pub(crate) fn local_repo_root(url: &str) -> Option<PathBuf> {
     let rest = url.strip_prefix("file://")?;
     // `file:///C:/x` names the drive path `C:/x`, not `/C:/x`.
     let bytes = rest.as_bytes();

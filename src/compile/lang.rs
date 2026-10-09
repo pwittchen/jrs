@@ -720,6 +720,8 @@ mod tests {
             foreign: None,
             main_api: None,
             share_dir: None,
+            build_cache: None,
+            worker: None,
         }
     }
 

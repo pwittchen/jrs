@@ -213,6 +213,21 @@ impl Index {
     }
 }
 
+/// The contents hash of each of `sources` that the unit's index recorded
+/// at its present size and modification time, so that a key over the
+/// sources reads only those that moved.
+pub(super) fn known_hashes(unit: &CompileUnit) -> HashMap<PathBuf, String> {
+    let Some(index) = Index::load(unit) else {
+        return HashMap::new();
+    };
+    index
+        .sources
+        .into_iter()
+        .filter(|s| !s.hash.is_empty() && stat(&s.path) == Some((s.size, s.modified)))
+        .map(|s| (s.path, s.hash))
+        .collect()
+}
+
 fn stat(path: &Path) -> Option<(u64, u128)> {
     let meta = std::fs::metadata(path).ok()?;
     let modified = meta.modified().ok()?.duration_since(UNIX_EPOCH).ok()?;
@@ -814,6 +829,8 @@ mod tests {
                 foreign: None,
                 main_api: None,
                 share_dir: None,
+                build_cache: None,
+                worker: None,
             }
         }
     }
