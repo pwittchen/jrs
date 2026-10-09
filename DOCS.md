@@ -317,15 +317,21 @@ jar's is found first. jrs checks for such a name before every run and keeps
 the usual layout when it finds one (`-v` says which), but it cannot check the
 order of `META-INF/services` entries or `spring.factories`, and code that
 reads `java.class.path` itself no longer sees the class directories — hence
-opt-in. `--debug`, `--coverage` and `test.java-agents` turn it off for the
-run, and forked JVMs only read an archive a single-JVM run wrote.
+opt-in. Nor does a library in a jar that loads a project class by name
+through its own class loader: Spring's `SerializationUtils` deserialising a
+project class fails with `ClassNotFoundException`. `--debug`, `--coverage`
+and `test.java-agents` turn it off for the run, and forked JVMs only read an
+archive a single-JVM run wrote.
 
 `share-classes = "aot"` uses the JDK's AOT cache instead (JDK 24 and later;
 an older JDK gets the archive). Besides the classes it keeps them linked,
 and from JDK 25 it keeps method profiles too, which helps a large test
 context most. The first run records what it loaded and jrs then builds the
 cache (`cds/test-*.aot`) in a JVM of its own, which makes that first run
-slower; later runs map it. To see what either mode buys on your project,
+slower; later runs map it. When the tests attach an agent at run time —
+Mockito's inline mock maker does, unless it is in `test.java-agents` — the
+cache cannot be built, and every run records again. To see what either mode
+buys on your project,
 and whether its tests still pass, run `JRS_BENCH_PROJECT=<path> cargo bench
 --bench test_jvm` from a jrs checkout.
 

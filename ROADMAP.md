@@ -337,6 +337,11 @@ which gap is real, and every item here is judged by them.
   the corpus of section 1 to run green with it on.
   [specs/TEST_JVM_BENCHMARK.md](specs/TEST_JVM_BENCHMARK.md) is the plan
   and its decision rules; `cargo bench --bench test_jvm` is the harness.
+  Its first pass (§7 there) keeps both opt-in and names what blocks them: a
+  jar deserialising a project class cannot see it under the shared layout,
+  the AOT cache is never assembled after Mockito self-attaches, a forked run
+  never writes an archive, and the test JVM does not run in the project
+  directory.
 - **Task outputs in the build cache**, opt-in per task with `cache = true`:
   [specs/TASK_OUTPUT_CACHE.md](specs/TASK_OUTPUT_CACHE.md), a proposal.
 - **Per-class test results in the build cache**, keyed by each class's

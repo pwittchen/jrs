@@ -1919,7 +1919,10 @@ jvm-args = [
   jar's is found first. jrs checks for such a name before every run and keeps the usual layout when
   it finds one (<code>-v</code> says which), but it cannot check the order of
   <code>META-INF/services</code> entries or <code>spring.factories</code>, and code that reads
-  <code>java.class.path</code> itself no longer sees the class directories — hence opt-in.
+  <code>java.class.path</code> itself no longer sees the class directories — hence opt-in. Nor
+  does a library in a jar that loads a project class by name through its own class loader: Spring's
+  <code>SerializationUtils</code> deserialising a project class fails with
+  <code>ClassNotFoundException</code>.
   <code>--debug</code>, <code>--coverage</code> and <code>test.java-agents</code> turn it off for
   the run, and forked JVMs only read an archive a single-JVM run wrote.
 </p>
@@ -1927,7 +1930,10 @@ jvm-args = [
   <code>share-classes = "aot"</code> uses the JDK's AOT cache instead (JDK 24 and later; an older
   JDK gets the archive). It also keeps the classes linked and, from JDK 25, method profiles, which
   helps a large test context most. The first run records what it loaded and jrs then builds the
-  cache in a JVM of its own, so that run is slower; later runs map it. To see what either mode buys
+  cache in a JVM of its own, so that run is slower; later runs map it. When the tests attach an
+  agent at run time — Mockito's inline mock maker does, unless it is in
+  <code>test.java-agents</code> — the cache cannot be built, and every run records again. To see
+  what either mode buys
   on your project, and whether its tests still pass, run
   <code>JRS_BENCH_PROJECT=&lt;path&gt; cargo bench --bench test_jvm</code> from a jrs checkout.
 </p>

@@ -8,7 +8,8 @@ test JVM, pipelined downloads, a build cache, and a warm `javac` for
 Status: **F1–F7 implemented** (§9.1), F7 opt-in as `test.share-classes =
 "aot"`, in two steps (record, then assemble) rather than JDK 25's one-step
 flag, which prints into the test output. Which mode becomes the default is
-decided by measurement: [TEST_JVM_BENCHMARK.md](TEST_JVM_BENCHMARK.md). Open
+decided by measurement: [TEST_JVM_BENCHMARK.md](TEST_JVM_BENCHMARK.md),
+whose first pass keeps both opt-in. Open
 questions 5 and 7 have proposals of their own:
 [TASK_OUTPUT_CACHE.md](TASK_OUTPUT_CACHE.md) and
 [TEST_RESULT_CACHE.md](TEST_RESULT_CACHE.md). The SPEC.md edits of §7 are in:
@@ -198,6 +199,14 @@ and caches only the built-in loaders' classes, which with §3.2's layout are
 exactly the dependency jars. It is the same design with other flags, chosen
 by `Toolchain::version`. It ships after the dynamic archive has been measured
 against it on the corpus.
+
+The first measurement ([TEST_JVM_BENCHMARK.md §7](TEST_JVM_BENCHMARK.md#7-results-first-pass))
+kept it opt-in. On JDK 25 it beat the archive's `test JVM` time by 17–20%
+on a Ktor project and a plain library (−43% and −42% against no sharing),
+but on three Spring Boot petclinics it was never assembled: Mockito's
+self-attached agent appends to the boot class path in the recording run,
+`-XX:AOTMode=create` fails on it, and every later run recorded again, 32–134%
+slower than no sharing at all.
 
 ---
 
