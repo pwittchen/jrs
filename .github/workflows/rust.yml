@@ -31,7 +31,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ ubuntu-latest, macos-latest, windows-latest ]
+        os: [ ubuntu-24.04, macos-latest, windows-latest ]
 
     runs-on: ${{ matrix.os }}
 
@@ -89,7 +89,7 @@ jobs:
   bump:
     if: startsWith(github.ref, 'refs/tags/v')
     needs: build
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
 
     permissions:
       contents: write
@@ -144,7 +144,7 @@ jobs:
           # Linux binaries link musl statically, so they run on any distribution
           # regardless of its glibc version.
           - target: x86_64-unknown-linux-musl
-            os: ubuntu-latest
+            os: ubuntu-24.04
           - target: aarch64-unknown-linux-musl
             os: ubuntu-24.04-arm
           - target: x86_64-apple-darwin
@@ -207,7 +207,7 @@ jobs:
 
   release:
     needs: dist
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
 
     permissions:
       contents: write
