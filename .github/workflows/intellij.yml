@@ -1,0 +1,88 @@
+name: IntelliJ plugin
+
+# Tests and builds the IntelliJ IDEA plugin in plugins/intellij with Gradle.
+#
+# A change to the plugin runs it on its own, and so does a change to a
+# jrs.toml under examples/ or tests/fixtures, which the plugin's manifest
+# inspection is tested against. The release pipeline in rust.yml calls it with
+# the version commit and `upload: true`, and the archive it keeps becomes the
+# release's `jrs-intellij.zip`. The plugin's version is `pluginVersion` in its
+# gradle.properties, which the `bump` job sets to the tag's version.
+on:
+  push:
+    branches: [ "master" ]
+    paths:
+      - 'plugins/intellij/**'
+      - '!plugins/intellij/**/*.md'
+      - 'examples/**/jrs.toml'
+      - 'tests/fixtures/**/jrs.toml'
+      - '.github/workflows/intellij.yml'
+  pull_request:
+    branches: [ "master" ]
+    paths:
+      - 'plugins/intellij/**'
+      - '!plugins/intellij/**/*.md'
+      - 'examples/**/jrs.toml'
+      - 'tests/fixtures/**/jrs.toml'
+      - '.github/workflows/intellij.yml'
+  workflow_call:
+    inputs:
+      ref:
+        description: The commit to build the plugin from.
+        required: true
+        type: string
+      upload:
+        description: Keep the plugin archive as the `jrs-intellij` artifact.
+        required: false
+        default: false
+        type: boolean
+
+jobs:
+  plugin:
+    runs-on: ubuntu-24.04
+
+    permissions:
+      contents: read
+
+    defaults:
+      run:
+        working-directory: plugins/intellij
+
+    steps:
+    - uses: actions/checkout@v7
+      with:
+        ref: ${{ inputs.ref || github.sha }}
+
+    - name: Set up the JDK
+      uses: actions/setup-java@v6
+      with:
+        distribution: temurin
+        java-version: '21'
+
+    # Caches Gradle's dependencies and the IntelliJ Platform it downloads
+    # (about 1 GB) between runs.
+    - name: Set up Gradle
+      uses: gradle/actions/setup-gradle@v5
+
+    - name: Test and build the plugin
+      run: ./gradlew --no-daemon test buildPlugin
+
+    # Release assets carry no version, like the binaries, so
+    # `releases/latest/download/jrs-intellij.zip` is a stable URL.
+    - name: Rename the archive
+      if: inputs.upload
+      run: |
+        mkdir -p dist
+        archives=(build/distributions/jrs-intellij-*.zip)
+        if [ "${#archives[@]}" -ne 1 ]; then
+          echo "::error::expected one plugin archive, found: ${archives[*]}"
+          exit 1
+        fi
+        cp "${archives[0]}" dist/jrs-intellij.zip
+
+    - uses: actions/upload-artifact@v7
+      if: inputs.upload
+      with:
+        name: jrs-intellij
+        path: plugins/intellij/dist/jrs-intellij.zip
+        if-no-files-found: error

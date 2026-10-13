@@ -45,13 +45,18 @@ The IDE the plugin is compiled against is `platformVersion` in
 uses the [IntelliJ Platform Gradle Plugin](https://plugins.jetbrains.com/docs/intellij/tools-intellij-platform-gradle-plugin.html)
 2.x and Kotlin.
 
+Each jrs release carries the plugin as `jrs-intellij.zip`, built by CI
+(`.github/workflows/intellij.yml`) with the release's version. The same
+workflow runs `test` and `buildPlugin` on every change to the plugin.
+
 ## Installing
 
-1. Build the archive (above).
+1. Download `jrs-intellij.zip` from the
+   [latest release](https://github.com/pwittchen/jrs/releases/latest), or
+   build the archive yourself (above).
 2. In IntelliJ IDEA open **Settings | Plugins**, click the gear icon and choose
    **Install Plugin from Disk…**.
-3. Pick `build/distributions/jrs-intellij-<version>.zip` and restart the IDE
-   when it asks.
+3. Pick the zip and restart the IDE when it asks.
 
 ## Using it
 

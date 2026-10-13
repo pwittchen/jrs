@@ -37,11 +37,16 @@ Windows (`fmt` on Linux only), plus the network tests on Linux, on push and PR
 against `master`. Its `reproducible` job packages every `examples/` project
 from two checkouts at different paths and compares what was written byte for
 byte: a compiler or writer that records a path or a time fails there. Changes that only touch `*.md`, `LICENSE` or `website/` are
-excluded via `paths-ignore` — they cannot break the build, so they do not run it. A `v*` tag
+excluded via `paths-ignore` — they cannot break the build, so they do not run it;
+neither do changes under `plugins/`. `.github/workflows/intellij.yml` tests and
+builds the IntelliJ plugin with Gradle on changes to it or to a `jrs.toml` under
+`examples/` or `tests/fixtures`, and `rust.yml` calls it on a release. A `v*` tag
 push runs the same checks, then `bump` writes the tag's version into `Cargo.toml`
 and `Cargo.lock` and commits it to `master` (the tag itself is never moved), the
 `dist` matrix builds release binaries for Linux (musl), macOS and Windows (x86_64
-and ARM64) from that commit, and `release` publishes them and writes the
+and ARM64) from that commit, `plugin` builds the IntelliJ plugin from it (the
+`bump` commit also sets `pluginVersion` in `plugins/intellij/gradle.properties`),
+and `release` publishes them, the plugin as `jrs-intellij.zip`, and writes the
 Homebrew, Scoop and winget manifests from their checksums
 (`packaging/manifests.sh`, kept as the `package-manifests` artifact; publishing
 those is manual). The tag must point at the tip of `master`. Don't

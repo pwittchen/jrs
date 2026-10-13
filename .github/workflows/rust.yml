@@ -1,8 +1,9 @@
 name: Rust
 
 on:
-  # Documentation-only and website-only changes cannot break the build, so they
-  # do not run it; website.yml publishes the site. Path filters are not
+  # Documentation-only, website-only and plugin-only changes cannot break the
+  # build, so they do not run it; website.yml publishes the site and
+  # intellij.yml builds the IntelliJ plugin. Path filters are not
   # evaluated for tag pushes, so a version tag always runs the full pipeline
   # and then publishes a release (see `dist`).
   push:
@@ -12,12 +13,14 @@ on:
       - '**/*.md'
       - 'LICENSE'
       - 'website/**'
+      - 'plugins/**'
   pull_request:
     branches: [ "master" ]
     paths-ignore:
       - '**/*.md'
       - 'LICENSE'
       - 'website/**'
+      - 'plugins/**'
 
 env:
   CARGO_TERM_COLOR: always
@@ -148,8 +151,9 @@ jobs:
         exit "$failed"
 
   # A version tag sets the crate version: `v1.2.3` writes `version = "1.2.3"` to
-  # Cargo.toml and Cargo.lock and commits that to master, so the release is
-  # built from sources that report its version. The tag itself is left where it
+  # Cargo.toml and Cargo.lock, and `pluginVersion` in the IntelliJ plugin's
+  # gradle.properties, and commits that to master, so the release is built
+  # from sources that report its version. The tag itself is left where it
   # was pushed, so a local clone never holds a stale copy of it.
   # Pushes made with the workflow's own token do not trigger further runs.
   bump:
@@ -187,8 +191,9 @@ jobs:
         version="${GITHUB_REF_NAME#v}"
         sed -i "0,/^version = \".*\"$/s//version = \"$version\"/" Cargo.toml
         cargo update --workspace
+        sed -i "s/^pluginVersion = .*$/pluginVersion = $version/" plugins/intellij/gradle.properties
         if git diff --quiet; then
-          echo "Cargo.toml is already at $version"
+          echo "Cargo.toml and the plugin are already at $version"
         else
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
@@ -282,14 +287,28 @@ jobs:
         path: dist/*
         if-no-files-found: error
 
+  # The IntelliJ plugin, built from the version commit, so it reports the
+  # release's version; it becomes the `jrs-intellij.zip` asset.
+  plugin:
+    needs: bump
+
+    permissions:
+      contents: read
+
+    uses: ./.github/workflows/intellij.yml
+    with:
+      ref: ${{ needs.bump.outputs.sha }}
+      upload: true
+
   release:
-    needs: dist
+    needs: [ dist, plugin ]
     runs-on: ubuntu-24.04
 
     permissions:
       contents: write
 
     steps:
+    # The binaries from `dist` and the plugin archive from `plugin`.
     - uses: actions/download-artifact@v8
       with:
         path: dist
