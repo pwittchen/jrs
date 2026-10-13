@@ -1,0 +1,98 @@
+<idea-plugin>
+    <id>dev.getjrs.intellij</id>
+    <name>jrs</name>
+    <vendor url="https://getjrs.dev">jrs</vendor>
+    <description><![CDATA[
+    Support for <a href="https://getjrs.dev">jrs</a>, the Java build system driven by one <code>jrs.toml</code>.
+    <ul>
+      <li>Imports a jrs project from <code>jrs metadata</code>: source and resource roots, output directories,
+          the JDK, the language level and one library per classpath entry, with its sources when cached.</li>
+      <li>Shows a "Load jrs changes" prompt when <code>jrs.toml</code> or <code>jrs.lock</code> changes.</li>
+      <li>Delegates Build Project to <code>jrs build</code>, with compiler diagnostics linked to the source.</li>
+      <li>Run configurations for <code>jrs run</code>, <code>jrs test</code>, <code>jrs package</code> and
+          <code>jrs task</code>, with the debugger attached through <code>--debug</code> and test results
+          read from the JUnit XML into the test runner tree.</li>
+      <li>A jrs tool window with the project's tasks and dependencies and actions for the common commands.</li>
+      <li>Completion and unknown-key warnings in <code>jrs.toml</code>; adding and removing dependencies through
+          <code>jrs add</code> and <code>jrs remove</code>.</li>
+      <li>The jrs icon on <code>jrs.toml</code> and <code>jrs.lock</code>, and <code>jrs migrate</code> for
+          Maven and Gradle projects.</li>
+    </ul>
+    ]]></description>
+
+    <depends>com.intellij.modules.platform</depends>
+    <depends>com.intellij.java</depends>
+
+    <extensions defaultExtensionNs="com.intellij">
+        <fileIconProvider implementation="dev.getjrs.intellij.JrsFileIconProvider"/>
+
+        <applicationConfigurable parentId="build.tools" instance="dev.getjrs.intellij.settings.JrsConfigurable"
+                                 id="dev.getjrs.intellij.settings" displayName="jrs"/>
+
+        <notificationGroup id="jrs" displayType="BALLOON"/>
+
+        <postStartupActivity implementation="dev.getjrs.intellij.sync.JrsStartupActivity"/>
+        <editorNotificationProvider implementation="dev.getjrs.intellij.sync.JrsChangesNotificationProvider"/>
+
+        <projectTaskRunner implementation="dev.getjrs.intellij.build.JrsProjectTaskRunner" order="first"/>
+
+        <configurationType implementation="dev.getjrs.intellij.run.JrsConfigurationType"/>
+        <runConfigurationProducer implementation="dev.getjrs.intellij.run.JrsTestConfigurationProducer"/>
+        <programRunner implementation="dev.getjrs.intellij.run.JrsDebugRunner"/>
+
+        <toolWindow id="jrs" anchor="right" icon="/icons/jrs.png"
+                    factoryClass="dev.getjrs.intellij.toolwindow.JrsToolWindowFactory"/>
+
+        <completion.contributor language="any"
+                                implementationClass="dev.getjrs.intellij.manifest.JrsManifestCompletionContributor"/>
+        <localInspection shortName="JrsManifest" displayName="Unknown jrs.toml table or key"
+                         groupName="jrs" enabledByDefault="true" level="WARNING"
+                         implementationClass="dev.getjrs.intellij.manifest.JrsManifestInspection"/>
+    </extensions>
+
+    <projectListeners>
+        <listener class="dev.getjrs.intellij.sync.JrsManifestChangeListener"
+                  topic="com.intellij.openapi.vfs.newvfs.BulkFileListener"/>
+    </projectListeners>
+
+    <actions>
+        <group id="Jrs.Commands" text="jrs" popup="true" icon="/icons/jrs.png">
+            <add-to-group group-id="ToolsMenu" anchor="last"/>
+            <action id="Jrs.Sync" class="dev.getjrs.intellij.actions.JrsSyncAction"
+                    text="Load jrs Project" description="Run jrs metadata and set the project up from it"
+                    icon="AllIcons.Actions.Refresh"/>
+            <separator/>
+            <action id="Jrs.Build" class="dev.getjrs.intellij.actions.JrsBuildAction"
+                    text="jrs build" icon="AllIcons.Actions.Compile"/>
+            <action id="Jrs.Test" class="dev.getjrs.intellij.actions.JrsTestAction"
+                    text="jrs test" icon="AllIcons.RunConfigurations.Junit"/>
+            <action id="Jrs.Run" class="dev.getjrs.intellij.actions.JrsRunAction"
+                    text="jrs run" icon="AllIcons.Actions.Execute"/>
+            <action id="Jrs.Package" class="dev.getjrs.intellij.actions.JrsPackageAction"
+                    text="jrs package" icon="AllIcons.Nodes.PpJar"/>
+            <action id="Jrs.Clean" class="dev.getjrs.intellij.actions.JrsCleanAction"
+                    text="jrs clean" icon="AllIcons.Actions.GC"/>
+            <separator/>
+            <action id="Jrs.Tree" class="dev.getjrs.intellij.actions.JrsTreeAction"
+                    text="jrs tree" description="Print the resolved dependency graph"
+                    icon="AllIcons.Actions.ShowAsTree"/>
+            <action id="Jrs.Outdated" class="dev.getjrs.intellij.actions.JrsOutdatedAction"
+                    text="jrs outdated" description="List declared dependencies that have newer releases"/>
+            <action id="Jrs.Update" class="dev.getjrs.intellij.actions.JrsUpdateAction"
+                    text="jrs update" description="Re-resolve dependencies and rewrite jrs.lock"/>
+            <action id="Jrs.Verify" class="dev.getjrs.intellij.actions.JrsVerifyAction"
+                    text="jrs verify" description="Re-hash the cached jars against jrs.lock"/>
+            <action id="Jrs.Fetch" class="dev.getjrs.intellij.actions.JrsFetchSourcesAction"
+                    text="Download Sources" description="jrs fetch --sources, then reload the project"
+                    icon="AllIcons.Actions.Download"/>
+            <separator/>
+            <action id="Jrs.AddDependency" class="dev.getjrs.intellij.actions.JrsAddDependencyAction"
+                    text="Add Dependency…" description="jrs add" icon="AllIcons.General.Add"/>
+            <action id="Jrs.RemoveDependency" class="dev.getjrs.intellij.actions.JrsRemoveDependencyAction"
+                    text="Remove Dependency…" description="jrs remove" icon="AllIcons.General.Remove"/>
+            <separator/>
+            <action id="Jrs.Migrate" class="dev.getjrs.intellij.actions.JrsMigrateAction"
+                    text="Migrate to jrs" description="Run jrs migrate on this Maven or Gradle project"/>
+        </group>
+    </actions>
+</idea-plugin>

@@ -59,7 +59,7 @@ the page says what jrs does and leaves out how it compares:
 | It builds real projects | The corpus's compatibility table | Section 1 |
 | Reproducible by default | Two builds of every example compared byte for byte in CI | The `reproducible` job in `rust.yml` |
 | Auditable supply chain | `jrs package --sbom`, `jrs licenses`, `jrs audit` | Built in |
-| Works in the IDE | The IntelliJ plugin | Section 4 |
+| Works in the IDE | The IntelliJ plugin | `plugins/intellij` |
 
 **Order of work.** The plan follows from the table: first what stops people
 from trying jrs at all, then what proves the claims, then what widens the
@@ -67,18 +67,16 @@ audience.
 
 1. **Section 1, the real-project corpus.** A user's first project has to
    build; nothing else matters until it does.
-2. **Section 4, the IntelliJ plugin.** Without it, a jrs project is a folder of
-   files in the IDE most JVM developers use, and nobody works that way every day.
-3. **Section 2, benchmarks.** They turn "fast" from a promise into a table,
+2. **Section 2, benchmarks.** They turn "fast" from a promise into a table,
    and the Why page and README link to the report once it exists.
-4. **Section 3, publishing to the package managers**, so trying jrs costs
+3. **Section 3, publishing to the package managers**, so trying jrs costs
    one command on every platform.
-5. **One spec decision, taken early: `jrs install`** (section 5, publishing).
+4. **One spec decision, taken early: `jrs install`** (section 5, publishing).
    Installing a jar into `~/.m2` is the smallest step past one module: it
    lets a team split a library out of a service without a reactor, which is
    the most common reason a project cannot try jrs.
    Multi-module builds (section 7) are the full answer, and come after it.
-6. **A guide for coding agents** in `DOCS.md` and on the website: which
+5. **A guide for coding agents** in `DOCS.md` and on the website: which
    commands to run, which flags give stable output, and how to read
    `jrs metadata`. It needs no code, only documentation of what exists.
 
@@ -205,64 +203,28 @@ package managers look:
 - **DOCS.md and the website's install section** list the three commands once
   they work, and `website/install.sh` mentions them for Windows.
 
-## 4. An IntelliJ plugin
+## 4. The IntelliJ plugin
 
-Today IntelliJ IDEA does not recognise a jrs project. Someone who opens one
-gets a folder of `.java` files with no source roots, no JDK and no libraries,
-unless they keep a `pom.xml` or a Gradle build beside `jrs.toml` for the IDE
-alone. A plugin that imports a jrs project the way IntelliJ imports a Maven or
-Gradle one closes that gap. It needs no daemon: `jrs metadata` (SPEC §5.4) is
-already the project model an editor plugin needs, and was written for this.
+The plugin lives in `plugins/intellij` (its README says how to build and use
+it), written in Kotlin against the IntelliJ Platform SDK. It imports a jrs
+project from `jrs metadata`: source roots, outputs, the JDK, and one library
+per classpath entry in its scope, with its sources jar. It shows "Load jrs
+changes" when `jrs.toml` or `jrs.lock` changes, and delegates Build Project to
+`jrs build`. It has run configurations for every command, with `jrs test` from
+the gutter (`--filter`, `--method`), JUnit XML in the test tree and the
+debugger on `--debug`. It also has a tool window, `jrs.toml` completion and
+unknown-key warnings, `jrs add`/`remove`, `jrs migrate`, and the logo on both
+files. What is left:
 
-- **Import and sync.** Opening a directory with a `jrs.toml` offers to import
-  it. The plugin runs `jrs metadata` and builds one IntelliJ module from the
-  JSON: the main and test source roots for each language, the generated
-  sources and resources, the output directories, the JDK from `jdk.home`,
-  and one library per classpath entry, with its `-sources.jar` attached when
-  `jrs fetch --sources` has cached it. Compile-only and runtime-only
-  dependencies get the matching IntelliJ scope, and the test classpath goes to
-  the test scope. A change to `jrs.toml` or `jrs.lock` shows the usual "Load
-  jrs changes" prompt, and a `jrs metadata --no-deps` pass sets up the source
-  roots before the first resolution has finished.
-- **Kotlin, Scala and Groovy.** The module's language levels and compiler
-  settings come from the metadata's `languages` and the `[kotlin]`,
-  `[scala]` and `[groovy]` tables, so the IDE's own Kotlin, Scala and Groovy
-  plugins analyse the code with the compiler version the build uses. Where
-  `jrs metadata` does not yet carry a setting the IDE needs, such as the
-  compiler arguments or `[kotlin] plugins`, the key is added to the JSON
-  within its current `version`, as SPEC §5.4 allows.
-- **Build and run through jrs.** Build Project delegates to `jrs build`, as
-  IntelliJ delegates to Gradle, so the IDE and the terminal produce the same
-  `target/classes`. Run configurations cover `jrs run`, `jrs test` (a
-  class run from the gutter becomes `--filter`; a single method needs a
-  selector jrs does not have yet), `jrs package` and `jrs task
-  <name>`, with `--debug` wired to the IDE's debugger. Test results come from
-  the JUnit XML in `target/test-reports` into the test runner tree, and the
-  build's output keeps jrs's plain transcript (`--progress never`), with
-  `javac`'s diagnostics linked back to the source.
-- **A jrs tool window.** The tasks from `jrs task --list` and the hooks that run
-  them, the dependency graph from `jrs tree`, and actions for `jrs update`,
-  `jrs outdated`, `jrs verify` and `jrs clean`.
-- **Editing `jrs.toml`.** Completion and validation for the manifest's tables
-  and keys, and the same unknown-key warnings the manifest parser gives. Adding
-  or removing a dependency goes through `jrs add` and `jrs remove`, so
-  `edit.rs` stays the one place that rewrites the manifest.
-- **A file icon for `jrs.toml` and `jrs.lock`.** Both files show the jrs icon
-  in the project view and the editor tabs, as `pom.xml` and `build.gradle`
-  show Maven's and Gradle's. The icon is drawn from `logo.png` and checked in
-  to this repository before the plugin work starts — an SVG, with the 16×16
-  light and `_dark` variants the IntelliJ Platform expects — so the plugin
-  takes it from here rather than keeping a copy of its own.
-- **Migration from the IDE.** An action on a Maven or Gradle project runs
-  `jrs migrate`, shows its report, and imports the result.
-- **Where it lives.** A separate repository, written in Kotlin against the
-  IntelliJ Platform SDK and built with the IntelliJ Platform Gradle Plugin,
-  since that is the only supported way to build one. It is published to the
-  JetBrains Marketplace and tested with the platform's own test framework,
-  against a `jrs` binary on `PATH`. It adds no crate to jrs: what the plugin
-  needs from jrs goes into `jrs metadata` and the commands' existing flags.
-  If a long-lived process turns out to be needed after all, that is the Build
-  Server Protocol row in section 5.
+- **Kotlin, Scala and Groovy compiler settings.** The IDE's language plugins
+  get the source roots and the runtime libraries, but not the compiler
+  arguments or `[kotlin] plugins`. Those need new keys in `jrs metadata`,
+  within its current `version` (SPEC §5.4), before the plugin can pass them on.
+- **A file icon drawn for 16×16.** The plugin scales `logo.png` down. An SVG
+  with the `_dark` variant the IntelliJ Platform expects would read better
+  at that size.
+- **Publishing.** A CI job that builds and tests the plugin, and a release to
+  the JetBrains Marketplace.
 
 ## 5. Needs a spec decision first
 
