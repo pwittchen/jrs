@@ -295,6 +295,29 @@ jrs migrate         <span class="c"># or start from an existing pom.xml / build.
         </div>
       </section>
 
+      <section class="wrap section" id="intellij">
+        <h2>IntelliJ IDEA</h2>
+        <p class="section-lede">
+          The jrs plugin imports a <code>jrs.toml</code> project the way the IDE imports a Maven or
+          Gradle one, from <code>jrs metadata</code>: source roots, the JDK and every library.
+          Build Project runs <code>jrs build</code>, so the IDE and the terminal share one
+          <code>target/</code>.
+        </p>
+        <ul class="ide-features">
+          <li>Run configurations for <code>jrs run</code>, <code>jrs test</code> and <code>jrs task</code>, with the debugger and the test runner tree</li>
+          <li><strong>jrs test</strong> on any test class or method, from the gutter</li>
+          <li>A jrs tool window with the project's tasks and dependencies</li>
+          <li>Completion and unknown-key warnings in <code>jrs.toml</code>; <code>jrs add</code> / <code>remove</code> from the menu</li>
+          <li>A reload banner when <code>jrs.toml</code> or <code>jrs.lock</code> changes</li>
+        </ul>
+        <p class="note">
+          Each <a href="https://github.com/pwittchen/jrs/releases/latest">release</a> ships it as
+          <code>jrs-intellij.zip</code>: in <strong>Settings | Plugins</strong>, choose
+          <strong>Install Plugin from Disk…</strong> from the gear menu. Needs IntelliJ IDEA 2026.2
+          or newer. More in <a href="docs/#editors">the docs</a>.
+        </p>
+      </section>
+
       <section class="wrap section" id="contact">
         <h2>Contact, support &amp; consulting</h2>
         <p class="section-lede">

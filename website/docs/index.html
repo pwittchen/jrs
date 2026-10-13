@@ -2906,6 +2906,41 @@ jobs:
   <li><strong><code>jrs classpath</code></strong> prints a classpath for a tool that only needs that.</li>
   <li><strong><code>jrs completions</code></strong> gives your shell completion for commands and flags.</li>
 </ul>
+
+<h3>IntelliJ IDEA</h3>
+<p>
+  The jrs plugin imports a jrs project the way the IDE imports a Maven or Gradle one, builds and
+  runs it through <code>jrs</code>, and knows its <code>jrs.toml</code>. It starts no daemon and
+  never reads the manifest itself: what it knows comes from <code>jrs metadata</code>, and what it
+  does runs the <code>jrs</code> binary as a subprocess. It needs IntelliJ IDEA 2026.2 or newer
+  and jrs 0.9 or newer, found in its settings, on <code>PATH</code> or in the usual install
+  directories.
+</p>
+<p>To install it:</p>
+<ol>
+  <li>Download <code>jrs-intellij.zip</code> from the <a href="https://github.com/pwittchen/jrs/releases/latest">latest release</a>.</li>
+  <li>In <strong>Settings | Plugins</strong>, click the gear icon and choose <strong>Install Plugin from Disk…</strong>.</li>
+  <li>Pick the zip and restart the IDE.</li>
+</ol>
+<p>Then open the directory that holds <code>jrs.toml</code> and click <strong>Load jrs project</strong> in the notification. The plugin:</p>
+<ul>
+  <li><strong>Imports the project</strong> as one module: the source and resource roots of every language, task-generated sources, <code>target/classes</code> as the output, the JDK and language level, and one library per jar with the right scope, its sources attached when they are in the cache. <strong>Tools | jrs | Download Sources</strong> runs <code>jrs fetch --sources</code>.</li>
+  <li><strong>Stays in sync</strong>: a change to <code>jrs.toml</code> or <code>jrs.lock</code> shows a <strong>Load jrs changes</strong> banner, or reloads by itself if you turn that on.</li>
+  <li><strong>Builds with jrs</strong>: <strong>Build Project</strong> runs <code>jrs build</code>, <strong>Rebuild Project</strong> <code>jrs clean</code> first, so the IDE and the terminal write the same <code>target/classes</code>. Compiler errors open their source line.</li>
+  <li><strong>Runs, tests and debugs</strong>: a <strong>jrs</strong> run configuration for any command, <strong>jrs test</strong> on test classes and methods from the gutter, results in the test runner tree, and the debugger attached to <code>run</code> and <code>test</code> through <a href="#cmd-run"><code>--debug</code></a>.</li>
+  <li><strong>Adds a jrs tool window</strong> with the project's tasks and resolved dependencies, and the commands from <strong>Tools | jrs</strong>.</li>
+  <li><strong>Edits <code>jrs.toml</code></strong>: completion of tables and keys, a warning on an unknown key, and <strong>Add</strong> / <strong>Remove Dependency</strong> through <code>jrs add</code> and <code>jrs remove</code>.</li>
+  <li><strong>Migrates</strong> a Maven or Gradle project with <strong>Tools | jrs | Migrate to jrs</strong>.</li>
+</ul>
+<p>
+  Its settings are under <strong>Settings | Build, Execution, Deployment | Build Tools | jrs</strong>;
+  turn off <strong>Build the project with jrs</strong> to let IntelliJ compile the project itself.
+  Kotlin, Scala and Groovy sources are set up, but their compiler flags are not passed to the IDE's
+  language plugins yet. The <a href="https://github.com/pwittchen/jrs/blob/master/plugins/intellij/README.md">plugin's README</a>
+  has the details and how to build it.
+</p>
+
+<h3>Other IDEs</h3>
 <p>
   For an IDE without jrs support, point its project at the source roots and add the jars
   <code>jrs classpath --test</code> prints as libraries; or migrate the other way temporarily and
