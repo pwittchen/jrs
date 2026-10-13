@@ -9,6 +9,8 @@ knows about a project comes from `jrs metadata` (SPEC §5.4), and everything it
 does runs the `jrs` binary as a subprocess: `jrs build`, `jrs test`, `jrs add`
 and so on.
 
+![The jrs plugin in IntelliJ IDEA's plugin list](intellij_plugin.png)
+
 ## Requirements
 
 - IntelliJ IDEA 2026.2 or newer, with the bundled Java plugin.
