@@ -155,6 +155,16 @@ tasks.withType&lt;AbstractArchiveTask&gt;().configureEach {
             </dd>
           </div>
           <div>
+            <dt>Caching</dt>
+            <dd>
+              Compiled classes, passing test runs and cacheable tasks' outputs are kept under a
+              hash of their inputs, so a branch switch or a <code>jrs clean</code> restores them
+              instead of redoing the work. An HTTP <a href="../docs/#build-cache">remote cache</a>
+              shares the classes and test runs between CI and every checkout. <code>jrs test</code> runs only the test
+              classes a change reaches.
+            </dd>
+          </div>
+          <div>
             <dt>Pinning</dt>
             <dd>
               The first resolution writes <code>jrs.lock</code> with every version and checksum
@@ -240,6 +250,8 @@ tasks.withType&lt;AbstractArchiveTask&gt;().configureEach {
             <p>
               Every released artifact pinned by checksum, reproducible output, <code>--offline</code> builds
               from the cache alone, and a build definition with no code in it to review.
+              <code>jrs audit</code> checks the graph against known vulnerabilities, and
+              <code>jrs package --sbom</code> writes a CycloneDX bill of materials.
             </p>
           </article>
           <article>
@@ -274,7 +286,6 @@ tasks.withType&lt;AbstractArchiveTask&gt;().configureEach {
           <li><strong>Libraries you publish.</strong> jrs builds sources and Javadoc jars but does not sign or deploy to a repository.</li>
           <li><strong>Android.</strong> Out of scope, as is Kotlin Multiplatform beyond the JVM target.</li>
           <li><strong>Build plugins you depend on.</strong> kapt and KSP, an annotation-processor path, JPMS modules, TestNG and container images from the build are not supported.</li>
-          <li><strong>A shared build cache.</strong> jrs recompiles only what changed, but does not share compiled outputs across machines the way Gradle's remote cache does.</li>
         </ul>
       </section>
 

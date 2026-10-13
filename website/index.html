@@ -183,20 +183,29 @@ version = "2.4.20"
           <div>
             <dt>Testing</dt>
             <dd>
-              JUnit 5 and 6, JUnit 4, Spock, Kotest, ScalaTest and MUnit. Filter by class, tag or
-              method; get JUnit XML reports and JaCoCo coverage.
+              JUnit 5 and 6, JUnit 4, Spock, Kotest, ScalaTest and MUnit. Only the test classes a
+              change reaches run, split across JVMs; filter by class, tag or method, shard a suite
+              across CI machines, get JUnit XML reports and JaCoCo coverage.
             </dd>
           </div>
           <div>
             <dt>Packaging</dt>
             <dd>
               A plain, portable or fat jar with byte-identical output on every build, a trimmed
-              <code>jlink</code> runtime, or a native installer via <code>jpackage</code>.
+              <code>jlink</code> runtime, a native installer via <code>jpackage</code>, a GraalVM
+              native executable, and a CycloneDX SBOM.
             </dd>
           </div>
           <div>
             <dt>Running</dt>
-            <dd>Your main class, directly. Add <code>--watch</code> to rebuild on every change.</dd>
+            <dd>Your main class, directly. Add <code>--watch</code> to rebuild and restart it on every change.</dd>
+          </div>
+          <div>
+            <dt>Caching</dt>
+            <dd>
+              Compiled classes and passing test runs restored from a build cache across branches,
+              checkouts and <code>jrs clean</code>, locally or from a remote shared with CI.
+            </dd>
           </div>
           <div>
             <dt>Tasks</dt>
@@ -215,8 +224,9 @@ version = "2.4.20"
           <div>
             <dt>Inspecting</dt>
             <dd>
-              <code>jrs tree --why</code>, <code>jrs outdated</code>, <code>jrs classpath</code>,
-              and <code>jrs add</code> / <code>remove</code> that keep your comments intact.
+              <code>jrs tree --why</code>, <code>jrs outdated</code>, <code>jrs audit</code> for known
+              vulnerabilities, <code>jrs licenses</code>, <code>jrs classpath</code>, and
+              <code>jrs add</code> / <code>remove</code> that keep your comments intact.
             </dd>
           </div>
         </dl>
@@ -270,7 +280,7 @@ version = "2.4.20"
 tar -xf jrs-x86_64-pc-windows-msvc.zip jrs.exe</code></pre>
             <button class="copy" type="button" data-fast-goal="copy_install_windows">Copy</button>
           </div>
-          <p class="note">Run in PowerShell, then move <code>jrs.exe</code> to a directory on your <code>PATH</code>.</p>
+          <p class="note">Run in PowerShell, then move <code>jrs.exe</code> to a directory on your <code>PATH</code>. On ARM64, download <code>jrs-aarch64-pc-windows-msvc.zip</code> instead.</p>
         </div>
 
         <div class="panel" role="tabpanel" id="panel-source" aria-labelledby="tab-source" hidden>
