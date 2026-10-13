@@ -121,6 +121,15 @@ To move an existing project over, run `jrs migrate` next to its `pom.xml` or
 Gradle build. [`examples`](examples) holds complete sample projects in Java,
 Kotlin, Scala and Groovy.
 
+## IntelliJ IDEA
+
+[`plugins/intellij`](plugins/intellij) is an IntelliJ IDEA plugin. It imports
+a jrs project from `jrs metadata` with its source roots, JDK and libraries.
+Build Project runs `jrs build`, and it has run configurations for `jrs run`,
+`jrs test` and `jrs task`, with the debugger and the test runner tree. It also
+adds a jrs tool window and completion in `jrs.toml`. Its
+[README](plugins/intellij/README.md) says how to build, install and use it.
+
 ## Documentation
 
 - [DOCS.md](DOCS.md) — the full reference: the manifest, every command, tests,
