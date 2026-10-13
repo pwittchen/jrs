@@ -274,7 +274,6 @@ tasks.withType&lt;AbstractArchiveTask&gt;().configureEach {
           <li><strong>Libraries you publish.</strong> jrs builds sources and Javadoc jars but does not sign or deploy to a repository.</li>
           <li><strong>Android.</strong> Out of scope, as is Kotlin Multiplatform beyond the JVM target.</li>
           <li><strong>Build plugins you depend on.</strong> kapt and KSP, an annotation-processor path, JPMS modules, TestNG and container images from the build are not supported.</li>
-          <li><strong>IDE import.</strong> IntelliJ IDEA does not import a jrs project yet. The plugin is planned; <code>jrs metadata</code> is the model it will read.</li>
           <li><strong>A shared build cache.</strong> jrs recompiles only what changed, but does not share compiled outputs across machines the way Gradle's remote cache does.</li>
         </ul>
       </section>
