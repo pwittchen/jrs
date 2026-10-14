@@ -40,7 +40,7 @@ version. It can also be run by hand from the Actions tab.
   the third entry point: what jrs gives a project by default, who it fits and
   when to stay with Maven or Gradle. `src/why.css` imports `style.css` for the
   same reason `docs.css` does, and `src/why.ts` wires up only the shared
-  chrome. Its claims follow `ROADMAP.md`'s "Where jrs is aimed"; keep the two
+  chrome. Its claims follow `ROADMAP_ARCHIVE.md`'s "Where jrs is aimed"; keep the two
   in step, and link the benchmark report from it once one exists.
 - `src/topbar.css` is the sticky top bar the docs and "Why jrs" pages share,
   imported by both `docs.css` and `why.css`; each lays out `.topbar-inner` on

@@ -1,7 +1,7 @@
 # jrs — Faster builds: the rest of "Faster than Gradle"
 
 Design proposal for the four items still open in
-[ROADMAP §6](../ROADMAP.md#6-faster-than-gradle): class-data sharing for the
+[ROADMAP_ARCHIVE §6](../ROADMAP_ARCHIVE.md#6-faster-than-gradle): class-data sharing for the
 test JVM, pipelined downloads, a build cache, and a warm `javac` for
 `--watch`.
 
@@ -27,7 +27,7 @@ units with annotation processors are cached, trusting their declared inputs
 
 ## 1. Problem
 
-The first half of ROADMAP §6 has landed (SPEC §7.2, §10.2):
+The first half of ROADMAP_ARCHIVE §6 has landed (SPEC §7.2, §10.2):
 
 - each compiler JVM maps its classes from a class-data-sharing archive in
   `<cache>/cds/`, and a file-by-file `javac` starts with C1 and the serial
@@ -455,7 +455,7 @@ for one compile, so it forks `javac` as today.
 
 ### 6.3 Why this is not the compiler daemon
 
-SPEC §1.2 rules out compiler daemons, and ROADMAP §5 keeps "a compiler
+SPEC §1.2 rules out compiler daemons, and ROADMAP_ARCHIVE §5 keeps "a compiler
 daemon (the Gradle daemon)" there. The line this proposal draws is
 **lifetime**: the Gradle daemon outlives the command that started it, is
 found again by later commands, and is managed (status, stop, idle timeout).
@@ -467,7 +467,7 @@ found by anything else. §7 gives the SPEC wording.
 
 Out of scope for this proposal. kotlinc's in-process entry point is the
 Kotlin Build Tools API, which also brings incremental Kotlin compilation and
-its own caches (ROADMAP §5); scalac's is `scala.tools.nsc.Main.process`, and
+its own caches (ROADMAP_ARCHIVE §5); scalac's is `scala.tools.nsc.Main.process`, and
 Scala 3's `dotty.tools.dotc.Main`. Each is a worker of the same shape with its
 own protocol shim, and each waits for a measurement on the corpus saying the
 second of JVM start-up JVM_LANGUAGES.md §14.1 notes is felt.
@@ -487,7 +487,7 @@ Each part changes SPEC.md before its code lands:
 3. **Build cache (§5).** A new SPEC §7.8 "Build cache" with §5.2–§5.6 in
    condensed form; SPEC §8.5 (network access and user configuration):
    `[build-cache]`; SPEC §8.6 (cache maintenance): `build/` and `prune`; the
-   `--no-build-cache` flag in the command table; ROADMAP §5 loses its build
+   `--no-build-cache` flag in the command table; ROADMAP_ARCHIVE §5 loses its build
    cache row.
 4. **Warm compiler (§6).** SPEC §1.2's language bullet becomes:
 
@@ -496,7 +496,7 @@ Each part changes SPEC.md before its code lands:
    > command that started it; a `--watch` session may keep one `javac`
    > worker for its own lifetime (§7.5), which no later command can reach.
 
-   SPEC §7.5 gains a paragraph on the worker, and ROADMAP §5's compiler
+   SPEC §7.5 gains a paragraph on the worker, and ROADMAP_ARCHIVE §5's compiler
    daemon row says what is left of it (a daemon across commands, Kotlin).
 
 ---

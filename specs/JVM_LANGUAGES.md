@@ -47,7 +47,7 @@ the three named languages, **on the JVM only**, and keeps the rest:
 
 | Still out | Why |
 | --- | --- |
-| Kotlin Multiplatform, Kotlin/JS, Kotlin/Native, Scala.js, Scala Native, Android | Not the JVM. Different toolchains, different outputs, often Gradle Module Metadata (ROADMAP §5). |
+| Kotlin Multiplatform, Kotlin/JS, Kotlin/Native, Scala.js, Scala Native, Android | Not the JVM. Different toolchains, different outputs, often Gradle Module Metadata (ROADMAP_ARCHIVE §5). |
 | `kapt`, KSP, Compose, macro-paradise style setups | Annotation-processor or compiler-plugin *configuration*, already a non-goal. Java annotation processing in a mixed project keeps working (it is `javac`'s). |
 | Incremental compilation (Zinc, Kotlin IC) | A unit with another language is compiled whole (SPEC §7.2). Only a Java-only unit compiles file by file, since jrs can read its class files' API. |
 | Compiler daemons (Kotlin daemon, Bloop) | A long-lived process jrs would have to manage. See §14.1. |
@@ -568,7 +568,7 @@ an input build paired with its expected `jrs.toml`.
 10. **§11**, the migration rows in §10.
 11. **§12**, milestone **M8 — JVM languages** (§13.2 below).
 12. **§13**, a new question recording the non-goal decision and §2's reasoning.
-13. **ROADMAP §4**, remove the "Kotlin or other JVM languages" row.
+13. **ROADMAP_ARCHIVE §4**, remove the "Kotlin or other JVM languages" row.
 
 No new crates. `std::process` runs the compilers, `resolve` resolves them,
 and `zip` merges the Groovy descriptors.

@@ -2,7 +2,7 @@
 
 IntelliJ IDEA support for [jrs](https://getjrs.dev): it imports a jrs project
 the way the IDE imports a Maven or Gradle one, builds and runs it through
-`jrs`, and knows its `jrs.toml`. It is the plan in ROADMAP §4.
+`jrs`, and knows its `jrs.toml`. It is the plan in ROADMAP_ARCHIVE §4.
 
 The plugin starts no daemon and does not read `jrs.toml` itself. Everything it
 knows about a project comes from `jrs metadata` (SPEC §5.4), and everything it
