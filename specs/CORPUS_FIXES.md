@@ -4,7 +4,7 @@ The plan for the findings of the first run of the real-project corpus
 ([CORPUS.md](todo/CORPUS.md), ROADMAP §1): 4 of 11 projects went from
 `jrs migrate` to a running fat jar with no hand edits, and the other seven
 stopped at `jrs build` on six causes, recorded in
-[`corpus/FINDINGS.md`](../corpus/FINDINGS.md). Five of them are gaps in
+[`docs/corpus/FINDINGS.md`](../docs/corpus/FINDINGS.md). Five of them are gaps in
 `jrs migrate`, not in the build; one is a non-goal.
 
 Status: **done**, 2026-10-14. F5–F10 are closed and F11's message is
@@ -271,7 +271,7 @@ A unit test on the message; no corpus change.
 1. `cargo lint`, `cargo test`, as for any change.
 2. `JRS_CORPUS=<the projects it unblocks> cargo bench --bench corpus`.
 3. When the step is `ok`: remove its `known` mapping from
-   `corpus/corpus.toml`, mark the finding closed in `corpus/FINDINGS.md`
+   `docs/corpus/corpus.toml`, mark the finding closed in `docs/corpus/FINDINGS.md`
    with the fixture or test that covers it, and record any new failure
    further along as a new finding with its own mapping.
 4. Update the Compatibility table in `DOCS.md` and on

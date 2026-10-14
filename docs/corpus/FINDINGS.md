@@ -1,6 +1,6 @@
 # Corpus findings
 
-The ledger of [specs/todo/CORPUS.md §6](../specs/todo/CORPUS.md#6-findings-and-triage):
+The ledger of [specs/todo/CORPUS.md §6](../../specs/todo/CORPUS.md#6-findings-and-triage):
 one entry per cause, not per project. `corpus.toml` maps a step that fails
 for a known cause to its entry (`known = { build = 6 }`), so the table
 prints `F6` there instead of `FAIL`; when a run after the fix shows the cell
@@ -9,7 +9,7 @@ prints `F6` there instead of `FAIL`; when a run after the fix shows the cell
 Bins: **1** a jrs bug (fixed with a regression test from a minimal
 reproduction in `tests/`), **2** a migration gap (a rule in `src/migrate/`
 and a fixture in `tests/fixtures/migrate/`), **3** a non-goal in the way
-(cited in [ROADMAP_ARCHIVE §5](../specs/ROADMAP_ARCHIVE.md#5-needs-a-spec-decision-first)).
+(cited in [ROADMAP_ARCHIVE §5](../../specs/ROADMAP_ARCHIVE.md#5-needs-a-spec-decision-first)).
 
 | # | Seen in | Step | Bin | State |
 | --- | --- | --- | --- | --- |
@@ -34,11 +34,11 @@ and a fixture in `tests/fixtures/migrate/`), **3** a non-goal in the way
 | 19 | ktor-h2 | `run`, `package` | – | open |
 
 Findings 1–5 are those of the first test JVM measurement,
-[TEST_JVM_BENCHMARK §7.1](../specs/TEST_JVM_BENCHMARK.md#71-findings), in
+[TEST_JVM_BENCHMARK §7.1](../../specs/TEST_JVM_BENCHMARK.md#71-findings), in
 its order; 1–3 only show with `test.share-classes` turned on, and 4 only
 when `jrs` runs outside the project, so the corpus, which runs neither way,
 does not see them. Findings 6–11 are from the first corpus run, and 12–19
-from the run after [CORPUS_FIXES](../specs/CORPUS_FIXES.md) closed 5–10,
+from the run after [CORPUS_FIXES](../../specs/CORPUS_FIXES.md) closed 5–10,
 which took those six projects past `build` for the first time. A step marked
 `(classpath)` runs, but its runtime classpath differs from the reference's.
 Bin `–` is a failure the project's own build has too.

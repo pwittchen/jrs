@@ -1,7 +1,7 @@
 name: Corpus
 
 # The real-project corpus (specs/todo/CORPUS.md): every project in
-# corpus/corpus.toml through `jrs migrate`, `build`, `test`, `run` and
+# docs/corpus/corpus.toml through `jrs migrate`, `build`, `test`, `run` and
 # `package`, checked against its own Maven or Gradle build. Manual only: it
 # takes the better part of an hour and clones third parties' repositories,
 # so neither a push nor a release waits on it.
@@ -9,7 +9,7 @@ on:
   workflow_dispatch:
     inputs:
       projects:
-        description: 'Projects to run: `all`, or names from corpus/corpus.toml, comma-separated'
+        description: 'Projects to run: `all`, or names from docs/corpus/corpus.toml, comma-separated'
         default: 'all'
         required: true
       jdk:

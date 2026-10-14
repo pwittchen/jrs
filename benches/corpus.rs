@@ -1,5 +1,5 @@
 //! The real-project corpus (specs/todo/CORPUS.md, ROADMAP §1): every project
-//! in `corpus/corpus.toml`, cloned at its pinned commit, taken through
+//! in `docs/corpus/corpus.toml`, cloned at its pinned commit, taken through
 //! `jrs migrate`, `build`, `test`, `run` and `package` with no hand edits,
 //! and checked against the project's own Maven or Gradle build — the same
 //! runtime classpath, the same tests run, passed and skipped.
@@ -22,7 +22,7 @@
 //! log per step, and the classpath and test comparisons. The table goes to
 //! stdout and to `REPORT.md`. A cell is `ok`, `skip` (a missing need), `·`
 //! (an earlier step's command failed), `-` (a step `JRS_CORPUS_STEPS` left
-//! out), `F<n>` (a failure `known` maps to finding n of `corpus/FINDINGS.md`)
+//! out), `F<n>` (a failure `known` maps to finding n of `docs/corpus/FINDINGS.md`)
 //! or `FAIL`, which also makes the run exit 1.
 //!
 //! A step whose command fails stops the project there. A step whose command
@@ -223,14 +223,14 @@ struct Row {
 fn main() {
     let Some(selection) = std::env::var("JRS_CORPUS").ok().filter(|s| !s.is_empty()) else {
         println!(
-            "SKIPPED the corpus: set JRS_CORPUS to `all` or to project names from corpus/corpus.toml"
+            "SKIPPED the corpus: set JRS_CORPUS to `all` or to project names from docs/corpus/corpus.toml"
         );
         return;
     };
     let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let text = std::fs::read_to_string(repo_root.join("corpus/corpus.toml"))
-        .expect("read corpus/corpus.toml");
-    let corpus: Corpus = toml::from_str(&text).expect("parse corpus/corpus.toml");
+    let text = std::fs::read_to_string(repo_root.join("docs/corpus/corpus.toml"))
+        .expect("read docs/corpus/corpus.toml");
+    let corpus: Corpus = toml::from_str(&text).expect("parse docs/corpus/corpus.toml");
     check(&corpus);
     let entries = select(&corpus, &selection);
     let steps = selected_steps();

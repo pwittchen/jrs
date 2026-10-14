@@ -87,10 +87,10 @@ JRS_BENCH_PROJECT=<path> cargo bench --bench test_jvm  # SPEC §10.2: share-clas
 JRS_CORPUS=all cargo bench --bench corpus       # ROADMAP §1: real projects vs their own Maven/Gradle build
 ```
 
-Only the corpus (`corpus/corpus.toml`, `specs/todo/CORPUS.md`) and
+Only the corpus (`docs/corpus/corpus.toml`, `specs/todo/CORPUS.md`) and
 `tests/network.rs` may reach Maven Central. The corpus also clones its
 projects and runs their own builds, and keeps everything under
-`target/corpus/<run>/`; `corpus/FINDINGS.md` is the ledger of what it found.
+`target/corpus/<run>/`; `docs/corpus/FINDINGS.md` is the ledger of what it found.
 
 Driving jrs against a Java project:
 

@@ -7,7 +7,7 @@ and checks the result against the project's own Maven or Gradle build, and
 the rules for what happens to every failure it finds.
 
 Status: **harness landed, findings open**. `benches/corpus.rs`,
-`corpus/corpus.toml`, `corpus/FINDINGS.md` and `.github/workflows/corpus.yml`
+`docs/corpus/corpus.toml`, `docs/corpus/FINDINGS.md` and `.github/workflows/corpus.yml`
 exist, and the first run is in `DOCS.md`'s Compatibility section; §9's
 criteria are not met yet. Nothing here changes how jrs builds; the harness
 is a new `[[bench]]` and adds no crate. The first pass of
@@ -62,7 +62,7 @@ nothing jrs means to fix.
 
 ### 2.2 The list
 
-`corpus/corpus.toml` at the repository root, read with the `toml` crate jrs
+`docs/corpus/corpus.toml`, read with the `toml` crate jrs
 already depends on:
 
 ```toml
@@ -224,7 +224,7 @@ directory for whoever triages.
 
 ## 6. Findings and triage
 
-`corpus/FINDINGS.md` is the ledger: one numbered entry per cause, not per
+`docs/corpus/FINDINGS.md` is the ledger: one numbered entry per cause, not per
 project, carrying the project and step it was seen in, the error, the cause
 once known, its bin and its state. Its first entries are the five of
 TEST_JVM_BENCHMARK §7.1, renumbered and cited back. `corpus.toml` maps
@@ -299,8 +299,8 @@ TEST_JVM_BENCHMARK §3's corpus becomes this one.
 ## 10. Changes this implies
 
 1. **`Cargo.toml`**: a `[[bench]] name = "corpus"`, `harness = false`.
-2. **`corpus/corpus.toml`, `corpus/FINDINGS.md`**: new, at the repository
-   root. Neither is read by jrs.
+2. **`docs/corpus/corpus.toml`, `docs/corpus/FINDINGS.md`**: new. Neither is
+   read by jrs.
 3. **`.github/workflows/corpus.yml`**: new, manual only.
 4. **`DOCS.md`**: the Compatibility section (§8); the Development section
    gains the `cargo bench --bench corpus` command beside the other benches.

@@ -1707,8 +1707,8 @@ How real projects fare, taken through `jrs migrate`, `build`, `test`, `run`
 and `package --fat` with no hand edits and checked against their own Maven
 or Gradle build (the runtime classpath, and the tests run, passed and
 skipped). The projects and their pinned commits are in
-[`corpus/corpus.toml`](corpus/corpus.toml); each failure is a numbered entry
-in [`corpus/FINDINGS.md`](corpus/FINDINGS.md), fixed, added as a migration
+[`docs/corpus/corpus.toml`](docs/corpus/corpus.toml); each failure is a numbered entry
+in [`docs/corpus/FINDINGS.md`](docs/corpus/FINDINGS.md), fixed, added as a migration
 rule, or cited as a non-goal. Measured with jrs 0.11.0 on 2026-10-14, on
 JDK 25.0.2 and macOS 27.0.1; a step after a failed one did not run (`·`).
 
@@ -1718,13 +1718,13 @@ JDK 25.0.2 and macOS 27.0.1; a step after a failed one did not run (`·`).
 | `spring-guides/gs-accessing-data-jpa` | Maven | Spring Boot | `ef48947` | ok | ok | ok 1/1 | ok | ok |
 | `spring-guides/gs-rest-service` | Gradle | Spring Boot | `3f4cef0` | ok | ok | ok 2/2 | ok | ok |
 | `spring-guides/gs-accessing-data-jpa` | Gradle | Spring Boot | `ef48947` | ok | ok | ok 1/1 | ok | ok |
-| `spring-projects/spring-petclinic` | Maven | Spring Boot | `500158f` | ok | [F13](corpus/FINDINGS.md#13-a-boms-exclusions-on-a-managed-dependency-are-not-applied) | ok 81/81 | ok | ok |
-| `spring-projects/spring-petclinic` | Gradle | Spring Boot | `500158f` | ok | [F13](corpus/FINDINGS.md#13-a-boms-exclusions-on-a-managed-dependency-are-not-applied) | ok 81/81 | ok | ok |
-| `spring-petclinic/spring-petclinic-kotlin` | Gradle | Spring Boot, Kotlin | `c77f77b` | ok | [F17](corpus/FINDINGS.md#17-a-versionless-orgjetbrainskotlin-library-takes-the-kotlin-plugins-version) | ok 41/41 | ok | ok |
-| `ktorio/ktor-samples`, `httpbin` | Gradle | Ktor | `1c9df7c` | ok | [F14](corpus/FINDINGS.md#14-a-profile-a-dependencys-pom-activates-by-os) | [F14](corpus/FINDINGS.md#14-a-profile-a-dependencys-pom-activates-by-os) 166/167 | ok | ok |
-| `ktorio/ktor-samples`, `h2` | Gradle | Ktor | `1c9df7c` | ok | ok | ok 4/4 | [F19](corpus/FINDINGS.md#19-ktor-h2-names-a-module-function-that-does-not-exist) | [F19](corpus/FINDINGS.md#19-ktor-h2-names-a-module-function-that-does-not-exist) |
-| `spring-petclinic/spring-petclinic-rest` | Maven | service | `afc8fc1` | ok | [F13](corpus/FINDINGS.md#13-a-boms-exclusions-on-a-managed-dependency-are-not-applied) | [F12](corpus/FINDINGS.md#12-maven-the-compiler-plugins-execution-configuration-is-not-read) 5/237 | [F12](corpus/FINDINGS.md#12-maven-the-compiler-plugins-execution-configuration-is-not-read) | [F12](corpus/FINDINGS.md#12-maven-the-compiler-plugins-execution-configuration-is-not-read) |
-| `spring-petclinic/spring-petclinic-microservices` | Maven | workspace | `1d76b00` | ok | [F11](corpus/FINDINGS.md#11-a-version-range-in-a-transitive-pom) | · | · | · |
+| `spring-projects/spring-petclinic` | Maven | Spring Boot | `500158f` | ok | [F13](docs/corpus/FINDINGS.md#13-a-boms-exclusions-on-a-managed-dependency-are-not-applied) | ok 81/81 | ok | ok |
+| `spring-projects/spring-petclinic` | Gradle | Spring Boot | `500158f` | ok | [F13](docs/corpus/FINDINGS.md#13-a-boms-exclusions-on-a-managed-dependency-are-not-applied) | ok 81/81 | ok | ok |
+| `spring-petclinic/spring-petclinic-kotlin` | Gradle | Spring Boot, Kotlin | `c77f77b` | ok | [F17](docs/corpus/FINDINGS.md#17-a-versionless-orgjetbrainskotlin-library-takes-the-kotlin-plugins-version) | ok 41/41 | ok | ok |
+| `ktorio/ktor-samples`, `httpbin` | Gradle | Ktor | `1c9df7c` | ok | [F14](docs/corpus/FINDINGS.md#14-a-profile-a-dependencys-pom-activates-by-os) | [F14](docs/corpus/FINDINGS.md#14-a-profile-a-dependencys-pom-activates-by-os) 166/167 | ok | ok |
+| `ktorio/ktor-samples`, `h2` | Gradle | Ktor | `1c9df7c` | ok | ok | ok 4/4 | [F19](docs/corpus/FINDINGS.md#19-ktor-h2-names-a-module-function-that-does-not-exist) | [F19](docs/corpus/FINDINGS.md#19-ktor-h2-names-a-module-function-that-does-not-exist) |
+| `spring-petclinic/spring-petclinic-rest` | Maven | service | `afc8fc1` | ok | [F13](docs/corpus/FINDINGS.md#13-a-boms-exclusions-on-a-managed-dependency-are-not-applied) | [F12](docs/corpus/FINDINGS.md#12-maven-the-compiler-plugins-execution-configuration-is-not-read) 5/237 | [F12](docs/corpus/FINDINGS.md#12-maven-the-compiler-plugins-execution-configuration-is-not-read) | [F12](docs/corpus/FINDINGS.md#12-maven-the-compiler-plugins-execution-configuration-is-not-read) |
+| `spring-petclinic/spring-petclinic-microservices` | Maven | workspace | `1d76b00` | ok | [F11](docs/corpus/FINDINGS.md#11-a-version-range-in-a-transitive-pom) | · | · | · |
 
 End to end: 4 of 11, and 10 of 11 get past `jrs build`; what stops the
 other six there is a classpath difference, a failing test or start, or the
@@ -1737,7 +1737,7 @@ suite among them, pass on all three. Why the others are not `ok`:
   `mysql-connector-j`; jrs takes a managed entry's version and not its
   exclusions, so the jar is on the classpath. petclinic's devtools, which
   jrs.toml has no scope for, is missing besides
-  ([F18](corpus/FINDINGS.md#18-spring-boot-devtools)).
+  ([F18](docs/corpus/FINDINGS.md#18-spring-boot-devtools)).
 - **F17** — petclinic-kotlin's versionless `kotlin-reflect` takes Spring
   Boot's version, where the Kotlin plugin gives it its own; JUnit's
   `apiguardian-api` and devtools differ too (F16, F18).
@@ -1752,7 +1752,7 @@ suite among them, pass on all three. Why the others are not `ok`:
   ([`[managed]`](#managed) pins one by hand, as the error now says).
 
 Gradle resolves the highest version in a graph and jrs the nearest
-([F15](corpus/FINDINGS.md#15-highest-wins-mediation)), so a Gradle project's versions may
+([F15](docs/corpus/FINDINGS.md#15-highest-wins-mediation)), so a Gradle project's versions may
 differ where nothing else does; the Ktor samples' do.
 
 ## Development
@@ -1805,7 +1805,7 @@ cargo bench --bench incremental
 JRS_BENCH_CLASSES=1000 JRS_BENCH_RUNS=7 cargo bench --bench incremental
 ```
 
-The corpus takes the real projects listed in `corpus/corpus.toml` — Spring
+The corpus takes the real projects listed in `docs/corpus/corpus.toml` — Spring
 Boot and Ktor applications on Maven and on Gradle, each cloned at a pinned
 commit — through `jrs migrate`, `build`, `test`, `run` and `package` with no
 hand edits, and checks each against the project's own build: the same
@@ -1815,7 +1815,7 @@ wrapper; Docker is used when it is running. It does nothing unless
 `JRS_CORPUS` names the projects, and keeps everything under
 `target/corpus/<run>/`, with the table in `REPORT.md` there. The
 [Compatibility](#compatibility) section is written from it, and
-`corpus/FINDINGS.md` keeps what it found:
+`docs/corpus/FINDINGS.md` keeps what it found:
 
 ```
 JRS_CORPUS=all cargo bench --bench corpus
