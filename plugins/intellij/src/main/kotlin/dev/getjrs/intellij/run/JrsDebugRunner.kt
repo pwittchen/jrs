@@ -57,7 +57,7 @@ class JrsDebugRunner : AsyncProgramRunner<RunnerSettings>() {
     private fun attach(project: Project, port: Int, name: String) {
         if (project.isDisposed) return
         val settings = RunManager.getInstance(project)
-            .createConfiguration("Attach to $name", RemoteConfigurationType.getInstance().factory)
+            .createConfiguration("Attach to $name", RemoteConfigurationType.getInstance().configurationFactories.single())
         settings.isTemporary = true
         (settings.configuration as RemoteConfiguration).apply {
             HOST = "127.0.0.1"

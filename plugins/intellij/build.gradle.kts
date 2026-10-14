@@ -1,4 +1,5 @@
 import org.jetbrains.intellij.platform.gradle.TestFrameworkType
+import org.jetbrains.kotlin.gradle.dsl.JvmDefaultMode
 
 plugins {
     id("org.jetbrains.kotlin.jvm") version "2.4.20"
@@ -10,6 +11,12 @@ version = providers.gradleProperty("pluginVersion").get()
 
 kotlin {
     jvmToolchain(21)
+    compilerOptions {
+        // Without it every default method of a platform interface gets a bridge
+        // in the implementing class, which the Plugin Verifier reports as an
+        // override of deprecated and experimental API.
+        jvmDefault = JvmDefaultMode.NO_COMPATIBILITY
+    }
 }
 
 repositories {

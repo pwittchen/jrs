@@ -3,17 +3,17 @@ package dev.getjrs.intellij.build
 import com.intellij.build.BuildViewManager
 import com.intellij.build.DefaultBuildDescriptor
 import com.intellij.build.FilePosition
+import com.intellij.build.events.FinishBuildEvent
 import com.intellij.build.events.MessageEvent
+import com.intellij.build.events.OutputBuildEvent
+import com.intellij.build.events.StartBuildEvent
 import com.intellij.build.events.impl.FailureResultImpl
-import com.intellij.build.events.impl.FileMessageEventImpl
-import com.intellij.build.events.impl.FinishBuildEventImpl
-import com.intellij.build.events.impl.OutputBuildEventImpl
-import com.intellij.build.events.impl.StartBuildEventImpl
 import com.intellij.build.events.impl.SuccessResultImpl
 import com.intellij.execution.ExecutionException
 import com.intellij.execution.process.OSProcessHandler
 import com.intellij.execution.process.ProcessEvent
 import com.intellij.execution.process.ProcessListener
+import com.intellij.execution.process.ProcessOutputType
 import com.intellij.execution.process.ProcessOutputTypes
 import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.application.ModalityState
@@ -28,7 +28,6 @@ import com.intellij.openapi.vfs.VfsUtil
 import dev.getjrs.intellij.JrsCli
 import dev.getjrs.intellij.JrsFiles
 import dev.getjrs.intellij.sync.JrsProjectState
-import java.io.File
 import java.nio.file.Path
 
 /**
@@ -52,14 +51,11 @@ object JrsBuild {
                 val buildId = Any()
                 val view = project.service<BuildViewManager>()
                 val descriptor = DefaultBuildDescriptor(buildId, title, root.toString(), System.currentTimeMillis())
-                view.onEvent(buildId, StartBuildEventImpl(descriptor, "$title…"))
+                view.onEvent(buildId, StartBuildEvent.builder("$title…", descriptor).build())
                 ok = (!rebuild || command(project, root, buildId, listOf("clean"), indicator)) &&
                     command(project, root, buildId, listOf("build"), indicator)
                 val result = if (ok) SuccessResultImpl() else FailureResultImpl()
-                view.onEvent(
-                    buildId,
-                    FinishBuildEventImpl(buildId, null, System.currentTimeMillis(), if (ok) "finished" else "failed", result),
-                )
+                view.onEvent(buildId, FinishBuildEvent.builder(buildId, if (ok) "finished" else "failed", result).build())
                 refreshOutputs(project, root)
             }
 
@@ -72,19 +68,23 @@ object JrsBuild {
         val handler = try {
             OSProcessHandler(JrsCli.commandLine(root, args))
         } catch (e: ExecutionException) {
-            view.onEvent(buildId, OutputBuildEventImpl(buildId, "Could not run ${JrsCli.executable()}: ${e.message}\n", false))
+            view.onEvent(buildId, output(buildId, "Could not run ${JrsCli.executable()}: ${e.message}\n", false))
             return false
         }
         val pending = StringBuilder()
         fun line(text: String, stdout: Boolean) {
-            view.onEvent(buildId, OutputBuildEventImpl(buildId, text + "\n", stdout))
+            view.onEvent(buildId, output(buildId, text + "\n", stdout))
             val diagnostic = CompilerDiagnostics.parse(text) ?: return
-            val position = FilePosition(File(diagnostic.path), diagnostic.line - 1, (diagnostic.column ?: 1) - 1)
+            val path = runCatching { Path.of(diagnostic.path) }.getOrNull() ?: return
+            val position = FilePosition(path, diagnostic.line - 1, (diagnostic.column ?: 1) - 1)
             val kind = if (diagnostic.error) MessageEvent.Kind.ERROR else MessageEvent.Kind.WARNING
-            view.onEvent(
-                buildId,
-                FileMessageEventImpl(buildId, kind, "compiler", diagnostic.message, text, position),
-            )
+            val message = MessageEvent.builder(diagnostic.message, kind)
+                .withParentId(buildId)
+                .withGroup("compiler")
+                .withDescription(text)
+                .withFilePosition(position)
+                .build()
+            view.onEvent(buildId, message)
         }
         handler.addProcessListener(object : ProcessListener {
             override fun onTextAvailable(event: ProcessEvent, outputType: Key<*>) {
@@ -117,6 +117,12 @@ object JrsBuild {
         }
         return handler.exitCode == 0
     }
+
+    private fun output(buildId: Any, text: String, stdout: Boolean): OutputBuildEvent =
+        OutputBuildEvent.builder(text)
+            .withParentId(buildId)
+            .withOutputType(if (stdout) ProcessOutputType.STDOUT else ProcessOutputType.STDERR)
+            .build()
 
     private fun refreshOutputs(project: Project, root: Path) {
         val metadata = JrsProjectState.getInstance(project).metadata

@@ -4,6 +4,7 @@ import com.intellij.openapi.application.WriteAction
 import com.intellij.openapi.module.JavaModuleType
 import com.intellij.openapi.module.Module
 import com.intellij.openapi.module.ModuleManager
+import com.intellij.openapi.module.ModuleType
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.projectRoots.JavaSdk
 import com.intellij.openapi.projectRoots.ProjectJdkTable
@@ -112,7 +113,7 @@ object JrsModelApplier {
                 ModuleRootManager.getInstance(m).contentRootUrls.any { it == rootUrl }
             }
         val javaModule = JavaModuleType.getModuleType().id
-        if (existing != null && existing.moduleTypeName == javaModule) return existing
+        if (existing != null && ModuleType.get(existing).id == javaModule) return existing
 
         val modules = manager.getModifiableModel()
         existing?.let(modules::disposeModule)

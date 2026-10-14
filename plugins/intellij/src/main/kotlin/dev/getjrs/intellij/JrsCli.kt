@@ -2,12 +2,12 @@ package dev.getjrs.intellij
 
 import com.intellij.execution.ExecutionException
 import com.intellij.execution.configurations.GeneralCommandLine
-import com.intellij.execution.configurations.PathEnvironmentVariableUtil
 import com.intellij.execution.process.CapturingProcessHandler
 import com.intellij.execution.process.ProcessOutput
 import com.intellij.openapi.progress.ProgressIndicator
 import com.intellij.openapi.util.SystemInfo
 import dev.getjrs.intellij.settings.JrsSettings
+import java.io.File
 import java.nio.charset.StandardCharsets
 import java.nio.file.Files
 import java.nio.file.Path
@@ -21,15 +21,17 @@ object JrsCli {
 
     /** `jrs` on `PATH`, or in one of the directories the installers write to. */
     fun findOnPath(): String? {
-        PathEnvironmentVariableUtil.findInPath(binaryName)?.let { return it.path }
+        val path = System.getenv("PATH").orEmpty().split(File.pathSeparatorChar)
+            .filter { it.isNotBlank() }
+            .mapNotNull { runCatching { Path.of(it, binaryName) }.getOrNull() }
         val home = System.getProperty("user.home")
-        return listOf(
+        return (path + listOf(
             Path.of(home, ".local", "bin", binaryName),
             Path.of(home, ".cargo", "bin", binaryName),
             Path.of("/opt/homebrew/bin", binaryName),
             Path.of("/usr/local/bin", binaryName),
             Path.of(home, "scoop", "shims", binaryName),
-        ).firstOrNull { Files.isExecutable(it) }?.toString()
+        )).firstOrNull { Files.isExecutable(it) }?.toString()
     }
 
     fun executable(): String =
