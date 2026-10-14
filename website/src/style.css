@@ -484,6 +484,19 @@ h3 {
   font-weight: 600;
 }
 
+/* The JetBrains Marketplace's install button, drawn by its own script. */
+.marketplace {
+  margin-top: 1.5rem;
+  min-height: 3rem;
+}
+
+/* Its frame's document is light; on this dark page the browser would paint
+   the frame white behind the button's rounded ends unless the frame says
+   light too. */
+.marketplace iframe {
+  color-scheme: light;
+}
+
 /* ---- install ----------------------------------------------------------- */
 
 .tabs {
