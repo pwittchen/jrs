@@ -860,19 +860,23 @@ fn key(group: &str, artifact: &str, classifier: Option<&str>) -> String {
 /// `classpaths.runtime` of `jrs metadata`, across every member of a
 /// workspace. A member's own jar is not on another's list: members are
 /// class directories, so the reference's entries for them are dropped in
-/// [`compare_classpaths`] by name.
+/// [`compare_classpaths`] by name. A single project has no members.
 fn jrs_classpath(model: &Json) -> (Classpath, BTreeSet<String>) {
     let mut classpath = Classpath::new();
     let mut members = BTreeSet::new();
-    let projects: Vec<&Json> = match model.get("members") {
+    let workspace = model.get("members");
+    let projects: Vec<&Json> = match workspace {
         Some(list) => list.items().iter().collect(),
         None => vec![model],
     };
     for project in projects {
+        // A single project's name is no sibling's: ktor-h2's `h2` would
+        // drop `com.h2database:h2` from the reference.
         if let Some(name) = project
             .get("project")
             .and_then(|p| p.get("name"))
             .and_then(Json::as_str)
+            .filter(|_| workspace.is_some())
         {
             members.insert(name.to_string());
         }
