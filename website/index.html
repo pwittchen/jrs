@@ -102,9 +102,10 @@
         <h2>Status</h2>
         <p>
           jrs is <strong class="experimental">experimental</strong>, and it is not a replacement for Maven or Gradle. It builds
-          single-module projects and implements a deliberately narrow subset of what those tools
-          do: no plugin system, no build DSL, no multi-module reactor. Evaluate it against your
-          own requirements before adopting it for production builds.
+          single projects and multi-module workspaces, and implements a deliberately narrow subset
+          of what those tools do: no plugin system, no build DSL, no reactor — modules are declared,
+          not configured. Evaluate it against your own requirements before adopting it for
+          production builds.
         </p>
         <p>
           The <a href="https://github.com/pwittchen/jrs/blob/master/ROADMAP.md">roadmap</a> lists
@@ -208,6 +209,14 @@ version = "2.4.20"
             </dd>
           </div>
           <div>
+            <dt>Workspaces</dt>
+            <dd>
+              Several modules from one root: members that depend on each other by path, shared
+              settings, one lockfile for all of them, and every command over the whole workspace
+              or, with <code>-p</code>, one member and what it needs.
+            </dd>
+          </div>
+          <div>
             <dt>Tasks</dt>
             <dd>
               Code generators, checksums and chores declared in <code>jrs.toml</code>, run as
@@ -218,7 +227,8 @@ version = "2.4.20"
             <dt>Migrating</dt>
             <dd>
               A one-shot <code>jrs.toml</code> from <code>pom.xml</code>, <code>build.gradle</code>
-              or <code>build.gradle.kts</code>, Spring Boot builds included, with a report of what needs review.
+              or <code>build.gradle.kts</code>, Spring Boot and multi-module builds included, with a
+              report of what needs review.
             </dd>
           </div>
           <div>
@@ -314,6 +324,7 @@ jrs migrate         <span class="c"># or start from an existing pom.xml / build.
           <code>target/</code>.
         </p>
         <ul class="ide-features">
+          <li>A workspace imported as one module per member, depending on each other</li>
           <li>Run configurations for <code>jrs run</code>, <code>jrs test</code> and <code>jrs task</code>, with the debugger and the test runner tree</li>
           <li><strong>jrs test</strong> on any test class or method, from the gutter</li>
           <li>A jrs tool window with the project's tasks and dependencies</li>

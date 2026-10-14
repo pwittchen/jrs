@@ -97,8 +97,9 @@
 <h2>Introduction</h2>
 <p class="lead">
   jrs is a build system for the JVM, written in Rust. It builds, tests, runs and packages a
-  single-module Java project from one <code>jrs.toml</code> manifest, resolving dependencies
-  from Maven Central. Kotlin, Scala and Groovy compile alongside Java.
+  Java project from one <code>jrs.toml</code> manifest — or a project of several modules as a
+  <a href="#workspaces">workspace</a>, one manifest per module — resolving dependencies from
+  Maven Central. Kotlin, Scala and Groovy compile alongside Java.
 </p>
 <p>
   It aims for the ergonomics of Cargo: a small declarative manifest, a committed lockfile, one
@@ -129,7 +130,12 @@
     points, which can extend the build but never replace, remove or reorder its phases. No user
     code runs inside jrs.
   </li>
-  <li><strong>No multi-module builds.</strong> One manifest is one module; there is no reactor.</li>
+  <li>
+    <strong>No reactor.</strong> One manifest is one module, and several modules build together
+    as a <a href="#workspaces">workspace</a>: declared by a root <code>jrs.toml</code>, sharing its
+    defaults and one lockfile. A module cannot configure another, and there are no composite
+    builds across repositories.
+  </li>
   <li><strong>No publishing</strong> to a repository (<code>deploy</code> / <code>publish</code>).</li>
   <li>
     No Android, no JPMS module-descriptor configuration, no annotation-processor path (processors
@@ -649,7 +655,7 @@ javadoc-args = ["-Xdoclint:none"]</pre>
     <tr><td><code>compile-only</code></td><td><code>true</code>: compile and test classpaths, never at runtime. Maven's <code>provided</code>, Gradle's <code>compileOnly</code>.</td></tr>
     <tr><td><code>runtime-only</code></td><td><code>true</code>: runtime and test classpaths, never compiled against by the main sources. Maven's <code>runtime</code>, Gradle's <code>runtimeOnly</code>.</td></tr>
     <tr><td><code>classifier</code></td><td>A file published beside the main jar, such as natives or a platform build.</td></tr>
-    <tr><td><code>path</code></td><td>A jar in the project instead of a repository. See <a href="#dependencies-local-jars">Local jars</a>.</td></tr>
+    <tr><td><code>path</code></td><td>A jar in the project instead of a repository. See <a href="#dependencies-local-jars">Local jars</a>. A directory instead of a jar is another member of the <a href="#workspaces">workspace</a>.</td></tr>
   </tbody>
 </table>
 <pre data-lang="toml">[dependencies]
@@ -1142,6 +1148,12 @@ checksum = "sha1:…"</pre>
   plain Java project's lockfile stays byte-identical across jrs releases. It never records an
   absolute path: cache locations are recomputed on every machine.
 </p>
+<p>
+  A <a href="#workspaces">workspace</a> has one <code>jrs.lock</code>, at its root, for every
+  member: the members' dependencies are resolved together, so they agree on every version. It
+  says <code>version = 3</code> and lists the members' directories as <code>members</code>; a
+  member has no lockfile of its own.
+</p>
 </section>
 
 </div>
@@ -1190,6 +1202,7 @@ checksum = "sha1:…"</pre>
     <tr><td><code>--offline</code></td><td>Never touch the network; use the cache and lockfile only, and fail on a miss.</td></tr>
     <tr><td><code>-j</code>, <code>--jobs &lt;N&gt;</code></td><td>Cap parallelism. Defaults to the user configuration's <code>jobs</code>, else the number of cores, with a floor of 4 for network work.</td></tr>
     <tr><td><code>--manifest-path &lt;PATH&gt;</code></td><td>Use a manifest outside the working directory: the file or its directory.</td></tr>
+    <tr><td><code>-p</code>, <code>--module &lt;NAME&gt;</code></td><td>In a <a href="#workspaces">workspace</a>, act on this member and the members it depends on instead of every member. Repeatable.</td></tr>
     <tr><td><code>--progress &lt;auto|always|never&gt;</code></td><td>Live animated output. <code>auto</code> animates only on an interactive terminal.</td></tr>
     <tr><td><code>--color &lt;auto|always|never&gt;</code></td><td>Colour and styling.</td></tr>
     <tr><td><code>--charset &lt;auto|unicode|ascii&gt;</code></td><td>Glyphs for spinners, bars and trees.</td></tr>
@@ -1625,6 +1638,13 @@ org.apache.logging.log4j:log4j-core:2.14.1  GHSA-jfh8-c2jp-5v3q (CVE-2021-44228)
   <code>coordinate</code> is <code>null</code>. The top-level <code>version</code> goes up only when
   a key changes meaning or disappears; new keys may appear within a version. The full schema is in
   <a href="https://github.com/pwittchen/jrs/blob/master/SPEC.md#54-the-project-model-jrs-metadata-and-jrs-fetch">SPEC §5.4</a>.
+</p>
+<p>
+  At a <a href="#workspaces">workspace</a>'s root, the model is the workspace's: a
+  <code>workspace</code> object with its root and lockfile, and a <code>members</code> array with
+  each member's model, which adds <code>modules</code> — the members it depends on, with their
+  class directories and the classpath they go on. With <code>-p</code>, or from inside a member,
+  it is that member's model alone.
 </p>
 </section>
 
@@ -2637,6 +2657,92 @@ env = { JDK_JAVA_OPTIONS = "--add-exports=jdk.compiler/com.sun.tools.javac.api=A
 </div>
 </section>
 
+<section id="workspaces">
+<h2>Workspaces</h2>
+<p>
+  A project of several modules — a <code>core</code> library, an <code>api</code>, an
+  application on top — is a workspace: one <code>jrs.toml</code> per module, and a root
+  <code>jrs.toml</code> that lists them. Modules are declared, not configured: a member is an
+  ordinary manifest, and the root holds nothing a member could not say for itself.
+  <code>examples/ledger</code> in the repository is one.
+</p>
+<pre data-lang="toml" data-file="jrs.toml">[workspace]
+members = ["core", "api", "app"]
+
+[java]
+source = 21
+
+[managed]
+"org.junit:junit-bom" = { version = "5.14.3", bom = true }</pre>
+<pre data-lang="toml" data-file="app/jrs.toml">[project]
+name = "app"
+version = "1.0.0"
+main-class = "com.example.app.Main"
+
+[dependencies]
+api = { path = "../api" }
+
+[dev-dependencies]
+"org.junit.jupiter:junit-jupiter" = {}</pre>
+
+<h3>Members and shared keys</h3>
+<ul>
+  <li><strong>Members</strong> are directories under the root, each with its own <code>jrs.toml</code>, sources and <code>target/</code>. The order of <code>members</code> does not matter: a member is built after the members it depends on. A root without <code>[project]</code> builds nothing itself; a root with one is a member too.</li>
+  <li><strong>Shared keys.</strong> <code>[java]</code>, <code>[repositories]</code> and <code>[managed]</code> in the root are every member's, a member's own key winning. <code>[kotlin]</code>, <code>[scala]</code> and <code>[groovy]</code> are inherited by a member that has the table, so <code>[kotlin]</code> with nothing under it takes the root's version.</li>
+  <li><strong>One lockfile.</strong> <code>jrs.lock</code> lives at the root and pins one version of every library for every member: the workspace is resolved once. Two members that declare one library at two versions get the first one's, with a warning.</li>
+</ul>
+
+<h3>Depending on a member</h3>
+<p>
+  A <code>path</code> to the member's directory, keyed by its <code>project.name</code>, in
+  <code>[dependencies]</code> (with <code>compile-only</code> or <code>runtime-only</code> if
+  needed) or <code>[dev-dependencies]</code>. Its classes go where its jar would, and its own
+  dependencies come with it, as a jar's transitive ones do. Members that depend on each other in a
+  cycle are an error that names the cycle. A change to a member recompiles the members that depend
+  on it only when it changes what they can see — a method's body leaves them fresh — and
+  <code>jrs test</code> runs the tests a change reaches, across members.
+</p>
+
+<h3>Commands in a workspace</h3>
+<p>
+  At the root a command acts on every member. <code>-p &lt;member&gt;</code> (repeatable), or
+  running from inside a member's directory, narrows it to that member and the members it depends
+  on, which are always built first.
+</p>
+<pre>jrs build                     # every member, in dependency order
+jrs test                      # every member's tests; fails at the end if any did
+jrs -p api test               # api's tests, after building core
+cd app &amp;&amp; jrs run             # app, after building api and core
+jrs run                       # the only member with a main class; with several, -p says which
+jrs package --fat             # a jar per member; app's carries api's and core's classes
+jrs -p app classpath          # app's classes, then api's and core's, then the jars
+jrs -p core add com.google.guava:guava</pre>
+<p>
+  <code>classpath</code>, <code>add</code> and <code>remove</code> act on one member; at a root
+  without <code>[project]</code> they ask for <code>-p</code>. <code>update</code>,
+  <code>verify</code>, <code>fetch</code>, <code>outdated</code>, <code>licenses</code> and
+  <code>audit</code> act on the workspace's one graph. <code>jrs tree</code> prints each member's
+  graph, its member dependencies first. Phase lines name the member they are about.
+</p>
+<p>
+  In a fat jar, a member's sibling members are packaged under the same merge rules as any
+  dependency; in the portable layout they are jars in <code>lib/</code>. At the root,
+  <code>--fat</code>, <code>--dist</code>, <code>--jlink</code>, <code>--jpackage</code> and
+  <code>--native-image</code> apply to the members with a main class, and a library gets its
+  plain jar.
+</p>
+
+<h3>Tasks across members</h3>
+<p>
+  <code>[tasks]</code> and <code>[hooks]</code> stay per member, and a task can depend on another
+  member's task as <code>"&lt;member&gt;:&lt;task&gt;"</code>. The other task runs in its own
+  member, once per command, before this member's command reaches it.
+</p>
+<pre data-lang="toml">[tasks.check]
+script = "Check.java"
+depends-on = ["core:generate"]</pre>
+</section>
+
 <section id="annotation-processors">
 <h2>Annotation processors</h2>
 <p>
@@ -2928,7 +3034,7 @@ jobs:
 </ol>
 <p>Then open the directory that holds <code>jrs.toml</code> and click <strong>Load jrs project</strong> in the notification. The plugin:</p>
 <ul>
-  <li><strong>Imports the project</strong> as one module: the source and resource roots of every language, task-generated sources, <code>target/classes</code> as the output, the JDK and language level, and one library per jar with the right scope, its sources attached when they are in the cache. <strong>Tools | jrs | Download Sources</strong> runs <code>jrs fetch --sources</code>.</li>
+  <li><strong>Imports the project</strong> as one module — a <a href="#workspaces">workspace</a> as one module per member, depending on each other as the members do: the source and resource roots of every language, task-generated sources, <code>target/classes</code> as the output, the JDK and language level, and one library per jar with the right scope, its sources attached when they are in the cache. <strong>Tools | jrs | Download Sources</strong> runs <code>jrs fetch --sources</code>.</li>
   <li><strong>Stays in sync</strong>: a change to <code>jrs.toml</code> or <code>jrs.lock</code> shows a <strong>Load jrs changes</strong> banner, or reloads by itself if you turn that on.</li>
   <li><strong>Builds with jrs</strong>: <strong>Build Project</strong> runs <code>jrs build</code>, <strong>Rebuild Project</strong> <code>jrs clean</code> first, so the IDE and the terminal write the same <code>target/classes</code>. Compiler errors open their source line.</li>
   <li><strong>Runs, tests and debugs</strong>: a <strong>jrs</strong> run configuration for any command, <strong>jrs test</strong> on test classes and methods from the gutter, results in the test runner tree, and the debugger attached to <code>run</code> and <code>test</code> through <a href="#cmd-run"><code>--debug</code></a>.</li>
@@ -3023,6 +3129,22 @@ jrs migrate                # write jrs.toml; the original build file is untouche
   migrated, what needs review, and what was skipped, each with a reason. Gradle scripts are read by
   pattern, their declarative subset, without running Gradle, and the report says so. Build the
   result, run the tests, and read the review list before deleting anything.
+</p>
+
+<h3>Multi-module builds</h3>
+<p>
+  A Maven aggregator, or a Gradle build whose <code>settings.gradle</code> includes projects,
+  becomes a <a href="#workspaces">workspace</a>: a <code>jrs.toml</code> per module, and a root
+  one that lists them. <code>&lt;modules&gt;</code> are walked recursively; a dependency on a
+  sibling — Maven's own <code>groupId:artifactId</code>, Gradle's <code>project(":core")</code> —
+  becomes a path dependency. What every member shares moves into the root: the parent POM's
+  compiler settings and <code>&lt;dependencyManagement&gt;</code>, or a Gradle version catalog,
+  become the root's <code>[java]</code> and <code>[managed]</code>. Each Maven module is read with
+  its parent's plugins and <code>&lt;pluginManagement&gt;</code>, as Maven builds it; a Gradle
+  root's <code>subprojects { }</code> and <code>allprojects { }</code> are read into every
+  member. The report has a section per member and ends with how many migrated cleanly. A module
+  only a profile lists, a <code>pom</code> module that is not an aggregator, and a sibling's test
+  jar are reported.
 </p>
 
 <h3>What maps to what</h3>
