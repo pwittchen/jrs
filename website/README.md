@@ -46,7 +46,7 @@ version. It can also be run by hand from the Actions tab.
   `getjrs.dev/benchmarks/`, and the fourth entry point: jrs against Maven and
   Gradle, the headline numbers, the bars and every result table. The numbers
   live once, in `RESULTS` in `src/benchmarks.ts`, which draws the bars and the
-  tables from them; they are `docs/BENCHMARKS_SUMMARY.md`'s, so keep the two in
+  tables from them; they are `specs/BENCHMARKS_SUMMARY.md`'s, so keep the two in
   step, and replace both when a full `cargo bench --bench compare` report is
   published. `src/benchmarks.css` is its own stylesheet for the reason
   `docs.css` is. The Maven and Gradle marks in the table headers are

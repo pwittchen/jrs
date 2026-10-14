@@ -3,11 +3,11 @@
 Run on 2026-10-14 with jrs 0.11.0 (`4f40e18`, `benches/compare.rs`), on an
 Apple M4 Max (14 cores, 36 GiB) under macOS 27.0.1, with Corretto 25.0.2,
 Maven 3.9.16 and Gradle 9.1.0, every tool from the local mirror. Every
-project passed the checks of [BENCHMARKS.md](../specs/BENCHMARKS.md)
+project passed the checks of [BENCHMARKS.md](BENCHMARKS.md)
 §5.1 on all three tools first: the same runtime classpath, the same tests,
 the same `run` output and a fat jar that starts.
 
-**These are not the report of [BENCHMARKS.md](../specs/BENCHMARKS.md)
+**These are not the report of [BENCHMARKS.md](BENCHMARKS.md)
 §6.** Each cell is **one run with no warm-up** (`JRS_BENCH_RUNS=1
 JRS_BENCH_WARMUP=0`), so there is no spread and a cell may move by tens of
 percent in a full run. They were taken to check the harness end to end; the
@@ -120,8 +120,8 @@ a tool that beat jrs.
   sequence; Gradle's daemon does the same work in 0.5–0.8 s, and even
   Maven's single-threaded reactor is faster, since it compiles in one warm
   JVM. This is the evidence for "workspace members built in parallel" in
-  [GRADLE_GAPS.md](../specs/todo/GRADLE_GAPS.md); a warm in-process `javac`
-  across members ([FASTER_BUILDS.md](../specs/FASTER_BUILDS.md) §6's worker
+  [GRADLE_GAPS.md](todo/GRADLE_GAPS.md); a warm in-process `javac`
+  across members ([FASTER_BUILDS.md](FASTER_BUILDS.md) §6's worker
   outside `--watch`) would help as much.
 - **An API change recompiles more than it needs to.** `abi` on `gen-2000` is
   1.84 s against Gradle's 0.64 s: jrs recompiles every source that
@@ -140,7 +140,7 @@ a tool that beat jrs.
 - **Test JVM start on large suites.** On `gen-2000`, `test` (910 ms) and
   `test-edit` (1.20 s) trail the daemon by 6–13%, almost all of it in the
   test JVM (about 700 ms);
-  [TEST_JVM_BENCHMARK.md](../specs/TEST_JVM_BENCHMARK.md)'s `share-classes`
+  [TEST_JVM_BENCHMARK.md](TEST_JVM_BENCHMARK.md)'s `share-classes`
   archive is the lever already built for it.
 - **The workspace's `test` against Gradle's configuration cache** (1.89 s
   against 714 ms) needs a full run before it is read: a single sample that

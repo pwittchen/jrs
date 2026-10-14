@@ -9,7 +9,7 @@ on:
   workflow_dispatch:
     inputs:
       projects:
-        description: 'Projects: `all`, or names from benches/compare.rs and docs/corpus/corpus.toml, comma-separated'
+        description: 'Projects: `all`, or names from benches/compare.rs and specs/corpus/corpus.toml, comma-separated'
         default: 'wordstats,bookmarks,gen-300,gen-2000,gen-ws'
         required: true
       scenarios:

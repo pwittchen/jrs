@@ -78,7 +78,7 @@ project says nothing about a Spring Boot suite.
 
 The projects of the real-project corpus
 ([CORPUS.md](CORPUS.md), listed in
-[`docs/corpus/corpus.toml`](../docs/corpus/corpus.toml)) whose `test` cell is `ok` —
+[`specs/corpus/corpus.toml`](corpus/corpus.toml)) whose `test` cell is `ok` —
 they pass `jrs test` with the usual layout, and the measurement means nothing
 on a project that does not. A project is copied out of a corpus run's
 `target/corpus/<run>/<name>/clone/` and given to `JRS_BENCH_PROJECT`. At

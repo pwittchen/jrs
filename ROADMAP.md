@@ -37,19 +37,19 @@ as a non-goal. The measure is how often `jrs migrate` works on the first
 try, published as a compatibility table in `DOCS.md` and on the website.
 
 The harness, the list and the ledger have landed (`cargo bench --bench
-corpus`, [`docs/corpus/`](docs/corpus/)). The first run took 4 of 11 projects end to
+corpus`, [`specs/corpus/`](specs/corpus/)). The first run took 4 of 11 projects end to
 end; the other seven stopped at `build` on six findings, five of them
 migration gaps. The plan for those,
 [specs/CORPUS_FIXES.md](specs/CORPUS_FIXES.md), is **done**: it closed
 them, and 10 of 11 now get past `build`. What keeps six of them from `ok`
 is findings 12–19 in
-[docs/corpus/FINDINGS.md](docs/corpus/FINDINGS.md): a BOM's exclusions, a dependency's
+[specs/corpus/FINDINGS.md](specs/corpus/FINDINGS.md): a BOM's exclusions, a dependency's
 OS profiles, two more migration gaps, and differences from Gradle's
 resolution that are non-goals.
 
 **Status: done.** The harness, the corpus and the ledger are in place, and
 the remaining findings are tracked in
-[docs/corpus/FINDINGS.md](docs/corpus/FINDINGS.md).
+[specs/corpus/FINDINGS.md](specs/corpus/FINDINGS.md).
 
 ## 2. Benchmarks against Maven and Gradle
 
@@ -69,7 +69,7 @@ report from the reference machine, and the links to it.
 
 **Status: done.** The comparison harness, the parity set and the on-demand
 workflow are in place. The summary is in
-[benchmarks/README.md](benchmarks/README.md), and the results are on the
+[specs/BENCHMARKS_SUMMARY.md](specs/BENCHMARKS_SUMMARY.md), and the results are on the
 website at [getjrs.dev/benchmarks](https://getjrs.dev/benchmarks/).
 
 ## 3. Closing the gaps where Gradle wins

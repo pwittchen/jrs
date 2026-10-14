@@ -89,11 +89,11 @@ JRS_BENCH_RECORD=1 cargo bench --bench compare  # ROADMAP §2: fill the local mi
 cargo bench --bench compare                     # ROADMAP §2: jrs vs Maven vs Gradle, into benchmarks/REPORT.md
 ```
 
-Only the corpus (`docs/corpus/corpus.toml`, `specs/CORPUS.md`),
+Only the corpus (`specs/corpus/corpus.toml`, `specs/CORPUS.md`),
 `tests/network.rs` and the comparison's recording run may reach Maven
 Central. The corpus also clones its
 projects and runs their own builds, and keeps everything under
-`target/corpus/<run>/`; `docs/corpus/FINDINGS.md` is the ledger of what it found.
+`target/corpus/<run>/`; `specs/corpus/FINDINGS.md` is the ledger of what it found.
 The comparison (`benches/compare.rs`, `specs/BENCHMARKS.md`) serves every
 tool from a local mirror (`benches/support/mirror.rs`, which `resolution.rs`
 shares) and refuses to time a project the tools do not build alike; the

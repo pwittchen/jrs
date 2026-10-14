@@ -1,5 +1,5 @@
 // The benchmarks page: the first pass of `cargo bench --bench compare`
-// (docs/BENCHMARKS_SUMMARY.md), drawn from one table of numbers so the bars
+// (specs/BENCHMARKS_SUMMARY.md), drawn from one table of numbers so the bars
 // and the tables cannot disagree. Keep RESULTS in step with that file.
 
 import { $, $$, setupCopy, stampVersion } from "./shared";

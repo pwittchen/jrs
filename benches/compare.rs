@@ -27,7 +27,7 @@
 //! Maven and Gradle builds of `benchmarks/projects/<name>/` laid over a copy;
 //! `gen-300`, `gen-2000` and `gen-ws` are written by [`generate`], seeded,
 //! with all three build files from one description. The corpus set is every
-//! project of `docs/corpus/corpus.toml` whose last corpus run passed every
+//! project of `specs/corpus/corpus.toml` whose last corpus run passed every
 //! step, from that run's clone, against the build it ships.
 //!
 //! **The mirror.** No measured run touches the network: every tool is
@@ -934,7 +934,7 @@ fn projects(repo_root: &Path, settings: &Settings, tools: &Tools) -> Selection {
                 known,
                 "JRS_BENCH_PROJECTS: no project `{name}`; the parity set is wordstats, \
                  bookmarks, gen-300, gen-2000 and gen-ws, and the corpus's are in \
-                 docs/corpus/corpus.toml"
+                 specs/corpus/corpus.toml"
             );
         }
     }
@@ -961,10 +961,10 @@ fn corpus_projects(
     tools: &Tools,
     left_out: &mut Vec<(String, String)>,
 ) -> (Vec<Project>, Option<PathBuf>) {
-    let Ok(text) = std::fs::read_to_string(repo_root.join("docs/corpus/corpus.toml")) else {
+    let Ok(text) = std::fs::read_to_string(repo_root.join("specs/corpus/corpus.toml")) else {
         return (Vec::new(), None);
     };
-    let corpus: toml::Table = toml::from_str(&text).expect("parse docs/corpus/corpus.toml");
+    let corpus: toml::Table = toml::from_str(&text).expect("parse specs/corpus/corpus.toml");
     let entries = corpus
         .get("project")
         .and_then(toml::Value::as_array)
