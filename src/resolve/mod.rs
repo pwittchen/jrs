@@ -273,12 +273,39 @@ struct Selected {
 ///
 /// If a worker thread panicked while holding the warnings or POM lock,
 /// poisoning it.
+pub fn resolve(manifest: &Manifest, fetcher: &Fetcher, jobs: usize) -> Result<Resolution> {
+    resolve_walking(manifest, fetcher, jobs, false)
+}
+
+/// [`resolve`] for a workspace's aggregate manifest (`specs/WORKSPACES.md`
+/// §5.1), whose roots are several members'. A package's children are walked
+/// with the exclusions of the path that reached it first; when another path
+/// reaches it excluding less, the children only that path keeps are walked
+/// too. Each member's share of the graph applies its own exclusions, so one
+/// member's exclusion never takes a jar off another's classpath.
+///
+/// # Errors
+///
+/// As for [`resolve`].
+pub fn resolve_workspace(
+    manifest: &Manifest,
+    fetcher: &Fetcher,
+    jobs: usize,
+) -> Result<Resolution> {
+    resolve_walking(manifest, fetcher, jobs, true)
+}
+
 #[allow(
     clippy::too_many_lines,
     reason = "one breadth-first walk over shared state (`selected`, `edges`, \
               `packaging`); split up, every piece would take all of it"
 )]
-pub fn resolve(manifest: &Manifest, fetcher: &Fetcher, jobs: usize) -> Result<Resolution> {
+fn resolve_walking(
+    manifest: &Manifest,
+    fetcher: &Fetcher,
+    jobs: usize,
+    every_path: bool,
+) -> Result<Resolution> {
     // The runtime libraries the manifest's languages imply are resolved as
     // direct dependencies, declared last.
     let dependencies = manifest.effective_dependencies();
@@ -316,6 +343,9 @@ pub fn resolve(manifest: &Manifest, fetcher: &Fetcher, jobs: usize) -> Result<Re
     let mut selected: HashMap<Ga, Selected> = HashMap::new();
     let mut edges: HashMap<Ga, Vec<Ga>> = HashMap::new();
     let mut packaging: HashMap<Ga, String> = HashMap::new();
+    // With `every_path`: the exclusions each package's children were walked
+    // with, and whether it was reached as a `pom`.
+    let mut walked: HashMap<Ga, (Vec<Ga>, bool)> = HashMap::new();
     let mut level: Vec<Pending> = seed(&dependencies, &dev_dependencies);
 
     let root_ga =
@@ -337,8 +367,33 @@ pub fn resolve(manifest: &Manifest, fetcher: &Fetcher, jobs: usize) -> Result<Re
         // at a shallower depth keeps its version; within a level, the earlier
         // declaration wins.
         let mut admitted: Vec<&Pending> = Vec::new();
+        let mut rewalk: Vec<Pending> = Vec::new();
         for item in &level {
             let ga = item.coord.ga();
+            if every_path
+                && selected.contains_key(&ga)
+                && let Some((before, pom_only)) = walked.get_mut(&ga)
+            {
+                // Walked before with exclusions this path does not make: what
+                // they kept out is this path's, so it is walked now.
+                let kept: Vec<Ga> = before
+                    .iter()
+                    .filter(|e| item.exclusions.contains(e))
+                    .cloned()
+                    .collect();
+                if kept.len() < before.len() {
+                    before.clone_from(&kept);
+                    let existing = &selected[&ga];
+                    rewalk.push(Pending {
+                        coord: existing.coord.clone(),
+                        classpath: existing.classpath.join(item.classpath),
+                        depth: existing.depth,
+                        exclusions: kept,
+                        parent: None,
+                        pom_only: *pom_only,
+                    });
+                }
+            }
             if let Some(existing) = selected.get_mut(&ga) {
                 let differs = compare_versions(&existing.coord.version, &item.coord.version)
                     != std::cmp::Ordering::Equal;
@@ -368,12 +423,17 @@ pub fn resolve(manifest: &Manifest, fetcher: &Fetcher, jobs: usize) -> Result<Re
                         mediated: false,
                     },
                 );
+                if every_path {
+                    walked.insert(ga.clone(), (item.exclusions.clone(), item.pom_only));
+                }
                 admitted.push(item);
             }
             if let Some(parent) = &item.parent {
                 edges.entry(parent.clone()).or_default().push(ga.clone());
             }
         }
+
+        admitted.extend(rewalk.iter());
 
         // Fetch and parse this level's POMs together.
         let effectives: Vec<Result<(usize, std::sync::Arc<Effective>)>> = pool.install(|| {

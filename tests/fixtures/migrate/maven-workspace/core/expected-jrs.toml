@@ -1,0 +1,9 @@
+[project]
+name = "shop-core"
+version = "2.3.0"
+
+[dependencies]
+"com.google.guava:guava" = {}
+
+[dev-dependencies]
+"org.junit.jupiter:junit-jupiter" = {}

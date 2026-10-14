@@ -25,6 +25,11 @@ pub const LOCK_VERSION: u64 = 1;
 /// compiler pins the next time it rewrites it.
 pub const TOOLS_LOCK_VERSION: u64 = 2;
 
+/// The format of a workspace's one lockfile (`specs/WORKSPACES.md` §5): the
+/// whole workspace's graph, with a `members` list naming the directories it
+/// was resolved for. A single-module project never reaches it.
+pub const WORKSPACE_LOCK_VERSION: u64 = 3;
+
 #[derive(Debug, Clone)]
 pub struct Lockfile {
     pub version: u64,
@@ -42,6 +47,9 @@ pub struct Lockfile {
     /// `version`: a jrs that predates them refuses the manifest's `path` key
     /// outright, so it can never rewrite this file and drop the pins.
     pub local: Vec<LocalJar>,
+    /// A workspace's members, by directory relative to its root, `/`-separated
+    /// (`.` for a root that is a member too); empty for a single project.
+    pub members: Vec<String>,
 }
 
 /// One tool's pinned graph, in the package format the project's uses.
@@ -71,7 +79,17 @@ impl Lockfile {
                     ..l.clone()
                 })
                 .collect(),
+            members: Vec::new(),
         }
+    }
+
+    /// Mark this as a workspace's lockfile, resolved for `members`, which
+    /// makes it a version 3 lockfile.
+    #[must_use]
+    pub fn with_members(mut self, members: &[String]) -> Lockfile {
+        self.members = members.to_vec();
+        self.version = WORKSPACE_LOCK_VERSION;
+        self
     }
 
     /// Pin a tool's graph beside the project's, which makes this a version 2
@@ -83,7 +101,7 @@ impl Lockfile {
             roots: resolution.roots.clone(),
             packages: sorted(&resolution.packages),
         });
-        self.version = TOOLS_LOCK_VERSION;
+        self.version = self.version.max(TOOLS_LOCK_VERSION);
         self
     }
 
@@ -194,7 +212,8 @@ impl Lockfile {
         if !supported(version) {
             return Err(JrsError::resolve(format!(
                 "{}: lockfile version {version} is not supported by jrs {} \
-                 (expected {LOCK_VERSION} or {TOOLS_LOCK_VERSION})\n\nrun `jrs update` to \
+                 (expected {LOCK_VERSION}, {TOOLS_LOCK_VERSION} or {WORKSPACE_LOCK_VERSION})\n\n\
+                 run `jrs update` to \
                  regenerate it",
                 path.display(),
                 env!("CARGO_PKG_VERSION"),
@@ -236,6 +255,13 @@ impl Lockfile {
             packages: read_packages(&table, path)?,
             tools,
             local: read_local(&table, path)?,
+            members: table
+                .get("members")
+                .and_then(toml::Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(|v| v.as_str().map(str::to_string))
+                .collect(),
         })
     }
 
@@ -247,6 +273,10 @@ impl Lockfile {
         s.push_str("# resolves to the same jars on every machine.\n\n");
         let _ = writeln!(s, "version = {}", self.version);
         let _ = writeln!(s, "manifest-checksum = \"{}\"", self.manifest_checksum);
+        if !self.members.is_empty() {
+            let members: Vec<String> = self.members.iter().map(|m| format!("\"{m}\"")).collect();
+            let _ = writeln!(s, "members = [{}]", members.join(", "));
+        }
         let _ = writeln!(s, "roots = {}", render_gas(&self.roots));
         let _ = writeln!(s, "test-roots = {}", render_gas(&self.test_roots));
 
@@ -269,7 +299,7 @@ impl Lockfile {
 }
 
 fn supported(version: u64) -> bool {
-    version == LOCK_VERSION || version == TOOLS_LOCK_VERSION
+    version == LOCK_VERSION || version == TOOLS_LOCK_VERSION || version == WORKSPACE_LOCK_VERSION
 }
 
 fn sorted(packages: &[ResolvedPackage]) -> Vec<ResolvedPackage> {
@@ -839,15 +869,35 @@ mod tests {
 
     #[test]
     fn a_newer_lockfile_version_is_refused() {
-        let err = Lockfile::parse("version = 3\n", Path::new("jrs.lock"))
+        let err = Lockfile::parse("version = 4\n", Path::new("jrs.lock"))
             .unwrap_err()
             .to_string();
-        assert!(err.contains("version 3 is not supported"), "{err}");
+        assert!(err.contains("version 4 is not supported"), "{err}");
         assert!(err.contains("jrs update"), "{err}");
         let err = Lockfile::parse("version = 2\n[[tool]]\nroots = []\n", Path::new("jrs.lock"))
             .unwrap_err()
             .to_string();
         assert!(err.contains("[[tool]] is missing `name`"), "{err}");
+    }
+
+    #[test]
+    fn a_workspace_lockfile_lists_its_members_and_round_trips() {
+        let m = manifest("[dependencies]\n'g:a'='1.0'");
+        let plain = Lockfile::from_resolution(&m, &resolution());
+        assert!(
+            !plain.render().contains("members"),
+            "a single project's stays as it was"
+        );
+        let lock = plain.with_members(&[".".to_string(), "core".to_string()]);
+        let text = lock.render();
+        assert!(text.contains("version = 3\n"), "{text}");
+        assert!(text.contains("members = [\".\", \"core\"]\n"), "{text}");
+        let back = Lockfile::parse(&text, Path::new("jrs.lock")).unwrap();
+        assert_eq!(back.members, [".", "core"]);
+        assert_eq!(back.render(), text);
+        // A compiler's pin does not take a workspace's lockfile back to 2.
+        let with_tool = lock.with_tool("kotlin-compiler", &compiler_graph());
+        assert_eq!(with_tool.version, WORKSPACE_LOCK_VERSION);
     }
 
     #[test]

@@ -5,7 +5,7 @@ It expands the capability list from [README.md](README.md) into a concrete scope
 so that implementation can start from agreed contracts instead of ad-hoc decisions.
 
 Status: **implemented** — every milestone in the [Roadmap](#12-roadmap) has
-landed, except the tool dependencies M7 defers and the documentation tools M8
+landed, workspaces (M10) among them, except the tool dependencies M7 defers and the documentation tools M8
 defers. The document still describes the design rather than the code, so where
 the two differ the code is authoritative; the deliberate divergences are listed
 in [§12.1](#121-where-the-implementation-diverges), and the decisions taken on
@@ -17,8 +17,10 @@ in [§12.1](#121-where-the-implementation-diverges), and the decisions taken on
 
 ### 1.1 Goals
 
-- Build, test, run and package a single-module Java project with **zero configuration
-  beyond one `jrs.toml` file**. Kotlin, Scala and Groovy sources compile
+- Build, test, run and package a Java project with **zero configuration
+  beyond one `jrs.toml` file** — or, for a project of several modules, one
+  `jrs.toml` per module under a workspace root that lists them
+  ([WORKSPACES.md](specs/WORKSPACES.md)). Kotlin, Scala and Groovy sources compile
   alongside the Java ones (§7.7), but Java is the default and the JDK is the
   toolchain: jrs stays a Java build system.
 - Resolve dependencies (including transitive ones) from Maven Central.
@@ -34,7 +36,11 @@ in [§12.1](#121-where-the-implementation-diverges), and the decisions taken on
   declarative TOML only. User-defined tasks (§7.6) are subprocesses jrs
   launches at fixed lifecycle points; they cannot replace, remove or
   reorder the built-in phases, and no user code runs inside jrs.
-- Multi-module / aggregator builds (v1 is one module per manifest).
+- A reactor: one manifest is one module. Several modules build together as
+  a workspace ([WORKSPACES.md](specs/WORKSPACES.md)): members declared by a
+  root `jrs.toml`, sharing its defaults and one lockfile. A member
+  configuring another, build logic at the root, per-module lockfiles and
+  composite builds across repositories stay out.
 - Publishing artifacts to a repository (`deploy`/`publish`).
 - JVM languages beyond Java, Kotlin, Scala and Groovy; and for those three,
   anything off the JVM (Multiplatform, JS, Native, Android), compiler
@@ -284,6 +290,12 @@ dependencies excluded, since `-javaagent:` loads one jar, and pinned in a
 one per section. An agent named by `group:artifact` comes from the project's
 graph and adds nothing, so its lockfile stays byte for byte.
 
+A workspace has one lockfile, at its root, for every member
+([WORKSPACES.md §5](specs/WORKSPACES.md#5-one-lockfile)): the resolution of all
+the members' dependencies at once. It says `version = 3` and lists the
+members' directories in a `members` array after `manifest-checksum`; a member
+has no lockfile of its own.
+
 A package whose version `[managed]` decided (§8.9) says `managed = true`. The
 line is written only then, and `manifest-checksum` gains `[managed]`'s entries
 only when there are some, so a manifest without the table keeps its lockfile
@@ -355,6 +367,12 @@ jrs <command> [options]
 | `jrs metadata [--no-deps]` | Print the project model as versioned JSON on stdout, for editors and tools; resolves but never compiles (§5.4). |
 | `jrs fetch [--sources]` | Resolve and download the dependencies, the compilers, the tasks' tools and the test launcher into the cache without building; `--sources` adds each dependency's `-sources.jar` (§5.4). |
 
+In a workspace, every command acts on every member at the root, and on the
+members `-p` names or the member it is run from otherwise, building the
+members those depend on first; `classpath`, `add` and `remove` act on one
+member, and `update`, `verify`, `fetch`, `outdated`, `licenses` and `audit` on
+the workspace's one graph ([WORKSPACES.md §6](specs/WORKSPACES.md#6-commands)).
+
 `--debug[=[host:]port]` on `run` and `test` puts
 `-agentlib:jdwp=transport=dt_socket,server=y,suspend=y,address=<port>` ahead of
 every other JVM argument, on port 5005 unless given one, and prints a
@@ -373,6 +391,7 @@ while it waits.
 | `--offline` | Fail rather than hit the network; use cache + lockfile only. |
 | `--jobs <n>` | Cap parallelism; defaults to the user config's `jobs` (§8.5), else available cores. |
 | `--manifest-path <p>` | Run against a manifest outside the CWD. |
+| `-p, --module <name>` | In a workspace, act on this member and the members it depends on; repeatable. Outside one, a usage error. |
 | `--progress <auto\|always\|never>` | Live animated output. `auto` = on when stderr is a TTY. |
 | `--color <auto\|always\|never>` | Colour and styling. `auto` = on when stderr is a TTY. |
 | `--charset <auto\|unicode\|ascii>` | Glyph set for spinners, bars and trees. |
@@ -634,6 +653,13 @@ within a version.
 - `sources` is the dependency's `-sources.jar` when it is in the cache, and
   `null` otherwise. A classified artifact (natives, a platform build) points
   at its main artifact's sources.
+- In a workspace, a member's model adds `workspace` (the root's directory) and
+  `modules` (the members it depends on, each with its classes directory and
+  classpath) after `tasks`, and its `lockfile` is the root's. At the root,
+  `jrs metadata` prints the workspace's model instead: `version`, `jrs`, a
+  `workspace` object and a `members` array of the members' models
+  ([WORKSPACES.md §7](specs/WORKSPACES.md#7-tooling)). A single project's model
+  is unchanged.
 
 `jrs fetch` resolves and downloads everything a build and a test run need —
 the dependencies, the compilers (§7.7), each task's own tools (§7.6) and the
@@ -2267,9 +2293,10 @@ parent chains and `<dependencyManagement>` already work.
 
 Reported, not translated:
 
-- `<modules>` — multi-module builds are out of scope (§1.2). jrs migrates the
-  module it was pointed at and lists the others so they can be migrated
-  individually.
+- `<modules>` are migrated into a workspace: a root `jrs.toml` and one per
+  module, siblings' dependencies as path dependencies, and the parent's
+  compiler settings and `<dependencyManagement>` in the root
+  ([WORKSPACES.md §8.1](specs/WORKSPACES.md#81-maven)).
 - A parent in a repository, other than `spring-boot-starter-parent`.
 - A `system` scope outside the project, `<optional>`, and a `<type>` that
   does not go on a classpath.
@@ -2409,8 +2436,12 @@ Anything jrs cannot read confidently is skipped and reported — never guessed:
   loop or a conditional, or built by concatenation, a method call or
   `System.getenv`, and a coordinate held whole in a variable. What uses one is
   left out with the variable's name — never written without its version.
-- Plugins, `subprojects { }` / `allprojects { }`, and multi-project
-  `settings.gradle` includes (listed, not migrated).
+- Plugins. A multi-project build's `settings.gradle` includes become a
+  workspace, its `project(":x")` dependencies path dependencies and its
+  version catalog the root's `[managed]`; `subprojects { }` and
+  `allprojects { }` are read into each member, and what is the same in every
+  member moves into the root
+  ([WORKSPACES.md §8.2](specs/WORKSPACES.md#82-gradle)).
 - Custom tasks, except those that say everything in literals (§7.6,
   [TASKS.md §12](specs/TASKS.md#12-open-questions) item 5): an `Exec` task becomes
   a `run` task, a `JavaExec` over `sourceSets.main.runtimeClasspath` becomes
@@ -2564,6 +2595,21 @@ produces something runnable.
   between a compiler daemon and a `--watch` worker, is in
   [FASTER_BUILDS.md](specs/FASTER_BUILDS.md).
 
+### M10 — Workspaces
+- ☑ a root `jrs.toml` with `[workspace] members`, shared `[java]`,
+  `[repositories]`, `[managed]` and language tables
+- ☑ path dependencies between members, in every scope; cycles named
+- ☑ one lockfile for every member, mediation once over the workspace
+- ☑ members built in dependency order, compile avoidance and test selection
+  across the module boundary, phase lines naming their member
+- ☑ every command over the workspace, `-p` and the member it is run from;
+  fat jars carrying sibling members; tasks depending on another member's
+- ☑ `jrs metadata` listing every member, and the IntelliJ plugin importing
+  one module per member
+- ☑ `jrs migrate` of a Maven aggregator and of a Gradle build with `include`
+- Added after M9; the design, and the argument for narrowing §1.2, is in
+  [WORKSPACES.md](specs/WORKSPACES.md).
+
 Tick the corresponding README boxes as each lands — the README is the
 user-facing progress tracker, this document is the design behind it.
 
@@ -2667,8 +2713,10 @@ still the interesting part; the **decision** lines record what was settled on.
 11. **Should `jrs migrate` offer multi-module output?** A Maven aggregator could
     emit one `jrs.toml` per module. That is a useful escape hatch, but it edges
     towards the multi-module support §1.2 rules out.
-    **Decision:** no. `<modules>` and `include` are listed in the report with a
-    suggestion to run `jrs migrate --path <module>` on each.
+    **Decision:** first no — `<modules>` and `include` were listed in the
+    report with a suggestion to run `jrs migrate --path <module>` on each —
+    and then, once workspaces narrowed §1.2, yes: a multi-module build
+    migrates into a workspace ([WORKSPACES.md §8](specs/WORKSPACES.md#8-migration)).
 12. **User-defined build steps.** §1.2 first ruled out "plugin systems, custom
     task graphs, or a build DSL". But real projects nearly always have a step
     of their own: sources generated before `javac`, a jar signed or checksummed

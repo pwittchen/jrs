@@ -12,17 +12,20 @@
   <a href="https://github.com/pwittchen/jrs/actions/workflows/rust.yml"><img src="https://github.com/pwittchen/jrs/actions/workflows/rust.yml/badge.svg" alt="Rust"></a>
 </p>
 
-jrs builds, tests, runs and packages a single-module Java project from one
-`jrs.toml` manifest, resolving dependencies from Maven Central. Kotlin, Scala
+jrs builds, tests, runs and packages a Java project from one `jrs.toml`
+manifest — or a multi-module one from a manifest per module under a workspace
+root — resolving dependencies from Maven Central. Kotlin, Scala
 and Groovy sources compile alongside the Java ones. It aims for the
 ergonomics of Cargo: a small manifest, a committed lockfile, one binary, and no
 build script to write.
 
 ## Project status
 
-jrs is an **experimental**, single-module build system, not a replacement for Maven
+jrs is an **experimental** build system, not a replacement for Maven
 or Gradle. It implements a deliberately narrow subset of what those tools do —
-there is no plugin system, no build DSL and no multi-module reactor. A project's
+there is no plugin system, no build DSL and no reactor: several modules build
+together as a [workspace](DOCS.md#workspaces), declared rather than
+configured. A project's
 own build steps are [tasks](DOCS.md#tasks-and-hooks): commands jrs runs as
 subprocesses at fixed points in its lifecycle, which they cannot replace or
 reorder. It is offered as-is under the Apache 2.0 licence; evaluate it against
@@ -45,10 +48,10 @@ your own requirements before adopting it for production builds.
 - **Easy for people and for agents.** A manifest you can read in one screen,
   `jrs add` / `jrs remove`, plain output and `jrs metadata` as JSON.
 
-It fits single-module services (Spring Boot, Ktor), command-line tools, teams
-for whom the JVM is not their main language, and builds with supply-chain
-requirements. It does not fit multi-module builds, library publishing or
-Android. The longer case, and where jrs is not the right choice, is at
+It fits services in one module or a few (Spring Boot, Ktor), command-line
+tools, teams for whom the JVM is not their main language, and builds with
+supply-chain requirements. It does not fit library publishing, Android or
+builds whose modules configure each other in code. The longer case, and where jrs is not the right choice, is at
 [getjrs.dev/why](https://getjrs.dev/why/).
 
 ## Features
@@ -66,7 +69,10 @@ Android. The longer case, and where jrs is not the right choice, is at
 - User-defined tasks and lifecycle hooks, with Java tools from Maven Central:
   formatters and checkers such as google-java-format, ktfmt, Checkstyle, PMD
   and SpotBugs need no plugin
-- One-shot migration from Maven and Gradle, Spring Boot builds included
+- Multi-module workspaces: members that depend on each other by path, shared
+  settings, one lockfile, and every command over all members or one with `-p`
+- One-shot migration from Maven and Gradle, Spring Boot and multi-module
+  builds included
 - Watch mode that rebuilds, retests or restarts the program, dependency
   trees, outdated reports, `jrs add` / `jrs remove` and shell completions
 
@@ -119,12 +125,13 @@ source = 21
 
 To move an existing project over, run `jrs migrate` next to its `pom.xml` or
 Gradle build. [`examples`](examples) holds complete sample projects in Java,
-Kotlin, Scala and Groovy.
+Kotlin, Scala and Groovy, and a multi-module workspace (`examples/ledger`).
 
 ## IntelliJ IDEA
 
 [`plugins/intellij`](plugins/intellij) is an IntelliJ IDEA plugin. It imports
-a jrs project from `jrs metadata` with its source roots, JDK and libraries.
+a jrs project from `jrs metadata` with its source roots, JDK and libraries,
+and a workspace as one module per member.
 Build Project runs `jrs build`, and it has run configurations for `jrs run`,
 `jrs test` and `jrs task`, with the debugger and the test runner tree. It also
 adds a jrs tool window and completion in `jrs.toml`. Each release carries it

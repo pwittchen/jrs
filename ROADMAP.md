@@ -3,7 +3,7 @@
 Every milestone in [SPEC §12](SPEC.md#12-roadmap) has landed. This
 document lists only what is still open. Much of it closes a gap with Gradle, and those items
 name the Gradle feature they answer. jrs is not trying to become Gradle
-(SPEC §1.2), so each one is the single-module, declarative version of what a
+(SPEC §1.2), so each one is the declarative version of what a
 Gradle build gets from a plugin or a DSL block, and it arrives with its row in
 `jrs migrate` and a fixture in `tests/fixtures/migrate/`, as `test.forks` did
 for `maxParallelForks` (`gradle-forks`). Anything that touches a
@@ -25,9 +25,10 @@ backing it with evidence and for aiming the work at the people it fits.
 
 **Who it is for.** In order of how well jrs fits them today:
 
-1. **Single-module services.** A Spring Boot or Ktor service in a repository
-   of its own is the shape jrs was built for. Section 1 is about exactly these
-   projects.
+1. **Services, in one module or a few.** A Spring Boot or Ktor service in a
+   repository of its own is the shape jrs was built for, and since workspaces
+   (section 7) that includes one split into a `core`, an `api` and an
+   application. Section 1 is about exactly these projects.
 2. **Command-line tools and desktop apps.** The fat jar, `--jlink`,
    `--jpackage`, `--native-image` and `--obfuscate` are built in; in Maven or
    Gradle each is a plugin with its own configuration.
@@ -46,8 +47,10 @@ backing it with evidence and for aiming the work at the people it fits.
    script to a real project, without learning Maven first.
 
 It is not for libraries published to Maven Central, Android, or builds that
-need Gradle's plugin ecosystem (section 5 says why). It is not for
-multi-module builds yet either; section 7 is the plan for them.
+need Gradle's plugin ecosystem (section 5 says why). Multi-module builds it
+takes as workspaces (section 7), declared rather than configured: a build
+whose modules configure each other from `subprojects { }` code migrates with
+that code reported, not translated.
 
 **The claims, and the evidence each needs.** Every claim on the Why page has to
 be one a sceptical reader can check. Where the evidence does not exist yet,
@@ -72,10 +75,9 @@ audience.
 3. **Section 3, publishing to the package managers**, so trying jrs costs
    one command on every platform.
 4. **One spec decision, taken early: `jrs install`** (section 5, publishing).
-   Installing a jar into `~/.m2` is the smallest step past one module: it
-   lets a team split a library out of a service without a reactor, which is
-   the most common reason a project cannot try jrs.
-   Multi-module builds (section 7) are the full answer, and come after it.
+   Installing a jar into `~/.m2` lets a library be shared between projects in
+   different repositories, which a workspace (section 7) does not reach:
+   its members all live under one root.
 5. **A guide for coding agents** in `DOCS.md` and on the website: which
    commands to run, which flags give stable output, and how to read
    `jrs metadata`. It needs no code, only documentation of what exists.
@@ -234,8 +236,7 @@ listed so the discussion has a home, not because they are planned.
 
 | Idea | What it crosses |
 | --- | --- |
-| Multi-module builds / workspaces | Non-goal: one module per manifest. Planned in section 7, which starts with the spec change |
-| Composite builds (Gradle's `includeBuild`), dependency substitution with a local checkout | Non-goal: one module per manifest. Without them, the way to try a change to a library in the project that uses it is a `-SNAPSHOT` in `~/.m2` through a `file://` repository |
+| Composite builds (Gradle's `includeBuild`), dependency substitution with a local checkout | Non-goal: a workspace's members live under its root ([WORKSPACES.md §9](specs/WORKSPACES.md#9-what-stays-out)). Without them, the way to try a change to a library in the project that uses it is a `-SNAPSHOT` in `~/.m2` through a `file://` repository |
 | Publishing (Gradle's `maven-publish`, `publishToMavenLocal`) | Non-goal: SPEC §1.2 rules out `deploy`/`publish`. Done properly it means generating a POM from the manifest, sources and Javadoc jars (`jrs package --sources --javadoc` writes them), signing, and uploading with credentials. A `jrs install` into `~/.m2` is the smallest version, and it is the one that makes library development across projects bearable without a reactor |
 | JDK auto-provisioning (Gradle's toolchain resolvers, foojay) | Downloads from a host that is not a Maven repository. Unix JDKs ship as tar.gz, which means new crates. Today a pinned JDK that is not installed is an error listing the ones that are (SPEC §7.1) |
 | A wrapper that fetches the pinned jrs (Gradle's `gradlew`) | jrs would download and run executables. Today `project.jrs-version` (SPEC §4.3) makes an older jrs stop and name the version the project needs |
@@ -293,79 +294,41 @@ away the "no daemon, just a driver" defaults the Why page rests on.
 
 ## 7. Multi-module projects
 
-Most Spring Boot and Ktor codebases that outgrow one repository-sized service
-split into modules before they split into repositories: a `domain` or `core`
-library, an `api` module, one or two applications on top. Today jrs stops at
-the first `<modules>` or `include`: `jrs migrate` translates the module it was
-pointed at and lists the others, and the user is left wiring them together
-through `~/.m2` by hand. That is the most common reason a real project cannot
-try jrs at all, after the corpus failures of section 1.
+**Done.** Workspaces are designed in
+[specs/WORKSPACES.md](specs/WORKSPACES.md), which narrowed the "one module per
+manifest" non-goal (SPEC §1.2) and reversed SPEC open question 11, and
+`examples/ledger` is one. In short:
 
-This crosses the "one module per manifest" non-goal (SPEC §1.2) and reverses
-SPEC open question 11, so it starts with a spec change — a section of its own,
-in the manner of `specs/JVM_LANGUAGES.md` — before any code. The shape it
-should take is Cargo's workspace, not Gradle's reactor: modules are declared,
-not configured by a script, and the root adds nothing a member manifest could
-not say for itself.
+- **A workspace manifest.** A root `jrs.toml` with `[workspace] members`;
+  `[java]`, `[repositories]`, `[managed]` and the language tables are written
+  once there and inherited, a member's own key winning. A root without
+  `[project]` is a pure aggregator; a root with one is a member too.
+- **Module dependencies** by path (`core = { path = "../core" }`), in any
+  scope; a member's own dependencies join the graph as a jar's transitive ones
+  do, and a cycle is an error naming it.
+- **One lockfile** at the root, `version = 3`, mediation once over every
+  member's graph; a single-module project keeps its lockfile byte for byte.
+- **Building the graph** in dependency order, with compile avoidance and
+  `jrs test`'s selection carried across the module boundary, and phase lines
+  naming their member.
+- **Commands** act on every member at the root, and `-p <member>` or running
+  from inside a member narrows them to it and the members it depends on;
+  `jrs run` picks the only member with a main class; a fat jar carries its
+  sibling members' classes; a task can depend on another member's as
+  `"<member>:<task>"`.
+- **Tooling.** `jrs metadata` lists every member with its module dependencies,
+  and the IntelliJ plugin imports one module per member.
+- **Migration.** A Maven aggregator (with its parent's settings,
+  `<dependencyManagement>` and `<pluginManagement>`) and a Gradle build with
+  `include` (with its version catalog and `subprojects { }`) become a
+  workspace, with a report section per member; fixtures in
+  `tests/fixtures/migrate/maven-workspace` and `gradle-workspace`.
 
-- **A workspace manifest.** A root `jrs.toml` with a `[workspace]` table
-  listing its members by directory (`members = ["core", "api", "app"]`). Keys
-  every member shares — `project.java`, `[repositories]`, `[managed]`, the
-  language versions — are written once at the root and inherited, with a
-  member's own key winning, as Cargo's `workspace = true` does. A root
-  without `[project]` is a pure aggregator; a root with one is a member too.
-- **Module dependencies.** A member depends on a sibling by path
-  (`core = { path = "../core" }`), in any scope. The sibling's classes go on
-  the classpath where its jar would, and its own dependencies join the graph
-  as a jar's transitive ones do, so nearest-wins mediation runs once over the
-  whole workspace. Cycles between modules are an error naming the cycle.
-- **One lockfile.** `jrs.lock` lives at the root and pins one version of
-  every coordinate for every member, so two modules can never link against
-  different versions of the same library. Path dependencies are recorded
-  relative to the root, never absolutely, and a workspace lockfile is a new
-  `version`; a single-module project keeps its lockfile byte for byte.
-- **Building the graph.** Members build in dependency order, independent
-  ones in parallel on the `rayon` pool the downloads already use. Compile
-  avoidance carries across the module boundary: a downstream unit's
-  fingerprint holds `compile::api_digest` of its upstream's classes, so a
-  body change in `core` recompiles `core` alone, and `jrs test`'s selection
-  (`compile/impact.rs`) follows a change into the modules that reach it.
-  Phase lines name their module, in a fixed order whatever the parallelism,
-  so `--progress never` stays deterministic.
-- **Commands.** At the root every command acts on all members; `-p <module>`
-  (or running from inside a member's directory) narrows it to one and the
-  modules it depends on. `jrs run` needs a member with a main class, and
-  picks it when there is exactly one. `jrs package` writes one jar per member;
-  a fat jar of an application carries its sibling modules' classes, under the
-  same merge and relocation rules as any dependency. `[tasks]` and `[hooks]`
-  stay per member, with a task able to depend on another member's.
-- **Tooling.** `jrs metadata` lists every member with its module
-  dependencies, so the IntelliJ plugin (section 4) imports one IntelliJ module
-  per member. `jrs tree`, `jrs outdated` and `jrs add`/`remove` take `-p`;
-  `jrs add` at the root of a pure aggregator asks which member.
-- **Migration from Maven.** `jrs migrate` on an aggregator POM writes the
-  root manifest and one manifest per `<module>`, recursively. The parent's
-  `<properties>`, `<dependencyManagement>` and compiler settings become the
-  root's shared keys and `[managed]`; a `<dependency>` on a sibling's own
-  coordinates becomes a path dependency; `<pluginManagement>` feeds each
-  member's plugin translation as Maven's inheritance does. A parent that is
-  not also the aggregator, and modules reached only through a profile's
-  `<modules>`, each get a review line.
-- **Migration from Gradle.** `settings.gradle(.kts)`'s `include(...)` and
-  `rootProject.name` give the members, `project(":core")` dependencies become
-  path dependencies, and a version catalog at the root becomes shared
-  `[managed]` entries. `allprojects { }` and `subprojects { }` blocks, and
-  convention plugins in `buildSrc` or `build-logic`, are code: the parts that
-  are plain declarations (a Java toolchain, a repository, a common dependency)
-  are translated into the root's shared keys, and the rest is reported per
-  member, as an unknown plugin is today. `includeBuild` stays a composite
-  build (section 5).
-- **One report.** The migration report gains a section per member, and the
-  summary says how many members migrated cleanly. New fixtures in
-  `tests/fixtures/migrate/` — a Maven aggregator with a parent, a Gradle build
-  with `include`, a version catalog and a `subprojects { }` block — cover
-  each rule, and multi-module Spring Boot and Ktor projects join the section 1
-  corpus, so the end-to-end pass judges the result.
+What is left: building independent members in parallel, which the plan had
+and the first version leaves out to keep the phase lines in a fixed order
+without buffering a member's output (WORKSPACES.md §9); and multi-module
+Spring Boot and Ktor projects joining the section 1 corpus, so that the
+end-to-end pass judges the migration.
 
 What stays out: a member configuring another member, build logic at the root
 beyond shared keys, per-module lockfiles, and composite builds across

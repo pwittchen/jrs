@@ -229,6 +229,8 @@ fn edges(manifest: &Manifest, node: &TaskRef) -> Vec<Step> {
             .task(name)
             .map(|t| t.depends_on.iter().map(|d| (d.clone(), None)).collect())
             .unwrap_or_default(),
+        // Another member's task is checked with the workspace.
+        TaskRef::Member { .. } => Vec::new(),
         TaskRef::Builtin(b) => b
             .hooks()
             .iter()
@@ -356,7 +358,7 @@ pub fn reached_from(manifest: &Manifest, hook: Hook) -> Vec<&TaskDef> {
         .iter()
         .filter_map(|step| match step {
             TaskRef::Task(name) => manifest.task(name),
-            TaskRef::Builtin(_) => None,
+            TaskRef::Builtin(_) | TaskRef::Member { .. } => None,
         })
         .collect()
 }

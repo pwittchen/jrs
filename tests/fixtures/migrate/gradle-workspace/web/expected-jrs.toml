@@ -1,0 +1,10 @@
+[project]
+name = "web"
+version = "2.3.0"
+main-class = "com.example.shop.web.Main"
+
+[dependencies]
+core = { path = "../core" }
+
+[dev-dependencies]
+"org.junit.jupiter:junit-jupiter" = {}

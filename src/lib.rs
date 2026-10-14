@@ -38,6 +38,7 @@ pub mod test;
 pub mod test_report;
 pub mod toolchain;
 pub mod ui;
+pub mod workspace;
 
 pub mod json;
 pub mod model;

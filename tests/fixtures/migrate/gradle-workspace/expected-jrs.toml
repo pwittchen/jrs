@@ -1,0 +1,12 @@
+[workspace]
+members = ["core", "web"]
+
+[java]
+source = 21
+
+[managed]
+"com.google.guava:guava" = "33.4.0-jre"
+"org.junit.jupiter:junit-jupiter" = "5.11.4"
+
+[repositories]
+"maven" = "https://maven.example.com/releases"

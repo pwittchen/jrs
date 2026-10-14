@@ -54,6 +54,9 @@ use crate::test_report;
 use crate::timings::{self, Timings};
 use crate::toolchain::{self, Toolchain};
 use crate::ui::{self, CharsetChoice, Style, TreeNode, Ui, UiOptions, When};
+use crate::workspace::Workspace;
+
+mod members;
 
 #[derive(Debug, Parser)]
 #[command(
@@ -61,8 +64,9 @@ use crate::ui::{self, CharsetChoice, Style, TreeNode, Ui, UiOptions, When};
     version,
     about = "A Java build system, in Rust",
     long_about = "A Java build system, in Rust.\n\n\
-                  jrs builds, tests, runs and packages a single-module Java project \
-                  from one jrs.toml file, resolving dependencies from Maven Central.",
+                  jrs builds, tests, runs and packages a Java project from one \
+                  jrs.toml file, or a workspace of several modules from one per module, \
+                  resolving dependencies from Maven Central.",
     disable_help_subcommand = true
 )]
 pub struct Cli {
@@ -93,6 +97,11 @@ pub struct GlobalFlags {
     /// Run against a manifest outside the current directory.
     #[arg(long, global = true, value_name = "PATH")]
     pub manifest_path: Option<PathBuf>,
+
+    /// In a workspace, act on this member (and the members it depends on)
+    /// instead of every member; repeatable.
+    #[arg(short = 'p', long = "module", global = true, value_name = "NAME")]
+    pub modules: Vec<String>,
 
     /// Live animated output.
     #[arg(long, global = true, value_name = "WHEN", default_value = "auto")]
@@ -516,7 +525,7 @@ pub struct TestArgs {
     pub no_build_cache: bool,
 }
 
-#[derive(Debug, Default, Args)]
+#[derive(Debug, Default, Clone, Args)]
 #[allow(
     clippy::struct_excessive_bools,
     reason = "each is an independent command-line flag, as clap parses them"
@@ -709,6 +718,16 @@ fn dispatch(cli: &Cli, ui: &Ui) -> Result<i32> {
         Command::Completions { shell } => return completions_command(ui, shell),
         Command::Cache { action } => return cache_command(cli, ui, action),
         Command::SelfCmd { action } => return self_command(cli, ui, action),
+        _ => {}
+    }
+
+    // A workspace's root, or a member of one: every member's manifest, one
+    // lockfile, and the command run member by member (`specs/WORKSPACES.md`).
+    if let Some((workspace, location)) = Workspace::find(&manifest_path(cli)?)? {
+        return members::dispatch(cli, ui, workspace, location);
+    }
+
+    match &cli.command {
         Command::Add {
             coordinates,
             dev,
@@ -841,6 +860,24 @@ struct Session<'a> {
     /// The second wave of downloads, while it runs behind the main compile
     /// (SPEC §8.4).
     pending: RefCell<Option<Pending>>,
+    /// What a workspace member's session is given (`specs/WORKSPACES.md`):
+    /// its share of the workspace's graph, and the members it depends on.
+    member: Option<MemberContext>,
+    /// For the session over a workspace's aggregate manifest: the members'
+    /// directories, which make its `jrs.lock` a workspace's.
+    workspace_members: Vec<String>,
+}
+
+/// A workspace member's session's view of the rest of the workspace.
+struct MemberContext {
+    /// Its share of the workspace's graph, and the tools' graphs it uses,
+    /// in place of a resolution of its own.
+    preset: ResolvedWithTools,
+    /// The members it depends on, nearest first, with their classpaths.
+    upstream: Vec<crate::workspace::Upstream>,
+    /// The workspace's root: what the build cache keys paths against, so
+    /// that a member's key names its upstream members' classes relatively.
+    root: PathBuf,
 }
 
 /// The jars the main compile does not need, downloading on a thread of
@@ -873,11 +910,46 @@ impl<'a> Session<'a> {
         for warning in &manifest.warnings {
             ui.warn(warning);
         }
+        if let Some(module) = manifest.modules.first() {
+            return Err(JrsError::manifest(format!(
+                "{}: `{}` is a path dependency on another module, `{}`, which only a \
+                 workspace can build\n\nadd a jrs.toml above both with:\n\n    \
+                 [workspace]\n    members = [...]",
+                manifest.path.display(),
+                module.name,
+                module.path
+            )));
+        }
+        if let Some((task, reference)) = manifest.tasks.iter().find_map(|t| {
+            t.depends_on
+                .iter()
+                .find(|d| matches!(d, TaskRef::Member { .. }))
+                .map(|d| (t, d))
+        }) {
+            return Err(JrsError::manifest(format!(
+                "{}: `tasks.{}.depends-on` names `{reference}`, another member's task, and \
+                 the project is not in a workspace",
+                manifest.path.display(),
+                task.name
+            )));
+        }
+        if !cli.global.modules.is_empty() {
+            return Err(JrsError::usage(format!(
+                "-p names a workspace member, and {} is not in a workspace",
+                manifest.path.display()
+            )));
+        }
         let config = Config::load()?;
         for warning in &config.warnings {
             ui.warn(warning);
         }
-        Ok(Session {
+        Ok(Session::new(cli, ui, manifest, config))
+    }
+
+    /// A session over `manifest`, with `config` already loaded and its
+    /// warnings said.
+    fn new(cli: &Cli, ui: &'a Ui, manifest: Manifest, config: Config) -> Session<'a> {
+        Session {
             manifest,
             ui,
             jobs: effective_jobs(cli.global.jobs, config.jobs),
@@ -907,7 +979,9 @@ impl<'a> Session<'a> {
             },
             worker: None,
             pending: RefCell::new(None),
-        })
+            member: None,
+            workspace_members: Vec::new(),
+        }
     }
 
     /// Send every `javac` step of this build to `worker`.
@@ -918,6 +992,95 @@ impl<'a> Session<'a> {
 
     fn project(&self) -> Project<'_> {
         Project::new(&self.manifest)
+    }
+
+    /// The class directories of the workspace members this one depends on
+    /// whose classpath `include` takes, nearest first: they go where their
+    /// jars would, ahead of the jars (`specs/WORKSPACES.md` §4).
+    fn upstream_dirs(&self, include: impl Fn(Classpath) -> bool) -> Vec<PathBuf> {
+        self.member
+            .iter()
+            .flat_map(|m| &m.upstream)
+            .filter(|u| include(u.classpath))
+            .map(|u| u.classes_dir.clone())
+            .collect()
+    }
+
+    /// What the members whose classes `include` takes show a compiler:
+    /// their API digests, by name, for a unit's fingerprint, so that a body
+    /// change upstream leaves this member fresh (SPEC §7.2). `None` with no
+    /// such member.
+    fn upstream_api(&self, include: impl Fn(Classpath) -> bool) -> Result<Option<String>> {
+        let mut api = String::new();
+        for upstream in self
+            .member
+            .iter()
+            .flat_map(|m| &m.upstream)
+            .filter(|u| include(u.classpath))
+        {
+            let _ = writeln!(
+                api,
+                "{} {}",
+                upstream.name,
+                compile::api_digest(&upstream.classes_dir)?
+            );
+        }
+        Ok((!api.is_empty()).then_some(api))
+    }
+
+    /// A plain jar of each upstream member's classes that runs with this
+    /// one, for packaging: written fresh beside its classes (in its
+    /// `target/.jrs/module/`), named as its own jar is, so that a portable
+    /// `lib/` or a fat jar takes it as it takes any dependency's.
+    fn module_jars(&self) -> Result<Vec<PathBuf>> {
+        let mut jars = Vec::new();
+        for upstream in self
+            .member
+            .iter()
+            .flat_map(|m| &m.upstream)
+            .filter(|u| u.classpath.runs())
+        {
+            let file = upstream.jar_path.file_name().map_or_else(
+                || format!("{}-{}.jar", upstream.name, upstream.version),
+                |n| n.to_string_lossy().into_owned(),
+            );
+            let jar = upstream
+                .classes_dir
+                .parent()
+                .map_or_else(|| upstream.root.clone(), Path::to_path_buf)
+                .join(".jrs")
+                .join("module")
+                .join(file);
+            if let Some(dir) = jar.parent() {
+                std::fs::create_dir_all(dir).path(dir)?;
+            }
+            package::write_thin_jar(
+                &upstream.classes_dir,
+                &jar,
+                &JarManifest {
+                    main_class: None,
+                    class_path: Vec::new(),
+                    attributes: Vec::new(),
+                },
+            )?;
+            jars.push(jar);
+        }
+        Ok(jars)
+    }
+
+    /// A `Testing` line, which names the member in a workspace.
+    fn testing(&self, what: impl std::fmt::Display) {
+        self.ui.phase("Testing", self.named(what));
+    }
+
+    /// `what`, named after this member when it is one of a workspace's: a
+    /// phase line that does not say which module it is about otherwise.
+    fn named(&self, what: impl std::fmt::Display) -> String {
+        if self.member.is_some() {
+            format!("{}: {what}", self.manifest.name)
+        } else {
+            what.to_string()
+        }
     }
 
     fn elapsed(&self) -> String {
@@ -1060,6 +1223,7 @@ impl<'a> Session<'a> {
         let toolchain = self.toolchain()?;
 
         let mut classpath = vec![self.project().classes_dir()];
+        classpath.extend(self.upstream_dirs(Classpath::runs));
         classpath.extend(built.resolution.runtime_classpath());
         let mut agents = self.java_agents(
             "run",
@@ -1265,7 +1429,10 @@ impl<'a> Session<'a> {
         let built = self.build()?;
         let project = self.project();
         let output = project.jar_path();
-        let runtime = built.resolution.runtime_classpath();
+        // The members this one depends on go first, as jars of their own,
+        // under the rules any dependency's jar is packaged by.
+        let mut runtime = self.module_jars()?;
+        runtime.extend(built.resolution.runtime_classpath());
         // An image or a distribution needs a jar that runs anywhere: the fat
         // one when asked for, the portable layout otherwise.
         let portable = args.portable || ((images || args.dist) && !args.fat);
@@ -1559,6 +1726,7 @@ impl<'a> Session<'a> {
             let tool = native_image::find(&toolchain)?;
             let main_class = self.manifest.require_main_class("package --native-image")?;
             let mut classpath = vec![project.classes_dir()];
+            classpath.extend(self.upstream_dirs(Classpath::runs));
             classpath.extend(built.resolution.runtime_classpath());
             let image = NativeImage {
                 name: &self.manifest.name,
@@ -1651,6 +1819,7 @@ impl<'a> Session<'a> {
         // too unless a fat jar already holds their classes.
         let mut library_jars = obfuscate::jdk_library_jars(&toolchain);
         if !args.fat {
+            library_jars.extend(self.upstream_dirs(Classpath::runs));
             library_jars.extend(built.resolution.runtime_classpath());
         }
         let obfuscation = Obfuscation {
@@ -1760,19 +1929,17 @@ impl<'a> Session<'a> {
         let sources = project.sources(Unit::Test, &generated.sources)?;
         // A suite compiles against the default tests, which may be none.
         if sources.is_empty() && suite.is_none() {
-            self.ui.phase(
-                "Testing",
-                format!(
-                    "no tests found under {}",
-                    display_roots(&project.roots(Unit::Test))
-                ),
-            );
+            self.testing(format!(
+                "no tests found under {}",
+                display_roots(&project.roots(Unit::Test))
+            ));
             return Ok(None);
         }
 
         // Tests compile against the main classes plus the test classpath, and
         // Kotlin tests may use the main module's `internal` declarations.
         let mut classpath = vec![project.classes_dir()];
+        classpath.extend(self.upstream_dirs(|_| true));
         classpath.extend(built.resolution.classpath(Classpath::Test));
         if !sources.is_empty() {
             self.compile_tests(&project, &toolchain, &sources, &classpath)?;
@@ -1794,13 +1961,10 @@ impl<'a> Session<'a> {
                 let (sources, classpath) =
                     self.compile_suite(&project, &toolchain, suite, classpath)?;
                 if sources.is_empty() {
-                    self.ui.phase(
-                        "Testing",
-                        format!(
-                            "no tests found under {}",
-                            self.manifest.root.join(&suite.test_dir).display()
-                        ),
-                    );
+                    self.testing(format!(
+                        "no tests found under {}",
+                        self.manifest.root.join(&suite.test_dir).display()
+                    ));
                     return Ok(None);
                 }
                 (
@@ -1886,10 +2050,7 @@ impl<'a> Session<'a> {
             // own, so that another shard run here does not take it for its.
             classes = shard.select(&classes);
             if classes.is_empty() {
-                self.ui.phase(
-                    "Testing",
-                    format!("shard {shard} has no test classes to run"),
-                );
+                self.testing(format!("shard {shard} has no test classes to run"));
                 return Ok(None);
             }
             run.filter = Some(junit::fork_pattern(&classes, run.filter.as_deref()));
@@ -1925,8 +2086,7 @@ impl<'a> Session<'a> {
         if let Some(only) = &selected
             && only.is_empty()
         {
-            self.ui.phase(
-                "Testing",
+            self.testing(
                 "no test class reaches a change since the last run (`--all` runs them all)",
             );
             if let Some((_, snapshot)) = &impact {
@@ -2069,7 +2229,12 @@ impl<'a> Session<'a> {
         let checking = Instant::now();
         // Compile avoidance: the tests see the main classes' API, not their
         // bytes, so a changed method body leaves them fresh (SPEC §7.2).
-        unit.main_api = Some(compile::api_digest(&project.classes_dir())?);
+        let mut api = compile::api_digest(&project.classes_dir())?;
+        if let Some(upstream) = self.upstream_api(|_| true)? {
+            api.push('\n');
+            api.push_str(&upstream);
+        }
+        unit.main_api = Some(api);
         if self.cache_use == CacheUse::Verify {
             compile::forget(&unit);
         }
@@ -2077,15 +2242,15 @@ impl<'a> Session<'a> {
         if stale && compile::restore(&unit, self.ui)?.is_some() {
             self.ui.phase(
                 "Restored",
-                format!(
+                self.named(format!(
                     "{} (from the build cache)",
                     sources.describe("test sources")
-                ),
+                )),
             );
             self.timings.since("compile test (restored)", checking);
         } else if stale {
             let what = sources.describe("test sources");
-            self.ui.phase("Compiling", &what);
+            self.ui.phase("Compiling", self.named(&what));
             let scope = self.ui.spinner("Compiling", &what);
             let mut steps = Vec::new();
             let result = compile::compile_timed(toolchain, &unit, self.ui, &mut steps);
@@ -2128,9 +2293,10 @@ impl<'a> Session<'a> {
         let checking = Instant::now();
         // What the suite can see of the main and the default test classes.
         unit.main_api = Some(format!(
-            "{}\n{}",
+            "{}\n{}\n{}",
             compile::api_digest(&project.classes_dir())?,
-            compile::api_digest(&project.test_classes_dir())?
+            compile::api_digest(&project.test_classes_dir())?,
+            self.upstream_api(|_| true)?.unwrap_or_default()
         ));
         let stale = compile::is_stale(&unit)?;
         if stale && compile::restore(&unit, self.ui)?.is_some() {
@@ -2145,7 +2311,7 @@ impl<'a> Session<'a> {
                 .since(format!("compile {label} (restored)"), checking);
         } else if stale {
             let what = sources.describe(&format!("{} sources", suite.name));
-            self.ui.phase("Compiling", &what);
+            self.ui.phase("Compiling", self.named(&what));
             let scope = self.ui.spinner("Compiling", &what);
             let mut steps = Vec::new();
             let result = compile::compile_timed(toolchain, &unit, self.ui, &mut steps);
@@ -2236,13 +2402,10 @@ impl<'a> Session<'a> {
             }
         }
         build_cache::extract(&entries, reports)?;
-        self.ui.phase(
-            "Testing",
-            format!(
-                "{classes} test {}: passed in the cached run (`--all` runs them)",
-                if classes == 1 { "class" } else { "classes" }
-            ),
-        );
+        self.testing(format!(
+            "{classes} test {}: passed in the cached run (`--all` runs them)",
+            if classes == 1 { "class" } else { "classes" }
+        ));
         self.ui
             .verbose(format!("build cache: restored the test reports from {key}"));
         Ok(Some(outcome))
@@ -2524,10 +2687,10 @@ impl<'a> Session<'a> {
             ));
         }
         if let Some((failed, _)) = rerun {
-            self.ui.phase(
-                "Testing",
-                format!("{} that failed in the last run", counted(*failed, "test")),
-            );
+            self.testing(format!(
+                "{} that failed in the last run",
+                counted(*failed, "test")
+            ));
             return;
         }
         let what = match (reached, shard) {
@@ -2540,9 +2703,9 @@ impl<'a> Session<'a> {
             (None, None) => sources.describe("test sources"),
         };
         if forks > 1 {
-            self.ui.phase("Testing", format!("{what} in {forks} JVMs"));
+            self.testing(format!("{what} in {forks} JVMs"));
         } else {
-            self.ui.phase("Testing", what);
+            self.testing(what);
         }
     }
 
@@ -2591,10 +2754,7 @@ impl<'a> Session<'a> {
         };
         let failed = results.failed();
         if failed.is_empty() {
-            self.ui.phase(
-                "Testing",
-                "no failed tests to rerun: nothing failed in the last run",
-            );
+            self.testing("no failed tests to rerun: nothing failed in the last run");
             return Ok(None);
         }
         Ok(Some((failed.len(), test_report::select(failed))))
@@ -2793,7 +2953,8 @@ impl<'a> Session<'a> {
         }
 
         let javadoc = toolchain.tool("javadoc")?;
-        let mut classpath = resolution.classpath(Classpath::Compile);
+        let mut classpath = self.upstream_dirs(Classpath::compiles);
+        classpath.extend(resolution.classpath(Classpath::Compile));
         if let Some(language) = all.foreign() {
             self.ui.warn(format!(
                 "jrs has no documentation tool for {language}: its {} source files were left \
@@ -2903,7 +3064,11 @@ impl<'a> Session<'a> {
             sources,
             roots,
             classes_dir: project.classes_dir(),
-            classpath: resolution.classpath(Classpath::Compile),
+            classpath: self
+                .upstream_dirs(Classpath::compiles)
+                .into_iter()
+                .chain(resolution.classpath(Classpath::Compile))
+                .collect(),
             output_dir: project.target_dir().join("doc"),
             release: toolchain.release(self.manifest.java.source)?,
             encoding: self.manifest.java.encoding.clone(),
@@ -2994,6 +3159,13 @@ impl<'a> Session<'a> {
             entries.push(project.test_classes_dir());
         }
         entries.push(project.classes_dir());
+        entries.extend(self.upstream_dirs(if test {
+            |_| true
+        } else if runtime {
+            Classpath::runs
+        } else {
+            Classpath::compiles
+        }));
         entries.extend(if test {
             resolution.classpath(Classpath::Test)
         } else if runtime {
@@ -3519,6 +3691,7 @@ impl<'a> Session<'a> {
             toolchain: toolchain.as_ref(),
             resolution: resolution.as_ref(),
             cache: cache.as_ref(),
+            workspace: None,
         })?;
         // The model is real output, for `jrs metadata | jq`.
         self.ui.suspend();
@@ -3697,13 +3870,7 @@ impl<'a> Session<'a> {
             )));
         }
 
-        let unit = self.compile_unit(
-            "main",
-            &sources,
-            project.classes_dir(),
-            resolution.classpath(Classpath::Compile),
-            Vec::new(),
-        )?;
+        let unit = self.main_unit(&sources, &resolution)?;
 
         let checking = Instant::now();
         if self.cache_use == CacheUse::Verify {
@@ -3784,6 +3951,24 @@ impl<'a> Session<'a> {
             classes,
         };
         Ok(self.built.get_or_init(|| built).clone())
+    }
+
+    /// The main sources' unit: the classes of the members this one depends
+    /// on ahead of the jars, and their API in its fingerprint, so that a
+    /// body change upstream leaves this member fresh (compile avoidance
+    /// across members, `specs/WORKSPACES.md` §6.2).
+    fn main_unit(&self, sources: &Sources, resolution: &Resolution) -> Result<CompileUnit> {
+        let mut classpath = self.upstream_dirs(Classpath::compiles);
+        classpath.extend(resolution.classpath(Classpath::Compile));
+        let mut unit = self.compile_unit(
+            "main",
+            sources,
+            self.project().classes_dir(),
+            classpath,
+            Vec::new(),
+        )?;
+        unit.main_api = self.upstream_api(Classpath::compiles)?;
+        Ok(unit)
     }
 
     /// Mirror generated resource directories into `to`, each with its own
@@ -3971,7 +4156,9 @@ impl<'a> Session<'a> {
         Some(Arc::new(
             BuildCache::new(
                 cache.root().join("build"),
-                &self.manifest.root,
+                self.member
+                    .as_ref()
+                    .map_or(&self.manifest.root, |m| &m.root),
                 cache.root(),
                 &toolchain,
             )
@@ -4058,6 +4245,9 @@ impl<'a> Session<'a> {
     fn step(&self, step: &TaskRef, hook: Option<Hook>) -> Result<()> {
         match step {
             TaskRef::Builtin(builtin) => self.builtin(*builtin),
+            // Another member's task: the workspace ran it, in that member,
+            // before this member's command began (`specs/WORKSPACES.md` §6.3).
+            TaskRef::Member { .. } => Ok(()),
             TaskRef::Task(name) => {
                 if !self.ran.borrow_mut().insert(name.clone()) {
                     return Ok(());
@@ -4144,7 +4334,8 @@ impl<'a> Session<'a> {
         let cached = prepared.is_cached() && named.is_none_or(<[String]>::is_empty);
         let verifying = cached && self.cache_use == CacheUse::Verify;
         if !verifying && prepared.is_fresh() {
-            self.ui.phase("Fresh", format!("{} (task)", def.name));
+            self.ui
+                .phase("Fresh", self.named(format!("{} (task)", def.name)));
             self.timings
                 .since(task_timing_label(&def.name, hook, Some("fresh")), started);
             return Ok(exit::SUCCESS);
@@ -4159,7 +4350,7 @@ impl<'a> Session<'a> {
         {
             self.ui.phase(
                 "Restored",
-                format!("{} (task, from the build cache)", def.name),
+                self.named(format!("{} (task, from the build cache)", def.name)),
             );
             self.timings.since(
                 task_timing_label(&def.name, hook, Some("restored")),
@@ -4169,8 +4360,10 @@ impl<'a> Session<'a> {
         }
 
         match hook {
-            Some(hook) => self.ui.phase("Task", format!("{} ({hook})", def.name)),
-            None => self.ui.phase("Task", &def.name),
+            Some(hook) => self
+                .ui
+                .phase("Task", self.named(format!("{} ({hook})", def.name))),
+            None => self.ui.phase("Task", self.named(&def.name)),
         }
         self.ui.verbose(prepared.launch.describe());
         self.ui.verbose(format!("in {}", prepared.cwd.display()));
@@ -4351,14 +4544,26 @@ impl<'a> Session<'a> {
         let classes = absolute(project.classes_dir());
         let test_classes = absolute(project.test_classes_dir());
         let with = |dirs: Vec<PathBuf>, jars: Vec<PathBuf>| dirs.into_iter().chain(jars).collect();
+        let upstream = |include: fn(Classpath) -> bool| {
+            self.upstream_dirs(include)
+                .into_iter()
+                .map(absolute)
+                .collect::<Vec<_>>()
+        };
+        let dirs = |first: Vec<PathBuf>, include: fn(Classpath) -> bool| {
+            first.into_iter().chain(upstream(include)).collect()
+        };
         Ok(task::Classpaths {
             compile: with(
-                vec![classes.clone()],
+                dirs(vec![classes.clone()], Classpath::compiles),
                 resolution.classpath(Classpath::Compile),
             ),
-            runtime: with(vec![classes.clone()], resolution.runtime_classpath()),
+            runtime: with(
+                dirs(vec![classes.clone()], Classpath::runs),
+                resolution.runtime_classpath(),
+            ),
             test: with(
-                vec![test_classes, classes],
+                dirs(vec![test_classes, classes], |_| true),
                 resolution.classpath(Classpath::Test),
             ),
         })
@@ -4376,8 +4581,30 @@ impl<'a> Session<'a> {
     /// downloaded before this returns; the rest download on a thread behind
     /// it, and the graph it returns lacks them until
     /// [`resolved`](Self::resolved) joins that thread (SPEC §8.4).
+    #[allow(
+        clippy::too_many_lines,
+        reason = "a workspace member's preset, then the lockfile or a fresh resolution, then \
+                  the downloads, in the order they happen"
+    )]
     fn gather(&self, force_update: bool, pipelined: bool) -> Result<Resolution> {
         let manifest = &self.manifest;
+        // A member's graph is its share of the workspace's, resolved and
+        // downloaded once for every member (`specs/WORKSPACES.md` §5).
+        if let Some(member) = &self.member {
+            let (resolution, tools, task_tools, obfuscator, agents) = member.preset.clone();
+            let _ = self.tools.set(tools);
+            let _ = self.task_tools.set(task_tools);
+            let _ = self.obfuscator.set(obfuscator);
+            let _ = self.agents.set(agents);
+            let mut resolution = resolution;
+            resolution
+                .warnings
+                .extend(lang::resolution_warnings(manifest, &resolution));
+            for warning in &resolution.warnings {
+                self.ui.warn(warning);
+            }
+            return Ok(resolution);
+        }
         let declared = manifest.dependencies.len() + manifest.dev_dependencies.len();
         let tasks_with_tools: Vec<&TaskDef> = manifest
             .tasks
@@ -4667,6 +4894,9 @@ impl<'a> Session<'a> {
         for (name, graph) in self.agents.get().into_iter().flatten() {
             lock = lock.with_tool(name, graph);
         }
+        if !self.workspace_members.is_empty() {
+            lock = lock.with_members(&self.workspace_members);
+        }
         lock.write(lock_path)?;
         self.ui.verbose(format!("wrote {}", lock_path.display()));
         Ok(())
@@ -4877,7 +5107,13 @@ impl<'a> Session<'a> {
     /// The project's graph, each language's compiler as a graph apart from
     /// it, and each task's own dependencies as a graph apart from both.
     fn resolve_with_tools(&self, fetcher: &Fetcher) -> Result<ResolvedWithTools> {
-        let resolution = resolve::resolve(&self.manifest, fetcher, self.jobs)?;
+        // A workspace's aggregate walks every member's paths in full: one
+        // member's exclusion must not take a jar off another's classpath.
+        let resolution = if self.workspace_members.is_empty() {
+            resolve::resolve(&self.manifest, fetcher, self.jobs)?
+        } else {
+            resolve::resolve_workspace(&self.manifest, fetcher, self.jobs)?
+        };
         let mut tools = Vec::new();
         for config in &self.manifest.languages {
             let roots = crate::compile::lang::compiler_roots(config);
@@ -5006,6 +5242,20 @@ impl<'a> Session<'a> {
         );
         if limit == Some(0) {
             return root;
+        }
+        // A workspace member it depends on comes first: built here, so with
+        // nothing below it but what its own dependencies put in the graph.
+        for upstream in self.member.iter().flat_map(|m| &m.upstream) {
+            if upstream.direct {
+                let scope = match upstream.classpath {
+                    Classpath::Compile => String::new(),
+                    other => format!(", {}", other.as_str()),
+                };
+                root.children.push(TreeNode::styled(
+                    format!("{} v{} (module{scope})", upstream.name, upstream.version),
+                    Style::None,
+                ));
+            }
         }
         let mut seen = Vec::new();
         let implied = self.manifest.implied_dependencies();
@@ -5426,8 +5676,19 @@ fn add_command(
     dev: bool,
     only: (bool, bool),
 ) -> Result<i32> {
+    add_to(cli, ui, &Session::open(cli, ui)?, coordinates, dev, only)
+}
+
+/// `jrs add` into the manifest `session` is over.
+fn add_to(
+    cli: &Cli,
+    ui: &Ui,
+    session: &Session,
+    coordinates: &[String],
+    dev: bool,
+    only: (bool, bool),
+) -> Result<i32> {
     let (compile_only, runtime_only) = only;
-    let session = Session::open(cli, ui)?;
     let section = if dev {
         "dev-dependencies"
     } else {
@@ -5516,7 +5777,11 @@ fn add_command(
 }
 
 fn remove_command(cli: &Cli, ui: &Ui, keys: &[String], dev: bool) -> Result<i32> {
-    let session = Session::open(cli, ui)?;
+    remove_from(cli, ui, &Session::open(cli, ui)?, keys, dev)
+}
+
+/// `jrs remove` from the manifest `session` is over.
+fn remove_from(cli: &Cli, ui: &Ui, session: &Session, keys: &[String], dev: bool) -> Result<i32> {
     let sections: &[&str] = if dev {
         &["dev-dependencies"]
     } else {
@@ -5574,18 +5839,37 @@ fn edit_manifest(
     let path = &current.path;
     let original = std::fs::read_to_string(path).path(path)?;
     let edited = change(&original)?;
-    Manifest::parse(&edited, path, &current.root).map_err(|e| {
-        JrsError::manifest(format!(
-            "the edit would leave {} unreadable, so it was not written:\n\n{e}",
-            path.display()
-        ))
-    })?;
+    // A workspace member's manifest reads only with what it inherits from
+    // the root: it is checked by loading the workspace once it is written,
+    // and put back if that fails.
+    let in_workspace = Workspace::find(&manifest_path(cli)?)?.is_some();
+    if !in_workspace {
+        Manifest::parse(&edited, path, &current.root).map_err(|e| {
+            JrsError::manifest(format!(
+                "the edit would leave {} unreadable, so it was not written:\n\n{e}",
+                path.display()
+            ))
+        })?;
+    }
     std::fs::write(path, &edited).path(path)?;
 
-    let resolved = Session::open(cli, ui).and_then(|s| {
-        let resolution = s.dependencies(false)?;
-        Ok((s.manifest.lock_path(), resolution.packages.len()))
-    });
+    let resolved = if in_workspace {
+        Workspace::find(&manifest_path(cli)?).and_then(|found| {
+            let (workspace, _) = found.ok_or_else(|| {
+                JrsError::manifest(format!("{} left the workspace", path.display()))
+            })?;
+            let (aggregate, _) = workspace.aggregate()?;
+            let mut session = Session::new(cli, ui, aggregate, Config::load()?);
+            session.workspace_members = workspace.member_dirs();
+            let resolution = session.dependencies(false)?;
+            Ok((session.manifest.lock_path(), resolution.packages.len()))
+        })
+    } else {
+        Session::open(cli, ui).and_then(|s| {
+            let resolution = s.dependencies(false)?;
+            Ok((s.manifest.lock_path(), resolution.packages.len()))
+        })
+    };
     match resolved {
         Ok((lock, packages)) => {
             ui.phase(
@@ -6204,6 +6488,9 @@ fn migrate_command(
 
     let root = path.map_or_else(|| PathBuf::from("."), Path::to_path_buf);
     let source = from.map(migrate::Source::parse).transpose()?;
+    if let Some(workspace) = migrate::plan_workspace(&root, source)? {
+        return migrate_workspace(ui, &workspace, &root, dry_run, force);
+    }
     let migration = migrate::plan(&root, source)?;
 
     ui.phase(
@@ -6241,6 +6528,68 @@ fn migrate_command(
     ui.println_out("");
     ui.println_out("Next: `jrs build`, then `jrs tree` to compare the resolved graph");
     ui.println_out("against `mvn dependency:tree` / `gradle dependencies`.");
+    Ok(exit::SUCCESS)
+}
+
+/// `jrs migrate` of a multi-module build: the root's report, then a section
+/// per member, then every file (`specs/WORKSPACES.md` §8.3).
+fn migrate_workspace(
+    ui: &Ui,
+    workspace: &migrate::workspace::WorkspaceMigration,
+    root: &Path,
+    dry_run: bool,
+    force: bool,
+) -> Result<i32> {
+    ui.phase(
+        "Migrating",
+        format!(
+            "{} ({}, a workspace of {})",
+            workspace.source_file.display(),
+            workspace.source.as_str(),
+            counted(workspace.members.len(), "member")
+        ),
+    );
+    ui.suspend();
+    if let Some(preamble) = &workspace.report.preamble {
+        ui.println_out(preamble);
+        ui.println_out("");
+    }
+    ui.println_out("== workspace ==");
+    ui.println_out("");
+    print_block(ui, "Migrated", &workspace.report.migrated);
+    print_block(ui, "Needs review", &workspace.report.needs_review);
+    print_block(ui, "Not migrated", &workspace.report.not_migrated);
+    for (dir, member) in &workspace.members {
+        ui.println_out(format!("== {} ({dir}) ==", member.manifest.name));
+        ui.println_out("");
+        print_block(ui, "Migrated", &member.report.migrated);
+        print_block(ui, "Needs review", &member.report.needs_review);
+        print_block(ui, "Not migrated", &member.report.not_migrated);
+    }
+    ui.println_out(format!(
+        "{} of {} members migrated without anything to review",
+        workspace.clean(),
+        workspace.members.len()
+    ));
+    ui.println_out("");
+
+    if dry_run {
+        for (file, text) in workspace.files() {
+            ui.println_out(format!("--- {file} (dry run; nothing was written) ---"));
+            for line in text.lines() {
+                ui.println_out(line);
+            }
+        }
+        return Ok(exit::SUCCESS);
+    }
+    for written in migrate::workspace::write(workspace, root, force)? {
+        ui.phase("Created", written.display());
+    }
+    ui.println_out("");
+    ui.println_out("Next: `jrs build` at the root builds every member; `jrs tree` shows each");
+    ui.println_out(
+        "member's graph to compare against `mvn dependency:tree` / `gradle dependencies`.",
+    );
     Ok(exit::SUCCESS)
 }
 

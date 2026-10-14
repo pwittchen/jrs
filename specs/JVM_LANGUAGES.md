@@ -1,7 +1,7 @@
 # jrs — Kotlin, Scala and Groovy
 
 Design proposal for compiling Kotlin, Scala and Groovy sources alongside Java,
-in the same single-module project and from the same `jrs.toml`.
+in the same module and from the same `jrs.toml`.
 
 Status: **implemented**, as milestone M8 of [SPEC §12](../SPEC.md#12-roadmap);
 [SPEC §7.7](../SPEC.md#77-other-jvm-languages) is the condensed contract.

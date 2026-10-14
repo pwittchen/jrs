@@ -19,6 +19,7 @@ published at [getjrs.dev/docs](https://getjrs.dev/docs/).
 - [Tests](#tests)
 - [Kotlin, Scala and Groovy](#kotlin-scala-and-groovy)
 - [Tasks and hooks](#tasks-and-hooks)
+- [Workspaces](#workspaces)
 - [Annotation processors](#annotation-processors)
 - [Shell completions](#shell-completions)
 - [Editors and IntelliJ IDEA](#editors-and-intellij-idea)
@@ -515,6 +516,9 @@ fails the build until `jrs update` pins it again. A missing jar is an error
 that names its path. `jrs tree` shows it as `ojdbc = libs/ojdbc11.jar`,
 `jrs remove ojdbc` removes it, and `jrs outdated` skips it.
 
+A `path` that names a directory rather than a `.jar` is another module of the
+same [workspace](#workspaces): `core = { path = "../core" }`.
+
 ### `[managed]`
 
 Versions kept in one place, which is what Maven's `<dependencyManagement>` and
@@ -627,8 +631,10 @@ fails, is waited out until the next change. The program keeps the terminal
 while it runs, so its input still reaches it.
 
 Global flags: `-v/--verbose`, `-q/--quiet`, `--offline`, `-j/--jobs <n>`,
-`--manifest-path <p>`, `--progress <auto|always|never>`,
-`--color <auto|always|never>`, `--charset <auto|unicode|ascii>`.
+`--manifest-path <p>`, `-p/--module <name>` (in a [workspace](#workspaces),
+act on that member and the members it depends on; repeatable),
+`--progress <auto|always|never>`, `--color <auto|always|never>`,
+`--charset <auto|unicode|ascii>`.
 
 Exit codes: `0` success, `1` build or test failure, `2` usage or manifest error,
 `101` internal error.
@@ -737,7 +743,9 @@ building, the tools of its tasks included, which warms a CI cache for
 `--offline` runs. `jrs fetch --sources`
 also downloads each dependency's `-sources.jar`, and `jrs metadata` then lists
 it next to the jar, so an editor can go to a library's definitions. A library
-that publishes no sources jar is only a warning.
+that publishes no sources jar is only a warning. At a
+[workspace](#workspaces)'s root, `jrs metadata` prints every member's model
+under `members`, each with the members it depends on under `modules`.
 
 ## Dependency cache
 
@@ -1324,6 +1332,101 @@ returns the program's.
 `migrate`, `completions`, `self` and `clean` never run a task, so inspecting a project with them
 is always safe.
 
+## Workspaces
+
+A project of several modules — a `core` library, an `api`, an application on
+top — is a workspace: one `jrs.toml` per module, and a root `jrs.toml` that
+lists them. `examples/ledger` is one.
+
+```toml
+# jrs.toml at the root
+[workspace]
+members = ["core", "api", "app"]
+
+[java]
+source = 21
+
+[managed]
+"org.junit:junit-bom" = { version = "5.14.3", bom = true }
+```
+
+```toml
+# app/jrs.toml
+[project]
+name = "app"
+version = "1.0.0"
+main-class = "com.example.app.Main"
+
+[dependencies]
+api = { path = "../api" }
+
+[dev-dependencies]
+"org.junit.jupiter:junit-jupiter" = {}
+```
+
+- **Members** are directories under the root, each with its own `jrs.toml`,
+  sources and `target/`. The order of `members` does not matter: a member is
+  built after the members it depends on. A root without `[project]` builds
+  nothing itself; a root with one is a member too.
+- **Shared keys.** `[java]`, `[repositories]` and `[managed]` in the root are
+  every member's, a member's own key winning. `[kotlin]`, `[scala]` and
+  `[groovy]` are inherited by a member that has the table, so `[kotlin]` with
+  nothing under it takes the root's version.
+- **Depending on a member** is a `path` to its directory, keyed by its
+  `project.name`, in `[dependencies]` (with `compile-only` or `runtime-only` if
+  needed) or `[dev-dependencies]`. Its classes go where its jar would, and its
+  own dependencies come with it, as a jar's transitive ones do. Members that
+  depend on each other in a cycle are an error that names the cycle.
+- **One lockfile.** `jrs.lock` lives at the root and pins one version of every
+  library for every member: the workspace is resolved once. Two members that
+  declare one library at two versions get the first one's, with a warning.
+  Members have no lockfile of their own.
+
+At the root, a command acts on every member. `-p <member>` (repeatable), or
+running from inside a member's directory, narrows it to that member and the
+members it depends on, which are always built first:
+
+```
+jrs build                     # every member, in dependency order
+jrs test                      # every member's tests; the command fails at the end if any did
+jrs -p api test               # api's tests, after building core
+cd app && jrs run             # app, after building api and core
+jrs run                       # the only member with a main class; with several, -p says which
+jrs package --fat             # a jar per member; app's carries api's and core's classes
+jrs -p app classpath          # app's classes, then api's and core's, then the jars
+jrs -p core add com.google.guava:guava
+```
+
+`jrs classpath`, `jrs add` and `jrs remove` act on one member; at a root
+without `[project]` they ask for `-p`. `jrs update`, `jrs verify`,
+`jrs fetch`, `jrs outdated`, `jrs licenses` and `jrs audit` act on the
+workspace's one graph. `jrs tree` prints each member's graph, its member
+dependencies first, marked `(module)`.
+
+A change to a member recompiles the members that depend on it only when it
+changes what they can see — a method's body leaves them fresh — and
+`jrs test` runs the tests a change reaches, across members. Phase lines name
+the member: `Compiling core v1.0.0`, `Compiling app: 4 test sources`.
+
+In a fat jar, a member's sibling members' classes are packaged under the same
+rules as a dependency's; in the portable layout they are jars in `lib/`. At the
+root, `--fat`, `--dist`, `--jlink`, `--jpackage` and `--native-image` apply to
+the members with a main class, and a library gets its plain jar (the portable
+layout where the applications get a fat jar).
+
+`[tasks]` and `[hooks]` stay per member, and a task can depend on another
+member's task as `"<member>:<task>"`:
+
+```toml
+[tasks.check]
+script = "Check.java"
+depends-on = ["core:generate"]
+```
+
+The other task runs in its own member, once per command, before this member's
+command reaches it.
+[specs/WORKSPACES.md](specs/WORKSPACES.md) has the design.
+
 ## Annotation processors
 
 jrs has no separate processor path. Configuring processors is a
@@ -1376,8 +1479,9 @@ To install it, download `jrs-intellij.zip` from the
 pick the zip and restart the IDE. Then open the directory that holds `jrs.toml`
 and click **Load jrs project** in the notification. The plugin:
 
-- **imports the project** as one module: the source and resource roots of
-  every language, task-generated sources, `target/classes` as the output, the
+- **imports the project** as one module — or a [workspace](#workspaces) as one
+  module per member, each depending on the members it depends on: the source
+  and resource roots of every language, task-generated sources, `target/classes` as the output, the
   JDK and language level, and one library per jar with the right scope, its
   sources attached when they are in the cache. **Tools | jrs | Download
   Sources** runs `jrs fetch --sources`;
@@ -1420,6 +1524,21 @@ Migration is a one-shot, best-effort translation. It prints a report in three
 blocks — what was migrated, what needs review, and what was skipped, each with a
 reason. Gradle migration in particular reads the declarative subset of a build
 script by pattern rather than by running Gradle, and says so.
+
+A multi-module build becomes a [workspace](#workspaces): a Maven aggregator's
+`<modules>` (walked recursively) or the projects a Gradle build's
+`settings.gradle` includes each get a `jrs.toml` of their own, and the root one
+lists them. A dependency on a sibling module — Maven's own `groupId:artifactId`,
+Gradle's `project(":core")` — becomes a path dependency. What every member
+shares moves into the root: the parent POM's compiler settings and
+`<dependencyManagement>`, or a Gradle version catalog, become the root's
+`[java]` and `[managed]`, and the members' declarations take their versions
+from it. Each member is read as Maven would build it, with its parent's
+plugins and `<pluginManagement>`; a Gradle root's `subprojects { }` and
+`allprojects { }` are read into every member. The report has a section per
+member, and ends by saying how many migrated with nothing to review. A module
+reached only through a profile, a `pom` module that is no aggregator (a BOM),
+and a sibling's test jar are reported.
 
 A version kept in a Gradle variable is written into each declaration that
 uses it. That covers `ext`, `def`, the Kotlin DSL's `val` and `extra`, and

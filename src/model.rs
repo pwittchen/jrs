@@ -21,6 +21,7 @@ use crate::resolve::cache::Cache;
 use crate::resolve::{self, Classpath, Resolution};
 use crate::task;
 use crate::toolchain::Toolchain;
+use crate::workspace::{Upstream, Workspace};
 
 /// The format version, the document's first key. It goes up only when a key
 /// changes meaning or goes away; new keys may appear within a version.
@@ -35,6 +36,15 @@ pub struct Inputs<'a> {
     pub resolution: Option<&'a Resolution>,
     /// Where to look for each package's `-sources.jar`.
     pub cache: Option<&'a Cache>,
+    /// The workspace the project is a member of, if it is one.
+    pub workspace: Option<WorkspaceInputs<'a>>,
+}
+
+/// What a workspace member's model adds: where the workspace is, and the
+/// members it depends on (`specs/WORKSPACES.md` §7).
+pub struct WorkspaceInputs<'a> {
+    pub root: &'a Path,
+    pub upstream: &'a [Upstream],
 }
 
 /// The whole document.
@@ -49,10 +59,13 @@ pub fn metadata(inputs: &Inputs<'_>) -> Result<Json> {
     let main_generated = task::generated(m, Hook::PreCompile)?;
     let test_generated = task::generated(m, Hook::PreTest)?;
 
-    Ok(Json::object([
+    let mut document = Json::object([
         ("version", Json::Int(FORMAT_VERSION)),
         ("jrs", Json::string(env!("CARGO_PKG_VERSION"))),
-        ("project", project_json(m)),
+        (
+            "project",
+            project_json(m, inputs.workspace.as_ref().map(|w| w.root)),
+        ),
         ("jdk", Json::or_null(inputs.toolchain, jdk_json)),
         ("java", java_json(m, inputs.toolchain)),
         ("languages", languages_json(m)),
@@ -83,10 +96,69 @@ pub fn metadata(inputs: &Inputs<'_>) -> Result<Json> {
             Json::or_null(inputs.resolution, |r| classpaths_json(r, inputs.cache)),
         ),
         ("tasks", tasks_json(m)),
-    ]))
+    ]);
+    // Only a member has these, so a single project's model stays as it was.
+    if let (Some(workspace), Json::Object(pairs)) = (&inputs.workspace, &mut document) {
+        pairs.push((
+            "workspace".to_string(),
+            Json::path(&absolute(workspace.root)),
+        ));
+        pairs.push(("modules".to_string(), modules_json(workspace.upstream)));
+    }
+    Ok(document)
 }
 
-fn project_json(m: &Manifest) -> Json {
+/// The members a member depends on, nearest first: each one's name, root,
+/// class directory and the classpath it is on, and whether the member names
+/// it itself. An editor makes each a module dependency.
+fn modules_json(upstream: &[Upstream]) -> Json {
+    Json::Array(
+        upstream
+            .iter()
+            .map(|u| {
+                Json::object([
+                    ("name", Json::string(&u.name)),
+                    ("version", Json::string(&u.version)),
+                    ("root", Json::path(&absolute(&u.root))),
+                    ("output", Json::path(&absolute(&u.classes_dir))),
+                    ("classpath", Json::string(u.classpath.as_str())),
+                    ("direct", Json::Bool(u.direct)),
+                ])
+            })
+            .collect(),
+    )
+}
+
+/// A workspace's model: where it is, and each member's model, in
+/// declaration order.
+#[must_use]
+pub fn workspace(workspace: &Workspace, members: Vec<Json>) -> Json {
+    Json::object([
+        ("version", Json::Int(FORMAT_VERSION)),
+        ("jrs", Json::string(env!("CARGO_PKG_VERSION"))),
+        (
+            "workspace",
+            Json::object([
+                ("name", Json::string(&workspace.name)),
+                ("root", Json::path(&absolute(&workspace.root))),
+                ("manifest", Json::path(&absolute(&workspace.path))),
+                (
+                    "lockfile",
+                    Json::path(&absolute(&workspace.root.join(crate::manifest::LOCK_FILE))),
+                ),
+            ]),
+        ),
+        ("members", Json::Array(members)),
+    ])
+}
+
+/// `lockfile` is the workspace's when `workspace` is its root: a member has
+/// none of its own.
+fn project_json(m: &Manifest, workspace: Option<&Path>) -> Json {
+    let lockfile = workspace.map_or_else(
+        || m.lock_path(),
+        |root| root.join(crate::manifest::LOCK_FILE),
+    );
     Json::object([
         ("name", Json::string(&m.name)),
         ("version", Json::string(&m.version)),
@@ -100,7 +172,7 @@ fn project_json(m: &Manifest) -> Json {
         ),
         ("root", Json::path(&absolute(&m.root))),
         ("manifest", Json::path(&absolute(&m.path))),
-        ("lockfile", Json::path(&absolute(&m.lock_path()))),
+        ("lockfile", Json::path(&absolute(&lockfile))),
     ])
 }
 
@@ -321,6 +393,7 @@ mod tests {
             toolchain: None,
             resolution: None,
             cache: None,
+            workspace: None,
         });
         let keys: Vec<&str> = text
             .lines()
@@ -379,6 +452,7 @@ mod tests {
             toolchain: None,
             resolution: None,
             cache: None,
+            workspace: None,
         });
         assert!(text.contains("\"main-class\": \"com.example.MainKt\""));
         assert!(text.contains("\"name\": \"kotlin\",\n      \"version\": \"2.4.20\",\n      \"compiler\": \"org.jetbrains.kotlin:kotlin-compiler-embeddable:2.4.20\""), "{text}");
@@ -443,6 +517,7 @@ mod tests {
             toolchain: None,
             resolution: Some(&resolution),
             cache: Some(&cache),
+            workspace: None,
         });
         let _ = std::fs::remove_dir_all(&cache_dir);
 

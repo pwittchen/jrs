@@ -19,7 +19,7 @@ use crate::error::{IoResultExt, Result};
 use crate::manifest::{self, Dependency, Exclusion, Manifest, Placeholder};
 use crate::resolve::coord::{Ga, OS_CLASSIFIER};
 
-const PREAMBLE: &str = "Gradle migration is approximate. jrs reads the declarative \
+pub(super) const PREAMBLE: &str = "Gradle migration is approximate. jrs reads the declarative \
                         parts of a build script by pattern, not by running Gradle, \
                         so review the manifest below before relying on it.";
 
@@ -64,16 +64,52 @@ const REPORTED_CONFIGS: &[&str] = &[
 /// [`JrsError::Io`](crate::error::JrsError::Io) if `build_file` cannot be read.
 /// Everything jrs cannot read in it goes into the report, not an error.
 pub fn migrate(build_file: &Path, root: &Path) -> Result<Migration> {
+    migrate_with(build_file, root, None)
+}
+
+/// What a subproject's translation takes from the build it is part of
+/// (`specs/WORKSPACES.md` §8.2).
+pub(super) struct Subproject<'a> {
+    /// The directory `settings.gradle`, the version catalog and
+    /// `gradle.properties` are in.
+    pub settings_root: &'a Path,
+    /// The project's name: its directory's, as Gradle names it.
+    pub name: String,
+    /// The bodies of the root script's `subprojects { }` and
+    /// `allprojects { }` blocks, read after the project's own script, so
+    /// that its own settings come first.
+    pub shared: String,
+}
+
+/// [`migrate`], for the root project (`None`) or one of a multi-project
+/// build's subprojects, whose `project(":x")` dependencies become module
+/// dependencies with the Gradle path as their `path`.
+pub(super) fn migrate_with(
+    build_file: &Path,
+    root: &Path,
+    subproject: Option<&Subproject>,
+) -> Result<Migration> {
     let mut report = Report {
         preamble: Some(PREAMBLE.to_string()),
         ..Report::default()
     };
 
-    let script = strip_comments(&std::fs::read_to_string(build_file).path(build_file)?);
-    let settings = read_settings(root, &mut report);
-    let catalog = read_catalog(root, &mut report);
+    let own = strip_comments(&std::fs::read_to_string(build_file).path(build_file)?);
+    let script = match subproject {
+        Some(sub) if !sub.shared.is_empty() => format!("{own}\n{}", sub.shared),
+        _ => own,
+    };
+    let settings_root = subproject.map_or(root, |s| s.settings_root);
+    let settings = match subproject {
+        Some(sub) => Settings {
+            root_project_name: Some(sub.name.clone()),
+            includes: Vec::new(),
+        },
+        None => read_settings(root, &mut report),
+    };
+    let catalog = read_catalog(settings_root, &mut report);
     let kotlin_dsl = build_file.extension().is_some_and(|e| e == "kts");
-    let mut vars = Variables::read(&script, root, kotlin_dsl);
+    let mut vars = Variables::read(&script, settings_root, kotlin_dsl);
 
     let name = settings
         .root_project_name
@@ -106,7 +142,14 @@ pub fn migrate(build_file: &Path, root: &Path) -> Result<Migration> {
         &mut out,
         &mut report,
     );
-    read_dependencies(&script, &catalog, &mut vars, &mut out, &mut report);
+    read_dependencies(
+        &script,
+        &catalog,
+        &mut vars,
+        &mut out,
+        &mut report,
+        subproject.is_some(),
+    );
     // After them: `groovy` and `scala` take their library's version.
     read_library_languages(&plugins, &mut out, &mut report);
     read_jvm_args(&script, &mut out, &mut report);
@@ -149,6 +192,7 @@ pub fn migrate(build_file: &Path, root: &Path) -> Result<Migration> {
         source_file: build_file.to_path_buf(),
         manifest: out,
         report,
+        group: None,
     })
 }
 
@@ -493,6 +537,7 @@ fn read_dependencies(
     vars: &mut Variables,
     out: &mut Manifest,
     report: &mut Report,
+    projects: bool,
 ) {
     // The declaration whose `{ exclude ... }` closure is still open, and how
     // deep inside it the scan is.
@@ -547,6 +592,10 @@ fn read_dependencies(
         if platform_argument(declaration).is_some() {
             continue;
         }
+        // `project(":core")` in a multi-project build: another member.
+        if projects && push_project(out, target, declaration) {
+            continue;
+        }
         // `files(...)` and `fileTree(...)`: jars in the project, not coordinates.
         if let Some(jars) = super::gradle_files::read(trimmed, &out.root, report) {
             for dep in jars {
@@ -599,6 +648,76 @@ fn read_dependencies(
             }
         ));
     }
+}
+
+/// A `project(":core")` declaration as a module dependency, which the
+/// workspace's translation points at the member's directory. Whether it
+/// was one.
+fn push_project(out: &mut Manifest, target: Target, declaration: &str) -> bool {
+    let Some(path) = project_reference(declaration) else {
+        return false;
+    };
+    out.modules.push(manifest::ModuleDependency {
+        name: String::new(),
+        path,
+        dev: target == Target::Test,
+        compile_only: matches!(target, Target::CompileOnly | Target::Processor),
+        runtime_only: target == Target::RuntimeOnly,
+    });
+    true
+}
+
+/// The project a `project(":core")` (or `projects.core`) declaration names:
+/// its Gradle path, or the type-safe accessor as written after `projects.`.
+fn project_reference(declaration: &str) -> Option<String> {
+    if let Some(at) = declaration.find("project(") {
+        let path = quoted(&declaration[at..]).into_iter().next()?;
+        return path.starts_with(':').then_some(path);
+    }
+    let at = declaration.find("projects.")?;
+    let accessor: String = declaration[at + "projects.".len()..]
+        .chars()
+        .take_while(|c| c.is_alphanumeric() || *c == '.' || *c == '_')
+        .collect();
+    (!accessor.is_empty()).then(|| format!("projects.{accessor}"))
+}
+
+/// The bodies of a root script's `subprojects { }` and `allprojects { }`
+/// blocks: what Gradle configures every subproject with.
+pub(super) fn shared_configuration(script: &str) -> String {
+    let script = strip_comments(script);
+    let mut lines = block_lines(&script, "allprojects");
+    lines.extend(block_lines(&script, "subprojects"));
+    lines.join("\n")
+}
+
+/// The projects `settings.gradle(.kts)` in `root` includes, by Gradle path
+/// (`:core`, `:libs:util`), and `rootProject.name` when it has one.
+pub(super) fn settings_projects(root: &Path) -> (Vec<String>, Option<String>) {
+    let settings = read_settings(root, &mut Report::default());
+    let mut paths = Vec::new();
+    for include in settings.includes {
+        let path = if include.starts_with(':') {
+            include
+        } else {
+            format!(":{include}")
+        };
+        if !paths.contains(&path) {
+            paths.push(path);
+        }
+    }
+    (paths, settings.root_project_name)
+}
+
+/// The version catalog's libraries with a version, as
+/// (group, artifact, version), for a workspace's root `[managed]`.
+pub(super) fn catalog_versions(root: &Path) -> Vec<(String, String, String)> {
+    read_catalog(root, &mut Report::default())
+        .entries
+        .values()
+        .filter(|d| !d.is_managed() && d.classifier.is_none())
+        .map(|d| (d.group.clone(), d.artifact.clone(), d.version.clone()))
+        .collect()
 }
 
 /// Where a dependency declared in Gradle's `config` goes in `jrs.toml`.

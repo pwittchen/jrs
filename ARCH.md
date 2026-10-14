@@ -4,8 +4,9 @@ This document describes how jrs is put together: the modules, the way a command
 flows through them, and the invariants the code is organised around. It is a map
 of the code as it is. The design the code follows is
 [SPEC.md](SPEC.md), with
-[specs/JVM_LANGUAGES.md](specs/JVM_LANGUAGES.md) for Kotlin, Scala and Groovy and
-[specs/TASKS.md](specs/TASKS.md) for tasks and hooks. Module doc comments cite
+[specs/JVM_LANGUAGES.md](specs/JVM_LANGUAGES.md) for Kotlin, Scala and Groovy,
+[specs/TASKS.md](specs/TASKS.md) for tasks and hooks and
+[specs/WORKSPACES.md](specs/WORKSPACES.md) for multi-module workspaces. Module doc comments cite
 those by section (`SPEC §8.2`), and SPEC §12.1 lists the four places where the
 code deliberately diverges from SPEC.
 
@@ -21,15 +22,17 @@ code deliberately diverges from SPEC.
 8. [Tests](#8-tests)
 9. [Packaging](#9-packaging)
 10. [Tasks and hooks](#10-tasks-and-hooks)
-11. [The output layer](#11-the-output-layer)
-12. [Errors and exit codes](#12-errors-and-exit-codes)
-13. [Files on disk](#13-files-on-disk)
-14. [How jrs itself is tested](#14-how-jrs-itself-is-tested)
-15. [Invariants](#15-invariants)
+11. [Workspaces](#11-workspaces)
+12. [The output layer](#12-the-output-layer)
+13. [Errors and exit codes](#13-errors-and-exit-codes)
+14. [Files on disk](#14-files-on-disk)
+15. [How jrs itself is tested](#15-how-jrs-itself-is-tested)
+16. [Invariants](#16-invariants)
 
 ## 1. The shape of it
 
-jrs is a **driver**, not a reimplementation of the JDK. It reads one manifest,
+jrs is a **driver**, not a reimplementation of the JDK. It reads one manifest
+(or, in a workspace, one per member under a root that lists them),
 resolves a dependency graph from Maven repositories, and then shells out to the
 JDK's own tools. Kotlin, Scala and Groovy compilers are Java programs, so they
 are resolved like dependencies and run on the project's JDK too.
@@ -74,8 +77,13 @@ src/
 ├── main.rs            the five-line entry point
 ├── lib.rs             module list; re-exports JrsError and Result
 ├── cli.rs             clap definitions, dispatch, Session (the build spine)
+├── cli/
+│   └── members.rs     a workspace's commands: the aggregate session, one Session
+│                      per member, build order, -p
 ├── error.rs           JrsError, exit codes
 ├── manifest.rs        jrs.toml: hand-parsed, ordered, per-key diagnostics
+├── workspace.rs       [workspace]: members, inheritance, module edges, build order,
+│                      the aggregate manifest and each member's share of its graph
 ├── config.rs          the per-user config.toml: credentials, mirrors, proxy, jdks
 ├── edit.rs            format-preserving line editor for `jrs add` / `jrs remove`
 ├── checkers.rs        PMD, Checkstyle, SpotBugs, google-java-format, ktfmt as tasks
@@ -123,6 +131,8 @@ src/
 │   ├── mod.rs         detection, report, manifest emission
 │   ├── maven.rs       pom.xml → Manifest (reuses resolve::pom); exec-maven-plugin → [tasks]
 │   ├── maven_profiles.rs  the <profiles> a plain `mvn` build activates, merged in
+│   ├── workspace.rs   <modules> / settings.gradle include → a root and a manifest
+│   │                  per member; siblings as paths; shared keys hoisted
 │   ├── checks.rs      formatter and checker plugins → crate::checkers tasks
 │   ├── gradle.rs      build.gradle[.kts] → Manifest (pattern extraction)
 │   ├── gradle_files.rs  files() / fileTree() → local jars, literal ones only
@@ -189,6 +199,10 @@ What the layering buys:
   The `Fetcher` reports transfers through a `TransferReporter` trait. The CLI
   plugs in `resolve::UiReporter`, an adapter that only mutates the UI's shared
   live state, and tests plug in a `SilentReporter`.
+- **`workspace` sits beside `manifest`.** It reads tables and manifests and
+  turns a resolved graph into each member's share of it; it knows nothing of
+  sessions, terminals or processes. `cli/members.rs` is the part of `cli`
+  that drives one.
 - **`manifest` borrows data, not behaviour, from above it:** the `Language`
   enum from `compile::lang`, coordinate parsing from `resolve::coord`, and
   `task::check` for the whole-manifest task validation.
@@ -220,8 +234,14 @@ What the layering buys:
    ▼                         cursor guard (ui/render.rs: panic hook + signals)
  dispatch(cli, ui)
    │
-   ├── needs no manifest, or manages its own sessions:
-   │     init · migrate · completions · cache · add · remove
+   ├── needs no manifest:
+   │     init · migrate · completions · cache · self
+   │
+   ├── Workspace::find(manifest path) ─► a workspace's root, or a member of one:
+   │     cli/members.rs runs the command over its members (§11)
+   │
+   ├── manages its own sessions:
+   │     add · remove
    │     build --watch · test --watch · task --watch   (a fresh Session per change)
    │     run --watch    (a Session per change; the program stopped and restarted)
    │
@@ -265,7 +285,11 @@ it, it runs **at most once per invocation**.
  ├── build_cache: OnceCell<Option<Arc<BuildCache>>>
  │                                          the build cache, once every jar is in
  ├── cache_use  : CacheUse                  On, Off (--no-build-cache), Verify
- └── worker     : Option<Arc<Worker>>       the --watch session's warm javac
+ ├── worker     : Option<Arc<Worker>>       the --watch session's warm javac
+ ├── member     : Option<MemberContext>     a workspace member's preset graph and
+ │                                          upstream members (§11)
+ └── workspace_members : Vec<String>        the aggregate session's: makes its
+                                            jrs.lock a workspace's
 ```
 
 `watch()` creates the `Worker` once and hands it to each `Session` it opens,
@@ -338,7 +362,7 @@ Every phase line (`Resolving`, `Downloading`, `Compiling`, `Fresh`, `Testing`,
 `Packaging`, `Running`, `Task`, `Finished`, …) is printed by these methods,
 unconditionally.
 The spinner or download bars around a phase are a separate `LiveScope` that
-only adds motion. See [§11](#11-the-output-layer).
+only adds motion. See [§12](#12-the-output-layer).
 
 The same methods time their phases. As each leaf phase ends — resolution,
 downloads, each compile step (`compile::compile_timed` hands them back),
@@ -991,7 +1015,65 @@ hands `task::prepare` their classpath, which it writes to
 `target/.jrs/tasks/<name>.tool.args` and passes as `java @<argfile> <class>`;
 a `script` with dependencies gets the same argfile ahead of its file.
 
-## 11. The output layer
+## 11. Workspaces
+
+A workspace ([specs/WORKSPACES.md](specs/WORKSPACES.md)) is a root `jrs.toml`
+with `[workspace] members`, and a manifest per member. `dispatch` asks
+`Workspace::find` before it opens a `Session`: a manifest with `[workspace]` is
+a root, and a manifest under a root that lists its directory is a member of
+it, which narrows the command to that member.
+
+```
+ Workspace::find ─► Workspace::load
+   │  each member's table ◄─ the root's [java] [repositories] [managed]
+   │                         (and language tables it has), its own keys winning
+   │  Manifest::from_table      one Manifest per member, as a single project's
+   │  module edges              path dependencies ─► members; names checked
+   │  build_order               depth-first for a named cycle, then Kahn,
+   │                            ties in declaration order
+   │  check_member_tasks        "<member>:<task>" references, cross-member cycles
+   ▼
+ cli/members.rs  Driver
+   │  aggregate() ─► Workspace::aggregate: every member's dependencies,
+   │                 [managed], repositories, compilers, task graphs (as
+   │                 <member>/<task>), pinned agents ─► one Manifest at the root
+   │                 a Session over it, workspace_members set
+   │  graph()      ─► that session's dependencies(): jrs.lock (version 3) or
+   │                 a fresh resolution, downloaded once
+   │  session(i)   ─► Session::new(member's manifest) with MemberContext:
+   │                   preset   = Workspace::project(i, graph), and the tools
+   │                              its languages, tasks and agents use
+   │                   upstream = Workspace::upstream_of(i): class dirs, nearest
+   │                              first, each with the classpath it goes on
+   │                   root     = the build cache's {root}
+   │  prepared(i)  ─► the other members' tasks i's hooks reach, run in theirs
+   ▼
+ for each member, in build order:  build / test / package / … as for one project
+```
+
+A member's `Session` never resolves: `gather()` hands back the preset graph.
+Everything else is the single-project spine, with the upstream members' class
+directories where their jars would be — `upstream_dirs(compiles)` on the main
+unit's classpath, all of them on the test classpath, `upstream_dirs(runs)` for
+`jrs run`, the tasks' `{classpath}`s, `--native-image` — and their
+`api_digest`s in the units' fingerprints (`upstream_api`), so compile avoidance
+and test selection carry across members. Packaging writes each upstream member
+that runs with this one as a plain jar into its own `target/.jrs/module/`
+(`module_jars`) and treats it as a dependency's jar: on a thin jar's
+`Class-Path`, in a portable `lib/`, unpacked into a fat jar. Phase lines that
+do not already name the project are prefixed with the member's name
+(`Session::named`).
+
+The aggregate resolves through `resolve::resolve_workspace`: when a path
+reaches an already-walked package excluding less than the path that walked it,
+its children are walked again with the smaller set, so the graph holds what
+any member's paths keep. `Workspace::project` walks the resolved graph's edges from the member's own
+roots (depth 1) and its upstream members' (depth 2, by `workspace::carried`),
+joining each package's classpath as resolution does and applying the member's
+own exclusions, so the share is what resolving the member alone against the
+workspace's versions would give.
+
+## 12. The output layer
 
 Only `ui/` touches the terminal. Build code never prints: it either calls a
 `Ui` method that writes a **permanent** line, or mutates the **live** state that
@@ -1057,7 +1139,7 @@ columns depend on the labels alone. The lines go to stderr in every mode
 except quiet, so `tests/output.rs` snapshots the table with fixed durations,
 the same way it snapshots the summary.
 
-## 12. Errors and exit codes
+## 13. Errors and exit codes
 
 Errors are values. Every fallible function returns `jrs::Result<T>`, and there
 is one error enum:
@@ -1078,10 +1160,10 @@ the live region down. `jrs run` and `jrs task <name>` return the program's own
 exit code. There is no `unwrap()` outside `#[cfg(test)]`, except on lock
 poisoning, which is documented under each function's `# Panics`.
 
-## 13. Files on disk
+## 14. Files on disk
 
 ```
- my-project/
+ my-project/                      (a workspace member: the same, without jrs.lock)
  ├── jrs.toml                     the manifest (committed)
  ├── jrs.lock                     the resolved graph + compiler / obfuscator graphs (committed)
  ├── src/main/{java,kotlin,scala,groovy,resources}
@@ -1120,7 +1202,15 @@ poisoning, which is documented under each function's `# Panics`.
          ├── junit-palette.properties  jpackage-input/
          │   native-image.args
          ├── obfuscate.pro  obfuscate.args  obfuscated.jar   --obfuscate
+         ├── module/<name>-<version>.jar   a workspace member's classes as a jar,
+         │                          for a dependent member's packaging
          └── timings.txt            --timings: phase<TAB>ms, the last run's
+
+ my-workspace/
+ ├── jrs.toml                     [workspace] members, the shared tables (committed)
+ ├── jrs.lock                     every member's graph, version = 3 (committed)
+ ├── core/  api/  app/            members, laid out as above
+ └── target/.jrs/timings.txt      --timings over every member
 
  shared cache  (JRS_CACHE_DIR, or ~/Library/Caches/jrs, $XDG_CACHE_HOME/jrs,
                 ~/.cache/jrs, %LOCALAPPDATA%\jrs\cache)
@@ -1149,7 +1239,7 @@ Nothing is written into `target/` that cannot be regenerated, so `jrs clean`
 can never lose user data, and task-generated sources must live under
 `target-dir` for the same reason.
 
-## 14. How jrs itself is tested
+## 15. How jrs itself is tested
 
 ```
  cargo test   (hermetic: no network)
@@ -1161,7 +1251,8 @@ can never lose user data, and task-generated sources must live under
  │                         ASCII fallback, narrow-terminal truncation
  │
  ├── tests/resolution.rs ┐
- ├── tests/build.rs      ├─ tests/common/mod.rs: a self-cleaning Scratch dir
+ ├── tests/build.rs      │
+ ├── tests/workspace.rs  ├─ tests/common/mod.rs: a self-cleaning Scratch dir
  ├── tests/migration.rs  ┘  and a file:// FixtureRepo
  │                           ├── tests/fixtures/repo/…/*.pom   checked in
  │                           ├── jars                           synthesised at test time
@@ -1189,6 +1280,7 @@ can never lose user data, and task-generated sources must live under
  CI: the reproducible job (.github/workflows/rust.yml)
  └── every examples/ project packaged from two checkouts at different paths,
      without the build cache, and everything written compared byte for byte
+     (a workspace's members' target directories each)
 
  JRS_BENCH_PROJECT=<path> cargo bench --bench test_jvm
  └── benches/test_jvm.rs   SPEC §10.2: `jrs test` on a real project with
@@ -1196,7 +1288,7 @@ can never lose user data, and task-generated sources must live under
                            the outcome changed (specs/TEST_JVM_BENCHMARK.md)
 ```
 
-## 15. Invariants
+## 16. Invariants
 
 These are the rules the architecture above exists to keep. Breaking one is a
 design regression, not a style nit.
@@ -1225,6 +1317,8 @@ design regression, not a style nit.
 | Obfuscation runs after packaging, over the assembled jar, keeping the entry point and `ServiceLoader` names; it changes names, not behaviour or timing | `obfuscate.rs`, `cli.rs` |
 | A group a repository's `groups` claim is looked up nowhere else | `resolve::repo::repositories_for` |
 | Tasks are subprocesses at fixed points; built-in phases cannot be reordered | `task.rs`, `cli.rs` |
+| A workspace resolves once; a member's graph is its share of that, never a resolution of its own | `workspace.rs`, `cli/members.rs`, `Session::gather` |
+| A single project's lockfile and model are byte for byte what they were; a workspace's lockfile is `version = 3` | `lockfile.rs`, `model.rs` |
 
 The dependency list is kept deliberately short (SPEC §13): `clap`,
 `toml`+`serde`, `ureq`, `quick-xml`, `zip`, `rayon`, `thiserror`,

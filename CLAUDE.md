@@ -5,8 +5,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## What this is
 
 `jrs` is a Java build system written in Rust: it builds, tests, runs and packages a
-single-module Java project from one `jrs.toml` manifest, resolving dependencies from
-Maven Central. It shells out to `javac`, `java` and the other JDK tools — it is a
+Java project from one `jrs.toml` manifest — or a workspace of several, one per module
+under a root `jrs.toml` that lists them (`specs/WORKSPACES.md`) — resolving
+dependencies from Maven Central. It shells out to `javac`, `java` and the other JDK tools — it is a
 driver, not a reimplementation of the JDK. Kotlin, Scala and Groovy compile alongside
 Java (`specs/JVM_LANGUAGES.md`, SPEC §7.7): their compilers are resolved from Maven
 Central as isolated tool graphs, pinned in `jrs.lock`'s `[[tool]]` blocks, and
@@ -135,6 +136,13 @@ language's compiler coordinate, runtime library and flags are plain data on
 `enum Language` in `compile/lang.rs`. A compiler runs as `java @argfile`, with
 its whole invocation — classpath, main class, flags, sources — in the file.
 
+A workspace (`workspace.rs`, SPEC §1.2, `specs/WORKSPACES.md`) is loaded before
+any `Session`: members inherit the root's shared tables, module dependencies are
+edges between members, and the whole workspace resolves once as an aggregate
+manifest whose session owns the root `jrs.lock`. `cli/members.rs` then gives each
+member a `Session` of its own, preset with its share of that graph and its upstream
+members' class directories, and runs the command member by member in build order.
+
 User-defined tasks (`[tasks]`, `[hooks]`, SPEC §7.6) are planned in `task.rs`:
 ordering, cycle checks, placeholder expansion, the environment and fingerprints.
 `Session` in `cli.rs` fires the hooks at their fixed points and emits the
@@ -232,6 +240,14 @@ regression, not a style nit.
   `[tasks.<name>.dependencies]` (a `[[tool]]` block named `tasks.<name>`), so
   the Kotlin compiler's own coroutines cannot mediate against the project's.
   `[managed]` does not reach them either.
+- **A workspace resolves once.** A member never resolves on its own: its graph is
+  its share of the aggregate's (`Workspace::project`), so two members cannot link
+  against two versions of one library. The aggregate resolves with
+  `resolve::resolve_workspace`, which re-walks a package reached by a path that
+  excludes less, so one member's exclusion never drops a jar another needs. A member's main unit fingerprints its
+  upstream members' `api_digest`, as the test unit does the main classes'. A
+  single-module project, its lockfile and its `jrs metadata` stay byte for byte
+  what they were; a workspace's lockfile is `version = 3`.
 - **A managed version is settled before mediation.** `[managed]` (SPEC §8.9),
   its own entries first and then each BOM's, replaces the version any POM asks
   for, in `resolve::admissible`; a version declared in `[dependencies]` still
@@ -257,6 +273,11 @@ regression, not a style nit.
   real compilers' main classes, compiled and published into the fixture repo
   at test time. Those tests drive the jrs binary with their own
   `JRS_CACHE_DIR`, so fake artifacts never reach the user's cache.
+- **`tests/workspace.rs`** drives the jrs binary over workspaces — build order,
+  compile avoidance across members, `-p`, one lockfile, fat jars carrying
+  siblings, cross-member tasks — each test with its own `JRS_CACHE_DIR`.
+  Workspace migration has its fixtures in `tests/fixtures/migrate/*-workspace`,
+  an `expected-jrs.toml` beside each build file.
 - **`tests/network.rs`** is the only suite allowed to hit Maven Central, behind the
   `network-tests` feature. It also builds one project per language with the
   real compilers, which is the only check of their determinism.

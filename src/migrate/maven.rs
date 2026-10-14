@@ -48,7 +48,8 @@ pub fn migrate(pom_path: &Path, root: &Path) -> Result<Migration> {
     let mut report = Report::default();
     // Reported last, after what the profiles merged in has been read.
     let mut profiles = Report::default();
-    let (chain, boot_parent) = read_chain(pom_path, &mut report, &mut profiles)?;
+    let (mut chain, boot_parent) = read_chain(pom_path, &mut report, &mut profiles)?;
+    inherit_plugins(&mut chain);
     let effective = pom::effective(&chain)?;
     let pom = &chain[0];
 
@@ -85,6 +86,7 @@ pub fn migrate(pom_path: &Path, root: &Path) -> Result<Migration> {
         source_file: pom_path.to_path_buf(),
         manifest: out,
         report,
+        group: Some(effective.coord.group.clone()),
     })
 }
 
@@ -153,6 +155,69 @@ fn read_chain(
         }
     }
     Ok((chain, None))
+}
+
+/// Maven's plugin inheritance, for the readers that look at the project's
+/// own `<build><plugins>`: a plugin an ancestor declares is the project's
+/// too, and a plugin the project declares takes the configuration and
+/// executions the nearest `<pluginManagement>` gives it for what it does
+/// not set itself (`specs/WORKSPACES.md` §8.1).
+fn inherit_plugins(chain: &mut [Pom]) {
+    let Some((own, ancestors)) = chain.split_first_mut() else {
+        return;
+    };
+    for ancestor in ancestors.iter() {
+        for plugin in &ancestor.build.plugins {
+            let inherited = ancestor
+                .root
+                .path(&["build", "plugins"])
+                .into_iter()
+                .flat_map(|p| p.children_named("plugin"))
+                .find(|p| p.text_of("artifactId") == Some(plugin.artifact.as_str()))
+                .and_then(|p| p.text_of("inherited"))
+                != Some("false");
+            if inherited
+                && !own
+                    .build
+                    .plugins
+                    .iter()
+                    .any(|p| p.artifact == plugin.artifact)
+            {
+                own.build.plugins.push(plugin.clone());
+            }
+        }
+    }
+    for plugin in &mut own.build.plugins {
+        let managed = ancestors.iter().find_map(|ancestor| {
+            ancestor
+                .root
+                .path(&["build", "pluginManagement", "plugins"])?
+                .children_named("plugin")
+                .find(|p| p.text_of("artifactId") == Some(plugin.artifact.as_str()))
+        });
+        let Some(managed) = managed else {
+            continue;
+        };
+        if let Some(config) = managed.child("configuration") {
+            match &mut plugin.configuration {
+                None => plugin.configuration = Some(config.clone()),
+                Some(own_config) => {
+                    for child in &config.children {
+                        if own_config.child(&child.name).is_none() {
+                            own_config.children.push(child.clone());
+                        }
+                    }
+                }
+            }
+        }
+        if plugin.executions.is_empty() {
+            plugin.executions = managed
+                .list("executions", "execution")
+                .into_iter()
+                .cloned()
+                .collect();
+        }
+    }
 }
 
 /// spring-boot-starter-parent compiles for `${java.version}`.

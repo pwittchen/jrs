@@ -1,0 +1,10 @@
+[workspace]
+members = ["core", "libs/util", "web"]
+
+[java]
+source = 21
+javac-args = ["-parameters"]
+
+[managed]
+"com.google.guava:guava" = "33.4.0-jre"
+"org.junit.jupiter:junit-jupiter" = "5.11.4"

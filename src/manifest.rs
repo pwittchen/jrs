@@ -56,6 +56,23 @@ impl std::fmt::Display for Exclusion {
     }
 }
 
+/// A dependency on another member of the workspace, by path
+/// (`core = { path = "../core" }`): its classes go where its jar would, and
+/// its own dependencies join the graph as a jar's transitive ones do
+/// (`specs/WORKSPACES.md` §4).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModuleDependency {
+    /// The manifest key: the member's `project.name`.
+    pub name: String,
+    /// The member's directory, relative to this manifest's and
+    /// `/`-separated, as written.
+    pub path: String,
+    /// Declared in `[dev-dependencies]`: on the test classpath only.
+    pub dev: bool,
+    pub compile_only: bool,
+    pub runtime_only: bool,
+}
+
 impl Dependency {
     pub fn new(
         group: impl Into<String>,
@@ -897,6 +914,12 @@ impl Builtin {
 pub enum TaskRef {
     Task(String),
     Builtin(Builtin),
+    /// `"<member>:<task>"`: another workspace member's task, which runs in
+    /// that member before this one's command (`specs/WORKSPACES.md` §6.3).
+    Member {
+        member: String,
+        task: String,
+    },
 }
 
 impl std::fmt::Display for TaskRef {
@@ -904,6 +927,7 @@ impl std::fmt::Display for TaskRef {
         match self {
             TaskRef::Task(name) => f.write_str(name),
             TaskRef::Builtin(b) => f.write_str(b.name()),
+            TaskRef::Member { member, task } => write!(f, "{member}:{task}"),
         }
     }
 }
@@ -1096,6 +1120,10 @@ pub struct Manifest {
     pub languages: Vec<LanguageConfig>,
     pub dependencies: Vec<Dependency>,
     pub dev_dependencies: Vec<Dependency>,
+    /// Path dependencies on other workspace members, `[dependencies]` first
+    /// and then `[dev-dependencies]`, each in declaration order. Never part
+    /// of `dependencies`: a module has no coordinate to resolve.
+    pub modules: Vec<ModuleDependency>,
     /// `[managed]`, in declaration order: pinned versions and BOMs.
     pub managed: Vec<Managed>,
     /// User repositories in declaration order, with Central appended last.
@@ -1199,6 +1227,7 @@ const TOP_KEYS: &[&str] = &[
     "repositories",
     "tasks",
     "hooks",
+    "workspace",
 ];
 
 /// Every `jrs` subcommand. A task may not take one of these names, so that
@@ -1315,28 +1344,28 @@ impl Manifest {
     /// its required keys is missing, or any value has the wrong type or an
     /// invalid form (a name, class name, path, release, dependency or
     /// repository).
+    pub fn parse(text: &str, path: &Path, root: &Path) -> Result<Manifest> {
+        Manifest::from_table(&parse_toml(text, path)?, path, root)
+    }
+
+    /// [`Manifest::parse`] for a table already read: a workspace member's,
+    /// once the keys it inherits from the root are merged in
+    /// (`specs/WORKSPACES.md` §3).
+    ///
+    /// # Errors
+    ///
+    /// As for [`Manifest::parse`].
     #[allow(
         clippy::similar_names,
-        reason = "`test` is the `[test]` table, named like `run` and `package` beside it; \
-                  `text` is the manifest source"
+        reason = "`test` is the `[test]` table, named like `run` and `package` beside it"
     )]
     #[allow(
         clippy::too_many_lines,
         reason = "one short step per top-level table, in the order a reader of jrs.toml \
                   meets them; each table's own parsing is already a helper"
     )]
-    pub fn parse(text: &str, path: &Path, root: &Path) -> Result<Manifest> {
-        let table: toml::Table = toml::from_str(text).map_err(|e| {
-            let where_ = e.span().map_or_else(
-                || format!("{}: ", path.display()),
-                |s| {
-                    let (line, col) = locate(text, s.start);
-                    format!("{}:{line}:{col}: ", path.display())
-                },
-            );
-            JrsError::manifest(format!("{where_}{}", e.message()))
-        })?;
-
+    pub fn from_table(table: &toml::Table, path: &Path, root: &Path) -> Result<Manifest> {
+        let table = table.clone();
         let mut warnings = Vec::new();
         warn_unknown(&table, TOP_KEYS, "", &mut warnings);
 
@@ -1431,8 +1460,37 @@ impl Manifest {
         };
 
         let languages = parse_languages(&table, &mut warnings)?;
-        let dependencies = parse_dependencies(&table, "dependencies")?;
-        let dev_dependencies = parse_dependencies(&table, "dev-dependencies")?;
+        let (dependencies, mut modules) = parse_dependencies(&table, "dependencies")?;
+        let (dev_dependencies, dev_modules) = parse_dependencies(&table, "dev-dependencies")?;
+        if let Some(m) = dev_modules
+            .iter()
+            .find(|m| m.compile_only || m.runtime_only)
+        {
+            return Err(JrsError::manifest(format!(
+                "`dev-dependencies.\"{}\"`: `compile-only` and `runtime-only` only mean \
+                 something in [dependencies]",
+                m.name
+            )));
+        }
+        for dev in &dev_modules {
+            if modules.iter().any(|m| m.name == dev.name) {
+                warnings.push(format!(
+                    "`{}` is declared in both [dependencies] and [dev-dependencies]; \
+                     the main declaration wins",
+                    dev.name
+                ));
+            }
+        }
+        modules.extend(
+            dev_modules
+                .into_iter()
+                .filter(|dev| !modules.iter().any(|m| m.name == dev.name))
+                .map(|mut m| {
+                    m.dev = true;
+                    m
+                })
+                .collect::<Vec<_>>(),
+        );
         if let Some(d) = dev_dependencies.iter().find(|d| d.compile_only) {
             return Err(JrsError::manifest(format!(
                 "`dev-dependencies.\"{}\"`: `compile-only` only means something in \
@@ -1483,6 +1541,7 @@ impl Manifest {
             languages,
             dependencies,
             dev_dependencies,
+            modules,
             managed,
             repositories,
             tasks,
@@ -1908,14 +1967,21 @@ impl Manifest {
                 let _ = writeln!(s, "{} = {value}", quote(&m.key()));
             }
         }
-        if !self.dependencies.is_empty() {
+        let modules = |dev: bool| self.modules.iter().filter(move |m| m.dev == dev);
+        if !self.dependencies.is_empty() || modules(false).next().is_some() {
             let _ = writeln!(s, "\n[dependencies]");
+            for m in modules(false) {
+                let _ = writeln!(s, "{}", render_module(m));
+            }
             for d in &self.dependencies {
                 let _ = writeln!(s, "{}", render_dependency(d));
             }
         }
-        if !self.dev_dependencies.is_empty() {
+        if !self.dev_dependencies.is_empty() || modules(true).next().is_some() {
             let _ = writeln!(s, "\n[dev-dependencies]");
+            for m in modules(true) {
+                let _ = writeln!(s, "{}", render_module(m));
+            }
             for d in &self.dev_dependencies {
                 let _ = writeln!(s, "{}", render_dependency(d));
             }
@@ -2057,6 +2123,7 @@ pub fn blank(name: &str, version: &str, root: &Path) -> Manifest {
         languages: Vec::new(),
         dependencies: Vec::new(),
         dev_dependencies: Vec::new(),
+        modules: Vec::new(),
         managed: Vec::new(),
         repositories: vec![Repository::new(CENTRAL_NAME, CENTRAL_URL)],
         tasks: Vec::new(),
@@ -2370,6 +2437,19 @@ fn parse_depends_on(t: &toml::Table, section: &str) -> Result<Vec<TaskRef>> {
     for entry in string_array(t, "depends-on", section)? {
         let reference = match Builtin::parse(&entry) {
             Some(b) => TaskRef::Builtin(b),
+            None if entry.contains(':') => {
+                let (member, task) = entry.split_once(':').unwrap_or_default();
+                if validate_name(member).is_err() || validate_task_name(task).is_err() {
+                    return Err(JrsError::manifest(format!(
+                        "`{section}.depends-on`: `{entry}` is not `<member>:<task>`, another \
+                         workspace member's task"
+                    )));
+                }
+                TaskRef::Member {
+                    member: member.to_string(),
+                    task: task.to_string(),
+                }
+            }
             None if RESERVED_TASK_NAMES.contains(&entry.as_str()) => {
                 return Err(JrsError::manifest(format!(
                     "`{section}.depends-on`: `{entry}` is a command a task cannot depend on; \
@@ -2577,21 +2657,61 @@ fn default_test_resource_dir(test_dir: &Path) -> PathBuf {
     }
 }
 
-fn parse_dependencies(table: &toml::Table, section: &str) -> Result<Vec<Dependency>> {
-    parse_dependency_table(table.get(section), section)
+fn parse_dependencies(
+    table: &toml::Table,
+    section: &str,
+) -> Result<(Vec<Dependency>, Vec<ModuleDependency>)> {
+    parse_dependency_table_with_modules(table.get(section), section)
 }
 
-/// A table of dependencies; `section` is how messages name it.
+/// A table of dependencies that may not name a workspace member: a task's
+/// own. `section` is how messages name it.
 fn parse_dependency_table(value: Option<&toml::Value>, section: &str) -> Result<Vec<Dependency>> {
+    let (dependencies, modules) = parse_dependency_table_with_modules(value, section)?;
+    if let Some(m) = modules.first() {
+        return Err(JrsError::manifest(format!(
+            "`{section}.\"{}\"` names a directory, `{}`: only [dependencies] and \
+             [dev-dependencies] may depend on another workspace member",
+            m.name, m.path
+        )));
+    }
+    Ok(dependencies)
+}
+
+/// Whether a `path` names a workspace member rather than a local jar: a
+/// local jar's ends in `.jar`.
+#[must_use]
+pub fn is_module_path(path: &str) -> bool {
+    !path
+        .rsplit('/')
+        .next()
+        .is_some_and(|file| file.to_ascii_lowercase().ends_with(".jar"))
+}
+
+/// A table of dependencies, with the workspace members it names apart;
+/// `section` is how messages name it.
+fn parse_dependency_table_with_modules(
+    value: Option<&toml::Value>,
+    section: &str,
+) -> Result<(Vec<Dependency>, Vec<ModuleDependency>)> {
     let Some(value) = value else {
-        return Ok(Vec::new());
+        return Ok((Vec::new(), Vec::new()));
     };
     let deps = value
         .as_table()
         .ok_or_else(|| JrsError::manifest(format!("`{section}` must be a table")))?;
 
     let mut out: Vec<Dependency> = Vec::with_capacity(deps.len());
+    let mut modules: Vec<ModuleDependency> = Vec::new();
     for (key, value) in deps {
+        if let toml::Value::Table(t) = value
+            && let Some(toml::Value::String(path)) = t.get("path")
+            && !path.trim().is_empty()
+            && is_module_path(&path.replace('\\', "/"))
+        {
+            modules.push(parse_module(key, t, section)?);
+            continue;
+        }
         if let toml::Value::Table(t) = value
             && t.contains_key("path")
         {
@@ -2633,7 +2753,53 @@ fn parse_dependency_table(value: Option<&toml::Value>, section: &str) -> Result<
         }
         out.push(dep);
     }
-    Ok(out)
+    Ok((out, modules))
+}
+
+/// `core = { path = "../core" }`: a dependency on the workspace member in
+/// that directory, whose `project.name` the key is.
+fn parse_module(key: &str, t: &toml::Table, section: &str) -> Result<ModuleDependency> {
+    let name = |k: &str| format!("`{section}.\"{key}\".{k}`");
+    if validate_name(key).is_err() {
+        return Err(JrsError::manifest(format!(
+            "`{section}.\"{key}\"` has a `path` to a directory, so it is a workspace member, \
+             and its key is that member's `project.name`"
+        )));
+    }
+    for k in t.keys() {
+        if !LOCAL_DEPENDENCY_KEYS.contains(&k.as_str()) {
+            return Err(JrsError::manifest(format!(
+                "`{section}.\"{key}\"`: `{k}` does not go with a member's `path` — a member is \
+                 built from its sources, at the version its own manifest gives (expected \
+                 `path`, `compile-only` or `runtime-only`)"
+            )));
+        }
+    }
+    let raw = optional_string(t, "path", &format!("{section}.\"{key}\""))?.unwrap_or_default();
+    let path = raw.replace('\\', "/");
+    let trimmed = path.trim_end_matches('/').to_string();
+    let as_path = Path::new(&trimmed);
+    if trimmed.is_empty() || as_path.is_absolute() || as_path.has_root() || trimmed.starts_with('/')
+    {
+        return Err(JrsError::manifest(format!(
+            "{} must name a member's directory relative to this manifest's, as \
+             `../core` (got `{raw}`)",
+            name("path")
+        )));
+    }
+    let module = ModuleDependency {
+        name: key.to_string(),
+        path: trimmed,
+        dev: false,
+        compile_only: bool_key(t, "compile-only", &name("compile-only"))?,
+        runtime_only: bool_key(t, "runtime-only", &name("runtime-only"))?,
+    };
+    if module.compile_only && module.runtime_only {
+        return Err(JrsError::manifest(format!(
+            "`{section}.\"{key}\"` cannot be both `compile-only` and `runtime-only`"
+        )));
+    }
+    Ok(module)
 }
 
 /// A classifier holds no braces but those of `{os-classifier}`, the one
@@ -3265,6 +3431,18 @@ fn validate_attribute_name(name: &str) -> std::result::Result<(), String> {
     Ok(())
 }
 
+/// One `[dependencies]` line for a workspace member.
+fn render_module(m: &ModuleDependency) -> String {
+    let mut fields = vec![format!("path = {}", quote(&m.path))];
+    if m.compile_only {
+        fields.push("compile-only = true".to_string());
+    }
+    if m.runtime_only {
+        fields.push("runtime-only = true".to_string());
+    }
+    format!("{} = {{ {} }}", m.name, fields.join(", "))
+}
+
 /// One `[dependencies]` line: the short form when it says everything, the
 /// inline table otherwise.
 fn render_dependency(d: &Dependency) -> String {
@@ -3728,6 +3906,25 @@ fn release_parts(version: &str) -> Option<[u64; 3]> {
         *slot = part.parse().ok()?;
     }
     Some(out)
+}
+
+/// `text` as a TOML table, or the parser's message with the file, line and
+/// column it points at.
+///
+/// # Errors
+///
+/// [`JrsError::Manifest`] when `text` is not TOML.
+pub fn parse_toml(text: &str, path: &Path) -> Result<toml::Table> {
+    toml::from_str(text).map_err(|e| {
+        let where_ = e.span().map_or_else(
+            || format!("{}: ", path.display()),
+            |s| {
+                let (line, col) = locate(text, s.start);
+                format!("{}:{line}:{col}: ", path.display())
+            },
+        );
+        JrsError::manifest(format!("{where_}{}", e.message()))
+    })
 }
 
 /// Byte offset to 1-based line and column.

@@ -14,6 +14,7 @@ mod gradle_tasks;
 mod gradle_vars;
 pub mod maven;
 mod maven_profiles;
+pub mod workspace;
 
 use std::path::{Path, PathBuf};
 
@@ -146,6 +147,9 @@ pub struct Migration {
     pub source_file: PathBuf,
     pub manifest: Manifest,
     pub report: Report,
+    /// The project's `groupId`, when the build says (Maven): what a
+    /// sibling's dependency on it names.
+    pub group: Option<String>,
 }
 
 impl Migration {
@@ -247,6 +251,48 @@ pub fn plan(dir: &Path, from: Option<Source>) -> Result<Migration> {
     }?;
     note_default_forks(&mut migration, dir);
     Ok(migration)
+}
+
+/// The workspace the build in `dir` becomes, when it has modules
+/// (`specs/WORKSPACES.md` §8): a Maven aggregator's `<modules>`, or the
+/// projects a Gradle build's `settings.gradle` includes. `None` for a
+/// single-module build, which [`plan`] translates.
+///
+/// # Errors
+///
+/// As for [`plan`].
+pub fn plan_workspace(
+    dir: &Path,
+    from: Option<Source>,
+) -> Result<Option<workspace::WorkspaceMigration>> {
+    let (source, file) = match from {
+        None => detect(dir)?,
+        Some(Source::Maven) => (Source::Maven, dir.join("pom.xml")),
+        Some(Source::Gradle) => {
+            let groovy = dir.join("build.gradle");
+            let file = if groovy.is_file() {
+                groovy
+            } else {
+                dir.join("build.gradle.kts")
+            };
+            (Source::Gradle, file)
+        }
+    };
+    if !file.is_file() {
+        return Ok(None);
+    }
+    let Some(mut migration) = workspace::plan(dir, source, &file)? else {
+        return Ok(None);
+    };
+    for (member, m) in &mut migration.members {
+        let member_root = if member == "." {
+            dir.to_path_buf()
+        } else {
+            dir.join(member.as_str())
+        };
+        note_default_forks(m, &member_root);
+    }
+    Ok(Some(migration))
 }
 
 /// Maven and Gradle run the tests in one JVM unless told otherwise; jrs
