@@ -1296,7 +1296,7 @@ can never lose user data, and task-generated sources must live under
                            projects) and the corpus, from a local mirror
                            (benches/support/mirror.rs); timed only once the
                            tools agree on classpath, tests, run and package;
-                           writes benchmarks/REPORT.md (specs/todo/BENCHMARKS.md)
+                           writes benchmarks/REPORT.md (specs/BENCHMARKS.md)
 ```
 
 ## 16. Invariants

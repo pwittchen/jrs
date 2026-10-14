@@ -1,6 +1,6 @@
 name: Benchmarks
 
-# jrs against Maven and Gradle (specs/todo/BENCHMARKS.md §7): the parity set
+# jrs against Maven and Gradle (specs/BENCHMARKS.md §7): the parity set
 # built, tested, run and packaged by each tool from a local mirror, on two
 # JDKs. Manual only, and it commits nothing: a shared runner is noisy, so its
 # report is for spotting a regression between two jrs commits, not for the

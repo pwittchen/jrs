@@ -94,7 +94,7 @@ Only the corpus (`docs/corpus/corpus.toml`, `specs/todo/CORPUS.md`),
 Central. The corpus also clones its
 projects and runs their own builds, and keeps everything under
 `target/corpus/<run>/`; `docs/corpus/FINDINGS.md` is the ledger of what it found.
-The comparison (`benches/compare.rs`, `specs/todo/BENCHMARKS.md`) serves every
+The comparison (`benches/compare.rs`, `specs/BENCHMARKS.md`) serves every
 tool from a local mirror (`benches/support/mirror.rs`, which `resolution.rs`
 shares) and refuses to time a project the tools do not build alike; the
 hand-written Maven and Gradle builds of its parity set are in

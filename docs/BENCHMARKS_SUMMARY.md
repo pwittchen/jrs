@@ -3,11 +3,11 @@
 Run on 2026-10-14 with jrs 0.11.0 (`4f40e18`, `benches/compare.rs`), on an
 Apple M4 Max (14 cores, 36 GiB) under macOS 27.0.1, with Corretto 25.0.2,
 Maven 3.9.16 and Gradle 9.1.0, every tool from the local mirror. Every
-project passed the checks of [BENCHMARKS.md](../specs/todo/BENCHMARKS.md)
+project passed the checks of [BENCHMARKS.md](../specs/BENCHMARKS.md)
 §5.1 on all three tools first: the same runtime classpath, the same tests,
 the same `run` output and a fat jar that starts.
 
-**These are not the report of [BENCHMARKS.md](../specs/todo/BENCHMARKS.md)
+**These are not the report of [BENCHMARKS.md](../specs/BENCHMARKS.md)
 §6.** Each cell is **one run with no warm-up** (`JRS_BENCH_RUNS=1
 JRS_BENCH_WARMUP=0`), so there is no spread and a cell may move by tens of
 percent in a full run. They were taken to check the harness end to end; the

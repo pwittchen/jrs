@@ -1,6 +1,6 @@
 # jrs — Benchmarks against Maven and Gradle
 
-The plan for [ROADMAP §2](../../ROADMAP.md#2-benchmarks-against-maven-and-gradle):
+The plan for [ROADMAP §2](../ROADMAP.md#2-benchmarks-against-maven-and-gradle):
 jrs, Maven and Gradle building, testing, running and packaging the same
 projects, checked to be the same build before anything is timed, with the
 results written up in a report anyone can regenerate.
@@ -25,7 +25,7 @@ claim the Why page and the README make ("fast start, no daemon") and leave
 unbacked: `website/why/index.html` says the timings are "on the roadmap".
 
 This benchmark is the evidence. It is also the judge of
-[GRADLE_GAPS.md](GRADLE_GAPS.md): each gap there gets code only when a
+[GRADLE_GAPS.md](todo/GRADLE_GAPS.md): each gap there gets code only when a
 scenario here shows it, and FASTER_BUILDS.md §9.1's "measured by" column
 names scenarios defined in §4 below.
 

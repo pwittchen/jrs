@@ -1,7 +1,7 @@
 //! Test counts from the `JUnit` XML each build tool writes, by class: what
 //! `benches/corpus.rs` compares with a project's own build, and what
 //! `benches/compare.rs` checks the three tools agree on before it times
-//! them (specs/todo/BENCHMARKS.md §5.1).
+//! them (specs/BENCHMARKS.md §5.1).
 
 #![allow(
     dead_code,

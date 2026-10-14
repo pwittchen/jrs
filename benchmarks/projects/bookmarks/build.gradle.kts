@@ -1,5 +1,5 @@
 // examples/bookmarks's jrs.toml, as Gradle: benches/compare.rs builds it
-// beside the example's own sources (specs/todo/BENCHMARKS.md §2). Boot's
+// beside the example's own sources (specs/BENCHMARKS.md §2). Boot's
 // plugin compiles with -parameters, as the jrs.toml asks for, and its
 // dependency management takes the BOM's versions as Maven does.
 plugins {

@@ -3,7 +3,7 @@
 `cargo bench --bench compare` (`benches/compare.rs`) builds, tests, runs and
 packages the same projects with jrs, Maven and Gradle, and writes the report
 here. The plan, the scenarios and the fairness rules are
-[specs/todo/BENCHMARKS.md](../specs/todo/BENCHMARKS.md); how to run it is in
+[specs/BENCHMARKS.md](../specs/BENCHMARKS.md); how to run it is in
 [DOCS.md](../DOCS.md#development).
 
 - `projects/<name>/` holds the Maven and Gradle builds of an example in

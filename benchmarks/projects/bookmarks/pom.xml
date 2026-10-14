@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!-- examples/bookmarks's jrs.toml, as Maven: benches/compare.rs builds it
-     beside the example's own sources (specs/todo/BENCHMARKS.md §2). Boot's
+     beside the example's own sources (specs/BENCHMARKS.md §2). Boot's
      parent compiles with -parameters, as the jrs.toml asks for. -->
 <project xmlns="http://maven.apache.org/POM/4.0.0"
          xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"

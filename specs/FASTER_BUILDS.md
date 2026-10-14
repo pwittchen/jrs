@@ -58,7 +58,7 @@ What Gradle still has over jrs comes down to four things:
 
 Every part below is judged by the benchmarks of
 [ROADMAP §2](../ROADMAP.md#2-benchmarks-against-maven-and-gradle), the
-scenarios of [BENCHMARKS.md §4](todo/BENCHMARKS.md#4-scenarios). A part
+scenarios of [BENCHMARKS.md §4](BENCHMARKS.md#4-scenarios). A part
 whose benchmark does not show a gain worth its code is not merged.
 
 ## 2. Principles
@@ -264,7 +264,7 @@ region takes over with what is left, as if it had just started. Under
 Only a cold or partly cold cache gains anything; with everything cached,
 both waves are a `locate_cached` pass and the thread is not started. The
 benchmark is the `cold` scenario of ROADMAP §2
-([BENCHMARKS.md §4](todo/BENCHMARKS.md#4-scenarios)), against a local mirror. The change is in `cli.rs` (`dependencies`, `download`, the join
+([BENCHMARKS.md §4](BENCHMARKS.md#4-scenarios)), against a local mirror. The change is in `cli.rs` (`dependencies`, `download`, the join
 points) and `resolve::fetch_jars`, which gains a variant taking a subset of
 the packages.
 
@@ -541,7 +541,7 @@ Each part changes SPEC.md before its code lands:
 ### 9.1 Milestones
 
 In order of value per line of code, each with its benchmark from ROADMAP §2,
-by the scenario ids of [BENCHMARKS.md §4](todo/BENCHMARKS.md#4-scenarios).
+by the scenario ids of [BENCHMARKS.md §4](BENCHMARKS.md#4-scenarios).
 That benchmark runs every tool without its build cache (its §5), so the rows
 that need the cache on wait for its open question 3:
 

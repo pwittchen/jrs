@@ -120,7 +120,7 @@ For every project × JDK:
 
 The results go into a section of the ROADMAP §2 benchmark report:
 `benchmarks/REPORT.md`'s "The test JVM" copies §7 below
-([BENCHMARKS.md §6](todo/BENCHMARKS.md#6-the-report)), next to its `test`
+([BENCHMARKS.md §6](BENCHMARKS.md#6-the-report)), next to its `test`
 scenario, which times the same kind of suite against Maven's and Gradle's.
 
 ## 5. Decisions

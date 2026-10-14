@@ -1,7 +1,7 @@
 //! The local repository server the benchmarks stand in for a remote one
 //! with: `benches/resolution.rs` serves the repository it synthesises from
 //! it, `benches/compare.rs` its mirror of Maven Central and of the Gradle
-//! Plugin Portal (specs/todo/BENCHMARKS.md §3.1).
+//! Plugin Portal (specs/BENCHMARKS.md §3.1).
 //!
 //! Std only: a thread per connection, one request per connection, and a
 //! fixed sleep before every answer to model the round trip. A route maps a

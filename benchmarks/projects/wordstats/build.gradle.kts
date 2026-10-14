@@ -1,5 +1,5 @@
 // examples/wordstats's jrs.toml, as Gradle: benches/compare.rs builds it
-// beside the example's own sources (specs/todo/BENCHMARKS.md §2).
+// beside the example's own sources (specs/BENCHMARKS.md §2).
 plugins {
     java
     application

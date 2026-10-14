@@ -49,7 +49,7 @@ resolution that are non-goals.
 
 ## 2. Benchmarks against Maven and Gradle
 
-[specs/todo/BENCHMARKS.md](specs/todo/BENCHMARKS.md)
+[specs/BENCHMARKS.md](specs/BENCHMARKS.md)
 
 The same projects built by jrs, Maven and Gradle (warm daemon and
 `--no-daemon`), checked to be the same build before anything is timed:
