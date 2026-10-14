@@ -1,5 +1,5 @@
 <idea-plugin>
-    <id>dev.getjrs.intellij</id>
+    <id>dev.getjrs.jrs</id>
     <name>jrs</name>
     <vendor url="https://getjrs.dev">jrs</vendor>
     <description><![CDATA[
