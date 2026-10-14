@@ -1,0 +1,7 @@
+[project]
+name = "core"
+version = "1.0.0"
+
+[dev-dependencies]
+# the version is the root's [managed] BOM's
+"org.junit.jupiter:junit-jupiter" = {}

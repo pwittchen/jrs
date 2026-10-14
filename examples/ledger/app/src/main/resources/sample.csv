@@ -1,0 +1,9 @@
+id,date,description,account,amount,currency
+1,2026-01-01,Salary,assets:bank,2500.00,EUR
+1,2026-01-01,Salary,income:salary,-2500.00,EUR
+2,2026-01-03,Cash for the week,assets:cash,100.00,EUR
+2,2026-01-03,Cash for the week,assets:bank,-100.00,EUR
+3,2026-01-04,Groceries,expenses:food,42.30,EUR
+3,2026-01-04,Groceries,assets:cash,-42.30,EUR
+4,2026-01-05,Rent,expenses:rent,900.00,EUR
+4,2026-01-05,Rent,assets:bank,-900.00,EUR

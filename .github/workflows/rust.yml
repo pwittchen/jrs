@@ -121,14 +121,25 @@ jobs:
             cp -R "$example" "$dir"
             rm -rf "$dir/target"
             run() { "$jrs" --manifest-path "$dir" --progress never package --no-build-cache "$@"; }
+            # What a package run wrote: a project's target directory, or
+            # each workspace member's, kept under its own name in $1.
+            keep() {
+              for target in "$dir"/target "$dir"/*/target; do
+                [ -d "$target" ] || continue
+                out="$dir.out/$1/$(basename "$(dirname "$target")")"
+                mkdir -p "$out"
+                for file in "$target"/lib "$target"/*.jar "$target"/*.zip \
+                  "$target"/*-cyclonedx.json; do
+                  if [ -e "$file" ]; then cp -R "$file" "$out/"; fi
+                done
+              done
+            }
             # A fat jar and the portable one share a name, so each set is
             # kept before the next build.
             run --portable --sources --dist --sbom
-            mkdir -p "$dir.out/portable" "$dir.out/fat"
-            cp -R "$dir/target/lib" "$dir"/target/*.jar "$dir"/target/*.zip \
-              "$dir"/target/*-cyclonedx.json "$dir.out/portable/"
+            keep portable
             run --fat
-            cp "$dir"/target/*.jar "$dir.out/fat/"
+            keep fat
           done
           files=$(cd "$a.out" && find . -type f | sort)
           if [ "$files" != "$(cd "$b.out" && find . -type f | sort)" ]; then

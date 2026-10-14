@@ -1,0 +1,12 @@
+[project]
+name = "app"
+version = "1.0.0"
+main-class = "com.example.ledger.app.Main"
+
+[dependencies]
+# core comes with it, as a jar's own dependencies would, and so does
+# commons-csv
+journal = { path = "../journal" }
+
+[dev-dependencies]
+"org.junit.jupiter:junit-jupiter" = {}

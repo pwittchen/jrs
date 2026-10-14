@@ -1,0 +1,16 @@
+[workspace]
+# listed in any order: the path dependencies decide that core is built
+# first, journal next and app last
+members = ["app", "journal", "core"]
+
+# The tables below are shared: every member inherits them, and a member's
+# own key would win over the root's.
+
+[java]
+source = 17
+javac-args = ["-Xlint:all"]
+
+[managed]
+# JUnit's BOM, once for the whole workspace: each member's tests name
+# junit-jupiter without a version
+"org.junit:junit-bom" = { version = "5.14.3", bom = true }

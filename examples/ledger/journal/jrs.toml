@@ -1,0 +1,11 @@
+[project]
+name = "journal"
+version = "1.0.0"
+
+[dependencies]
+# a sibling member, by its directory: its classes go where its jar would
+core = { path = "../core" }
+"org.apache.commons:commons-csv" = "1.14.1"
+
+[dev-dependencies]
+"org.junit.jupiter:junit-jupiter" = {}
