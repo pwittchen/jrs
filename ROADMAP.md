@@ -223,8 +223,9 @@ files. What is left:
 - **A file icon drawn for 16×16.** The plugin scales `logo.png` down. An SVG
   with the `_dark` variant the IntelliJ Platform expects would read better
   at that size.
-- **Publishing.** A CI job that builds and tests the plugin, and a release to
-  the JetBrains Marketplace.
+- **Publishing to the JetBrains Marketplace.** CI already builds and tests
+  the plugin, and each release ships it as `jrs-intellij.zip`; what is left is
+  a release to the Marketplace.
 
 ## 5. Needs a spec decision first
 
