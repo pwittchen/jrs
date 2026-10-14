@@ -11,6 +11,8 @@ and so on.
 
 ![The jrs plugin in IntelliJ IDEA's plugin list](intellij_plugin.png)
 
+![A jrs project in IntelliJ IDEA: jrs.toml in the editor, the jrs tool window with the project's dependencies, and a jrs test run](intellij_ide.png)
+
 ## Requirements
 
 - IntelliJ IDEA 2026.2 or newer, with the bundled Java plugin.
