@@ -45,8 +45,9 @@ builds the IntelliJ plugin with Gradle on changes to it or to a `jrs.toml` under
 push runs the same checks, then `bump` writes the tag's version into `Cargo.toml`
 and `Cargo.lock` and commits it to `master` (the tag itself is never moved), the
 `dist` matrix builds release binaries for Linux (musl), macOS and Windows (x86_64
-and ARM64) from that commit, `plugin` builds the IntelliJ plugin from it (the
-`bump` commit also sets `pluginVersion` in `plugins/intellij/gradle.properties`),
+and ARM64) from that commit, `plugin` builds the IntelliJ plugin from it (at the
+`pluginVersion` in `plugins/intellij/gradle.properties`, which is set by hand for
+now: `bump` leaves it alone),
 and `release` publishes them, the plugin as `jrs-intellij.zip`, and writes the
 Homebrew, Scoop and winget manifests from their checksums
 (`packaging/manifests.sh`, kept as the `package-manifests` artifact; publishing

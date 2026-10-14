@@ -48,7 +48,8 @@ uses the [IntelliJ Platform Gradle Plugin](https://plugins.jetbrains.com/docs/in
 2.x and Kotlin.
 
 Each jrs release carries the plugin as `jrs-intellij.zip`, built by CI
-(`.github/workflows/intellij.yml`) with the release's version. The same
+(`.github/workflows/intellij.yml`) at the version `pluginVersion` holds. A
+release does not change that version; it is bumped by hand. The same
 workflow runs `test` and `buildPlugin` on every change to the plugin.
 
 ## Installing

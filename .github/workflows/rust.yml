@@ -162,9 +162,10 @@ jobs:
         exit "$failed"
 
   # A version tag sets the crate version: `v1.2.3` writes `version = "1.2.3"` to
-  # Cargo.toml and Cargo.lock, and `pluginVersion` in the IntelliJ plugin's
-  # gradle.properties, and commits that to master, so the release is built
-  # from sources that report its version. The tag itself is left where it
+  # Cargo.toml and Cargo.lock, and commits that to master, so the release is
+  # built from sources that report its version. The IntelliJ plugin keeps the
+  # `pluginVersion` its gradle.properties holds: for now it is versioned by
+  # hand, apart from the crate. The tag itself is left where it
   # was pushed, so a local clone never holds a stale copy of it.
   # Pushes made with the workflow's own token do not trigger further runs.
   bump:
@@ -202,9 +203,8 @@ jobs:
         version="${GITHUB_REF_NAME#v}"
         sed -i "0,/^version = \".*\"$/s//version = \"$version\"/" Cargo.toml
         cargo update --workspace
-        sed -i "s/^pluginVersion = .*$/pluginVersion = $version/" plugins/intellij/gradle.properties
         if git diff --quiet; then
-          echo "Cargo.toml and the plugin are already at $version"
+          echo "Cargo.toml is already at $version"
         else
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
@@ -298,8 +298,8 @@ jobs:
         path: dist/*
         if-no-files-found: error
 
-  # The IntelliJ plugin, built from the version commit, so it reports the
-  # release's version; it becomes the `jrs-intellij.zip` asset.
+  # The IntelliJ plugin, built from the version commit at the version its
+  # gradle.properties holds; it becomes the `jrs-intellij.zip` asset.
   plugin:
     needs: bump
 
