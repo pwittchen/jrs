@@ -125,7 +125,8 @@ code {
 }
 
 .hero .version {
-  --button-h: calc(2 * 0.65rem + 0.92rem * 1.65 + 2px);
+  /* The hero's Install button's height, below. */
+  --button-h: calc(2 * 0.8rem + 1rem * 1.65 + 2px);
   --pill-h: calc(2 * 0.4rem + 0.85rem + 2px);
   grid-area: version;
   justify-self: center;
@@ -180,11 +181,60 @@ h1 {
   margin-top: 2rem;
 }
 
-/* In the hero the grid's row gap spaces the buttons instead. */
+/* In the hero, three tiers: Install, the one thing to do; the docs, the
+   next; and a quiet line of links for browsing, with no box to compete
+   with the two buttons above it. */
 .hero .cta {
   grid-area: cta;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 1.35rem;
+  /* As wide as its widest row, the links: the buttons fill that width. */
+  justify-self: start;
   align-self: start;
   margin-top: 0;
+}
+
+.cta-main {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+}
+
+/* Both a size above the buttons elsewhere, the same height, told apart by
+   the fill. */
+.hero .cta-main .button {
+  flex: 1 1 auto;
+  justify-content: center;
+  gap: 0.6rem;
+  padding: 0.8rem 1.45rem;
+  font-size: 1rem;
+}
+
+.cta-links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem 1.6rem;
+}
+
+.cta-links a {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding-block: 0.2rem;
+  color: var(--muted);
+  text-decoration: none;
+  font-size: 0.9rem;
+}
+
+.cta-links a:hover,
+.cta-links a:focus-visible {
+  color: var(--text);
+}
+
+.cta-links a:hover .icon,
+.cta-links a:focus-visible .icon {
+  color: var(--accent);
 }
 
 .button {
@@ -633,6 +683,10 @@ h3 {
   .hero-logo {
     width: 9rem;
     translate: none;
+  }
+
+  .hero .cta {
+    justify-self: stretch;
   }
 
   .split {
