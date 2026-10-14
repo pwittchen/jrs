@@ -77,7 +77,7 @@ project says nothing about a Spring Boot suite.
 ## 3. The corpus
 
 The projects of the real-project corpus
-([CORPUS.md](todo/CORPUS.md), listed in
+([CORPUS.md](CORPUS.md), listed in
 [`docs/corpus/corpus.toml`](../docs/corpus/corpus.toml)) whose `test` cell is `ok` —
 they pass `jrs test` with the usual layout, and the measurement means nothing
 on a project that does not. A project is copied out of a corpus run's

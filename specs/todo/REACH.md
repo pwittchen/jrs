@@ -447,7 +447,7 @@ reinstall with different bytes fails it. Unit tests for the POM table in
    the SPEC change.
 4. **§5, `jrs install`.** A POM writer, a manifest key, `~` in
    repository URLs, and the SPEC change. It is the one that most needs
-   [CORPUS.md](CORPUS.md)'s evidence: a corpus project that depends on a
+   [CORPUS.md](../CORPUS.md)'s evidence: a corpus project that depends on a
    sibling library in another repository would show its value best.
 
 ## 8. Open questions

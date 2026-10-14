@@ -26,7 +26,7 @@ done.
 
 ## 1. Hardening against real projects
 
-[specs/todo/CORPUS.md](specs/todo/CORPUS.md)
+[specs/CORPUS.md](specs/CORPUS.md)
 
 A pinned corpus of open-source Spring Boot and Ktor projects, on Maven and
 on Gradle, and a harness that takes each through `jrs migrate`, `build`,

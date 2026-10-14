@@ -1,6 +1,6 @@
 # jrs — The real-project corpus
 
-The plan for [ROADMAP §1](../../ROADMAP.md#1-hardening-against-real-projects):
+The plan for [ROADMAP §1](../ROADMAP.md#1-hardening-against-real-projects):
 a fixed list of open-source Spring Boot and Ktor projects, a harness that
 takes each one through `jrs migrate`, `build`, `test`, `run` and `package`
 and checks the result against the project's own Maven or Gradle build, and
@@ -11,7 +11,7 @@ Status: **harness landed, findings open**. `benches/corpus.rs`,
 exist, and the first run is in `DOCS.md`'s Compatibility section; §9's
 criteria are not met yet. Nothing here changes how jrs builds; the harness
 is a new `[[bench]]` and adds no crate. The first pass of
-[TEST_JVM_BENCHMARK.md §7](../TEST_JVM_BENCHMARK.md#7-results-first-pass)
+[TEST_JVM_BENCHMARK.md §7](TEST_JVM_BENCHMARK.md#7-results-first-pass)
 already ran jrs on three petclinics and found five things; this document
 turns that one-off into something that runs on every release and keeps
 its findings.

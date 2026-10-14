@@ -1,6 +1,6 @@
 # Corpus findings
 
-The ledger of [specs/todo/CORPUS.md §6](../../specs/todo/CORPUS.md#6-findings-and-triage):
+The ledger of [specs/CORPUS.md §6](../../specs/CORPUS.md#6-findings-and-triage):
 one entry per cause, not per project. `corpus.toml` maps a step that fails
 for a known cause to its entry (`known = { build = 6 }`), so the table
 prints `F6` there instead of `FAIL`; when a run after the fix shows the cell

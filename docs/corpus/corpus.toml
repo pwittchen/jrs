@@ -1,4 +1,4 @@
-# The real-project corpus (specs/todo/CORPUS.md): what `cargo bench --bench
+# The real-project corpus (specs/CORPUS.md): what `cargo bench --bench
 # corpus` takes through `jrs migrate`, `build`, `test`, `run` and `package`,
 # and checks against the project's own Maven or Gradle build. jrs never reads
 # this file.

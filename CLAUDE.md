@@ -89,7 +89,7 @@ JRS_BENCH_RECORD=1 cargo bench --bench compare  # ROADMAP §2: fill the local mi
 cargo bench --bench compare                     # ROADMAP §2: jrs vs Maven vs Gradle, into benchmarks/REPORT.md
 ```
 
-Only the corpus (`docs/corpus/corpus.toml`, `specs/todo/CORPUS.md`),
+Only the corpus (`docs/corpus/corpus.toml`, `specs/CORPUS.md`),
 `tests/network.rs` and the comparison's recording run may reach Maven
 Central. The corpus also clones its
 projects and runs their own builds, and keeps everything under

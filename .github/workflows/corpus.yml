@@ -1,6 +1,6 @@
 name: Corpus
 
-# The real-project corpus (specs/todo/CORPUS.md): every project in
+# The real-project corpus (specs/CORPUS.md): every project in
 # docs/corpus/corpus.toml through `jrs migrate`, `build`, `test`, `run` and
 # `package`, checked against its own Maven or Gradle build. Manual only: it
 # takes the better part of an hour and clones third parties' repositories,

@@ -40,7 +40,7 @@ harness = false
 name = "test_jvm"
 harness = false
 
-# ROADMAP §1, specs/todo/CORPUS.md: the real-project corpus, by JRS_CORPUS,
+# ROADMAP §1, specs/CORPUS.md: the real-project corpus, by JRS_CORPUS,
 # through migrate, build, test, run and package against its own build.
 [[bench]]
 name = "corpus"
