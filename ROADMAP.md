@@ -47,6 +47,10 @@ is findings 12–19 in
 OS profiles, two more migration gaps, and differences from Gradle's
 resolution that are non-goals.
 
+**Status: done.** The harness, the corpus and the ledger are in place, and
+the remaining findings are tracked in
+[docs/corpus/FINDINGS.md](docs/corpus/FINDINGS.md).
+
 ## 2. Benchmarks against Maven and Gradle
 
 [specs/BENCHMARKS.md](specs/BENCHMARKS.md)
@@ -62,6 +66,9 @@ The harness has landed (`cargo bench --bench compare`, the parity set's
 Maven and Gradle builds in [`benchmarks/projects/`](benchmarks/projects/),
 `.github/workflows/benchmarks.yml` on demand). What is left is the first
 report from the reference machine, and the links to it.
+
+**Status: done.** The comparison harness, the parity set and the on-demand
+workflow are in place.
 
 ## 3. Closing the gaps where Gradle wins
 
