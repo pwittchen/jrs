@@ -244,8 +244,17 @@
           <li><strong>Checked before timed.</strong> No project is timed until every tool resolves the same runtime classpath, runs the same tests with no failures, prints the same output and builds a jar that starts.</li>
           <li><strong>No network, no build cache.</strong> Every tool reads one local mirror of Maven Central and the Gradle Plugin Portal; jrs, Maven and Gradle all run with their build caches off.</li>
           <li><strong>Default configuration.</strong> No tuning flag jrs has no counterpart for. Output goes to a file, never a terminal. Runs go round-robin over the tools.</li>
-          <li><strong>The setup.</strong> jrs 0.11.0, Maven 3.9.16 and Gradle 9.1.0 on Corretto 25.0.2, an Apple M4 Max with 14 cores under macOS 27, on 2026-10-14.</li>
+          <li><strong>The setup.</strong> jrs 0.11.0, Maven 3.9.16 and Gradle 9.1.0 on Corretto 25.0.2, the machine below, on 2026-10-14.</li>
         </ol>
+        <h3>The machine</h3>
+        <dl class="phases">
+          <div><dt>Computer</dt><dd>MacBook Pro, 14-inch, 2024 (<code>Mac16,6</code>)</dd></div>
+          <div><dt>Chip</dt><dd>Apple M4 Max, 14 cores: 10 performance and 4 efficiency</dd></div>
+          <div><dt>Memory</dt><dd>36&nbsp;GB unified memory</dd></div>
+          <div><dt>Storage</dt><dd>Internal SSD; the mirror, the caches and every project on it</dd></div>
+          <div><dt>OS</dt><dd>macOS 27.0.1 (26A434)</dd></div>
+          <div><dt>JDK</dt><dd>Amazon Corretto 25.0.2 (25.0.2+10-LTS)</dd></div>
+        </dl>
         <p class="note">
           The rules, the scenarios and the harness are in
           <a href="https://github.com/pwittchen/jrs/blob/master/specs/BENCHMARKS.md">specs/BENCHMARKS.md</a>;
