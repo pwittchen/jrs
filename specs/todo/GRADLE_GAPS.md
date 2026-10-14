@@ -7,7 +7,7 @@ This is [ROADMAP §3](../../ROADMAP.md#3-closing-the-gaps-where-gradle-wins).
 
 Status: **proposed.** Nothing here is implemented. Parts A and B are speed,
 and each waits for a number from the benchmark of
-[BENCHMARKS.md](BENCHMARKS.md) before it gets code (§1). Parts C and D are
+[BENCHMARKS.md](../BENCHMARKS.md) before it gets code (§1). Parts C and D are
 not speed; they cross lines drawn in SPEC §1.2 and listed in
 [ROADMAP_ARCHIVE §5](../ROADMAP_ARCHIVE.md#5-needs-a-spec-decision-first),
 so each needs its SPEC.md edits (§6) agreed before code.
