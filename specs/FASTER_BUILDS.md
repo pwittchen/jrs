@@ -57,7 +57,8 @@ What Gradle still has over jrs comes down to four things:
    in-process and hot across builds.
 
 Every part below is judged by the benchmarks of
-[ROADMAP §2](../ROADMAP.md#2-benchmarks-against-maven-and-gradle). A part
+[ROADMAP §2](../ROADMAP.md#2-benchmarks-against-maven-and-gradle), the
+scenarios of [BENCHMARKS.md §4](todo/BENCHMARKS.md#4-scenarios). A part
 whose benchmark does not show a gain worth its code is not merged.
 
 ## 2. Principles
@@ -262,8 +263,8 @@ region takes over with what is left, as if it had just started. Under
 
 Only a cold or partly cold cache gains anything; with everything cached,
 both waves are a `locate_cached` pass and the thread is not started. The
-benchmark is "clean build, cold dependency cache" of ROADMAP §2, against a
-local mirror. The change is in `cli.rs` (`dependencies`, `download`, the join
+benchmark is the `cold` scenario of ROADMAP §2
+([BENCHMARKS.md §4](todo/BENCHMARKS.md#4-scenarios)), against a local mirror. The change is in `cli.rs` (`dependencies`, `download`, the join
 points) and `resolve::fetch_jars`, which gains a variant taking a subset of
 the packages.
 
@@ -539,16 +540,19 @@ Each part changes SPEC.md before its code lands:
 
 ### 9.1 Milestones
 
-In order of value per line of code, each with its benchmark from ROADMAP §2:
+In order of value per line of code, each with its benchmark from ROADMAP §2,
+by the scenario ids of [BENCHMARKS.md §4](todo/BENCHMARKS.md#4-scenarios).
+That benchmark runs every tool without its build cache (its §5), so the rows
+that need the cache on wait for its open question 3:
 
 | | Part | Measured by |
 | --- | --- | --- |
-| F1 | Test CDS, opt-in (§3), dynamic archive only | `test` on the Spring Boot corpus projects, warm |
-| F2 | Local build cache, compile units (§5.1–§5.4, §5.6) | `build` after a branch switch; after `jrs clean` |
-| F3 | Warm `javac` under `--watch` (§6) | incremental rebuild after one edit, the second and later |
-| F4 | Remote build cache (§5.5) | a CI clean build with a warm remote |
-| F5 | Test results in the build cache (§5.3) | `test` after a branch switch |
-| F6 | Pipelined downloads (§4) | clean build, cold dependency cache, local mirror |
+| F1 | Test CDS, opt-in (§3), dynamic archive only | `test` on `bookmarks` and the Spring Boot corpus projects |
+| F2 | Local build cache, compile units (§5.1–§5.4, §5.6) | `clean` with the build cache on (BENCHMARKS.md open question 3) |
+| F3 | Warm `javac` under `--watch` (§6) | `incremental`; its `--watch` variant, the second edit and later, is not a scenario yet |
+| F4 | Remote build cache (§5.5) | `clean` on CI with a warm remote (open question 3) |
+| F5 | Test results in the build cache (§5.3) | `test` with the build cache on (open question 3) |
+| F6 | Pipelined downloads (§4) | `cold`, from the local mirror |
 | F7 | AOT cache on JDK 25 (§3.5) | as F1 |
 
 ### 9.2 Code layout

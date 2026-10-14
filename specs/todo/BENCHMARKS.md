@@ -5,10 +5,12 @@ jrs, Maven and Gradle building, testing, running and packaging the same
 projects, checked to be the same build before anything is timed, with the
 results written up in a report anyone can regenerate.
 
-Status: **proposed**. It needs no SPEC.md change and adds no crate: the
-harness is a `cargo bench` target like the three in `benches/`, and drives
-Maven and Gradle as subprocesses. It runs on the projects of
-[CORPUS.md](CORPUS.md), so it starts once that corpus builds.
+Status: **the harness is implemented**; the first published report, and
+the links of §9 to it, are not. It needs no SPEC.md change and adds no
+crate: the harness is `benches/compare.rs`, a `cargo bench` target beside
+the others, and drives Maven and Gradle as subprocesses. Where the
+implementation settles something this plan left open, or departs from it,
+§11 says so.
 
 ---
 
@@ -359,3 +361,47 @@ regression between two jrs commits, not for the Why page.
    (daemon, CC)` become one column, and the report says which Gradle did so.
 6. **Windows.** Process start-up costs differ most there, and jrs ships a
    Windows binary. The harness is portable; the reference report is not.
+
+## 11. As implemented
+
+- **The init script is Groovy**, `mirror.gradle`, not `mirror.gradle.kts`:
+  it is compiled again in every cold Gradle home, and a Kotlin script's
+  compile would be the harness's cost counted as Gradle's. It rewrites every
+  Maven repository a build declares (`repositories.all`), so a settings or
+  build script's `mavenCentral()` or `gradlePluginPortal()` lands on the
+  mirror too. `org.gradle.java.installations.auto-download=false` is in the
+  home's `gradle.properties`.
+- **The classpaths** are read as coordinates, not mapped back from paths:
+  `jrs metadata`'s `classpaths.runtime`, Maven's `dependency:list` (the
+  corpus harness's pinned plugin), and the init script's task over
+  `runtimeClasspath`'s module ids.
+- **The generated projects** draw from a list of real jars with no runtime
+  dependency of their own and no signature, so the three tools' classpaths
+  are one set by construction; each class refers to one of them by a class
+  literal, which the fat jar's run then loads. `gen-ws` is six members
+  (`core`, `model`, `store`, `service`, `web`, `app`), Gradle's `api` to
+  match the transitive compile classpath Maven and jrs give a member.
+  Its `run` is not timed: `exec:java` cannot run one member of a reactor
+  without installing the others. Its `abi` edit is in `core`, so every
+  other member sees it.
+- **The edits** outside the generator are a private method added to the
+  source with the fewest dependents (`incremental`, `test-edit`) and a public
+  one to the source with the most (`abi`): a method body chosen by a grep
+  could not be changed safely. The report names each file.
+- **The states.** `cold` also deletes `jrs.lock`, which would otherwise spare
+  jrs the resolution the others do; each cold run of a daemon column stops
+  its daemon first, since its home is emptied. `clean` removes `target/` and
+  `build/` but keeps `.gradle/`, as `mvn clean`, `gradle clean` and `jrs
+  clean` leave each tool's state outside them. `test` and `package` start
+  from a full `test` run, which is what compiles the test classes on every
+  tool.
+- **The corpus set** is the projects whose row in the latest
+  `target/corpus/<run>/REPORT.md` has no failing, unrun, unselected or
+  skipped step, each from that run's clone, against the one build its
+  `corpus.toml` entry names.
+- **A recording run** (`JRS_BENCH_RECORD=1`) runs the checks of §5.1 alone:
+  each tool once, from cold caches, which fills the mirror. A 404 from
+  upstream is kept as a `.404` marker, so the measuring run answers it the
+  same way without counting a miss.
+- **Exit status.** The run exits 1 when a project fails its checks or a
+  cell fails, so a CI job shows red; an `incomplete` cell does not.

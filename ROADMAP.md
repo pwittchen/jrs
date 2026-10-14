@@ -58,6 +58,11 @@ incremental build, `test`, `run` and `package`. Medians and spread, from a
 local mirror, in a generated `benchmarks/REPORT.md` that says where jrs is
 slower. The Why page and the README link to it once it exists.
 
+The harness has landed (`cargo bench --bench compare`, the parity set's
+Maven and Gradle builds in [`benchmarks/projects/`](benchmarks/projects/),
+`.github/workflows/benchmarks.yml` on demand). What is left is the first
+report from the reference machine, and the links to it.
+
 ## 3. Closing the gaps where Gradle wins
 
 [specs/todo/GRADLE_GAPS.md](specs/todo/GRADLE_GAPS.md)

@@ -85,12 +85,22 @@ cargo bench --bench resolution                      # SPEC §12 M5: network vs j
 cargo bench --bench incremental                     # SPEC §7.2: rebuild time after one edit, javac's share
 JRS_BENCH_PROJECT=<path> cargo bench --bench test_jvm  # SPEC §10.2: share-classes off/true/"aot" on a real project
 JRS_CORPUS=all cargo bench --bench corpus       # ROADMAP §1: real projects vs their own Maven/Gradle build
+JRS_BENCH_RECORD=1 cargo bench --bench compare  # ROADMAP §2: fill the local mirror the comparison reads
+cargo bench --bench compare                     # ROADMAP §2: jrs vs Maven vs Gradle, into benchmarks/REPORT.md
 ```
 
-Only the corpus (`docs/corpus/corpus.toml`, `specs/todo/CORPUS.md`) and
-`tests/network.rs` may reach Maven Central. The corpus also clones its
+Only the corpus (`docs/corpus/corpus.toml`, `specs/todo/CORPUS.md`),
+`tests/network.rs` and the comparison's recording run may reach Maven
+Central. The corpus also clones its
 projects and runs their own builds, and keeps everything under
 `target/corpus/<run>/`; `docs/corpus/FINDINGS.md` is the ledger of what it found.
+The comparison (`benches/compare.rs`, `specs/todo/BENCHMARKS.md`) serves every
+tool from a local mirror (`benches/support/mirror.rs`, which `resolution.rs`
+shares) and refuses to time a project the tools do not build alike; the
+hand-written Maven and Gradle builds of its parity set are in
+`benchmarks/projects/`, and `benchmarks/REPORT.md` is generated, never edited.
+`.github/workflows/benchmarks.yml` runs it on demand only, on JDK 21 and 25,
+and commits nothing.
 
 Driving jrs against a Java project:
 

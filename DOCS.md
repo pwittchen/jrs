@@ -1823,6 +1823,35 @@ JRS_CORPUS=petclinic-maven,ktor-serialization cargo bench --bench corpus
 JRS_CORPUS=all JRS_CORPUS_STEPS=migrate,build cargo bench --bench corpus
 ```
 
+The comparison with Maven and Gradle builds, tests, runs and packages the same
+projects with each tool and writes `benchmarks/REPORT.md`, with every sample
+beside it in `benchmarks/raw/`. Its parity set is `examples/wordstats` and
+`examples/bookmarks`, with the Maven and Gradle builds of
+`benchmarks/projects/` laid over them, and three generated projects
+(`gen-300`, `gen-2000` and the six-member workspace `gen-ws`); the corpus
+projects whose last corpus run passed every step join them. Before it times a
+project it checks that every tool resolves the same runtime classpath, runs
+the same tests, and starts the same application and jar; a project that fails
+the check is reported, not timed. Gradle is timed three ways: with a warm
+daemon, with the daemon and `--configuration-cache`, and with `--no-daemon`.
+
+No timed run touches the network: every tool reads a local mirror of Maven
+Central and the Gradle Plugin Portal, which one recording run fills. It needs
+a JDK, `mvn` and `gradle` (9 or later) on `PATH`; a tool that is missing is
+skipped with a `SKIPPED` line:
+
+```
+JRS_BENCH_RECORD=1 cargo bench --bench compare        # fill ~/.cache/jrs-bench/mirror
+cargo bench --bench compare
+JRS_BENCH_TOOLS=jrs,gradle JRS_BENCH_PROJECTS=gen-300 \
+  JRS_BENCH_SCENARIOS=noop,incremental JRS_BENCH_RUNS=11 cargo bench --bench compare
+```
+
+`JRS_BENCH_WARMUP` (default 2), `JRS_BENCH_RUNS` (7), `JRS_BENCH_MIRROR`,
+`JRS_BENCH_LATENCY_MS` and `JRS_BENCH_REPORT` adjust it; the scenarios are
+`cold`, `clean`, `noop`, `incremental`, `abi`, `test`, `test-edit`, `run`
+and `package`. Logs stay under `target/compare/<run>/`.
+
 To cut a release, tag the tip of `master` and push the tag:
 
 ```

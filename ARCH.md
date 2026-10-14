@@ -1288,6 +1288,15 @@ can never lose user data, and task-generated sources must live under
  └── benches/test_jvm.rs   SPEC §10.2: `jrs test` on a real project with
                            share-classes off, true and "aot", and whether
                            the outcome changed (specs/TEST_JVM_BENCHMARK.md)
+
+ cargo bench --bench compare
+ └── benches/compare.rs    ROADMAP §2: jrs, Maven and Gradle (daemon, daemon
+                           with the configuration cache, no daemon) on the
+                           parity set (benchmarks/projects/, generated
+                           projects) and the corpus, from a local mirror
+                           (benches/support/mirror.rs); timed only once the
+                           tools agree on classpath, tests, run and package;
+                           writes benchmarks/REPORT.md (specs/todo/BENCHMARKS.md)
 ```
 
 ## 16. Invariants
