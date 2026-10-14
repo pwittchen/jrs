@@ -39,7 +39,8 @@ try, published as a compatibility table in `DOCS.md` and on the website.
 The harness, the list and the ledger have landed (`cargo bench --bench
 corpus`, [`corpus/`](corpus/)). The first run took 4 of 11 projects end to
 end; the other seven stop at `build` on six findings, five of them migration
-gaps ([corpus/FINDINGS.md](corpus/FINDINGS.md)).
+gaps ([corpus/FINDINGS.md](corpus/FINDINGS.md)); the plan for them is
+[specs/todo/CORPUS_FIXES.md](specs/todo/CORPUS_FIXES.md).
 
 ## 2. Benchmarks against Maven and Gradle
 
