@@ -68,7 +68,9 @@ Maven and Gradle builds in [`benchmarks/projects/`](benchmarks/projects/),
 report from the reference machine, and the links to it.
 
 **Status: done.** The comparison harness, the parity set and the on-demand
-workflow are in place.
+workflow are in place. The summary is in
+[benchmarks/README.md](benchmarks/README.md), and the results are on the
+website at [getjrs.dev/benchmarks](https://getjrs.dev/benchmarks/).
 
 ## 3. Closing the gaps where Gradle wins
 
