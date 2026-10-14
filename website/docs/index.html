@@ -3228,6 +3228,49 @@ jrs migrate                # write jrs.toml; the original build file is untouche
 <p>An explicit standard-library dependency (<code>kotlin-stdlib</code> and friends) is dropped, since jrs implies it.</p>
 </section>
 
+<section id="compatibility">
+<h2>Compatibility</h2>
+<p>
+  How real projects fare, taken through <code>jrs migrate</code>, <code>build</code>,
+  <code>test</code>, <code>run</code> and <code>package --fat</code> with no hand edits and checked
+  against their own Maven or Gradle build: the same runtime classpath, and the same tests run,
+  passed and skipped. The projects and their pinned commits are in
+  <a href="https://github.com/pwittchen/jrs/blob/master/corpus/corpus.toml"><code>corpus/corpus.toml</code></a>;
+  each failure is a numbered entry in
+  <a href="https://github.com/pwittchen/jrs/blob/master/corpus/FINDINGS.md"><code>corpus/FINDINGS.md</code></a>, fixed, added as a migration rule, or cited as
+  a non-goal. Measured with jrs 0.11.0 on 2026-10-14, on JDK 25.0.2 and macOS 27.0.1; a step after
+  a failed one did not run (<code>·</code>).
+</p>
+<table>
+  <thead><tr><th>Project</th><th>Build</th><th>Kind</th><th>Commit</th><th>migrate</th><th>build</th><th>test</th><th>run</th><th>package</th></tr></thead>
+  <tbody>
+    <tr><td><code>spring-guides/gs-rest-service</code></td><td>Maven</td><td>Spring Boot</td><td><code>3f4cef0</code></td><td>ok</td><td>ok</td><td>ok 2/2</td><td>ok</td><td>ok</td></tr>
+    <tr><td><code>spring-guides/gs-accessing-data-jpa</code></td><td>Maven</td><td>Spring Boot</td><td><code>ef48947</code></td><td>ok</td><td>ok</td><td>ok 1/1</td><td>ok</td><td>ok</td></tr>
+    <tr><td><code>spring-guides/gs-rest-service</code></td><td>Gradle</td><td>Spring Boot</td><td><code>3f4cef0</code></td><td>ok</td><td>ok</td><td>ok 2/2</td><td>ok</td><td>ok</td></tr>
+    <tr><td><code>spring-guides/gs-accessing-data-jpa</code></td><td>Gradle</td><td>Spring Boot</td><td><code>ef48947</code></td><td>ok</td><td>ok</td><td>ok 1/1</td><td>ok</td><td>ok</td></tr>
+    <tr><td><code>spring-projects/spring-petclinic</code></td><td>Maven</td><td>Spring Boot</td><td><code>500158f</code></td><td>ok</td><td><a href="https://github.com/pwittchen/jrs/blob/master/corpus/FINDINGS.md#6-maven-checkstyle-the-executions-configuration-is-not-read">F6</a></td><td>·</td><td>·</td><td>·</td></tr>
+    <tr><td><code>spring-projects/spring-petclinic</code></td><td>Gradle</td><td>Spring Boot</td><td><code>500158f</code></td><td>ok</td><td><a href="https://github.com/pwittchen/jrs/blob/master/corpus/FINDINGS.md#7-gradle-checkstyle-config_loc-and-the-checkers-own-dependencies">F7</a></td><td>·</td><td>·</td><td>·</td></tr>
+    <tr><td><code>spring-petclinic/spring-petclinic-kotlin</code></td><td>Gradle</td><td>Spring Boot, Kotlin</td><td><code>c77f77b</code></td><td>ok</td><td><a href="https://github.com/pwittchen/jrs/blob/master/corpus/FINDINGS.md#5-a-kotlin-plugin-version-from-a-val-in-plugins---and-the-kotlin-springbootapplication">F5</a></td><td>·</td><td>·</td><td>·</td></tr>
+    <tr><td><code>ktorio/ktor-samples</code>, <code>httpbin</code></td><td>Gradle</td><td>Ktor</td><td><code>1c9df7c</code></td><td>ok</td><td><a href="https://github.com/pwittchen/jrs/blob/master/corpus/FINDINGS.md#8-the-ktor-gradle-plugins-bom">F8</a></td><td>·</td><td>·</td><td>·</td></tr>
+    <tr><td><code>ktorio/ktor-samples</code>, <code>h2</code></td><td>Gradle</td><td>Ktor</td><td><code>1c9df7c</code></td><td>ok</td><td><a href="https://github.com/pwittchen/jrs/blob/master/corpus/FINDINGS.md#8-the-ktor-gradle-plugins-bom">F8</a></td><td>·</td><td>·</td><td>·</td></tr>
+    <tr><td><code>spring-petclinic/spring-petclinic-rest</code></td><td>Maven</td><td>service</td><td><code>afc8fc1</code></td><td>ok</td><td><a href="https://github.com/pwittchen/jrs/blob/master/corpus/FINDINGS.md#10-openapi-generators-sources">F10</a></td><td>·</td><td>·</td><td>·</td></tr>
+    <tr><td><code>spring-petclinic/spring-petclinic-microservices</code></td><td>Maven</td><td>workspace</td><td><code>1d76b00</code></td><td>ok</td><td><a href="https://github.com/pwittchen/jrs/blob/master/corpus/FINDINGS.md#11-a-version-range-in-a-transitive-pom">F11</a></td><td>·</td><td>·</td><td>·</td></tr>
+  </tbody>
+</table>
+<p>
+  End to end: 4 of 11. Where a migrated project builds, its runtime classpath matches the
+  reference's jar for jar and version for version, and the same tests pass. Why the others stop:
+</p>
+<ul>
+  <li><strong>F6, F7</strong>: petclinic's Checkstyle check becomes a post-compile task, but not with petclinic's configuration: from the <code>pom.xml</code> the execution's <code>configLocation</code> is not read and <code>sun_checks</code> fails the build; from <code>build.gradle</code> the <code>config_loc</code> property Gradle sets is missing.</li>
+  <li><strong>F5</strong>: the Kotlin plugin's version is a <code>val</code> inside <code>plugins { }</code>, so no <code>[kotlin]</code> table is written and the Kotlin sources do not compile.</li>
+  <li><strong>F8</strong>: the Ktor Gradle plugin manages every <code>io.ktor</code> version through its BOM; migration does not write it to <code>[managed]</code>, so the versionless Ktor dependencies are dropped.</li>
+  <li><strong>F10</strong>: the DTOs come from <code>openapi-generator-maven-plugin</code>, which is not translated into a task.</li>
+  <li><strong>F11</strong>: a webjar's POM asks for a version range, which jrs rejects; a <code>[managed]</code> pin settles it by hand.</li>
+</ul>
+</section>
+
+
 </div>
 <!-- ===================================================================== -->
 <div class="group" data-title="Reference">

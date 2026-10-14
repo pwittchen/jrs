@@ -1,0 +1,69 @@
+name: Corpus
+
+# The real-project corpus (specs/todo/CORPUS.md): every project in
+# corpus/corpus.toml through `jrs migrate`, `build`, `test`, `run` and
+# `package`, checked against its own Maven or Gradle build. Manual only: it
+# takes the better part of an hour and clones third parties' repositories,
+# so neither a push nor a release waits on it.
+on:
+  workflow_dispatch:
+    inputs:
+      projects:
+        description: 'Projects to run: `all`, or names from corpus/corpus.toml, comma-separated'
+        default: 'all'
+        required: true
+      jdk:
+        description: 'The JDK to run them on'
+        default: '25'
+        required: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  corpus:
+    # Docker is installed and running here, so Testcontainers suites run.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 240
+
+    steps:
+    - uses: actions/checkout@v7
+
+    - name: Set up the JDK
+      uses: actions/setup-java@v6
+      with:
+        distribution: temurin
+        java-version: ${{ inputs.jdk }}
+
+    # For a project without a wrapper; every project in the first set has one.
+    - name: Set up Maven
+      uses: stCarolas/setup-maven@v5
+      with:
+        maven-version: '3.9.11'
+
+    - name: Set up Gradle
+      uses: gradle/actions/setup-gradle@v5
+      with:
+        gradle-version: '9.1.0'
+
+    # A bench builds in release mode: the corpus drives the binary a user gets.
+    - name: Run the corpus
+      env:
+        JRS_CORPUS: ${{ inputs.projects }}
+      run: cargo bench --bench corpus
+
+    - name: Write the report to the job summary
+      if: always()
+      run: cat target/corpus/*/REPORT.md >> "$GITHUB_STEP_SUMMARY" || true
+
+    - name: Upload the run
+      if: always()
+      uses: actions/upload-artifact@v7
+      with:
+        name: corpus
+        path: |
+          target/corpus/
+          !target/corpus/*/cache/
+          !target/corpus/*/*/clone/
+          !target/corpus/*/*/reference/
+        if-no-files-found: ignore

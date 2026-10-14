@@ -24,6 +24,7 @@ published at [getjrs.dev/docs](https://getjrs.dev/docs/).
 - [Shell completions](#shell-completions)
 - [Editors and IntelliJ IDEA](#editors-and-intellij-idea)
 - [Migrating an existing project](#migrating-an-existing-project)
+- [Compatibility](#compatibility)
 - [Development](#development)
 
 ## Installation
@@ -1679,6 +1680,49 @@ them before the compile, with the `inputs` and `outputs` they declare, and
 tasks' `source-outputs` and `resource-outputs`. Rewriting those tasks as jrs
 tasks is what drops Gradle from the build.
 
+## Compatibility
+
+How real projects fare, taken through `jrs migrate`, `build`, `test`, `run`
+and `package --fat` with no hand edits and checked against their own Maven
+or Gradle build (the runtime classpath, and the tests run, passed and
+skipped). The projects and their pinned commits are in
+[`corpus/corpus.toml`](corpus/corpus.toml); each failure is a numbered entry
+in [`corpus/FINDINGS.md`](corpus/FINDINGS.md), fixed, added as a migration
+rule, or cited as a non-goal. Measured with jrs 0.11.0 on 2026-10-14, on
+JDK 25.0.2 and macOS 27.0.1; a step after a failed one did not run (`·`).
+
+| Project | Build | Kind | Commit | migrate | build | test | run | package |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| `spring-guides/gs-rest-service` | Maven | Spring Boot | `3f4cef0` | ok | ok | ok 2/2 | ok | ok |
+| `spring-guides/gs-accessing-data-jpa` | Maven | Spring Boot | `ef48947` | ok | ok | ok 1/1 | ok | ok |
+| `spring-guides/gs-rest-service` | Gradle | Spring Boot | `3f4cef0` | ok | ok | ok 2/2 | ok | ok |
+| `spring-guides/gs-accessing-data-jpa` | Gradle | Spring Boot | `ef48947` | ok | ok | ok 1/1 | ok | ok |
+| `spring-projects/spring-petclinic` | Maven | Spring Boot | `500158f` | ok | [F6](corpus/FINDINGS.md#6-maven-checkstyle-the-executions-configuration-is-not-read) | · | · | · |
+| `spring-projects/spring-petclinic` | Gradle | Spring Boot | `500158f` | ok | [F7](corpus/FINDINGS.md#7-gradle-checkstyle-config_loc-and-the-checkers-own-dependencies) | · | · | · |
+| `spring-petclinic/spring-petclinic-kotlin` | Gradle | Spring Boot, Kotlin | `c77f77b` | ok | [F5](corpus/FINDINGS.md#5-a-kotlin-plugin-version-from-a-val-in-plugins---and-the-kotlin-springbootapplication) | · | · | · |
+| `ktorio/ktor-samples`, `httpbin` | Gradle | Ktor | `1c9df7c` | ok | [F8](corpus/FINDINGS.md#8-the-ktor-gradle-plugins-bom) | · | · | · |
+| `ktorio/ktor-samples`, `h2` | Gradle | Ktor | `1c9df7c` | ok | [F8](corpus/FINDINGS.md#8-the-ktor-gradle-plugins-bom) | · | · | · |
+| `spring-petclinic/spring-petclinic-rest` | Maven | service | `afc8fc1` | ok | [F10](corpus/FINDINGS.md#10-openapi-generators-sources) | · | · | · |
+| `spring-petclinic/spring-petclinic-microservices` | Maven | workspace | `1d76b00` | ok | [F11](corpus/FINDINGS.md#11-a-version-range-in-a-transitive-pom) | · | · | · |
+
+End to end: 4 of 11. Where a migrated project builds, its runtime classpath
+matches the reference's jar for jar and version for version, and the same
+tests pass. Why the others stop:
+
+- **F6, F7** — petclinic's Checkstyle check becomes a post-compile task, but
+  not with petclinic's configuration: from the `pom.xml` the execution's
+  `configLocation` is not read and `sun_checks` fails the build; from
+  `build.gradle` the `config_loc` property Gradle sets is missing.
+- **F5** — the Kotlin plugin's version is a `val` inside `plugins { }`, so
+  no `[kotlin]` table is written and the Kotlin sources do not compile.
+- **F8** — the Ktor Gradle plugin manages every `io.ktor` version through
+  its BOM; migration does not write it to `[managed]`, so the versionless
+  Ktor dependencies are dropped.
+- **F10** — the DTOs come from `openapi-generator-maven-plugin`, which is
+  not translated into a task.
+- **F11** — a webjar's POM asks for a version range, which jrs rejects
+  ([`[managed]`](#managed) pins one by hand).
+
 ## Development
 
 ```
@@ -1727,6 +1771,24 @@ compiled (SPEC §7.2). It needs a JDK:
 ```
 cargo bench --bench incremental
 JRS_BENCH_CLASSES=1000 JRS_BENCH_RUNS=7 cargo bench --bench incremental
+```
+
+The corpus takes the real projects listed in `corpus/corpus.toml` — Spring
+Boot and Ktor applications on Maven and on Gradle, each cloned at a pinned
+commit — through `jrs migrate`, `build`, `test`, `run` and `package` with no
+hand edits, and checks each against the project's own build: the same
+runtime classpath, and the same tests run, passed and skipped. It needs
+`git`, the network, a JDK, and Maven or Gradle for a project without a
+wrapper; Docker is used when it is running. It does nothing unless
+`JRS_CORPUS` names the projects, and keeps everything under
+`target/corpus/<run>/`, with the table in `REPORT.md` there. The
+[Compatibility](#compatibility) section is written from it, and
+`corpus/FINDINGS.md` keeps what it found:
+
+```
+JRS_CORPUS=all cargo bench --bench corpus
+JRS_CORPUS=petclinic-maven,ktor-serialization cargo bench --bench corpus
+JRS_CORPUS=all JRS_CORPUS_STEPS=migrate,build cargo bench --bench corpus
 ```
 
 To cut a release, tag the tip of `master` and push the tag:

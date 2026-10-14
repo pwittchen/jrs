@@ -55,6 +55,10 @@ those is manual). The tag must point at the tip of `master`. Don't
 bump the version by hand — tagging is the release process. `setup-jrs/action.yml`
 is the GitHub Action that installs a release (`uses: pwittchen/jrs/setup-jrs@<tag>`);
 it, `website/install.sh` and `packaging/manifests.sh` all depend on the asset names.
+`.github/workflows/corpus.yml` runs the corpus (below) on demand only
+(`workflow_dispatch`, with `projects` and `jdk` inputs) and puts its
+`REPORT.md` in the job summary; nothing calls it, so no release waits on a
+third party's repository.
 
 `.github/workflows/website.yml` builds `website/` with Bun and rsyncs it to
 `getjrs.dev` on the mikr.us VPS (the `VPS_*` repository secrets) on pushes to
@@ -80,7 +84,13 @@ cargo test --features network-tests --test network  # the Maven Central tests
 cargo bench --bench resolution                      # SPEC §12 M5: network vs jrs vs renderer
 cargo bench --bench incremental                     # SPEC §7.2: rebuild time after one edit, javac's share
 JRS_BENCH_PROJECT=<path> cargo bench --bench test_jvm  # SPEC §10.2: share-classes off/true/"aot" on a real project
+JRS_CORPUS=all cargo bench --bench corpus       # ROADMAP §1: real projects vs their own Maven/Gradle build
 ```
+
+Only the corpus (`corpus/corpus.toml`, `specs/todo/CORPUS.md`) and
+`tests/network.rs` may reach Maven Central. The corpus also clones its
+projects and runs their own builds, and keeps everything under
+`target/corpus/<run>/`; `corpus/FINDINGS.md` is the ledger of what it found.
 
 Driving jrs against a Java project:
 

@@ -76,9 +76,13 @@ project says nothing about a Spring Boot suite.
 
 ## 3. The corpus
 
-The projects of [ROADMAP §1](../ROADMAP.md#1-hardening-against-real-projects)
-that already pass `jrs test` with the usual layout — the measurement means
-nothing on a project that does not. At least:
+The projects of the real-project corpus
+([CORPUS.md](todo/CORPUS.md), listed in
+[`corpus/corpus.toml`](../corpus/corpus.toml)) whose `test` cell is `ok` —
+they pass `jrs test` with the usual layout, and the measurement means nothing
+on a project that does not. A project is copied out of a corpus run's
+`target/corpus/<run>/<name>/clone/` and given to `JRS_BENCH_PROJECT`. At
+least:
 
 - **Spring Boot on Maven and on Gradle**, `spring-petclinic` first: one
   `@SpringBootTest` context, many slices, `META-INF/spring/*.imports` on the
@@ -92,7 +96,7 @@ nothing on a project that does not. At least:
   database driver loaded through `ServiceLoader`.
 - **A plain library** with JUnit alone, as the floor.
 
-Each project is pinned to the commit the corpus pins, and run on the JDKs
+Each project is at the commit `corpus.toml` pins, and run on the JDKs
 jrs supports that CI installs: 17 and 21 (archive only; `aot` falls back) and
 25 (both).
 

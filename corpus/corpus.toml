@@ -1,0 +1,166 @@
+# The real-project corpus (specs/todo/CORPUS.md): what `cargo bench --bench
+# corpus` takes through `jrs migrate`, `build`, `test`, `run` and `package`,
+# and checks against the project's own Maven or Gradle build. jrs never reads
+# this file.
+#
+#   name     the row in the report, and the directory under target/corpus/<run>/
+#   repo     cloned at `commit`, always a full hash: moving a pin is a commit of
+#            its own, with the outcome before and after in its message
+#   dir      where the build file is, inside the clone
+#   build    "maven" or "gradle": what `jrs migrate --from` gets, and the reference
+#   kind     spring-boot | ktor | service | workspace
+#   jdk      the oldest release it is run on; an older host JDK skips the project
+#   run      how to tell the application started: `probe` (a URL) and `expect`
+#            (the status), or `stdout` (a substring of its output); none skips
+#            `run`. `package` says the same of `java -jar` on the fat jar
+#   member   in a workspace, the member `run` and `package` start
+#   needs    what the host must have; today only "docker". Without it the tests
+#            are skipped on both sides, and `test` is `skip`
+#   known    a step's failure that FINDINGS.md explains: `{ test = 9 }` prints
+#            F9 instead of FAIL. Removed when the finding is closed
+#   exclude  test classes left out of the comparison on both sides, each with
+#            a reason in FINDINGS.md
+
+# Spring Boot, Java, Maven
+
+[[project]]
+name = "petclinic-maven"
+repo = "https://github.com/spring-projects/spring-petclinic"
+commit = "500158f732419217507c7656904b8e6aa1bcc0d6"
+dir = "."
+build = "maven"
+kind = "spring-boot"
+jdk = 17
+run = { probe = "http://localhost:8080/", expect = 200 }
+package = { fat = true, probe = "http://localhost:8080/", expect = 200 }
+needs = ["docker"]
+known = { build = 6 }
+
+[[project]]
+name = "rest-service-maven"
+repo = "https://github.com/spring-guides/gs-rest-service"
+commit = "3f4cef01152596c19bc4d37939409358812b1421"
+dir = "complete"
+build = "maven"
+kind = "spring-boot"
+jdk = 17
+run = { probe = "http://localhost:8080/greeting", expect = 200 }
+package = { fat = true, probe = "http://localhost:8080/greeting", expect = 200 }
+
+[[project]]
+name = "data-jpa-maven"
+repo = "https://github.com/spring-guides/gs-accessing-data-jpa"
+commit = "ef48947528dba9021776282e12299e5298e66bca"
+dir = "complete"
+build = "maven"
+kind = "spring-boot"
+jdk = 17
+run = { stdout = "Customers found with findAll()" }
+package = { fat = true, stdout = "Customers found with findAll()" }
+
+# Spring Boot, Java, Gradle: the same projects from their build.gradle
+
+[[project]]
+name = "petclinic-gradle"
+repo = "https://github.com/spring-projects/spring-petclinic"
+commit = "500158f732419217507c7656904b8e6aa1bcc0d6"
+dir = "."
+build = "gradle"
+kind = "spring-boot"
+jdk = 17
+run = { probe = "http://localhost:8080/", expect = 200 }
+package = { fat = true, probe = "http://localhost:8080/", expect = 200 }
+needs = ["docker"]
+known = { build = 7 }
+
+[[project]]
+name = "rest-service-gradle"
+repo = "https://github.com/spring-guides/gs-rest-service"
+commit = "3f4cef01152596c19bc4d37939409358812b1421"
+dir = "complete"
+build = "gradle"
+kind = "spring-boot"
+jdk = 17
+run = { probe = "http://localhost:8080/greeting", expect = 200 }
+package = { fat = true, probe = "http://localhost:8080/greeting", expect = 200 }
+
+[[project]]
+name = "data-jpa-gradle"
+repo = "https://github.com/spring-guides/gs-accessing-data-jpa"
+commit = "ef48947528dba9021776282e12299e5298e66bca"
+dir = "complete"
+build = "gradle"
+kind = "spring-boot"
+jdk = 17
+run = { stdout = "Customers found with findAll()" }
+package = { fat = true, stdout = "Customers found with findAll()" }
+
+# Spring Boot, Kotlin
+
+[[project]]
+name = "petclinic-kotlin"
+repo = "https://github.com/spring-petclinic/spring-petclinic-kotlin"
+commit = "c77f77ba5d43c2dbff7fa777c40be1d7ec321e40"
+dir = "."
+build = "gradle"
+kind = "spring-boot"
+jdk = 17
+run = { probe = "http://localhost:8080/", expect = 200 }
+package = { fat = true, probe = "http://localhost:8080/", expect = 200 }
+known = { build = 5 }
+
+# Ktor: two standalone builds of ktorio/ktor-samples, one with
+# kotlinx.serialization and one without
+
+[[project]]
+name = "ktor-serialization"
+repo = "https://github.com/ktorio/ktor-samples"
+commit = "1c9df7cf102d638eadaf545fcce4c0ec5ccad334"
+dir = "httpbin"
+build = "gradle"
+kind = "ktor"
+jdk = 17
+run = { probe = "http://localhost:8080/get", expect = 200 }
+package = { fat = true, probe = "http://localhost:8080/get", expect = 200 }
+known = { build = 8 }
+
+[[project]]
+name = "ktor-h2"
+repo = "https://github.com/ktorio/ktor-samples"
+commit = "1c9df7cf102d638eadaf545fcce4c0ec5ccad334"
+dir = "h2"
+build = "gradle"
+kind = "ktor"
+jdk = 17
+run = { probe = "http://localhost:8080/", expect = 200 }
+package = { fat = true, probe = "http://localhost:8080/", expect = 200 }
+known = { build = 8 }
+
+# A mid-sized service: a few dozen dependencies, MapStruct, Spring Security,
+# OpenAPI generation, H2 and PostgreSQL drivers
+
+[[project]]
+name = "service-rest"
+repo = "https://github.com/spring-petclinic/spring-petclinic-rest"
+commit = "afc8fc1d3b8ec8de69414482b3bd70a1da78cb95"
+dir = "."
+build = "maven"
+kind = "service"
+jdk = 17
+run = { probe = "http://localhost:9966/petclinic/api/vets", expect = 200 }
+package = { fat = true, probe = "http://localhost:9966/petclinic/api/vets", expect = 200 }
+known = { build = 10 }
+
+# Multi-module: a Maven aggregator, for workspaces. Its services need a
+# config server and a registry to start, so `run` and `package` are not
+# probed.
+
+[[project]]
+name = "microservices"
+repo = "https://github.com/spring-petclinic/spring-petclinic-microservices"
+commit = "1d76b00d683e86b62867a6bf59530f8ab301244f"
+dir = "."
+build = "maven"
+kind = "workspace"
+jdk = 17
+known = { build = 11 }

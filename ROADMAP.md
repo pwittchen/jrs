@@ -36,6 +36,11 @@ failure is fixed with a regression test, added as a migration rule, or cited
 as a non-goal. The measure is how often `jrs migrate` works on the first
 try, published as a compatibility table in `DOCS.md` and on the website.
 
+The harness, the list and the ledger have landed (`cargo bench --bench
+corpus`, [`corpus/`](corpus/)). The first run took 4 of 11 projects end to
+end; the other seven stop at `build` on six findings, five of them migration
+gaps ([corpus/FINDINGS.md](corpus/FINDINGS.md)).
+
 ## 2. Benchmarks against Maven and Gradle
 
 [specs/todo/BENCHMARKS.md](specs/todo/BENCHMARKS.md)

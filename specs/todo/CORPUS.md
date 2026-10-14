@@ -6,8 +6,11 @@ takes each one through `jrs migrate`, `build`, `test`, `run` and `package`
 and checks the result against the project's own Maven or Gradle build, and
 the rules for what happens to every failure it finds.
 
-Status: **proposed**. Nothing here changes how jrs builds; the harness is a
-new `[[bench]]` and adds no crate. The first pass of
+Status: **harness landed, findings open**. `benches/corpus.rs`,
+`corpus/corpus.toml`, `corpus/FINDINGS.md` and `.github/workflows/corpus.yml`
+exist, and the first run is in `DOCS.md`'s Compatibility section; §9's
+criteria are not met yet. Nothing here changes how jrs builds; the harness
+is a new `[[bench]]` and adds no crate. The first pass of
 [TEST_JVM_BENCHMARK.md §7](../TEST_JVM_BENCHMARK.md#7-results-first-pass)
 already ran jrs on three petclinics and found five things; this document
 turns that one-off into something that runs on every release and keeps
@@ -84,7 +87,13 @@ needs = ["docker"]                # steps that need it are skipped, not failed, 
   for a command-line program. A project without one has `run` skipped.
 - **`needs`** names what the host must have; today only `docker`, for
   Testcontainers. A missing need is a `skip`, so a laptop without Docker
-  still gets a table.
+  still gets a table: the tests are skipped on both sides (the reference
+  runs with `-DskipTests` or without `test`), and `test` shows `skip`.
+- **`member`**, in a workspace, names the member `run` and `package`
+  start (`jrs -p <member>`).
+- **`exclude`** lists test classes left out of the comparison on both
+  sides, each with its reason in `FINDINGS.md` (§4.2).
+- **`jdk`**: a host JDK older than it skips the whole row.
 
 ## 3. The harness
 
@@ -124,8 +133,11 @@ For each project, in order, each step timed and its full output logged:
 | `package` | `jrs package --fat`, then `java -jar` on it, then the probe | as for `run` |
 
 The reference runs first and in a copy of the clone, so its `target/` or
-`build/` cannot leak into jrs's. A step after a failed one is not run, and
-its cell says so (`·`). `run` and `package` kill what they started, its
+`build/` cannot leak into jrs's. A step after one whose command failed is
+not run, and its cell says so (`·`). A step whose command succeeded but
+whose comparison with the reference does not hold (§4) fails its cell and
+lets the next step run: a classpath difference says nothing of whether the
+tests pass. `run` and `package` kill what they started, its
 whole process group, on every path out.
 
 Nothing is edited by hand between steps. That is the point: the outcome is
@@ -188,19 +200,23 @@ At the end the harness prints, and writes to `target/corpus/<run>/REPORT.md`:
 ```text
 jrs corpus — jrs 0.11.0 (abc1234), JDK 25.0.2, macOS 27.0.1, 2026-10-20
 
-project              build   migrate  build      test        run   package  time
-petclinic-maven      maven   ok       ok         ok 81/81    ok    ok       3m12s
-petclinic-gradle     gradle  ok       cp ~4      ok 81/81    ok    ok       3m40s
-petclinic-kotlin     gradle  F5       ·          ·           ·     ·        0m41s
-ktor-serialization   gradle  ok       ok         ok 12/12    ok    skip     1m05s
-service-rest         maven   ok       ok         F9 140/142  ok    ok       4m50s
+project              build   reference  migrate  build      test        run   package  time
+petclinic-maven      maven   ok         ok       ok         ok 81/81    ok    ok       3m12s
+petclinic-gradle     gradle  ok         ok       cp ~4      ok 81/81    ok    ok       3m40s
+petclinic-kotlin     gradle  ok         F5       ·          ·           ·     ·        0m41s
+ktor-serialization   gradle  ok         ok       ok         ok 12/12    ok    skip     1m05s
+service-rest         maven   ok         ok       ok         F9 140/142  ok    ok       4m50s
 
 end to end: 3 of 5; migrate first try: 4 of 5
 ```
 
-A cell is `ok`, `skip` (a missing need), `·` (an earlier step failed), or
+A cell is `ok`, `skip` (a missing need, or no probe), `·` (an earlier
+step's command failed), `-` (a step `JRS_CORPUS_STEPS` left out), or
 `F<n>` naming the finding (§6) the failure belongs to; a failure the
-findings do not explain yet is `FAIL` and the run exits 1. The two headline
+findings do not explain yet is `FAIL` and the run exits 1. A failed
+`reference` is `FAIL` too, and leaves the row out of the headline numbers:
+the list needs fixing, not jrs. A step `known` maps that now passes is `ok`,
+and the report's notes say to close its finding. The two headline
 numbers at the bottom are the measures ROADMAP §1 tracks: **end to end**
 (every step `ok` or `skip`) and **migrate first try** (`migrate` and `build`
 both `ok`). Every step's log and both classpath lists stay under the run's
@@ -246,8 +262,9 @@ which has Docker for Testcontainers:
   for projects without a wrapper;
 - builds jrs in release mode and runs `cargo bench --bench corpus` with
   `JRS_CORPUS` from the input;
-- uploads `target/corpus/` as the run's artifact, and writes `REPORT.md`
-  to the job summary.
+- uploads `target/corpus/` as the run's artifact — the logs, the
+  comparisons and `REPORT.md`, without the clones and the cache — and
+  writes `REPORT.md` to the job summary.
 
 A run on JDK 17 and 21 is a matter of the input; the matrix is not built in
 until a finding shows the JDK matters. `rust.yml`'s `release` job does not
@@ -297,11 +314,13 @@ TEST_JVM_BENCHMARK §3's corpus becomes this one.
 
 ## 11. Open questions
 
-1. **Which Ktor samples, and which mid-sized service?** `ktor-samples` is a
-   Gradle multi-project; whether two of its subprojects can be entries
-   (`dir` pointing into it) or a migrated workspace is the entry, is decided
-   when the list is written. `spring-petclinic-rest` is a candidate for the
-   service, not a decision.
+1. ~~**Which Ktor samples, and which mid-sized service?**~~ Decided with
+   the list: each `ktor-samples` sample is a standalone build with its own
+   wrapper, so two are entries with `dir` pointing into the clone —
+   `httpbin` (kotlinx.serialization) and `h2` (none). The service is
+   `spring-petclinic-rest`: MapStruct, Spring Security, springdoc and
+   OpenAPI Generator, H2 and PostgreSQL. It has no Testcontainers; a service
+   that does is still wanted.
 2. **Is the reference's test run worth its time?** It doubles each
    project's minutes. Recording the reference counts in `corpus.toml` at
    pin time and only re-running the reference with `JRS_CORPUS_REFERENCE=1`
