@@ -317,7 +317,7 @@ fn setting(statement: &str) -> Option<(&str, &str)> {
 
 /// `mapOf("a" to "b", "c" to "")` or Groovy's `["a": "b"]`: its pairs, when
 /// every key and value is a literal (`true` and numbers count).
-fn map_pairs(value: &str) -> Option<Vec<(String, String)>> {
+pub(super) fn map_pairs(value: &str) -> Option<Vec<(String, String)>> {
     let value = value.trim();
     let inner = if let Some(rest) = value
         .strip_prefix("mapOf")
@@ -338,7 +338,13 @@ fn map_pairs(value: &str) -> Option<Vec<(String, String)>> {
             continue;
         }
         let (key, value) = split_pair(entry)?;
-        pairs.push((scalar(key)?, scalar(value)?));
+        // Groovy reads a bare key as a string: `[suppressions: 'x']`.
+        let key = scalar(key).or_else(|| {
+            let key = key.trim();
+            (!key.is_empty() && key.chars().all(|c| c.is_alphanumeric() || c == '_'))
+                .then(|| key.to_string())
+        })?;
+        pairs.push((key, scalar(value)?));
     }
     Some(pairs)
 }
@@ -378,8 +384,8 @@ pub(super) const OPENAPI_PLUGIN: &str = "org.openapi.generator";
 
 /// The command-line tool the plugin runs, from Maven Central, and its entry
 /// point.
-const OPENAPI_CLI: (&str, &str) = ("org.openapitools", "openapi-generator-cli");
-const OPENAPI_MAIN: &str = "org.openapitools.codegen.OpenAPIGenerator";
+pub(super) const OPENAPI_CLI: (&str, &str) = ("org.openapitools", "openapi-generator-cli");
+pub(super) const OPENAPI_MAIN: &str = "org.openapitools.codegen.OpenAPIGenerator";
 
 /// `openApiGenerate { }` settings that name a file or directory.
 const OPENAPI_PATHS: &[(&str, &str)] = &[
@@ -391,7 +397,7 @@ const OPENAPI_PATHS: &[(&str, &str)] = &[
 ];
 
 /// Settings that are one string, and the CLI's option for each.
-const OPENAPI_STRINGS: &[(&str, &str)] = &[
+pub(super) const OPENAPI_STRINGS: &[(&str, &str)] = &[
     ("generatorName", "-g"),
     ("modelPackage", "--model-package"),
     ("apiPackage", "--api-package"),
@@ -413,7 +419,7 @@ const OPENAPI_STRINGS: &[(&str, &str)] = &[
 ];
 
 /// Settings that are a map, written `k=v,k=v`.
-const OPENAPI_MAPS: &[(&str, &str)] = &[
+pub(super) const OPENAPI_MAPS: &[(&str, &str)] = &[
     ("globalProperties", "--global-property"),
     ("configOptions", "--additional-properties"),
     ("additionalProperties", "--additional-properties"),
@@ -430,7 +436,7 @@ const OPENAPI_MAPS: &[(&str, &str)] = &[
 ];
 
 /// Settings that are a switch, set to `true`.
-const OPENAPI_SWITCHES: &[(&str, &str)] = &[
+pub(super) const OPENAPI_SWITCHES: &[(&str, &str)] = &[
     ("skipValidateSpec", "--skip-validate-spec"),
     ("removeOperationIdPrefix", "--remove-operation-id-prefix"),
     ("skipOverwrite", "--skip-overwrite"),

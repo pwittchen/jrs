@@ -127,9 +127,14 @@ impl Variables {
         // The headers of the blocks the scan is inside, outermost first.
         let mut blocks: Vec<String> = Vec::new();
         for piece in pieces(script) {
-            let guarded = !blocks
-                .iter()
-                .all(|b| compact(b) == "buildscript" || is_ext_block(b));
+            // Gradle runs the top-level `plugins { }` once, unconditionally,
+            // as it does `buildscript { }`; a `plugins { }` anywhere else is
+            // inside something jrs does not run.
+            let top_level_plugins = matches!(blocks.as_slice(), [b] if compact(b) == "plugins");
+            let guarded = !top_level_plugins
+                && !blocks
+                    .iter()
+                    .all(|b| compact(b) == "buildscript" || is_ext_block(b));
             let in_ext = blocks.last().is_some_and(|b| is_ext_block(b));
             match piece {
                 Piece::Open(header) => {
@@ -360,6 +365,15 @@ impl Variables {
     pub(super) fn used_by_dependency(&mut self, names: &[String]) {
         for name in names {
             self.uses.entry(name.clone()).or_default().dependencies += 1;
+            self.follow(name);
+        }
+    }
+
+    /// Note that a JVM argument took a value from each of `names`: it is
+    /// used, but the argument is written out whole, so there is nothing to
+    /// review.
+    pub(super) fn used_by_argument(&mut self, names: &[String]) {
+        for name in names {
             self.follow(name);
         }
     }
@@ -1140,6 +1154,17 @@ mod tests {
             assert!(error.contains(why), "{name}: {error}");
         }
         assert_eq!(value(&vars, "alias").as_deref(), Ok("a"));
+    }
+
+    #[test]
+    fn a_val_in_the_top_level_plugins_block_is_read() {
+        let vars = kotlin(
+            "plugins {\n  val kotlinVersion = \"2.4.20\"\n  kotlin(\"jvm\") version kotlinVersion\n}\n\
+             subprojects {\n  plugins {\n    val nested = \"1.0\"\n  }\n}\n",
+        );
+        assert_eq!(value(&vars, "kotlinVersion").as_deref(), Ok("2.4.20"));
+        let error = value(&vars, "nested").unwrap_err();
+        assert!(error.contains("inside a conditional"), "{error}");
     }
 
     #[test]

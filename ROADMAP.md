@@ -38,9 +38,14 @@ try, published as a compatibility table in `DOCS.md` and on the website.
 
 The harness, the list and the ledger have landed (`cargo bench --bench
 corpus`, [`corpus/`](corpus/)). The first run took 4 of 11 projects end to
-end; the other seven stop at `build` on six findings, five of them migration
-gaps ([corpus/FINDINGS.md](corpus/FINDINGS.md)); the plan for them is
-[specs/todo/CORPUS_FIXES.md](specs/todo/CORPUS_FIXES.md).
+end; the other seven stopped at `build` on six findings, five of them
+migration gaps. The plan for those,
+[specs/CORPUS_FIXES.md](specs/CORPUS_FIXES.md), is **done**: it closed
+them, and 10 of 11 now get past `build`. What keeps six of them from `ok`
+is findings 12–19 in
+[corpus/FINDINGS.md](corpus/FINDINGS.md): a BOM's exclusions, a dependency's
+OS profiles, two more migration gaps, and differences from Gradle's
+resolution that are non-goals.
 
 ## 2. Benchmarks against Maven and Gradle
 

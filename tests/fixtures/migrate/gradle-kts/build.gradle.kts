@@ -8,6 +8,9 @@ plugins {
 group = "com.example"
 version = "2.1.0"
 
+val heap = "1g"
+val isDevelopment: Boolean = project.ext.has("development")
+
 java {
     toolchain {
         languageVersion = JavaLanguageVersion.of(17)
@@ -32,7 +35,7 @@ dependencies {
 
 application {
     mainClass.set("com.example.App")
-    applicationDefaultJvmArgs = listOf("-Xmx1g", "-Dapp.mode=prod")
+    applicationDefaultJvmArgs = listOf("-Xmx$heap", "-Dapp.mode=prod", "-Dio.ktor.development=$isDevelopment")
 }
 
 tasks.test {

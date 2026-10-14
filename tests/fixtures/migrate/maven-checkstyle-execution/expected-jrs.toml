@@ -1,0 +1,19 @@
+[project]
+name = "checked"
+version = "1.0.0"
+
+[java]
+source = 17
+
+[tasks.checkstyle]
+description = "Check the Java sources with Checkstyle (src/checkstyle/nohttp-checkstyle.xml)"
+main = "com.puppycrawl.tools.checkstyle.Main"
+args = ["-c", "src/checkstyle/nohttp-checkstyle.xml", "-x", "^\\Q{root}\\E(?:[/\\\\][^/\\\\]*)*[/\\\\]\\.git(?:[/\\\\].*)?$", "-x", "^\\Q{root}\\E(?:[/\\\\][^/\\\\]*)*[/\\\\]target(?:[/\\\\].*)?$", "-x", "^\\Q{root}\\E(?:[/\\\\][^/\\\\]*)*[/\\\\][^/\\\\]*\\.class$", "{root}"]
+env = { "JAVA_TOOL_OPTIONS" = "-Dconfig_loc=src/checkstyle/" }
+
+[tasks.checkstyle.dependencies]
+"com.puppycrawl.tools:checkstyle" = "12.3.1"
+"io.spring.nohttp:nohttp-checkstyle" = "0.0.11"
+
+[hooks]
+post-compile = ["checkstyle"]

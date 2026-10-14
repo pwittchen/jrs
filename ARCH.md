@@ -130,10 +130,12 @@ src/
 ├── migrate/
 │   ├── mod.rs         detection, report, manifest emission
 │   ├── maven.rs       pom.xml → Manifest (reuses resolve::pom); exec-maven-plugin → [tasks]
+│   ├── maven_openapi.rs  openapi-generator-maven-plugin → a pre-compile task
 │   ├── maven_profiles.rs  the <profiles> a plain `mvn` build activates, merged in
 │   ├── workspace.rs   <modules> / settings.gradle include → a root and a manifest
 │   │                  per member; siblings as paths; shared keys hoisted
-│   ├── checks.rs      formatter and checker plugins → crate::checkers tasks
+│   ├── checks.rs      formatter and checker plugins → crate::checkers tasks;
+│   │                  Ant excludes → Checkstyle -x patterns
 │   ├── gradle.rs      build.gradle[.kts] → Manifest (pattern extraction)
 │   ├── gradle_files.rs  files() / fileTree() → local jars, literal ones only
 │   ├── gradle_generated.rs  openApiGenerate, sourceSets srcDirs, tasks left to ./gradlew

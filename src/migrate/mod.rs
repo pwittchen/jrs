@@ -13,6 +13,7 @@ mod gradle_repos;
 mod gradle_tasks;
 mod gradle_vars;
 pub mod maven;
+mod maven_openapi;
 mod maven_profiles;
 pub mod workspace;
 

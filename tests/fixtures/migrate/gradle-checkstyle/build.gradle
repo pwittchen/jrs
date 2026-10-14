@@ -1,0 +1,36 @@
+// The checkstyle plugin as spring-petclinic configures it: a configuration
+// directory, which Gradle exposes as `config_loc`, a configuration file in
+// it, a property of its own, and a second jar on the `checkstyle`
+// configuration beside Checkstyle's own; nohttp's plugin adds its check.
+plugins {
+  id 'java'
+  id 'checkstyle'
+  id "io.spring.nohttp" version "0.0.11"
+}
+
+group = 'com.example'
+version = '1.0.0'
+
+java {
+  toolchain {
+    languageVersion = JavaLanguageVersion.of(17)
+  }
+}
+
+repositories {
+  mavenCentral()
+}
+
+ext.checkstyleVersion = "12.3.1"
+ext.springJavaformatCheckstyleVersion = "0.0.47"
+
+dependencies {
+  checkstyle "io.spring.javaformat:spring-javaformat-checkstyle:${springJavaformatCheckstyleVersion}"
+  checkstyle "com.puppycrawl.tools:checkstyle:${checkstyleVersion}"
+}
+
+checkstyle {
+  configDirectory = project.file('src/checkstyle')
+  configFile = file('src/checkstyle/nohttp-checkstyle.xml')
+  configProperties = [suppressions: 'nohttp-checkstyle-suppressions.xml']
+}

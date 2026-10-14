@@ -1547,7 +1547,9 @@ uses it. That covers `ext`, `def`, the Kotlin DSL's `val` and `extra`, and
 map notation's `version: v`, in platforms, `mavenBom`, `constraints { }` and
 Spring Boot's plugin. A review line names the variable, since the manifest no
 longer shows those versions moving together. Only a variable assigned once,
-to a literal and outside a conditional, is used. What uses any other is
+to a literal and outside a conditional, is used; a `val` at the top of
+`plugins { }` counts, since Gradle runs that block once, so
+`kotlin("jvm") version kotlinVersion` reads. What uses any other is
 reported with the variable's name, never migrated without its version.
 
 Gradle tasks that say everything in literals become `[tasks]`: an `Exec` task
@@ -1583,7 +1585,10 @@ build's literal `group` and `description`. An `expand` given a map carries its
 entries over. `filter` and the rest of `ProcessResources` are reported.
 `options.compilerArgs` in `compileJava { }` or `tasks.withType(JavaCompile)`
 joins `java.javac-args`, and `jvmArgs` in `bootRun { }` or
-`tasks.withType(JavaExec)` joins `run.jvm-args`. A `version` Gradle computes,
+`tasks.withType(JavaExec)` joins `run.jvm-args`. A `$name` or `${...}` in a
+JVM argument takes the variable's value; one jrs cannot read — Ktor's
+`-Dio.ktor.development=$isDevelopment` — leaves the argument out, reported,
+rather than handing the JVM the template. A `version` Gradle computes,
 from a property or a git tag, is reported and defaulted, since it has no value
 until Gradle runs.
 
@@ -1619,7 +1624,9 @@ start.spring.io generates it, migrates whole. The Boot plugin with
 becomes Boot's BOM, so the starters stay versionless. `-parameters`, which
 Boot compiles with, goes into `javac-args`, and the `@SpringBootApplication`
 class becomes the main class. `jrs package --fat` then builds the runnable
-jar, a flat one with Spring's registries merged.
+jar, a flat one with Spring's registries merged. The Ktor Gradle plugin
+(`io.ktor.plugin`) becomes `io.ktor:ktor-bom` at the plugin's version, so
+the versionless Ktor dependencies, test ones included, stay versionless.
 
 Maven's `exec-maven-plugin` executions become tasks, and their `<phase>` a
 hook: `exec` a `run` command, and `java` a `java` command over jrs's
@@ -1632,7 +1639,17 @@ task, with the version and style the build names; Gradle's `checkstyle`, `pmd`
 and `com.github.spotbugs` plugins and Maven's `maven-checkstyle-plugin`,
 `maven-pmd-plugin` and `spotbugs-maven-plugin` a `checkstyle`, `pmd` or
 `spotbugs` task, with the tool version, configuration file and rule sets they
-set. Spotless's other steps are reported. The CycloneDX plugins point at
+set. Checkstyle's task gets what the build gives Checkstyle besides: the
+plugin's other `<dependencies>` and the Gradle `checkstyle` configuration's
+jars, where a configuration's custom checks come from (and nohttp's, when its
+Gradle plugin is applied); Maven's `<propertyExpansion>`, Gradle's
+`configProperties` and the `config_loc` Gradle sets, as system properties in
+`JAVA_TOOL_OPTIONS`, since Checkstyle's command line takes none; and a
+`maven-checkstyle-plugin` `<execution>`'s own configuration, one task per
+execution that has one. Its `<sourceDirectories>` become the task's
+directories and its Ant `<excludes>` Checkstyle's `-x` patterns, anchored at
+the project root; an `<includes>` or exclusion that does not translate is
+reported, not narrowed. Spotless's other steps are reported. The CycloneDX plugins point at
 `jrs package --sbom`, and a licence report plugin at `jrs licenses`.
 `os-maven-plugin`'s `${os.detected.classifier}` and the osdetector plugin's
 classifier become `{os-classifier}`.
@@ -1671,7 +1688,11 @@ tests start, `nextInt(8100, 8999)` in something named a port, becomes
 Code generation migrates with the task that does it. The OpenAPI Generator
 plugin's `openApiGenerate { }` becomes a `main` task over the generator's
 command-line tool, at the plugin's version, with each setting as the tool's
-option. A task of the build's own that the compile or the tests depend on,
+option. So does each `<execution>` of `openapi-generator-maven-plugin`, as a
+`pre-compile` task writing where the plugin does,
+`target/generated-sources/openapi`, whose `src/main/java` is its
+`source-outputs`; `build-helper-maven-plugin` adding that directory is then
+covered. A task of the build's own that the compile or the tests depend on,
 and that is Gradle code — a `doLast { }` — is left to Gradle when the
 project has the wrapper: one `[tasks.gradle]` runs `./gradlew` over all of
 them before the compile, with the `inputs` and `outputs` they declare, and
@@ -1697,31 +1718,42 @@ JDK 25.0.2 and macOS 27.0.1; a step after a failed one did not run (`·`).
 | `spring-guides/gs-accessing-data-jpa` | Maven | Spring Boot | `ef48947` | ok | ok | ok 1/1 | ok | ok |
 | `spring-guides/gs-rest-service` | Gradle | Spring Boot | `3f4cef0` | ok | ok | ok 2/2 | ok | ok |
 | `spring-guides/gs-accessing-data-jpa` | Gradle | Spring Boot | `ef48947` | ok | ok | ok 1/1 | ok | ok |
-| `spring-projects/spring-petclinic` | Maven | Spring Boot | `500158f` | ok | [F6](corpus/FINDINGS.md#6-maven-checkstyle-the-executions-configuration-is-not-read) | · | · | · |
-| `spring-projects/spring-petclinic` | Gradle | Spring Boot | `500158f` | ok | [F7](corpus/FINDINGS.md#7-gradle-checkstyle-config_loc-and-the-checkers-own-dependencies) | · | · | · |
-| `spring-petclinic/spring-petclinic-kotlin` | Gradle | Spring Boot, Kotlin | `c77f77b` | ok | [F5](corpus/FINDINGS.md#5-a-kotlin-plugin-version-from-a-val-in-plugins---and-the-kotlin-springbootapplication) | · | · | · |
-| `ktorio/ktor-samples`, `httpbin` | Gradle | Ktor | `1c9df7c` | ok | [F8](corpus/FINDINGS.md#8-the-ktor-gradle-plugins-bom) | · | · | · |
-| `ktorio/ktor-samples`, `h2` | Gradle | Ktor | `1c9df7c` | ok | [F8](corpus/FINDINGS.md#8-the-ktor-gradle-plugins-bom) | · | · | · |
-| `spring-petclinic/spring-petclinic-rest` | Maven | service | `afc8fc1` | ok | [F10](corpus/FINDINGS.md#10-openapi-generators-sources) | · | · | · |
+| `spring-projects/spring-petclinic` | Maven | Spring Boot | `500158f` | ok | [F13](corpus/FINDINGS.md#13-a-boms-exclusions-on-a-managed-dependency-are-not-applied) | ok 81/81 | ok | ok |
+| `spring-projects/spring-petclinic` | Gradle | Spring Boot | `500158f` | ok | [F13](corpus/FINDINGS.md#13-a-boms-exclusions-on-a-managed-dependency-are-not-applied) | ok 81/81 | ok | ok |
+| `spring-petclinic/spring-petclinic-kotlin` | Gradle | Spring Boot, Kotlin | `c77f77b` | ok | [F17](corpus/FINDINGS.md#17-a-versionless-orgjetbrainskotlin-library-takes-the-kotlin-plugins-version) | ok 41/41 | ok | ok |
+| `ktorio/ktor-samples`, `httpbin` | Gradle | Ktor | `1c9df7c` | ok | [F14](corpus/FINDINGS.md#14-a-profile-a-dependencys-pom-activates-by-os) | [F14](corpus/FINDINGS.md#14-a-profile-a-dependencys-pom-activates-by-os) 166/167 | ok | ok |
+| `ktorio/ktor-samples`, `h2` | Gradle | Ktor | `1c9df7c` | ok | ok | ok 4/4 | [F19](corpus/FINDINGS.md#19-ktor-h2-names-a-module-function-that-does-not-exist) | [F19](corpus/FINDINGS.md#19-ktor-h2-names-a-module-function-that-does-not-exist) |
+| `spring-petclinic/spring-petclinic-rest` | Maven | service | `afc8fc1` | ok | [F13](corpus/FINDINGS.md#13-a-boms-exclusions-on-a-managed-dependency-are-not-applied) | [F12](corpus/FINDINGS.md#12-maven-the-compiler-plugins-execution-configuration-is-not-read) 5/237 | [F12](corpus/FINDINGS.md#12-maven-the-compiler-plugins-execution-configuration-is-not-read) | [F12](corpus/FINDINGS.md#12-maven-the-compiler-plugins-execution-configuration-is-not-read) |
 | `spring-petclinic/spring-petclinic-microservices` | Maven | workspace | `1d76b00` | ok | [F11](corpus/FINDINGS.md#11-a-version-range-in-a-transitive-pom) | · | · | · |
 
-End to end: 4 of 11. Where a migrated project builds, its runtime classpath
-matches the reference's jar for jar and version for version, and the same
-tests pass. Why the others stop:
+End to end: 4 of 11, and 10 of 11 get past `jrs build`; what stops the
+other six there is a classpath difference, a failing test or start, or the
+project itself. Where
+a migrated project builds, its runtime classpath matches the reference's
+except as the findings say, and petclinic's 81 tests, its Testcontainers
+suite among them, pass on all three. Why the others are not `ok`:
 
-- **F6, F7** — petclinic's Checkstyle check becomes a post-compile task, but
-  not with petclinic's configuration: from the `pom.xml` the execution's
-  `configLocation` is not read and `sun_checks` fails the build; from
-  `build.gradle` the `config_loc` property Gradle sets is missing.
-- **F5** — the Kotlin plugin's version is a `val` inside `plugins { }`, so
-  no `[kotlin]` table is written and the Kotlin sources do not compile.
-- **F8** — the Ktor Gradle plugin manages every `io.ktor` version through
-  its BOM; migration does not write it to `[managed]`, so the versionless
-  Ktor dependencies are dropped.
-- **F10** — the DTOs come from `openapi-generator-maven-plugin`, which is
-  not translated into a task.
+- **F13** — Spring Boot's BOM excludes `protobuf-java` from
+  `mysql-connector-j`; jrs takes a managed entry's version and not its
+  exclusions, so the jar is on the classpath. petclinic's devtools, which
+  jrs.toml has no scope for, is missing besides
+  ([F18](corpus/FINDINGS.md#18-spring-boot-devtools)).
+- **F17** — petclinic-kotlin's versionless `kotlin-reflect` takes Spring
+  Boot's version, where the Kotlin plugin gives it its own; JUnit's
+  `apiguardian-api` and devtools differ too (F16, F18).
+- **F14** — brotli4j adds its native jar through a profile its POM
+  activates by OS, which jrs does not read, so the Brotli test fails.
+- **F12** — spring-petclinic-rest configures MapStruct in the compiler
+  plugin's `default-compile` execution, which migration does not read, so
+  the mappers are not Spring beans.
+- **F19** — the sample's `application.conf` names a module function that
+  does not exist; its own `./gradlew run` fails the same way.
 - **F11** — a webjar's POM asks for a version range, which jrs rejects
-  ([`[managed]`](#managed) pins one by hand).
+  ([`[managed]`](#managed) pins one by hand, as the error now says).
+
+Gradle resolves the highest version in a graph and jrs the nearest
+([F15](corpus/FINDINGS.md#15-highest-wins-mediation)), so a Gradle project's versions may
+differ where nothing else does; the Ktor samples' do.
 
 ## Development
 

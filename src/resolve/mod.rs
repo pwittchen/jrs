@@ -644,6 +644,13 @@ fn managed_versions_with(manifest: &Manifest, ctx: &Context) -> Result<ManagedVe
     Ok(ManagedVersions { versions })
 }
 
+/// The lowest version a range admits, when it names one it includes:
+/// `6.6.4` for `[6.6.4,7.0.0-0)`.
+fn range_floor(range: &str) -> Option<&str> {
+    let floor = range.strip_prefix('[')?.split([',', ']']).next()?.trim();
+    (!floor.is_empty()).then_some(floor)
+}
+
 /// Give each versionless dependency in `section` its managed version.
 fn with_managed_versions(
     mut dependencies: Vec<Dependency>,
@@ -807,10 +814,14 @@ fn admissible(
         return Ok(None);
     };
     if is_range(version) {
+        // A managed version replaces the range before it is looked at, so a
+        // pin settles it without touching the graph's shape.
+        let pin = range_floor(version).unwrap_or("<version>");
         return Err(JrsError::resolve(format!(
             "`{}` depends on `{ga}` with the version range `{version}`\n\n\
-             jrs resolves exact versions only; exclude the dependency and declare \
-             an exact version in jrs.toml",
+             jrs resolves exact versions only; pin one in [managed] \
+             (\"{ga}\" = \"{pin}\"), or exclude the dependency and declare \
+             an exact version",
             eff.coord
         )));
     }
@@ -1731,6 +1742,24 @@ mod tests {
         let m = repo.manifest("[dependencies]\n'g:a'='1.0'");
         let err = resolve(&m, &repo.fetcher(), 4).unwrap_err().to_string();
         assert!(err.contains("version range"), "{err}");
+        assert!(
+            err.contains("pin one in [managed] (\"g:b\" = \"1.0\"), or exclude"),
+            "{err}"
+        );
+
+        // The pin it suggests is what settles it.
+        repo.publish("g:b:1.5", "");
+        let m = repo.manifest("[managed]\n'g:b'='1.5'\n[dependencies]\n'g:a'='1.0'");
+        let r = resolve(&m, &repo.fetcher(), 4).unwrap();
+        assert_eq!(r.get(&Ga::new("g", "b")).unwrap().coord.version, "1.5");
+    }
+
+    #[test]
+    fn a_range_floor_is_its_included_lower_bound() {
+        assert_eq!(range_floor("[6.6.4,7.0.0-0)"), Some("6.6.4"));
+        assert_eq!(range_floor("[1.0]"), Some("1.0"));
+        assert_eq!(range_floor("(1.0,2.0)"), None);
+        assert_eq!(range_floor("[,2.0)"), None);
     }
 
     #[test]

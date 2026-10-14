@@ -1,0 +1,20 @@
+[project]
+name = "ktor-sample"
+version = "0.0.1"
+main-class = "io.ktor.samples.ApplicationKt"
+
+[kotlin]
+version = "2.2.0"
+
+[managed]
+"io.ktor:ktor-bom" = { version = "3.2.3", bom = true }
+
+[dependencies]
+"io.ktor:ktor-server-core" = {}
+"io.ktor:ktor-server-netty" = {}
+"io.ktor:ktor-serialization-kotlinx-json" = "3.2.0"
+"ch.qos.logback:logback-classic" = "1.5.18"
+
+[dev-dependencies]
+"io.ktor:ktor-server-test-host" = {}
+"org.jetbrains.kotlin:kotlin-test-junit5" = "2.2.0"

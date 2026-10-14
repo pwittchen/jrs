@@ -34,7 +34,7 @@ jdk = 17
 run = { probe = "http://localhost:8080/", expect = 200 }
 package = { fat = true, probe = "http://localhost:8080/", expect = 200 }
 needs = ["docker"]
-known = { build = 6 }
+known = { build = 13 }
 
 [[project]]
 name = "rest-service-maven"
@@ -71,7 +71,7 @@ jdk = 17
 run = { probe = "http://localhost:8080/", expect = 200 }
 package = { fat = true, probe = "http://localhost:8080/", expect = 200 }
 needs = ["docker"]
-known = { build = 7 }
+known = { build = 13 }
 
 [[project]]
 name = "rest-service-gradle"
@@ -107,7 +107,7 @@ kind = "spring-boot"
 jdk = 17
 run = { probe = "http://localhost:8080/", expect = 200 }
 package = { fat = true, probe = "http://localhost:8080/", expect = 200 }
-known = { build = 5 }
+known = { build = 17 }
 
 # Ktor: two standalone builds of ktorio/ktor-samples, one with
 # kotlinx.serialization and one without
@@ -122,7 +122,7 @@ kind = "ktor"
 jdk = 17
 run = { probe = "http://localhost:8080/get", expect = 200 }
 package = { fat = true, probe = "http://localhost:8080/get", expect = 200 }
-known = { build = 8 }
+known = { build = 14, test = 14 }
 
 [[project]]
 name = "ktor-h2"
@@ -134,7 +134,7 @@ kind = "ktor"
 jdk = 17
 run = { probe = "http://localhost:8080/", expect = 200 }
 package = { fat = true, probe = "http://localhost:8080/", expect = 200 }
-known = { build = 8 }
+known = { run = 19, package = 19 }
 
 # A mid-sized service: a few dozen dependencies, MapStruct, Spring Security,
 # OpenAPI generation, H2 and PostgreSQL drivers
@@ -149,7 +149,7 @@ kind = "service"
 jdk = 17
 run = { probe = "http://localhost:9966/petclinic/api/vets", expect = 200 }
 package = { fat = true, probe = "http://localhost:9966/petclinic/api/vets", expect = 200 }
-known = { build = 10 }
+known = { build = 13, test = 12, run = 12, package = 12 }
 
 # Multi-module: a Maven aggregator, for workspaces. Its services need a
 # config server and a registry to start, so `run` and `package` are not

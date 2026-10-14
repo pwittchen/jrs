@@ -93,3 +93,83 @@ pub(super) fn add(
         "its jars resolved and pinned by jrs"
     ));
 }
+
+/// An Ant pattern of the paths to leave out (`**/.git/**`, `**/*.class`),
+/// relative to the project root, as a regular expression Checkstyle's `-x`
+/// matches against each file's and directory's absolute path, in template
+/// text. It is anchored at `{root}`: unanchored, `**/target/**` would leave
+/// out every file of a project that is itself under a `target` directory.
+/// A directory pattern matches the directory, so Checkstyle never walks it.
+/// `None` for a pattern that cannot be translated.
+pub(super) fn ant_exclusion(pattern: &str) -> Option<String> {
+    const SEP: &str = r"[/\\]";
+    const NAME: &str = r"[^/\\]";
+    let pattern = pattern.trim().replace('\\', "/");
+    if pattern.is_empty() || pattern.starts_with('/') || pattern.contains('$') {
+        return None;
+    }
+    // Ant reads a trailing `/` as `/**`: the directory and all below it.
+    let (rest, below) = ["/**/*", "/**/", "/**", "/"]
+        .iter()
+        .find_map(|suffix| pattern.strip_suffix(suffix))
+        .map_or((pattern.as_str(), false), |rest| (rest, true));
+    let mut regex = String::new();
+    for segment in rest.split('/') {
+        if segment.is_empty() {
+            return None;
+        }
+        if segment == "**" {
+            for piece in ["(?:", SEP, NAME, "*)*"] {
+                regex.push_str(piece);
+            }
+            continue;
+        }
+        regex.push_str(SEP);
+        for c in segment.chars() {
+            match c {
+                '*' => {
+                    regex.push_str(NAME);
+                    regex.push('*');
+                }
+                '?' => regex.push_str(NAME),
+                c if c.is_alphanumeric() || matches!(c, '_' | '-') => regex.push(c),
+                c => {
+                    regex.push('\\');
+                    regex.push(c);
+                }
+            }
+        }
+    }
+    regex.push_str(if below { r"(?:[/\\].*)?$" } else { "$" });
+    let tail = crate::manifest::Template::literal(&regex).raw;
+    Some(format!(r"^\Q{{root}}\E{tail}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ant_exclusions_become_regexes_anchored_at_the_root() {
+        assert_eq!(
+            ant_exclusion("**/.git/**/*").as_deref(),
+            Some(r"^\Q{root}\E(?:[/\\][^/\\]*)*[/\\]\.git(?:[/\\].*)?$")
+        );
+        assert_eq!(
+            ant_exclusion("**/*.class").as_deref(),
+            Some(r"^\Q{root}\E(?:[/\\][^/\\]*)*[/\\][^/\\]*\.class$")
+        );
+        assert_eq!(
+            ant_exclusion("**/target/**/"),
+            ant_exclusion("**/target/**"),
+            "a trailing slash is `**`"
+        );
+        assert_eq!(
+            ant_exclusion("docs/a?.md").as_deref(),
+            Some(r"^\Q{root}\E[/\\]docs[/\\]a[^/\\]\.md$")
+        );
+        for unreadable in ["", "/abs/**", "${dir}/**", "a//b"] {
+            assert_eq!(ant_exclusion(unreadable), None, "{unreadable}");
+        }
+    }
+}

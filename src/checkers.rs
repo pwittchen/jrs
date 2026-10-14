@@ -113,31 +113,72 @@ pub fn pmd(name: &str, version: &str, dirs: &[String], rulesets: &str) -> Result
     })
 }
 
-/// Checkstyle over `dirs` with `config`: a file, or one of the
-/// configurations Checkstyle carries, `/sun_checks.xml` or
-/// `/google_checks.xml`.
+/// What a build adds to a Checkstyle run beyond its configuration and
+/// directories.
+#[derive(Debug, Clone, Default)]
+pub struct CheckstyleExtras {
+    /// System properties the configuration expands, `${config_loc}` first
+    /// among them: name and value, the value a template's text.
+    pub properties: Vec<(String, String)>,
+    /// Jars beside Checkstyle's own, where a configuration's custom checks
+    /// come from.
+    pub dependencies: Vec<Dependency>,
+    /// Regular expressions, as templates' text, for the paths Checkstyle
+    /// leaves out (`-x`).
+    pub excludes: Vec<String>,
+}
+
+/// Checkstyle over `dirs` with `config`, as task `name`: `config` is a file,
+/// or one of the configurations Checkstyle carries, `/sun_checks.xml` or
+/// `/google_checks.xml`. Its CLI takes no `-D`, but expands `${...}` from
+/// the system properties, so `extras.properties` go in through
+/// `JAVA_TOOL_OPTIONS`.
 ///
 /// # Errors
 ///
-/// [`JrsError::Manifest`] for a directory or configuration that is not a
-/// valid template.
-pub fn checkstyle(version: &str, config: &str, dirs: &[String]) -> Result<Scaffolded> {
+/// [`JrsError::Manifest`] for a directory, configuration or exclusion that is
+/// not a valid template, or a property value with whitespace in it, which
+/// `JAVA_TOOL_OPTIONS` would split.
+pub fn checkstyle(
+    name: &str,
+    version: &str,
+    config: &str,
+    dirs: &[String],
+    extras: &CheckstyleExtras,
+) -> Result<Scaffolded> {
     let mut args = vec!["-c", config];
+    for exclude in &extras.excludes {
+        args.extend(["-x", exclude]);
+    }
     args.extend(dirs.iter().map(String::as_str));
-    Ok(Scaffolded {
-        task: main_task(
-            "checkstyle",
-            format!("Check the Java sources with Checkstyle ({config})"),
-            "com.puppycrawl.tools.checkstyle.Main",
-            templates(&args)?,
-            vec![Dependency::new(
-                "com.puppycrawl.tools",
-                "checkstyle",
-                version,
-            )],
-        ),
-        hooked: true,
-    })
+    let mut dependencies = vec![Dependency::new(
+        "com.puppycrawl.tools",
+        "checkstyle",
+        version,
+    )];
+    dependencies.extend(extras.dependencies.iter().cloned());
+    let mut task = main_task(
+        name,
+        format!("Check the Java sources with Checkstyle ({config})"),
+        "com.puppycrawl.tools.checkstyle.Main",
+        templates(&args)?,
+        dependencies,
+    );
+    if !extras.properties.is_empty() {
+        let mut options = Vec::new();
+        for (key, value) in &extras.properties {
+            if key.contains(char::is_whitespace) || value.contains(char::is_whitespace) {
+                return Err(JrsError::manifest(format!(
+                    "the property `{key}={value}` has whitespace in it, which \
+                     JAVA_TOOL_OPTIONS cannot carry"
+                )));
+            }
+            options.push(format!("-D{key}={value}"));
+        }
+        let options = Template::parse(&options.join(" ")).map_err(JrsError::manifest)?;
+        task.env = vec![("JAVA_TOOL_OPTIONS".to_string(), options)];
+    }
+    Ok(Scaffolded { task, hooked: true })
 }
 
 /// `SpotBugs` over the compiled main classes, with the compile classpath to
@@ -290,7 +331,14 @@ mod tests {
         );
         assert_eq!(pmd.task.dependencies.len(), 2);
 
-        let style = checkstyle("10.0", "/google_checks.xml", &["src/main/java".into()]).unwrap();
+        let style = checkstyle(
+            "checkstyle",
+            "10.0",
+            "/google_checks.xml",
+            &["src/main/java".into()],
+            &CheckstyleExtras::default(),
+        )
+        .unwrap();
         assert_eq!(
             raw(&style.task),
             ["-c", "/google_checks.xml", "src/main/java"]
@@ -299,9 +347,38 @@ mod tests {
             style.task.action,
             Some(Action::Main("com.puppycrawl.tools.checkstyle.Main".into()))
         );
+        assert!(style.task.env.is_empty());
 
         let bugs = spotbugs("4.9.3").unwrap();
         assert!(raw(&bugs.task).contains(&"{classes}".to_string()));
+    }
+
+    #[test]
+    fn checkstyle_carries_properties_jars_and_exclusions() {
+        let extras = CheckstyleExtras {
+            properties: vec![("config_loc".into(), "src/checkstyle".into())],
+            dependencies: vec![Dependency::new(
+                "io.spring.nohttp",
+                "nohttp-checkstyle",
+                "0.0.11",
+            )],
+            excludes: vec!["^\\Q{root}\\E[/\\\\]\\.git".into()],
+        };
+        let style = checkstyle("nohttp", "12.3.1", "c.xml", &["{root}".into()], &extras).unwrap();
+        assert_eq!(style.task.name, "nohttp");
+        assert_eq!(
+            raw(&style.task),
+            ["-c", "c.xml", "-x", "^\\Q{root}\\E[/\\\\]\\.git", "{root}"]
+        );
+        assert_eq!(style.task.dependencies.len(), 2);
+        assert_eq!(style.task.env[0].0, "JAVA_TOOL_OPTIONS");
+        assert_eq!(style.task.env[0].1.raw, "-Dconfig_loc=src/checkstyle");
+
+        let spaced = CheckstyleExtras {
+            properties: vec![("k".into(), "a b".into())],
+            ..CheckstyleExtras::default()
+        };
+        assert!(checkstyle("c", "12.3.1", "c.xml", &[], &spaced).is_err());
     }
 
     #[test]

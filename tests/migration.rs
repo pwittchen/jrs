@@ -158,6 +158,76 @@ fn the_spring_boot_gradle_fixtures_translate_exactly() {
     }
 }
 
+/// The Ktor plugin brings `io.ktor:ktor-bom` at its own version, so the
+/// versionless Ktor dependencies, test ones included, are kept as `{}`; one
+/// written with a version keeps it.
+#[test]
+fn the_ktor_gradle_fixture_translates_exactly() {
+    let (migration, dir) = migrate_fixture("ktor-gradle");
+    assert_eq!(migration.manifest.render(None), expected(&dir));
+    assert!(
+        migration.report.not_migrated.is_empty(),
+        "{:?}",
+        migration.report.not_migrated
+    );
+    let review = migration.report.needs_review.join("\n");
+    assert!(review.contains("`buildFatJar`"), "{review}");
+}
+
+/// maven-checkstyle-plugin configured in an execution, as spring-petclinic
+/// does: its configuration, `<propertyExpansion>`, the plugin's other
+/// dependency and a whole-tree scan with Ant excludes all reach the task.
+#[test]
+fn the_maven_checkstyle_execution_fixture_translates_exactly() {
+    let (migration, dir) = migrate_fixture("maven-checkstyle-execution");
+    assert_eq!(migration.manifest.render(None), expected(&dir));
+    assert!(
+        migration.report.not_migrated.is_empty(),
+        "{:?}",
+        migration.report.not_migrated
+    );
+    let migrated = migration.report.migrated.join("\n");
+    assert!(
+        migrated.contains("execution `nohttp-checkstyle-validation` → Checkstyle task"),
+        "{migrated}"
+    );
+}
+
+/// The checkstyle plugin with a configuration directory, which Gradle
+/// exposes as `config_loc`, `configProperties`, and the `checkstyle`
+/// configuration's jars; nohttp's plugin puts its check beside them.
+#[test]
+fn the_gradle_checkstyle_fixture_translates_exactly() {
+    let (migration, dir) = migrate_fixture("gradle-checkstyle");
+    assert_eq!(migration.manifest.render(None), expected(&dir));
+    let skipped = migration.report.not_migrated.join("\n");
+    assert!(
+        skipped.contains("plugin `io.spring.nohttp` — its `checkstyleNohttp` task"),
+        "{skipped}"
+    );
+    assert!(!skipped.contains("no plugin system"), "{skipped}");
+    assert_eq!(migration.report.not_migrated.len(), 1, "{skipped}");
+}
+
+/// openapi-generator-maven-plugin as spring-petclinic-rest runs it: a
+/// pre-compile task over the generator's CLI, writing where the plugin does,
+/// whose tree `build-helper-maven-plugin` adds and javac then compiles.
+#[test]
+fn the_maven_openapi_fixture_translates_exactly() {
+    let (migration, dir) = migrate_fixture("maven-openapi");
+    assert_eq!(migration.manifest.render(None), expected(&dir));
+    assert!(
+        migration.report.not_migrated.is_empty(),
+        "{:?}",
+        migration.report.not_migrated
+    );
+    let migrated = migration.report.migrated.join("\n");
+    assert!(
+        migrated.contains("plugin build-helper-maven-plugin — its add-source"),
+        "{migrated}"
+    );
+}
+
 /// start.spring.io's Maven build: the starter parent stands for Boot's BOM.
 #[test]
 fn the_spring_boot_maven_fixture_translates_exactly() {
@@ -228,6 +298,14 @@ fn the_gradle_kotlin_fixture_translates_exactly() {
     assert!(
         review.contains("JDK 17 does not accept"),
         "a Java 17 project must not get -proc:full: {review}"
+    );
+    // `$heap` is a literal and resolves; `$isDevelopment` is computed, so its
+    // argument is reported, never copied as a template.
+    let skipped = migration.report.not_migrated.join("\n");
+    assert!(
+        skipped.contains("\"-Dio.ktor.development=$isDevelopment\"")
+            && skipped.contains("the argument was left out"),
+        "{skipped}"
     );
 }
 
@@ -666,6 +744,10 @@ fn every_expected_manifest_is_a_manifest_jrs_can_read() {
         "spring-boot-kts",
         "spring-boot-maven",
         "spring-boot-kotlin",
+        "ktor-gradle",
+        "maven-checkstyle-execution",
+        "gradle-checkstyle",
+        "maven-openapi",
         "maven-exec",
         "maven-profiles",
         "gradle-forks",

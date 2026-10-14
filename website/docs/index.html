@@ -3167,7 +3167,7 @@ jrs migrate                # write jrs.toml; the original build file is untouche
     <tr><td class="wrap">A <code>Test</code> task over another source set (<code>testClassesDirs = sourceSets.e2e.output.classesDirs</code>)</td><td class="wrap"><code>[test.suites.&lt;name&gt;]</code></td></tr>
     <tr><td class="wrap"><code>build</code> / <code>bootJar</code> / <code>bootRun</code> <code>dependsOn</code></td><td class="wrap"><code>hooks.pre-compile</code>, <code>hooks.pre-run</code></td></tr>
     <tr><td class="wrap"><code>jacoco { toolVersion }</code></td><td class="wrap"><code>test.jacoco-version</code></td></tr>
-    <tr><td class="wrap"><code>options.compilerArgs</code> on <code>JavaCompile</code>, <code>jvmArgs</code> on <code>bootRun</code> / <code>JavaExec</code></td><td class="wrap"><code>java.javac-args</code>, <code>run.jvm-args</code>, when literals</td></tr>
+    <tr><td class="wrap"><code>options.compilerArgs</code> on <code>JavaCompile</code>, <code>jvmArgs</code> on <code>bootRun</code> / <code>JavaExec</code></td><td class="wrap"><code>java.javac-args</code>, <code>run.jvm-args</code>, when literals; a <code>$name</code> in a JVM argument takes the variable's value, and one jrs cannot read leaves the argument out, reported</td></tr>
     <tr><td class="wrap">Shade <code>&lt;relocations&gt;</code>, Shadow <code>relocate</code></td><td class="wrap"><code>[package.relocate]</code>, and <code>jrs package --fat</code></td></tr>
     <tr><td class="wrap"><code>proguard-maven-plugin</code>, <code>com.guardsquare.proguard</code></td><td class="wrap"><code>[obfuscate]</code></td></tr>
     <tr><td class="wrap">Kotlin plugin, <code>id 'scala'</code>, <code>id 'groovy'</code>, <code>kotlin-</code> / <code>scala-maven-plugin</code>, <code>gmavenplus-plugin</code></td><td class="wrap"><code>[kotlin]</code>, <code>[scala]</code>, <code>[groovy]</code></td></tr>
@@ -3176,12 +3176,12 @@ jrs migrate                # write jrs.toml; the original build file is untouche
     <tr><td class="wrap">Version catalog <code>libs.bundles.&lt;name&gt;</code>, <code>alias(libs.plugins.&lt;name&gt;)</code></td><td class="wrap">The bundle's libraries; the plugin at the catalog's version</td></tr>
     <tr><td class="wrap"><code>resolutionStrategy { force(…) }</code></td><td class="wrap"><code>[managed]</code></td></tr>
     <tr><td class="wrap">A random port for a test server, <code>nextInt(8100, 8999)</code></td><td class="wrap"><code>{free-port.&lt;name&gt;}</code> in <code>test.env</code></td></tr>
-    <tr><td class="wrap">The OpenAPI Generator's <code>openApiGenerate { }</code></td><td class="wrap">A <code>main</code> task over the generator's CLI, hooked before the compile</td></tr>
+    <tr><td class="wrap">The OpenAPI Generator's <code>openApiGenerate { }</code>, each <code>openapi-generator-maven-plugin</code> execution</td><td class="wrap">A <code>main</code> task over the generator's CLI, hooked before the compile; from Maven, writing to <code>target/generated-sources/openapi</code>, whose <code>src/main/java</code> is its <code>source-outputs</code>, which covers <code>build-helper-maven-plugin</code>'s <code>add-source</code> of it</td></tr>
     <tr><td class="wrap">A task the compile depends on that is Gradle code (<code>doLast { }</code>), with <code>gradlew</code> in the project</td><td class="wrap"><code>[tasks.gradle]</code>, running <code>./gradlew</code> over them; <code>project.target-dir = "build"</code></td></tr>
     <tr><td class="wrap"><code>sourceSets { main { kotlin { srcDir(…) } } }</code> under <code>build/</code></td><td class="wrap">The generating task's <code>source-outputs</code> / <code>resource-outputs</code></td></tr>
     <tr><td class="wrap"><code>withSourcesJar()</code>, <code>withJavadocJar()</code></td><td class="wrap">Reported: <code>jrs package --sources</code> and <code>--javadoc</code></td></tr>
     <tr><td class="wrap">Spotless's <code>googleJavaFormat</code> and <code>ktfmt</code> steps (Gradle and Maven), <code>fmt-maven-plugin</code></td><td class="wrap">A <code>format</code> and a <code>format-check</code> task over the tool's own graph, with the version and style the build names; Spotless's other steps are reported</td></tr>
-    <tr><td class="wrap">Gradle's <code>checkstyle</code>, <code>pmd</code> and <code>com.github.spotbugs</code> plugins, <code>maven-checkstyle-plugin</code>, <code>maven-pmd-plugin</code>, <code>spotbugs-maven-plugin</code></td><td class="wrap">A <code>checkstyle</code>, <code>pmd</code> or <code>spotbugs</code> task hooked into <code>post-compile</code>, with the tool version, configuration file and rule sets they set</td></tr>
+    <tr><td class="wrap">Gradle's <code>checkstyle</code>, <code>pmd</code> and <code>com.github.spotbugs</code> plugins, <code>maven-checkstyle-plugin</code>, <code>maven-pmd-plugin</code>, <code>spotbugs-maven-plugin</code></td><td class="wrap">A <code>checkstyle</code>, <code>pmd</code> or <code>spotbugs</code> task hooked into <code>post-compile</code>, with the tool version, configuration file and rule sets they set. Checkstyle's also gets the plugin's other jars (the <code>checkstyle</code> configuration's, nohttp's), <code>&lt;propertyExpansion&gt;</code>, <code>configProperties</code> and Gradle's <code>config_loc</code> in <code>JAVA_TOOL_OPTIONS</code>, and one task per Maven execution with a configuration of its own, its <code>&lt;sourceDirectories&gt;</code> and Ant <code>&lt;excludes&gt;</code> as directories and <code>-x</code> patterns</td></tr>
     <tr><td class="wrap">The CycloneDX plugins, a licence report plugin</td><td class="wrap">Reported: <code>jrs package --sbom</code>, <code>jrs licenses</code></td></tr>
     <tr><td class="wrap"><code>os-maven-plugin</code>'s <code>${os.detected.classifier}</code>, the osdetector plugin's classifier</td><td class="wrap"><code>{os-classifier}</code></td></tr>
   </tbody>
@@ -3196,6 +3196,11 @@ jrs migrate                # write jrs.toml; the original build file is untouche
   <code>@SpringBootApplication</code> class becomes the main class. <code>jrs package --fat</code>
   then builds a runnable flat jar with Spring's registries merged.
 </p>
+<p>
+  The Ktor Gradle plugin (<code>io.ktor.plugin</code>) becomes <code>io.ktor:ktor-bom</code> at the
+  plugin's version in <code>[managed]</code>, so the versionless Ktor dependencies, test ones
+  included, stay versionless.
+</p>
 
 <h3>Gradle version variables</h3>
 <p>
@@ -3205,8 +3210,9 @@ jrs migrate                # write jrs.toml; the original build file is untouche
   <code>${property("v")}</code> or map notation's <code>version: v</code>, in platforms,
   <code>mavenBom</code>, <code>constraints { }</code> and Boot's plugin. A review line names the
   variable, since the manifest no longer shows those versions moving together. Only a variable
-  assigned once, to a literal, outside a conditional, is used; anything else is reported, never
-  migrated without its version.
+  assigned once, to a literal, outside a conditional, is used; a <code>val</code> at the top of
+  <code>plugins { }</code> counts, since Gradle runs that block once. Anything else is reported,
+  never migrated without its version.
 </p>
 
 <h3>Maven profiles</h3>
@@ -3248,26 +3254,33 @@ jrs migrate                # write jrs.toml; the original build file is untouche
     <tr><td><code>spring-guides/gs-accessing-data-jpa</code></td><td>Maven</td><td>Spring Boot</td><td><code>ef48947</code></td><td>ok</td><td>ok</td><td>ok 1/1</td><td>ok</td><td>ok</td></tr>
     <tr><td><code>spring-guides/gs-rest-service</code></td><td>Gradle</td><td>Spring Boot</td><td><code>3f4cef0</code></td><td>ok</td><td>ok</td><td>ok 2/2</td><td>ok</td><td>ok</td></tr>
     <tr><td><code>spring-guides/gs-accessing-data-jpa</code></td><td>Gradle</td><td>Spring Boot</td><td><code>ef48947</code></td><td>ok</td><td>ok</td><td>ok 1/1</td><td>ok</td><td>ok</td></tr>
-    <tr><td><code>spring-projects/spring-petclinic</code></td><td>Maven</td><td>Spring Boot</td><td><code>500158f</code></td><td>ok</td><td><a href="https://github.com/pwittchen/jrs/blob/master/corpus/FINDINGS.md#6-maven-checkstyle-the-executions-configuration-is-not-read">F6</a></td><td>·</td><td>·</td><td>·</td></tr>
-    <tr><td><code>spring-projects/spring-petclinic</code></td><td>Gradle</td><td>Spring Boot</td><td><code>500158f</code></td><td>ok</td><td><a href="https://github.com/pwittchen/jrs/blob/master/corpus/FINDINGS.md#7-gradle-checkstyle-config_loc-and-the-checkers-own-dependencies">F7</a></td><td>·</td><td>·</td><td>·</td></tr>
-    <tr><td><code>spring-petclinic/spring-petclinic-kotlin</code></td><td>Gradle</td><td>Spring Boot, Kotlin</td><td><code>c77f77b</code></td><td>ok</td><td><a href="https://github.com/pwittchen/jrs/blob/master/corpus/FINDINGS.md#5-a-kotlin-plugin-version-from-a-val-in-plugins---and-the-kotlin-springbootapplication">F5</a></td><td>·</td><td>·</td><td>·</td></tr>
-    <tr><td><code>ktorio/ktor-samples</code>, <code>httpbin</code></td><td>Gradle</td><td>Ktor</td><td><code>1c9df7c</code></td><td>ok</td><td><a href="https://github.com/pwittchen/jrs/blob/master/corpus/FINDINGS.md#8-the-ktor-gradle-plugins-bom">F8</a></td><td>·</td><td>·</td><td>·</td></tr>
-    <tr><td><code>ktorio/ktor-samples</code>, <code>h2</code></td><td>Gradle</td><td>Ktor</td><td><code>1c9df7c</code></td><td>ok</td><td><a href="https://github.com/pwittchen/jrs/blob/master/corpus/FINDINGS.md#8-the-ktor-gradle-plugins-bom">F8</a></td><td>·</td><td>·</td><td>·</td></tr>
-    <tr><td><code>spring-petclinic/spring-petclinic-rest</code></td><td>Maven</td><td>service</td><td><code>afc8fc1</code></td><td>ok</td><td><a href="https://github.com/pwittchen/jrs/blob/master/corpus/FINDINGS.md#10-openapi-generators-sources">F10</a></td><td>·</td><td>·</td><td>·</td></tr>
+    <tr><td><code>spring-projects/spring-petclinic</code></td><td>Maven</td><td>Spring Boot</td><td><code>500158f</code></td><td>ok</td><td><a href="https://github.com/pwittchen/jrs/blob/master/corpus/FINDINGS.md#13-a-boms-exclusions-on-a-managed-dependency-are-not-applied">F13</a></td><td>ok 81/81</td><td>ok</td><td>ok</td></tr>
+    <tr><td><code>spring-projects/spring-petclinic</code></td><td>Gradle</td><td>Spring Boot</td><td><code>500158f</code></td><td>ok</td><td><a href="https://github.com/pwittchen/jrs/blob/master/corpus/FINDINGS.md#13-a-boms-exclusions-on-a-managed-dependency-are-not-applied">F13</a></td><td>ok 81/81</td><td>ok</td><td>ok</td></tr>
+    <tr><td><code>spring-petclinic/spring-petclinic-kotlin</code></td><td>Gradle</td><td>Spring Boot, Kotlin</td><td><code>c77f77b</code></td><td>ok</td><td><a href="https://github.com/pwittchen/jrs/blob/master/corpus/FINDINGS.md#17-a-versionless-orgjetbrainskotlin-library-takes-the-kotlin-plugins-version">F17</a></td><td>ok 41/41</td><td>ok</td><td>ok</td></tr>
+    <tr><td><code>ktorio/ktor-samples</code>, <code>httpbin</code></td><td>Gradle</td><td>Ktor</td><td><code>1c9df7c</code></td><td>ok</td><td><a href="https://github.com/pwittchen/jrs/blob/master/corpus/FINDINGS.md#14-a-profile-a-dependencys-pom-activates-by-os">F14</a></td><td><a href="https://github.com/pwittchen/jrs/blob/master/corpus/FINDINGS.md#14-a-profile-a-dependencys-pom-activates-by-os">F14</a> 166/167</td><td>ok</td><td>ok</td></tr>
+    <tr><td><code>ktorio/ktor-samples</code>, <code>h2</code></td><td>Gradle</td><td>Ktor</td><td><code>1c9df7c</code></td><td>ok</td><td>ok</td><td>ok 4/4</td><td><a href="https://github.com/pwittchen/jrs/blob/master/corpus/FINDINGS.md#19-ktor-h2-names-a-module-function-that-does-not-exist">F19</a></td><td><a href="https://github.com/pwittchen/jrs/blob/master/corpus/FINDINGS.md#19-ktor-h2-names-a-module-function-that-does-not-exist">F19</a></td></tr>
+    <tr><td><code>spring-petclinic/spring-petclinic-rest</code></td><td>Maven</td><td>service</td><td><code>afc8fc1</code></td><td>ok</td><td><a href="https://github.com/pwittchen/jrs/blob/master/corpus/FINDINGS.md#13-a-boms-exclusions-on-a-managed-dependency-are-not-applied">F13</a></td><td><a href="https://github.com/pwittchen/jrs/blob/master/corpus/FINDINGS.md#12-maven-the-compiler-plugins-execution-configuration-is-not-read">F12</a> 5/237</td><td><a href="https://github.com/pwittchen/jrs/blob/master/corpus/FINDINGS.md#12-maven-the-compiler-plugins-execution-configuration-is-not-read">F12</a></td><td><a href="https://github.com/pwittchen/jrs/blob/master/corpus/FINDINGS.md#12-maven-the-compiler-plugins-execution-configuration-is-not-read">F12</a></td></tr>
     <tr><td><code>spring-petclinic/spring-petclinic-microservices</code></td><td>Maven</td><td>workspace</td><td><code>1d76b00</code></td><td>ok</td><td><a href="https://github.com/pwittchen/jrs/blob/master/corpus/FINDINGS.md#11-a-version-range-in-a-transitive-pom">F11</a></td><td>·</td><td>·</td><td>·</td></tr>
   </tbody>
 </table>
 <p>
-  End to end: 4 of 11. Where a migrated project builds, its runtime classpath matches the
-  reference's jar for jar and version for version, and the same tests pass. Why the others stop:
+  End to end: 4 of 11, and 10 of 11 get past <code>jrs build</code>; what stops the other six
+  there is a classpath difference, a failing test or start, or the project itself. Where a migrated project builds, its runtime
+  classpath matches the reference's except as the findings say, and petclinic's 81 tests, its
+  Testcontainers suite among them, pass on all three. Why the others are not <code>ok</code>:
 </p>
 <ul>
-  <li><strong>F6, F7</strong>: petclinic's Checkstyle check becomes a post-compile task, but not with petclinic's configuration: from the <code>pom.xml</code> the execution's <code>configLocation</code> is not read and <code>sun_checks</code> fails the build; from <code>build.gradle</code> the <code>config_loc</code> property Gradle sets is missing.</li>
-  <li><strong>F5</strong>: the Kotlin plugin's version is a <code>val</code> inside <code>plugins { }</code>, so no <code>[kotlin]</code> table is written and the Kotlin sources do not compile.</li>
-  <li><strong>F8</strong>: the Ktor Gradle plugin manages every <code>io.ktor</code> version through its BOM; migration does not write it to <code>[managed]</code>, so the versionless Ktor dependencies are dropped.</li>
-  <li><strong>F10</strong>: the DTOs come from <code>openapi-generator-maven-plugin</code>, which is not translated into a task.</li>
-  <li><strong>F11</strong>: a webjar's POM asks for a version range, which jrs rejects; a <code>[managed]</code> pin settles it by hand.</li>
+  <li><strong>F13</strong>: Spring Boot's BOM excludes <code>protobuf-java</code> from <code>mysql-connector-j</code>; jrs takes a managed entry's version and not its exclusions, so the jar is on the classpath. petclinic's devtools, which <code>jrs.toml</code> has no scope for, is missing besides (<a href="https://github.com/pwittchen/jrs/blob/master/corpus/FINDINGS.md#18-spring-boot-devtools">F18</a>).</li>
+  <li><strong>F17</strong>: petclinic-kotlin's versionless <code>kotlin-reflect</code> takes Spring Boot's version, where the Kotlin plugin gives it its own; JUnit's <code>apiguardian-api</code> (<a href="https://github.com/pwittchen/jrs/blob/master/corpus/FINDINGS.md#16-gradle-module-metadatas-runtime-variant">F16</a>) and devtools differ too.</li>
+  <li><strong>F14</strong>: brotli4j adds its native jar through a profile its POM activates by OS, which jrs does not read, so the Brotli test fails.</li>
+  <li><strong>F12</strong>: spring-petclinic-rest configures MapStruct in the compiler plugin's <code>default-compile</code> execution, which migration does not read, so the mappers are not Spring beans.</li>
+  <li><strong>F19</strong>: the sample's <code>application.conf</code> names a module function that does not exist; its own <code>./gradlew run</code> fails the same way.</li>
+  <li><strong>F11</strong>: a webjar's POM asks for a version range, which jrs rejects; a <code>[managed]</code> pin settles it by hand, as the error now says.</li>
 </ul>
+<p>
+  Gradle resolves the highest version in a graph and jrs the nearest (<a href="https://github.com/pwittchen/jrs/blob/master/corpus/FINDINGS.md#15-highest-wins-mediation">F15</a>), so a Gradle
+  project's versions may differ where nothing else does; the Ktor samples' do.
+</p>
 </section>
 
 

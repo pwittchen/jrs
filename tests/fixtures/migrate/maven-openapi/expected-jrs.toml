@@ -1,0 +1,23 @@
+[project]
+name = "pets"
+version = "1.0.0"
+
+[java]
+source = 17
+
+[dependencies]
+"org.openapitools:jackson-databind-nullable" = "0.2.11"
+
+[tasks.openapi]
+description = "Generate sources from src/main/resources/openapi.yml (OpenAPI Generator 7.25.0)"
+main = "org.openapitools.codegen.OpenAPIGenerator"
+args = ["generate", "-i", "src/main/resources/openapi.yml", "-o", "{target}/generated-sources/openapi", "-g", "spring", "--library", "spring-boot", "--model-name-suffix", "Dto", "--api-package", "com.example.pets.api", "--model-package", "com.example.pets.dto", "--import-mappings", "Nullable=org.jspecify.annotations.Nullable", "--additional-properties", "interfaceOnly=true,useTags=true,useSpringBoot3=true,openApiNullable=false"]
+inputs = ["src/main/resources/openapi.yml"]
+outputs = ["{target}/generated-sources/openapi"]
+source-outputs = ["{target}/generated-sources/openapi/src/main/java"]
+
+[tasks.openapi.dependencies]
+"org.openapitools:openapi-generator-cli" = "7.25.0"
+
+[hooks]
+pre-compile = ["openapi"]

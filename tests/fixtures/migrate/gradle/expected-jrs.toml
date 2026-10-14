@@ -23,6 +23,7 @@ javac-args = ["-proc:full"]
 description = "Check the Java sources with Checkstyle (config/checkstyle/checkstyle.xml)"
 main = "com.puppycrawl.tools.checkstyle.Main"
 args = ["-c", "config/checkstyle/checkstyle.xml", "src/main/java"]
+env = { "JAVA_TOOL_OPTIONS" = "-Dconfig_loc=config/checkstyle" }
 
 [tasks.checkstyle.dependencies]
 "com.puppycrawl.tools:checkstyle" = "12.3.1"

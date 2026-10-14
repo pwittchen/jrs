@@ -76,9 +76,10 @@ pub fn migrate(pom_path: &Path, root: &Path) -> Result<Migration> {
     read_test_settings(&effective, pom, &mut out, &mut report);
     read_repositories(&effective, &mut out, &mut report);
     read_exec(pom, &effective, &mut out, &mut report);
+    let mut translated = super::maven_openapi::read(pom, &effective, &mut out, &mut report);
     read_spring_boot(pom, boot_parent.as_deref(), &mut out, &mut report);
-    let checkers = read_checkers(pom, &mut out, &mut report);
-    read_the_rest(pom, &checkers, &mut report);
+    translated.extend(read_checkers(pom, &effective, &mut out, &mut report));
+    read_the_rest(pom, &translated, &mut report);
     report.append(profiles);
 
     Ok(Migration {
@@ -1390,12 +1391,7 @@ fn read_repositories(effective: &Effective, out: &mut Manifest, report: &mut Rep
 /// The version of `group:artifact` among a plugin's own `<dependencies>`,
 /// which is how a build picks the release of the tool a plugin runs.
 fn plugin_tool_version(pom: &Pom, plugin: &str, group: &str, artifacts: &[&str]) -> Option<String> {
-    let element = pom
-        .root
-        .path(&["build", "plugins"])?
-        .children_named("plugin")
-        .find(|p| p.text_of("artifactId") == Some(plugin))?;
-    element
+    plugin_element(pom, plugin)?
         .list("dependencies", "dependency")
         .into_iter()
         .find(|d| {
@@ -1405,6 +1401,247 @@ fn plugin_tool_version(pom: &Pom, plugin: &str, group: &str, artifacts: &[&str])
         })
         .and_then(|d| d.text_of("version"))
         .map(str::to_string)
+}
+
+/// `maven-checkstyle-plugin` → a Checkstyle task for the plugin's
+/// configuration, or one for each execution that carries one of its own,
+/// read key by key over the plugin's: `checkstyle-<id>` when there are
+/// several. `<propertyExpansion>` becomes system properties, the plugin's
+/// `<dependencies>` the task's jars, and `<sourceDirectories>` with
+/// `<excludes>` its directories and `-x` patterns. An execution whose scan
+/// cannot be said on Checkstyle's command line is reported, not narrowed.
+/// Whether the plugin was there.
+fn read_checkstyle(
+    pom: &Pom,
+    effective: &Effective,
+    out: &mut Manifest,
+    report: &mut Report,
+) -> bool {
+    use super::checks;
+    use crate::checkers::{self, CheckstyleExtras, Tool};
+
+    const ARTIFACT: &str = "maven-checkstyle-plugin";
+    let Some(info) = plugin(pom, ARTIFACT) else {
+        return false;
+    };
+    let from = format!("plugin {ARTIFACT}");
+    let interpolate = |text: &str| pom::interpolate(text.trim(), &effective.properties);
+
+    let (version, dependencies) = checkstyle_jars(pom, effective, &from, report);
+    let version = checks::version(Tool::Checkstyle, version);
+
+    let configured: Vec<(&str, Vec<&Element>)> = info
+        .executions
+        .iter()
+        .filter_map(|e| {
+            let config = e.child("configuration")?;
+            let id = e.text_of("id").unwrap_or("default");
+            Some((
+                id,
+                std::iter::once(config).chain(&info.configuration).collect(),
+            ))
+        })
+        .collect();
+    let runs = if configured.is_empty() {
+        vec![("default", info.configuration.iter().collect())]
+    } else {
+        configured
+    };
+    let several = runs.len() > 1;
+    for (id, configs) in runs {
+        let from = if id == "default" {
+            from.clone()
+        } else {
+            format!("{from}, execution `{id}`")
+        };
+        let name = if several {
+            match super::gradle_tasks::task_name(id) {
+                Ok(n) => format!("checkstyle-{n}"),
+                Err(why) => {
+                    report.skipped(format!("{from} — {why}"));
+                    continue;
+                }
+            }
+        } else {
+            "checkstyle".to_string()
+        };
+        let text = |key: &str| {
+            configs
+                .iter()
+                .find_map(|c| c.text_of(key))
+                .map(interpolate)
+                .filter(|t| !t.is_empty())
+        };
+        if text("skip").as_deref() == Some("true") {
+            report.skipped(format!("{from} — it is skipped (`<skip>true</skip>`)"));
+            continue;
+        }
+        // The plugin's default, and the two configurations Checkstyle
+        // carries, are read from its jar.
+        let location = text("configLocation").unwrap_or_else(|| "sun_checks.xml".to_string());
+        let location = match location.as_str() {
+            "sun_checks.xml" | "google_checks.xml" => format!("/{location}"),
+            other => strip_basedir(other),
+        };
+        let scan = checkstyle_scan(&configs, &interpolate).and_then(|(dirs, excludes)| {
+            let properties = text("propertyExpansion")
+                .map(|p| checkstyle_properties(&p))
+                .transpose()?
+                .unwrap_or_default();
+            Ok((dirs, excludes, properties))
+        });
+        let (dirs, excludes, properties) = match scan {
+            Ok(scan) => scan,
+            Err(why) => {
+                report.skipped(format!("{from} — {why}; no Checkstyle task was written"));
+                continue;
+            }
+        };
+        let dirs = dirs.unwrap_or_else(|| checks::java_dirs(out));
+        let extras = CheckstyleExtras {
+            properties,
+            dependencies: dependencies.clone(),
+            excludes,
+        };
+        checks::add(
+            out,
+            checkers::checkstyle(&name, &version, &location, &dirs, &extras).map(|t| vec![t]),
+            Tool::Checkstyle,
+            &from,
+            report,
+        );
+    }
+    true
+}
+
+/// `maven-checkstyle-plugin`'s `<dependencies>`: the Checkstyle release it
+/// names, and the other jars, where a configuration's custom checks come
+/// from. One without an exact version is reported.
+fn checkstyle_jars(
+    pom: &Pom,
+    effective: &Effective,
+    from: &str,
+    report: &mut Report,
+) -> (Option<String>, Vec<Dependency>) {
+    let mut version = None;
+    let mut dependencies = Vec::new();
+    for d in plugin_element(pom, "maven-checkstyle-plugin")
+        .map(|p| p.list("dependencies", "dependency"))
+        .unwrap_or_default()
+    {
+        let field = |name: &str| {
+            d.text_of(name)
+                .map(|t| pom::interpolate(t.trim(), &effective.properties))
+        };
+        let (Some(group), Some(artifact)) = (field("groupId"), field("artifactId")) else {
+            continue;
+        };
+        let given = field("version").filter(|v| !v.contains("${") && !is_range(v));
+        if group == "com.puppycrawl.tools" && artifact == "checkstyle" {
+            version = given;
+        } else if let Some(v) = given {
+            dependencies.push(Dependency::new(group, artifact, v));
+        } else {
+            report.skipped(format!(
+                "{from} — its dependency {group}:{artifact} has no exact version jrs can \
+                 read; add it to the Checkstyle task's dependencies by hand"
+            ));
+        }
+    }
+    (version, dependencies)
+}
+
+/// `<sourceDirectories>` (or `<sourceDirectory>`) and `<excludes>`: the
+/// directories Checkstyle walks, `None` for the plugin's own, and its `-x`
+/// patterns. `<includes>` other than everything, or the Java sources Maven
+/// checks by default, has no counterpart on Checkstyle's command line.
+fn checkstyle_scan(
+    configs: &[&Element],
+    interpolate: &dyn Fn(&str) -> String,
+) -> std::result::Result<(Option<Vec<String>>, Vec<String>), String> {
+    let get = |key: &str| configs.iter().find_map(|c| c.child(key));
+    let list = |element: &Element| -> Vec<String> {
+        let items: Vec<String> = if element.children.is_empty() {
+            element.text.split(',').map(interpolate).collect()
+        } else {
+            element
+                .children
+                .iter()
+                .map(|c| interpolate(&c.text))
+                .collect()
+        };
+        items.into_iter().filter(|t| !t.is_empty()).collect()
+    };
+    let dirs = get("sourceDirectories")
+        .or_else(|| get("sourceDirectory"))
+        .map(|element| {
+            list(element)
+                .into_iter()
+                .map(|dir| match dir.trim_end_matches('/') {
+                    "${basedir}" | "${project.basedir}" | "." | "" => Ok("{root}".to_string()),
+                    _ if strip_basedir(&dir).contains("${") => Err(format!(
+                        "its source directory `{dir}` names a property jrs cannot read"
+                    )),
+                    _ => Ok(crate::manifest::Template::literal(&strip_basedir(&dir)).raw),
+                })
+                .collect::<std::result::Result<Vec<_>, _>>()
+        })
+        .transpose()?;
+    if let Some(includes) = get("includes") {
+        let includes = list(includes);
+        if let Some(other) = includes
+            .iter()
+            .find(|i| !matches!(i.as_str(), "**/*" | "**" | "**/*.java"))
+        {
+            return Err(format!(
+                "its <includes> `{other}` has no counterpart on Checkstyle's command line"
+            ));
+        }
+    }
+    let mut excludes = Vec::new();
+    for pattern in get("excludes").map(list).unwrap_or_default() {
+        excludes.push(super::checks::ant_exclusion(&pattern).ok_or_else(|| {
+            format!("its <excludes> `{pattern}` does not translate into a Checkstyle `-x` pattern")
+        })?);
+    }
+    Ok((dirs, excludes))
+}
+
+/// `<propertyExpansion>`'s `key=value` lines, a path under `${basedir}`
+/// made relative to the project root, which is where the task runs.
+fn checkstyle_properties(text: &str) -> std::result::Result<Vec<(String, String)>, String> {
+    let mut properties = Vec::new();
+    for line in text.lines().map(str::trim) {
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let (key, value) = line
+            .split_once('=')
+            .ok_or_else(|| format!("its <propertyExpansion> line `{line}` is not key=value"))?;
+        let value = value.trim();
+        let value = match value {
+            "${basedir}" | "${project.basedir}" => ".".to_string(),
+            _ => strip_basedir(value),
+        };
+        if value.contains("${") {
+            return Err(format!(
+                "its <propertyExpansion> `{line}` names a property jrs cannot read"
+            ));
+        }
+        properties.push((
+            key.trim().to_string(),
+            crate::manifest::Template::literal(&value).raw,
+        ));
+    }
+    Ok(properties)
+}
+
+/// The project's own `<plugin>` element for `artifact`, as written.
+fn plugin_element<'a>(pom: &'a Pom, artifact: &str) -> Option<&'a Element> {
+    pom.root
+        .path(&["build", "plugins"])?
+        .children_named("plugin")
+        .find(|p| p.text_of("artifactId") == Some(artifact))
 }
 
 /// Spotless's google-java-format and ktfmt steps, and `fmt-maven-plugin`,
@@ -1512,7 +1749,12 @@ fn read_reports(pom: &Pom, report: &mut Report) -> Vec<&'static str> {
 
 /// Formatter and checker plugins → tasks (`super::checks`). Returns the
 /// artifacts of the plugins it translated.
-fn read_checkers(pom: &Pom, out: &mut Manifest, report: &mut Report) -> Vec<&'static str> {
+fn read_checkers(
+    pom: &Pom,
+    effective: &Effective,
+    out: &mut Manifest,
+    report: &mut Report,
+) -> Vec<&'static str> {
     use super::checks;
     use crate::checkers::{self, Tool};
 
@@ -1520,32 +1762,7 @@ fn read_checkers(pom: &Pom, out: &mut Manifest, report: &mut Report) -> Vec<&'st
     done.extend(read_reports(pom, report));
     let config = |artifact: &str| plugin(pom, artifact).and_then(|p| p.configuration.clone());
 
-    if plugin(pom, "maven-checkstyle-plugin").is_some() {
-        let version = checks::version(
-            Tool::Checkstyle,
-            plugin_tool_version(
-                pom,
-                "maven-checkstyle-plugin",
-                "com.puppycrawl.tools",
-                &["checkstyle"],
-            ),
-        );
-        // The plugin's default, and the two configurations Checkstyle
-        // carries, are read from its jar.
-        let location = config("maven-checkstyle-plugin")
-            .and_then(|c| c.text_of("configLocation").map(str::to_string))
-            .unwrap_or_else(|| "sun_checks.xml".to_string());
-        let location = match location.as_str() {
-            "sun_checks.xml" | "google_checks.xml" => format!("/{location}"),
-            other => strip_basedir(other),
-        };
-        checks::add(
-            out,
-            checkers::checkstyle(&version, &location, &checks::java_dirs(out)).map(|t| vec![t]),
-            Tool::Checkstyle,
-            "plugin maven-checkstyle-plugin",
-            report,
-        );
+    if read_checkstyle(pom, effective, out, report) {
         done.push("maven-checkstyle-plugin");
     }
     if plugin(pom, "maven-pmd-plugin").is_some() {
@@ -2089,6 +2306,105 @@ mod tests {
             migration.manifest.dependencies[0].key(),
             "io.netty:netty-transport-native-epoll:{os-classifier}"
         );
+    }
+
+    #[test]
+    fn each_checkstyle_execution_with_a_configuration_is_a_task() {
+        let dir = Dir::new("checkstyle-executions");
+        let migration = dir.migrate(
+            "<project><groupId>g</groupId><artifactId>a</artifactId><version>1</version>\
+             <build><plugins><plugin><artifactId>maven-checkstyle-plugin</artifactId>\
+             <configuration><configLocation>google_checks.xml</configLocation></configuration>\
+             <executions>\
+             <execution><id>style</id><configuration><sourceDirectories>\
+             <sourceDirectory>${project.basedir}/src/main/java</sourceDirectory>\
+             </sourceDirectories></configuration></execution>\
+             <execution><id>nohttp</id><configuration>\
+             <configLocation>nohttp.xml</configLocation>\
+             <includes>**/*.xml</includes></configuration></execution>\
+             <execution><id>docs</id><configuration><excludes>/abs/**</excludes>\
+             </configuration></execution>\
+             <execution><id>bare</id><goals><goal>check</goal></goals></execution>\
+             </executions></plugin></plugins></build></project>",
+        );
+        let m = &migration.manifest;
+        let names: Vec<&str> = m.tasks.iter().map(|t| t.name.as_str()).collect();
+        assert_eq!(names, ["checkstyle-style"]);
+        let args: Vec<&str> = m.tasks[0].args.iter().map(|a| a.raw.as_str()).collect();
+        // The plugin's configuration under the execution's own.
+        assert_eq!(args, ["-c", "/google_checks.xml", "src/main/java"]);
+        let skipped = migration.report.not_migrated.join("\n");
+        assert!(
+            skipped.contains("execution `nohttp` — its <includes> `**/*.xml` has no counterpart"),
+            "{skipped}"
+        );
+        assert!(
+            skipped.contains("execution `docs` — its <excludes> `/abs/**` does not translate"),
+            "{skipped}"
+        );
+    }
+
+    #[test]
+    fn each_openapi_execution_is_a_task_and_what_it_cannot_say_is_reported() {
+        let dir = Dir::new("openapi-executions");
+        let migration = dir.migrate(
+            "<project><groupId>g</groupId><artifactId>a</artifactId><version>1</version>\
+             <build><plugins><plugin><artifactId>openapi-generator-maven-plugin</artifactId>\
+             <version>7.25.0</version>\
+             <configuration><generatorName>java</generatorName></configuration><executions>\
+             <execution><id>client</id><goals><goal>generate</goal></goals><configuration>\
+             <inputSpec>${project.basedir}/api.yml</inputSpec>\
+             <output>${project.build.directory}/gen</output>\
+             <generateSupportingFiles>false</generateSupportingFiles>\
+             <generateModelTests>false</generateModelTests>\
+             <configOptions><sourceFolder>src/gen/java</sourceFolder></configOptions>\
+             <strictSpec>true</strictSpec>\
+             </configuration></execution>\
+             <execution><id>outside</id><goals><goal>generate</goal></goals><configuration>\
+             <inputSpec>api.yml</inputSpec><output>generated</output>\
+             </configuration></execution>\
+             </executions></plugin>\
+             <plugin><artifactId>build-helper-maven-plugin</artifactId><executions>\
+             <execution><goals><goal>add-source</goal></goals><configuration><sources>\
+             <source>src/extra/java</source></sources></configuration></execution>\
+             </executions></plugin></plugins></build></project>",
+        );
+        let m = &migration.manifest;
+        let names: Vec<&str> = m.tasks.iter().map(|t| t.name.as_str()).collect();
+        assert_eq!(names, ["openapi-client"]);
+        let task = &m.tasks[0];
+        let args: Vec<&str> = task.args.iter().map(|a| a.raw.as_str()).collect();
+        assert_eq!(
+            args,
+            [
+                "generate",
+                "-i",
+                "api.yml",
+                "-o",
+                "{target}/gen",
+                "-g",
+                "java",
+                "--global-property",
+                "apis,models,modelTests=false",
+                "--additional-properties",
+                "sourceFolder=src/gen/java",
+            ]
+        );
+        assert_eq!(task.source_outputs[0].raw, "{target}/gen/src/gen/java");
+        assert_eq!(m.hooks.tasks(Hook::PreCompile), ["openapi-client"]);
+
+        let skipped = migration.report.not_migrated.join("\n");
+        assert!(
+            skipped.contains("execution `outside` — its <output> `generated` is outside"),
+            "{skipped}"
+        );
+        // What it adds is not the generator's, so it is still unmigrated.
+        assert!(
+            skipped.contains("plugin build-helper-maven-plugin — jrs has no plugin system"),
+            "{skipped}"
+        );
+        let review = migration.report.needs_review.join("\n");
+        assert!(review.contains("<strictSpec> — not translated"), "{review}");
     }
 
     #[test]

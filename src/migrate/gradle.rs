@@ -152,7 +152,7 @@ pub(super) fn migrate_with(
     );
     // After them: `groovy` and `scala` take their library's version.
     read_library_languages(&plugins, &mut out, &mut report);
-    read_jvm_args(&script, &mut out, &mut report);
+    read_jvm_args(&script, &mut vars, &mut out, &mut report);
     super::gradle_tasks::read_jvm_environment(&script, &vars, &mut out, &mut report);
     read_jar_manifest(&script, &mut out, &mut report);
     read_resources(&script, &vars, &mut out, &mut report);
@@ -171,9 +171,9 @@ pub(super) fn migrate_with(
     super::gradle_tasks::read(&script, bridge, &mut out, &mut report);
     let source_sets_read =
         super::gradle_generated::read_source_sets(&script, &paths, &mut out, &mut report);
-    vars.report(&mut report);
     read_jacoco(&script, &plugins, &mut out, &mut report);
-    let checkers = read_checkers(&script, &plugins, &mut out, &mut report);
+    let checkers = read_checkers(&script, &plugins, &mut vars, &mut out, &mut report);
+    vars.report(&mut report);
     report_the_unreadable(
         &script,
         &settings,
@@ -1076,6 +1076,8 @@ fn read_managed(
         super::spring_boot_application(out, from, report);
     }
 
+    read_ktor(plugins, out, report);
+
     let mut pinned = read_dependency_management(script, vars, out, report);
 
     let mut constraints = 0usize;
@@ -1155,6 +1157,31 @@ fn read_managed(
         ));
     }
 }
+
+/// The Ktor plugin adds `platform("io.ktor:ktor-bom:<its version>")` to
+/// `implementation` once a Kotlin plugin is applied, which the test
+/// configurations extend; `[managed]` covers both. Its other work — the fat
+/// jar, Docker images — is reported for review.
+fn read_ktor(plugins: &[Plugin], out: &mut Manifest, report: &mut Report) {
+    let Some(ktor) = plugins.iter().find(|p| p.id == KTOR_PLUGIN) else {
+        return;
+    };
+    let from = format!("plugin `{KTOR_PLUGIN}`");
+    match &ktor.version {
+        Some(version) => super::add_bom(out, "io.ktor", "ktor-bom", version, &from, report),
+        None => report.skipped(format!(
+            "{from} — {}, so Ktor's BOM was not added to [managed]",
+            unread_version(ktor)
+        )),
+    }
+    report.review(format!(
+        "{from} — its tasks are not migrated: `jrs package --fat` builds the fat jar \
+         `buildFatJar` does, and its Docker images have no counterpart"
+    ));
+}
+
+/// The Ktor Gradle plugin's id.
+const KTOR_PLUGIN: &str = "io.ktor.plugin";
 
 /// `resolutionStrategy { force(...) }`, in `configurations.all { }` or one
 /// configuration's block: a version the whole graph is held to, which is what
@@ -1279,12 +1306,12 @@ fn read_dependency_management(
 
 /// `applicationDefaultJvmArgs` for `jrs run`; the test task's `jvmArgs` and
 /// `systemProperty` for `jrs test`.
-fn read_jvm_args(script: &str, out: &mut Manifest, report: &mut Report) {
+fn read_jvm_args(script: &str, vars: &mut Variables, out: &mut Manifest, report: &mut Report) {
     if let Some(line) = script
         .lines()
         .find(|l| l.trim().starts_with("applicationDefaultJvmArgs"))
     {
-        let mut args = quoted(line);
+        let mut args = jvm_arguments(line.trim(), vars, report);
         for agent in take_java_agents(&mut args) {
             translate_java_agent("run", &agent, out, report);
         }
@@ -1300,7 +1327,7 @@ fn read_jvm_args(script: &str, out: &mut Manifest, report: &mut Report) {
     for line in blocks_where(script, is_run_block) {
         let trimmed = line.trim();
         if trimmed.starts_with("jvmArgs") {
-            run_args.extend(quoted(trimmed));
+            run_args.extend(jvm_arguments(trimmed, vars, report));
         }
     }
     let run_agents = take_java_agents(&mut run_args);
@@ -1346,12 +1373,12 @@ fn read_jvm_args(script: &str, out: &mut Manifest, report: &mut Report) {
     for line in blocks_where(script, is_test_block) {
         let trimmed = line.trim();
         if trimmed.starts_with("jvmArgs") {
-            let mut args = quoted(trimmed);
+            let mut args = jvm_arguments(trimmed, vars, report);
             test_agents.extend(take_java_agents(&mut args));
             test_args.extend(args);
         } else if trimmed.starts_with("systemProperty") && !trimmed.starts_with("systemProperties")
         {
-            if let [key, value] = quoted(trimmed).as_slice() {
+            if let [key, value] = jvm_arguments(trimmed, vars, report).as_slice() {
                 test_args.push(format!("-D{key}={value}"));
             }
         } else if trimmed.contains("useTestNG") {
@@ -1376,6 +1403,32 @@ fn read_jvm_args(script: &str, out: &mut Manifest, report: &mut Report) {
     for agent in test_agents {
         translate_java_agent("test", &agent, out, report);
     }
+}
+
+/// The string literals on a line of JVM arguments, each `$name` or `${…}` in
+/// a double-quoted one replaced by the variable's value. One that names a
+/// variable jrs cannot read is left out and reported, never copied as text:
+/// the JVM would get the template itself. A `-javaagent:` is kept whole for
+/// [`translate_java_agent`], which never copies its path.
+fn jvm_arguments(line: &str, vars: &mut Variables, report: &mut Report) -> Vec<String> {
+    let mut args = Vec::new();
+    for (quote, text) in gradle_vars::literals(line) {
+        if quote != '"' || !text.contains('$') || text.starts_with("-javaagent:") {
+            args.push(text);
+            continue;
+        }
+        match vars.interpolate(&text) {
+            Ok((arg, names)) => {
+                vars.used_by_argument(&names);
+                args.push(arg);
+            }
+            Err(why) => report.skipped(format!(
+                "\"{text}\" in `{line}` — {why}; the argument was left out, add it to \
+                 jvm-args by hand"
+            )),
+        }
+    }
+    args
 }
 
 /// The value of `key = value` or `key value` on one line of a Gradle block, in
@@ -1854,6 +1907,136 @@ fn tool_version(script: &str, name: &str) -> Option<String> {
     block_setting(script, name, "toolVersion")
 }
 
+/// The `checkstyle` plugin → a Checkstyle task: its configuration file,
+/// `config_loc` and `configProperties` as system properties, and the
+/// `checkstyle` configuration's jars, nohttp's among them when its plugin is
+/// applied. Whether nohttp's plugin was, which this reports.
+fn read_checkstyle(
+    script: &str,
+    plugins: &[Plugin],
+    vars: &mut Variables,
+    out: &mut Manifest,
+    report: &mut Report,
+) -> bool {
+    use super::checks;
+    use crate::checkers::{self, CheckstyleExtras, Tool};
+
+    let from = "plugin `checkstyle`";
+    let mut extras = CheckstyleExtras::default();
+    let mut version = tool_version(script, "checkstyle");
+    // The `checkstyle` configuration: Checkstyle at a version of the
+    // build's choosing, and the jars its configuration's checks are in.
+    for dep in checkstyle_dependencies(script, vars, report) {
+        if dep.group == "com.puppycrawl.tools" && dep.artifact == "checkstyle" {
+            version = Some(dep.version);
+        } else {
+            extras.dependencies.push(dep);
+        }
+    }
+    let version = checks::version(Tool::Checkstyle, version);
+    // Gradle's own default, which it requires to exist.
+    let config = block_setting(script, "checkstyle", "configFile")
+        .unwrap_or_else(|| "config/checkstyle/checkstyle.xml".to_string());
+    // Gradle sets `config_loc` to the configuration directory, whatever
+    // the configuration file; the task runs in the project root, which
+    // is what Gradle's default resolves against.
+    let directory = block_setting(script, "checkstyle", "configDir")
+        .unwrap_or_else(|| "config/checkstyle".to_string());
+    extras.properties.push((
+        "config_loc".to_string(),
+        manifest::Template::literal(&directory).raw,
+    ));
+    if let Some(statement) = block_statements(script, "checkstyle")
+        .into_iter()
+        .find(|l| l.starts_with("configProperties"))
+    {
+        let value = statement["configProperties".len()..]
+            .trim_start()
+            .trim_start_matches('=');
+        match super::gradle_generated::map_pairs(value) {
+            Some(pairs) => extras.properties.extend(
+                pairs
+                    .into_iter()
+                    .map(|(k, v)| (k, manifest::Template::literal(&v).raw)),
+            ),
+            None => report.skipped(format!(
+                "`{statement}` — not a map of literals; add its properties to the \
+                 Checkstyle task's JAVA_TOOL_OPTIONS by hand"
+            )),
+        }
+    }
+    // nohttp's plugin puts its check on the `checkstyle` configuration.
+    let nohttp = plugins.iter().find(|p| p.id == NOHTTP_PLUGIN);
+    if let Some(nohttp) = nohttp {
+        let jar = nohttp
+            .version
+            .as_ref()
+            .map(|v| Dependency::new("io.spring.nohttp", "nohttp-checkstyle", v));
+        let added = jar.is_some_and(|jar| {
+            let fresh = !extras
+                .dependencies
+                .iter()
+                .any(|d| d.group == jar.group && d.artifact == jar.artifact);
+            if fresh {
+                extras.dependencies.push(jar);
+            }
+            true
+        });
+        report.skipped(format!(
+            "plugin `{NOHTTP_PLUGIN}` — its `checkstyleNohttp` task has no counterpart; \
+             its check is a Checkstyle configuration (NoHttpCheck) a Checkstyle task can \
+             run{}",
+            if added {
+                ", and nohttp-checkstyle is on the `checkstyle` task's classpath"
+            } else {
+                ""
+            }
+        ));
+    }
+    let task = checkers::checkstyle(
+        "checkstyle",
+        &version,
+        &config,
+        &checks::java_dirs(out),
+        &extras,
+    );
+    checks::add(out, task.map(|t| vec![t]), Tool::Checkstyle, from, report);
+    nohttp.is_some()
+}
+
+/// nohttp's Gradle plugin, which runs its check through Checkstyle.
+const NOHTTP_PLUGIN: &str = "io.spring.nohttp";
+
+/// The coordinates declared on the `checkstyle` configuration in
+/// `dependencies { }`; one jrs cannot read is reported.
+fn checkstyle_dependencies(
+    script: &str,
+    vars: &mut Variables,
+    report: &mut Report,
+) -> Vec<Dependency> {
+    let mut deps = Vec::new();
+    for line in block_lines(script, "dependencies") {
+        let trimmed = line.trim();
+        if leading_word(trimmed).as_deref() != Some("checkstyle") {
+            continue;
+        }
+        match literal_gav(trimmed, vars) {
+            Ok(Some((dep, names))) => {
+                vars.used_by_dependency(&names);
+                deps.push(dep);
+            }
+            Ok(None) => report.skipped(format!(
+                "`{trimmed}` — not a group:artifact:version jrs can read; add it to the \
+                 Checkstyle task's dependencies by hand"
+            )),
+            Err(why) => report.skipped(format!(
+                "`{trimmed}` — {why}; add it to the Checkstyle task's dependencies by hand"
+            )),
+        }
+    }
+    deps
+}
+
 /// Spotless's googleJavaFormat and ktfmt steps → `format` and
 /// `format-check` tasks. Whether there was either.
 fn read_spotless(script: &str, out: &mut Manifest, report: &mut Report) -> bool {
@@ -1931,6 +2114,7 @@ fn read_spotless(script: &str, out: &mut Manifest, report: &mut Report) -> bool 
 fn read_checkers(
     script: &str,
     plugins: &[Plugin],
+    vars: &mut Variables,
     out: &mut Manifest,
     report: &mut Report,
 ) -> Vec<&'static str> {
@@ -1943,18 +2127,9 @@ fn read_checkers(
         done.push("com.diffplug.spotless");
     }
     if applied("checkstyle") {
-        let version = checks::version(Tool::Checkstyle, tool_version(script, "checkstyle"));
-        // Gradle's own default, which it requires to exist.
-        let config = block_setting(script, "checkstyle", "configFile")
-            .unwrap_or_else(|| "config/checkstyle/checkstyle.xml".to_string());
-        let task = checkers::checkstyle(&version, &config, &checks::java_dirs(out));
-        checks::add(
-            out,
-            task.map(|t| vec![t]),
-            Tool::Checkstyle,
-            "plugin `checkstyle`",
-            report,
-        );
+        if read_checkstyle(script, plugins, vars, out, report) {
+            done.push(NOHTTP_PLUGIN);
+        }
         done.push("checkstyle");
     }
     if applied("pmd") {
@@ -2278,7 +2453,7 @@ fn report_the_unreadable(
         // Language plugins and Kotlin's compiler plugins have been reported,
         // migrated or not, by `read_kotlin` and `read_library_languages`.
         let id = plugin.id.as_str();
-        // Spring Boot's two have been reported by `read_managed`.
+        // Spring Boot's two and Ktor's have been reported by `read_managed`.
         let understood = matches!(
             id,
             "java"
@@ -2286,6 +2461,7 @@ fn report_the_unreadable(
                 | "application"
                 | "org.springframework.boot"
                 | "io.spring.dependency-management"
+                | KTOR_PLUGIN
                 | "com.guardsquare.proguard"
                 | "jacoco"
         ) || SHADOW_PLUGINS.contains(&id)
@@ -2340,6 +2516,13 @@ fn read_plugins(script: &str, catalog: &Catalog, vars: &mut Variables) -> Vec<Pl
 
 fn read_plugin(line: &str, catalog: &Catalog, vars: &mut Variables) -> Option<Plugin> {
     let trimmed = line.trim();
+    // `val kotlinVersion = "2.4.20"`: a variable, read by `Variables`.
+    if ["val ", "var ", "def "]
+        .iter()
+        .any(|k| trimmed.starts_with(k))
+    {
+        return None;
+    }
     // `alias(libs.plugins.kotlin.jvm)`, from the version catalog's [plugins].
     if let Some(args) = trimmed.strip_prefix("alias(") {
         let reference = catalog_reference(args)?;
@@ -4257,6 +4440,25 @@ junit = "org.junit.jupiter:junit-jupiter:5.10.2"
             2,
             "{skipped}"
         );
+    }
+
+    #[test]
+    fn the_ktor_plugin_needs_a_version_to_bring_its_bom() {
+        let dir = Dir::new("ktor-no-version");
+        let migration = dir.migrate(
+            "plugins {\n    id 'org.jetbrains.kotlin.jvm' version '2.2.0'\n    \
+             id 'io.ktor.plugin'\n}\n\
+             dependencies {\n    implementation 'io.ktor:ktor-server-core'\n}\n",
+        );
+        assert!(migration.manifest.managed.is_empty());
+        assert!(migration.manifest.dependencies.is_empty());
+        let skipped = migration.report.not_migrated.join("\n");
+        assert!(skipped.contains("Ktor's BOM was not added"), "{skipped}");
+        assert!(
+            skipped.contains("nothing in the build manages one"),
+            "{skipped}"
+        );
+        assert!(!skipped.contains("no plugin system"), "{skipped}");
     }
 
     #[test]

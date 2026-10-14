@@ -1,13 +1,25 @@
 # jrs — Fixing the first corpus run's findings
 
 The plan for the findings of the first run of the real-project corpus
-([CORPUS.md](CORPUS.md), ROADMAP §1): 4 of 11 projects went from
+([CORPUS.md](todo/CORPUS.md), ROADMAP §1): 4 of 11 projects went from
 `jrs migrate` to a running fat jar with no hand edits, and the other seven
 stopped at `jrs build` on six causes, recorded in
-[`corpus/FINDINGS.md`](../../corpus/FINDINGS.md). Five of them are gaps in
+[`corpus/FINDINGS.md`](../corpus/FINDINGS.md). Five of them are gaps in
 `jrs migrate`, not in the build; one is a non-goal.
 
-Status: **proposed**. Each fix below is a migration rule in `src/migrate/`,
+Status: **done**, 2026-10-14. F5–F10 are closed and F11's message is
+changed; all six projects get past `build`, and what their later steps
+turned up is in the ledger as findings 12–19. Where the implementation
+differs from the plan below: the F5 end-to-end case is in the
+`spring-boot-kotlin` fixture, the Kotlin one, not `spring-boot-kts`;
+Gradle's `config_loc` defaults to `config/checkstyle`, as Gradle's does,
+not to the configuration file's directory; property paths are relative to
+the project root, where tasks run, not `{root}`, which `JAVA_TOOL_OPTIONS`
+would split at a space; and OpenAPI's Maven task writes where the plugin
+does, `{target}/generated-sources/openapi`, so that `build-helper`'s
+`add-source` names the same tree.
+
+Each fix below is a migration rule in `src/migrate/`,
 with a fixture in `tests/fixtures/migrate/` and its `expected-jrs.toml`
 (CORPUS.md §6, bin 2). None changes how jrs builds, resolves or writes
 `jrs.lock`, so none needs a SPEC edit beyond DOCS.md's migration section.
