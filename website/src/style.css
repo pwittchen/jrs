@@ -487,6 +487,7 @@ h3 {
 /* The JetBrains Marketplace's install button, drawn by its own script. */
 .marketplace {
   margin-top: 1.5rem;
+  margin-bottom: 1.5rem;
   min-height: 3rem;
 }
 
