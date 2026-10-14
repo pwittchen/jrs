@@ -1,6 +1,6 @@
 # jrs website
 
-The project's website: a landing page, a "Why jrs" page and a documentation page, static HTML
+The project's website: a landing page, a "Why jrs" page, a benchmarks page and a documentation page, static HTML
 bundled with [Bun](https://bun.sh).
 
 ```
@@ -41,7 +41,17 @@ version. It can also be run by hand from the Actions tab.
   when to stay with Maven or Gradle. `src/why.css` imports `style.css` for the
   same reason `docs.css` does, and `src/why.ts` wires up only the shared
   chrome. Its claims follow `specs/ROADMAP_ARCHIVE.md`'s "Where jrs is aimed"; keep the two
-  in step, and link the benchmark report from it once one exists.
+  in step.
+- `benchmarks/index.html` is the benchmarks page, served at
+  `getjrs.dev/benchmarks/`, and the fourth entry point: jrs against Maven and
+  Gradle, the headline numbers, the bars and every result table. The numbers
+  live once, in `RESULTS` in `src/benchmarks.ts`, which draws the bars and the
+  tables from them; they are `docs/BENCHMARKS_SUMMARY.md`'s, so keep the two in
+  step, and replace both when a full `cargo bench --bench compare` report is
+  published. `src/benchmarks.css` is its own stylesheet for the reason
+  `docs.css` is. The Maven and Gradle marks in the table headers are
+  [Simple Icons](https://simpleicons.org)' paths (CC0), inlined in
+  `MARKS`; the jrs mark is the logo the top bar already loads.
 - `src/topbar.css` is the sticky top bar the docs and "Why jrs" pages share,
   imported by both `docs.css` and `why.css`; each lays out `.topbar-inner` on
   its own grid. Since both also import `style.css`, a landing-page-only rule

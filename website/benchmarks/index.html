@@ -1,0 +1,294 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>jrs benchmarks</title>
+    <meta
+      name="description"
+      content="jrs against Maven and Gradle on the same projects: no-op builds in tens of milliseconds, where jrs is faster, and where Gradle's daemon still wins."
+    />
+    <meta name="theme-color" content="#16110d" />
+    <link rel="canonical" href="https://getjrs.dev/benchmarks/" />
+    <link rel="apple-touch-icon" href="../../logo.png" />
+    <meta property="og:type" content="article" />
+    <meta property="og:site_name" content="jrs" />
+    <meta property="og:title" content="jrs benchmarks" />
+    <meta property="og:description" content="jrs against Maven and Gradle on the same projects: no-op builds in tens of milliseconds, where jrs is faster, and where Gradle's daemon still wins." />
+    <meta property="og:url" content="https://getjrs.dev/benchmarks/" />
+    <meta property="og:image" content="https://getjrs.dev/og.png" />
+    <meta property="og:image:width" content="1200" />
+    <meta property="og:image:height" content="630" />
+    <meta property="og:image:alt" content="jrs: a JVM build system, written in Rust" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content="jrs benchmarks" />
+    <meta name="twitter:description" content="jrs against Maven and Gradle on the same projects: no-op builds in tens of milliseconds, where jrs is faster, and where Gradle's daemon still wins." />
+    <meta name="twitter:image" content="https://getjrs.dev/og.png" />
+    <link rel="icon" type="image/png" href="../../logo.png" />
+    <link rel="stylesheet" href="../src/benchmarks.css" />
+    <script type="module" src="../src/benchmarks.ts"></script>
+    <script
+      defer
+      data-website-id="dfid_lddoX28RNBV7m5liPDpTU"
+      data-domain="getjrs.dev"
+      src="https://datafa.st/js/script.cookieless.js"
+    ></script>
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="wrap topbar-inner">
+        <div class="topbar-side">
+          <a class="brand" href="../"><img src="../../logo.png" alt="" width="32" height="32" />jrs</a>
+          <span class="brand-page">benchmarks</span>
+        </div>
+        <nav class="topnav" aria-label="Site">
+          <a href="../" aria-label="Home">
+            <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 11.5 12 4l9 7.5M5.5 9.5V20h4.5v-5.5h4V20h4.5V9.5" /></svg>
+            <span class="label">Home</span>
+          </a>
+          <a href="../why/" aria-label="Why jrs">
+            <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9" /><path d="M9.5 9.5a2.5 2.5 0 1 1 3.5 2.3c-.6.3-1 .9-1 1.6v.6M12 17.5h.01" /></svg>
+            <span class="label">Why jrs</span>
+          </a>
+          <a href="./" aria-current="page" aria-label="Benchmarks">
+            <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 20h16M6.5 20v-6M11.5 20V6M16.5 20v-9" /></svg>
+            <span class="label">Benchmarks</span>
+          </a>
+          <a href="../docs/" aria-label="Docs">
+            <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20V3H6.5A2.5 2.5 0 0 0 4 5.5v14zM4 19.5A2.5 2.5 0 0 0 6.5 22H20v-5" /></svg>
+            <span class="label">Docs</span>
+          </a>
+          <a href="../#install" aria-label="Install" data-fast-goal="install_click_benchmarks_nav">
+            <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v12M7 10l5 5 5-5M5 21h14" /></svg>
+            <span class="label">Install</span>
+          </a>
+          <a href="https://github.com/pwittchen/jrs/releases" aria-label="Releases">
+            <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M20.6 13.4 13.4 20.6a2 2 0 0 1-2.8 0L3 13V3h10l7.6 7.6a2 2 0 0 1 0 2.8zM7.5 7.5h.01" /></svg>
+            <span class="label">Releases</span>
+          </a>
+          <a href="https://github.com/pwittchen/jrs" aria-label="GitHub">
+            <svg class="icon filled" viewBox="0 0 16 16" aria-hidden="true"><path d="M8 0c4.42 0 8 3.58 8 8a8.013 8.013 0 0 1-5.45 7.59c-.4.08-.55-.17-.55-.38 0-.27.01-1.13.01-2.2 0-.75-.25-1.23-.54-1.48 1.78-.2 3.65-.88 3.65-3.95 0-.88-.31-1.59-.82-2.15.08-.2.36-1.02-.08-2.12 0 0-.67-.22-2.2.82-.64-.18-1.32-.27-2-.27-.68 0-1.36.09-2 .27-1.53-1.03-2.2-.82-2.2-.82-.44 1.1-.16 1.92-.08 2.12-.51.56-.82 1.28-.82 2.15 0 3.06 1.86 3.75 3.64 3.95-.23.2-.44.55-.51 1.07-.46.21-1.61.55-2.33-.66-.15-.24-.6-.83-1.23-.82-.67.01-.27.38.01.53.34.19.73.9.82 1.13.16.45.68 1.31 2.69.94 0 .67.01 1.3.01 1.49 0 .21-.15.45-.55.38A7.995 7.995 0 0 1 0 8c0-4.42 3.58-8 8-8Z" /></svg>
+            <span class="label">GitHub</span>
+          </a>
+          <a class="version" data-version href="https://github.com/pwittchen/jrs/releases" title="Release notes"></a>
+        </nav>
+      </div>
+    </header>
+
+        <main>
+      <section class="wrap intro">
+        <p class="eyebrow">Benchmarks</p>
+        <h1>The build is done before the daemon answers.</h1>
+        <p class="lede">
+          jrs is one native binary that starts in milliseconds and keeps nothing running between
+          builds. On the same projects, built the same way, it finishes a no-op build in about
+          60&nbsp;ms, five times faster than a warm Gradle daemon and more than ten times faster
+          than Maven. It is slower when a change forces a lot of compiling: an API change in a
+          large project, or a clean build of several modules, where a warm Gradle daemon
+          finishes up to four times sooner. Here are all the numbers, the losses included.
+        </p>
+        <p class="caveat">
+          <strong>A first pass, not the final report.</strong> Every cell below is a single run
+          with no warm-up, on one machine. The harness that produced it runs seven measured runs
+          and two warm-ups per cell by default; those numbers, with their spread, replace these
+          once they are published. Expect individual cells to move; the pattern held across all
+          five projects.
+        </p>
+      </section>
+
+      <section class="wrap section" aria-labelledby="headline">
+        <h2 id="headline">Where you wait the most</h2>
+        <p class="section-lede">
+          Most builds in a working day change nothing, or one file. That is where start-up
+          dominates, and where a tool with nothing to warm up pays off most.
+        </p>
+        <h3>Where jrs is faster</h3>
+        <dl class="stats">
+          <div>
+            <dt>No-op build</dt>
+            <dd><span class="value">63 ms</span><span class="versus">Gradle daemon 357&nbsp;ms</span><span class="versus">Maven 821&nbsp;ms</span></dd>
+          </div>
+          <div>
+            <dt>Run, to first output</dt>
+            <dd><span class="value">126 ms</span><span class="versus">Gradle daemon 439&nbsp;ms</span><span class="versus">Maven 933&nbsp;ms</span></dd>
+          </div>
+          <div>
+            <dt>Edit, 2000 classes</dt>
+            <dd><span class="value">386 ms</span><span class="versus">Gradle daemon 593&nbsp;ms</span><span class="versus">Maven 2.49&nbsp;s</span></dd>
+          </div>
+          <div>
+            <dt>Cold build, Spring Boot</dt>
+            <dd><span class="value">0.63 s</span><span class="versus">Maven 1.84&nbsp;s</span><span class="versus">Gradle 12.3&nbsp;s</span></dd>
+          </div>
+        </dl>
+        <h3>Where jrs is slower</h3>
+        <dl class="stats slower">
+          <div>
+            <dt>API change, 2000 classes</dt>
+            <dd><span class="value">1.84 s</span><span class="versus">Gradle daemon 641&nbsp;ms</span><span class="versus">Maven 2.51&nbsp;s</span></dd>
+          </div>
+          <div>
+            <dt>Clean build, 6 modules</dt>
+            <dd><span class="value">1.98 s</span><span class="versus">Gradle daemon 791&nbsp;ms</span><span class="versus">Maven 1.58&nbsp;s</span></dd>
+          </div>
+          <div>
+            <dt>Spring Boot fat jar</dt>
+            <dd><span class="value">719 ms</span><span class="versus">Gradle daemon 513&nbsp;ms</span><span class="versus">Maven 1.45&nbsp;s</span></dd>
+          </div>
+        </dl>
+        <p class="note">
+          From <code>wordstats</code>, <code>gen-2000</code>, <code>gen-ws</code> and
+          <code>bookmarks</code> below; the cold build reads every dependency from a local mirror,
+          so the network is not in it. Why jrs is slower in these, and what would fix it, is
+          <a href="#verdict">further down</a>.
+        </p>
+      </section>
+
+      <section class="wrap section" aria-labelledby="bars">
+        <h2 id="bars">Five ways to build the same project</h2>
+        <p class="section-lede">
+          Gradle is measured three ways: with a daemon kept warm from the warm-up runs, the same
+          with the configuration cache, and with <code>--no-daemon</code>, which is what a CI job
+          or the first command of the day sees.
+        </p>
+        <h3>Where jrs is faster</h3>
+        <div class="charts">
+          <figure class="chart">
+            <figcaption><strong>No-op build</strong><code>wordstats</code>, nothing changed</figcaption>
+            <div data-bars data-project="wordstats" data-scenario="noop"></div>
+          </figure>
+          <figure class="chart">
+            <figcaption><strong>One method body changed</strong><code>gen-2000</code>, 2000 classes</figcaption>
+            <div data-bars data-project="gen-2000" data-scenario="incremental"></div>
+          </figure>
+          <figure class="chart">
+            <figcaption><strong>Start a Spring Boot app</strong><code>bookmarks</code>, to its first HTTP 200</figcaption>
+            <div data-bars data-project="bookmarks" data-scenario="run"></div>
+          </figure>
+        </div>
+        <h3>Where Gradle's daemon is faster</h3>
+        <div class="charts">
+          <figure class="chart">
+            <figcaption><strong>A public method added</strong><code>gen-2000</code>, to a widely used class</figcaption>
+            <div data-bars data-project="gen-2000" data-scenario="abi"></div>
+          </figure>
+          <figure class="chart">
+            <figcaption><strong>Clean build of a workspace</strong><code>gen-ws</code>, six modules</figcaption>
+            <div data-bars data-project="gen-ws" data-scenario="clean"></div>
+          </figure>
+          <figure class="chart">
+            <figcaption><strong>Package Spring Boot</strong><code>bookmarks</code>, the fat jar</figcaption>
+            <div data-bars data-project="bookmarks" data-scenario="package"></div>
+          </figure>
+        </div>
+      </section>
+
+      <section class="wrap section" aria-labelledby="verdict">
+        <h2 id="verdict">Where jrs wins, and where it does not yet</h2>
+        <div class="verdicts">
+          <article class="wins">
+            <h3>Faster</h3>
+            <ul>
+              <li><strong>Anything start-up bound.</strong> No-op builds in 63–85&nbsp;ms on every project: 4–7× a warm Gradle daemon, 11–15× Maven, 26–37× Gradle without a daemon.</li>
+              <li><strong>Edits that change no API.</strong> One source recompiled and nothing else run: 25–45% ahead of the daemon, 4–6× ahead of Maven.</li>
+              <li><strong>Cold builds.</strong> 0.6–2.2&nbsp;s with empty caches, against 1.4–3&nbsp;s for Maven and 11–14&nbsp;s for Gradle, which sets up its whole home first.</li>
+              <li><strong>Fat jars of plain projects.</strong> 1.8–3× faster than <code>shadowJar</code> on a warm daemon.</li>
+              <li><strong>Small test suites and test selection.</strong> <code>jrs test</code> runs only the tests a change reaches: 626&nbsp;ms against 2.6&nbsp;s for Maven in the workspace.</li>
+              <li><strong>On CI.</strong> Against Maven and Gradle without a daemon, jrs is faster in every cell but three.</li>
+            </ul>
+          </article>
+          <article class="gaps">
+            <h3>Gradle's daemon still wins</h3>
+            <ul>
+              <li><strong>An API change in a big project.</strong> jrs recompiles everything that reaches the changed class; Gradle's analysis recompiles less, in a warm compiler. 1.84&nbsp;s against 0.64&nbsp;s on 2000 classes.</li>
+              <li><strong>Workspaces.</strong> Members compile one after another, each in a fresh <code>javac</code>; on six members a clean build takes 1.98&nbsp;s against the daemon's 0.79&nbsp;s and Maven's 1.58&nbsp;s. Building members in parallel is <a href="https://github.com/pwittchen/jrs/blob/master/specs/todo/GRADLE_GAPS.md">next on the roadmap</a>.</li>
+              <li><strong>Long compiles.</strong> At 2000 classes a hot, JIT-warmed <code>javac</code> overtakes a fresh one: 1.55&nbsp;s against 1.26&nbsp;s for a clean build.</li>
+              <li><strong>Spring Boot's jar.</strong> 719&nbsp;ms against <code>bootJar</code>'s 513&nbsp;ms; jrs unpacks every dependency into one jar where Boot nests them.</li>
+            </ul>
+          </article>
+        </div>
+      </section>
+
+      <section class="wrap section" aria-labelledby="all">
+        <h2 id="all">Every number</h2>
+        <p class="section-lede">
+          Five projects, nine scenarios each. Under every other tool's time is how it compares:
+          <code>4.4×</code> means jrs was 4.4 times faster; where the other tool won, it says by
+          how much.
+        </p>
+        <p class="legend"><span class="swatch"></span>jrs's column · <span class="best">yellow</span>: the fastest tool in the row · <strong>bold, marked “faster”</strong>: beat jrs</p>
+        <div data-tables></div>
+        <noscript>
+          <p class="note">
+            The tables need JavaScript; the same numbers are in
+            <a href="https://github.com/pwittchen/jrs/blob/master/docs/BENCHMARKS_SUMMARY.md">docs/BENCHMARKS_SUMMARY.md</a>.
+          </p>
+        </noscript>
+        <dl class="phases">
+          <div><dt>cold</dt><dd><code>build</code> with empty caches and no lockfile: resolution and every download, from a local mirror.</dd></div>
+          <div><dt>clean</dt><dd><code>build</code> with warm caches and a clean tree.</dd></div>
+          <div><dt>noop</dt><dd>The same <code>build</code> again, nothing changed.</dd></div>
+          <div><dt>incremental</dt><dd><code>build</code> after a change no other class can see: a method body, or a private method.</dd></div>
+          <div><dt>abi</dt><dd><code>build</code> after a public method is added to the class most others use.</dd></div>
+          <div><dt>test</dt><dd>The whole suite, every class already compiled.</dd></div>
+          <div><dt>test-edit</dt><dd><code>test</code> after one edit: jrs runs the tests the change reaches, Maven and Gradle the whole suite.</dd></div>
+          <div><dt>run</dt><dd>From the command to the program's first expected line, or a service's first HTTP answer.</dd></div>
+          <div><dt>package</dt><dd>The jar the project ships: a fat jar, or Spring Boot's.</dd></div>
+        </dl>
+      </section>
+
+      <section class="wrap section" aria-labelledby="method">
+        <h2 id="method">How it was measured</h2>
+        <ol class="method">
+          <li><strong>The same build, three times.</strong> Each project has a <code>jrs.toml</code>, a <code>pom.xml</code> and a <code>build.gradle.kts</code> for the same sources, dependencies, <code>--release</code>, JUnit 5 tests and fat jar. The generated projects get all three from one description.</li>
+          <li><strong>Checked before timed.</strong> No project is timed until every tool resolves the same runtime classpath, runs the same tests with no failures, prints the same output and builds a jar that starts.</li>
+          <li><strong>No network, no build cache.</strong> Every tool reads one local mirror of Maven Central and the Gradle Plugin Portal; jrs, Maven and Gradle all run with their build caches off.</li>
+          <li><strong>Default configuration.</strong> No tuning flag jrs has no counterpart for. Output goes to a file, never a terminal. Runs go round-robin over the tools.</li>
+          <li><strong>The setup.</strong> jrs 0.11.0, Maven 3.9.16 and Gradle 9.1.0 on Corretto 25.0.2, an Apple M4 Max with 14 cores under macOS 27, on 2026-10-14.</li>
+        </ol>
+        <p class="note">
+          The rules, the scenarios and the harness are in
+          <a href="https://github.com/pwittchen/jrs/blob/master/specs/todo/BENCHMARKS.md">specs/todo/BENCHMARKS.md</a>;
+          the numbers and their reading in
+          <a href="https://github.com/pwittchen/jrs/blob/master/docs/BENCHMARKS_SUMMARY.md">docs/BENCHMARKS_SUMMARY.md</a>.
+          Run it on your own machine:
+        </p>
+        <div class="shell">
+<pre><code>git clone https://github.com/pwittchen/jrs && cd jrs
+JRS_BENCH_RECORD=1 cargo bench --bench compare   <span class="c"># fill the local mirror, once</span>
+cargo bench --bench compare                      <span class="c"># writes benchmarks/REPORT.md</span></code></pre>
+          <button class="copy" type="button">Copy</button>
+        </div>
+      </section>
+
+      <section class="wrap section" aria-labelledby="try">
+        <h2 id="try">Time it on your own project</h2>
+        <p class="section-lede">
+          <code>jrs migrate</code> writes a <code>jrs.toml</code> beside your <code>pom.xml</code>
+          or Gradle build and leaves them in place, so the comparison costs one command.
+        </p>
+        <div class="shell">
+<pre><code>cd my-project
+jrs migrate
+time jrs build     <span class="c"># then once more, with nothing changed</span></code></pre>
+          <button class="copy" type="button">Copy</button>
+        </div>
+        <div class="cta">
+          <a class="button primary" href="../#install" data-fast-goal="install_click_benchmarks">
+            <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v12M7 10l5 5 5-5M5 21h14" /></svg>
+            Install jrs
+          </a>
+          <a class="button" href="../why/">
+            <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9" /><path d="M9.5 9.5a2.5 2.5 0 1 1 3.5 2.3c-.6.3-1 .9-1 1.6v.6M12 17.5h.01" /></svg>
+            Why jrs
+          </a>
+        </div>
+      </section>
+    </main>
+
+    <footer class="wrap foot">
+      <span>Apache License 2.0</span>
+      <span><a href="../">Home</a> · <a href="../why/">Why jrs</a> · <a href="../docs/">Documentation</a> · <a href="https://github.com/pwittchen/jrs/releases">Releases</a> · <a class="foot-github" href="https://github.com/pwittchen/jrs" aria-label="jrs on GitHub" title="jrs on GitHub"><svg class="icon filled" viewBox="0 0 16 16" aria-hidden="true"><path d="M8 0c4.42 0 8 3.58 8 8a8.013 8.013 0 0 1-5.45 7.59c-.4.08-.55-.17-.55-.38 0-.27.01-1.13.01-2.2 0-.75-.25-1.23-.54-1.48 1.78-.2 3.65-.88 3.65-3.95 0-.88-.31-1.59-.82-2.15.08-.2.36-1.02-.08-2.12 0 0-.67-.22-2.2.82-.64-.18-1.32-.27-2-.27-.68 0-1.36.09-2 .27-1.53-1.03-2.2-.82-2.2-.82-.44 1.1-.16 1.92-.08 2.12-.51.56-.82 1.28-.82 2.15 0 3.06 1.86 3.75 3.64 3.95-.23.2-.44.55-.51 1.07-.46.21-1.61.55-2.33-.66-.15-.24-.6-.83-1.23-.82-.67.01-.27.38.01.53.34.19.73.9.82 1.13.16.45.68 1.31 2.69.94 0 .67.01 1.3.01 1.49 0 .21-.15.45-.55.38A7.995 7.995 0 0 1 0 8c0-4.42 3.58-8 8-8Z" /></svg></a></span>
+    </footer>
+  </body>
+</html>

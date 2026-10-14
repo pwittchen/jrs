@@ -600,6 +600,18 @@ h3 {
   color: var(--text);
 }
 
+/* The repository as its mark alone, sized to the footer's text and centred
+   on its lowercase letters, which the underlined links mostly are. */
+.foot-github {
+  display: inline-flex;
+  vertical-align: -0.27em;
+}
+
+.foot-github .icon {
+  width: 1.05em;
+  height: 1.05em;
+}
+
 /* ---- narrow screens ---------------------------------------------------- */
 
 @media (max-width: 52rem) {

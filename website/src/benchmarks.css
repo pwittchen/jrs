@@ -1,0 +1,500 @@
+/* The benchmarks page: the landing page's palette, fonts and components, the
+   top bar the docs and "Why jrs" pages share, and the page's own headline
+   numbers, bars and result tables. Its own file, since Bun refuses two entry
+   points that bundle to the same CSS. */
+@import "./style.css";
+@import "./topbar.css";
+
+:root {
+  /* The fastest cell of a results row: a clear yellow, saturated enough to
+     read apart from the latte of "faster" and the orange accent. */
+  --best: #f7d43f;
+}
+
+/* ---- top bar and intro, as on the "Why jrs" page ---------------------- */
+
+.topbar-inner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  height: 3.5rem;
+}
+
+.topbar-side {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.intro {
+  padding-block: 4.5rem 0.5rem;
+}
+
+.eyebrow {
+  margin: 0 0 1rem;
+  color: var(--accent);
+  font-size: 0.78rem;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.intro h1 {
+  max-width: 22ch;
+}
+
+.caveat {
+  max-width: 70ch;
+  margin: 1.5rem 0 0;
+  padding: 0.8rem 1rem;
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--latte);
+  border-radius: 6px;
+  background: var(--raised);
+  color: var(--muted);
+  font-size: 0.88rem;
+}
+
+.caveat strong {
+  color: var(--text);
+}
+
+/* ---- headline numbers ------------------------------------------------- */
+
+.stats {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 1px;
+  margin: 0;
+  background: var(--line);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.stats > div {
+  padding: 1.3rem 1.4rem 1.4rem;
+  background: var(--raised);
+}
+
+.stats dt {
+  color: var(--muted);
+  font-size: 0.82rem;
+  /* One line in every tile, so the four values below sit on one line. */
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.stats dd {
+  margin: 0;
+}
+
+.stats .value {
+  display: block;
+  margin: 0.35rem 0 0.4rem;
+  color: var(--accent);
+  font-family: var(--display);
+  font-weight: 700;
+  font-size: 1.9rem;
+  line-height: 1.1;
+  font-variant-numeric: tabular-nums;
+}
+
+/* The losses, as prominent as the wins, told apart by more than colour:
+   their own heading, and three tiles to the wins' four. */
+.stats.slower {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.stats.slower .value {
+  color: var(--latte);
+}
+
+.stats .versus {
+  display: block;
+  color: var(--muted);
+  font-size: 0.85rem;
+  white-space: nowrap;
+}
+
+/* ---- bars ------------------------------------------------------------- */
+
+.charts {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 1.25rem;
+}
+
+.chart {
+  margin: 0;
+  padding: 1.1rem 1.2rem 1.2rem;
+  min-width: 0;
+  background: var(--raised);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+
+.chart figcaption {
+  margin-bottom: 0.9rem;
+  color: var(--muted);
+  font-size: 0.82rem;
+}
+
+.chart figcaption strong {
+  display: block;
+  color: var(--text);
+  font-size: 0.92rem;
+}
+
+.bars {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.bar {
+  position: relative;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-areas:
+    "name value"
+    "track track";
+  align-items: baseline;
+  gap: 0.2rem 0.6rem;
+  padding-block: 0.35rem;
+  font-size: 0.8rem;
+  outline: none;
+}
+
+.bar-name {
+  grid-area: name;
+  color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.bar.jrs .bar-name {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.bar-track {
+  grid-area: track;
+  height: 0.7rem;
+}
+
+.bar-fill {
+  display: block;
+  height: 100%;
+  border-radius: 0 4px 4px 0;
+  background: color-mix(in srgb, var(--muted) 45%, var(--raised));
+}
+
+.bar.jrs .bar-fill {
+  background: var(--accent);
+}
+
+.bar-value {
+  grid-area: value;
+  color: var(--text);
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.bar-value .x {
+  margin-left: 0.5rem;
+  color: var(--muted);
+}
+
+/* Another tool beat jrs here, said in words as well as colour. */
+.bar-value .x.ahead {
+  color: var(--latte);
+  font-weight: 600;
+}
+
+.bar-tip {
+  position: absolute;
+  z-index: 2;
+  left: 0;
+  bottom: calc(100% - 0.2rem);
+  padding: 0.3rem 0.55rem;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--sunk);
+  color: var(--text);
+  white-space: nowrap;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.12s;
+}
+
+.bar:hover .bar-tip,
+.bar:focus-visible .bar-tip {
+  opacity: 1;
+}
+
+.bar:hover .bar-fill,
+.bar:focus-visible .bar-fill {
+  filter: brightness(1.2);
+}
+
+/* ---- where it wins, where it does not --------------------------------- */
+
+.verdicts {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 1.25rem;
+}
+
+.verdicts article {
+  padding: 1.3rem 1.5rem 1.4rem;
+  background: var(--raised);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+
+.verdicts article.wins {
+  border-color: color-mix(in srgb, var(--accent) 55%, var(--line));
+}
+
+.verdicts h3 {
+  margin: 0 0 0.8rem;
+  color: var(--latte);
+  font-size: 0.95rem;
+}
+
+.verdicts ul {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.verdicts li {
+  position: relative;
+  padding: 0.55rem 0 0.55rem 1.4rem;
+  border-top: 1px solid var(--line);
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+.verdicts li::before {
+  position: absolute;
+  left: 0.1rem;
+  top: 0.55rem;
+  color: var(--accent);
+}
+
+.verdicts .wins li::before {
+  content: "↑";
+}
+
+.verdicts .gaps li::before {
+  content: "→";
+  color: var(--latte);
+}
+
+.verdicts strong {
+  color: var(--text);
+  font-weight: 600;
+}
+
+/* ---- result tables ---------------------------------------------------- */
+
+.results {
+  margin: 0 0 1.75rem;
+}
+
+.results figcaption {
+  margin-bottom: 0.6rem;
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+.results figcaption strong {
+  color: var(--text);
+  font-family: var(--display);
+  font-weight: 600;
+}
+
+.table-scroll {
+  overflow-x: auto;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+
+.results table {
+  width: 100%;
+  min-width: 46rem;
+  border-collapse: collapse;
+  font-size: 0.84rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.results th,
+.results td {
+  padding: 0.5rem 0.65rem;
+  border-bottom: 1px solid var(--line);
+  text-align: right;
+  white-space: nowrap;
+}
+
+.results tbody tr:last-child > * {
+  border-bottom: 0;
+}
+
+.results thead th {
+  background: var(--raised);
+  color: var(--muted);
+  font-weight: 500;
+}
+
+.results th.scenario {
+  text-align: left;
+  font-weight: 400;
+}
+
+.results th.scenario code {
+  color: var(--text);
+}
+
+.results .what {
+  display: block;
+  color: var(--muted);
+  font-size: 0.76rem;
+}
+
+.results .jrs {
+  background: color-mix(in srgb, var(--accent) 9%, transparent);
+  color: var(--text);
+  font-weight: 600;
+}
+
+.results thead th.jrs {
+  color: var(--accent);
+}
+
+.tool-head {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+}
+
+.tool-mark {
+  flex: none;
+  width: 1.1rem;
+  height: 1.1rem;
+  fill: currentColor;
+}
+
+.results .x {
+  display: block;
+  color: var(--muted);
+  font-size: 0.74rem;
+}
+
+/* Another tool beat jrs here: said in words as well as colour. */
+.results td.ahead {
+  color: var(--latte);
+  font-weight: 600;
+}
+
+.legend {
+  margin: 0 0 1.25rem;
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+/* The row's fastest tool. Later than .jrs and .ahead, so it wins over both. */
+.results td.best,
+.results td.best .x {
+  color: var(--best);
+  font-weight: 600;
+}
+
+/* Read out, never drawn. */
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+.legend .best {
+  color: var(--best);
+  font-weight: 600;
+}
+
+.legend .swatch {
+  display: inline-block;
+  width: 0.7rem;
+  height: 0.7rem;
+  margin-right: 0.35rem;
+  border-radius: 2px;
+  vertical-align: -0.05rem;
+  background: color-mix(in srgb, var(--accent) 35%, var(--raised));
+}
+
+.method {
+  max-width: 72ch;
+  margin: 0;
+  padding-left: 1.2rem;
+  color: var(--muted);
+}
+
+/* The note that introduces the reproduce commands sits closer than a
+   section lede would; give the block below it the same room. */
+.note + .shell {
+  margin-top: 1.5rem;
+}
+
+.method li {
+  margin-bottom: 0.5rem;
+}
+
+.method strong {
+  color: var(--text);
+}
+
+/* ---- narrow screens --------------------------------------------------- */
+
+@media (max-width: 64rem) {
+  .charts {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .stats {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 52rem) {
+  .verdicts,
+  .stats.slower {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+@media (max-width: 36rem) {
+  .intro {
+    padding-block: 2.5rem 0;
+  }
+
+  .stats {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .topnav .version,
+  .topnav .label {
+    display: none;
+  }
+
+  .topnav a[aria-label="GitHub"] {
+    margin-right: -0.7rem;
+  }
+}
