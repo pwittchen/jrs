@@ -3,7 +3,7 @@
 Design for building a project of several modules — a `core` library, an
 `api`, an application on top — from one root, with one lockfile.
 
-Status: **implemented**, as section 7 of [ROADMAP_ARCHIVE.md](../ROADMAP_ARCHIVE.md). It
+Status: **implemented**, as section 7 of [ROADMAP_ARCHIVE.md](ROADMAP_ARCHIVE.md). It
 moves a line drawn in [SPEC §1.2](../SPEC.md#12-non-goals) ("Multi-module /
 aggregator builds (v1 is one module per manifest)") and reverses SPEC open
 question 11, so it needed an SPEC.md change before code; §2 is the argument,

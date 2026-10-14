@@ -18,7 +18,7 @@ independent and can land in any order; §7 suggests one.
 
 ## 1. Problem
 
-The audiences [ROADMAP_ARCHIVE.md](../../ROADMAP_ARCHIVE.md) names as the
+The audiences [ROADMAP_ARCHIVE.md](../ROADMAP_ARCHIVE.md) names as the
 best fit for jrs (services, command-line tools, teams for whom the JVM is a
 guest language, coding agents) meet four obstacles before they meet the
 build itself:

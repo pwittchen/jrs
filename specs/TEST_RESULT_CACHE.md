@@ -1,7 +1,7 @@
 # jrs — Per-class test results in the build cache
 
 Design proposal for the last test item in
-[ROADMAP_ARCHIVE §6](../ROADMAP_ARCHIVE.md#6-faster-than-gradle), and open question 7 of
+[ROADMAP_ARCHIVE §6](ROADMAP_ARCHIVE.md#6-faster-than-gradle), and open question 7 of
 [FASTER_BUILDS.md](FASTER_BUILDS.md#8-open-questions): letting a branch
 switch, a second checkout or a CI machine reuse *part* of a test suite's
 results, class by class, instead of all of them or none.

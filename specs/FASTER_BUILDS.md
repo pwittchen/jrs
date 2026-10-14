@@ -1,7 +1,7 @@
 # jrs — Faster builds: the rest of "Faster than Gradle"
 
 Design proposal for the four items still open in
-[ROADMAP_ARCHIVE §6](../ROADMAP_ARCHIVE.md#6-faster-than-gradle): class-data sharing for the
+[ROADMAP_ARCHIVE §6](ROADMAP_ARCHIVE.md#6-faster-than-gradle): class-data sharing for the
 test JVM, pipelined downloads, a build cache, and a warm `javac` for
 `--watch`.
 

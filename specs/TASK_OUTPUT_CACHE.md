@@ -1,7 +1,7 @@
 # jrs — Task outputs in the build cache
 
 Design proposal for the third item left in
-[ROADMAP_ARCHIVE §6](../ROADMAP_ARCHIVE.md#6-faster-than-gradle), and the answer to
+[ROADMAP_ARCHIVE §6](ROADMAP_ARCHIVE.md#6-faster-than-gradle), and the answer to
 [FASTER_BUILDS.md §8](FASTER_BUILDS.md#8-open-questions), question 5: a
 user-defined task's outputs, restored from the build cache of SPEC §7.8
 instead of run again.

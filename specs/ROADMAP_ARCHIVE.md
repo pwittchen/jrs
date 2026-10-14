@@ -1,6 +1,6 @@
 # jrs — Roadmap archive
 
-The roadmap as it stood on 2026-10-14, before [ROADMAP.md](ROADMAP.md) was
+The roadmap as it stood on 2026-10-14, before [ROADMAP.md](../ROADMAP.md) was
 narrowed to four items. Nothing here was dropped: what is still open below
 stays open, and the four items of the new roadmap take sections 1, 2, 3 and 6
 and parts of 4, 5 and 7 further, each with a spec in `specs/todo/`. Section
@@ -8,14 +8,14 @@ numbers cited elsewhere as "ROADMAP_ARCHIVE §n" refer to this document.
 
 ---
 
-Every milestone in [SPEC §12](SPEC.md#12-roadmap) has landed. This
+Every milestone in [SPEC §12](../SPEC.md#12-roadmap) has landed. This
 document lists only what is still open. Much of it closes a gap with Gradle, and those items
 name the Gradle feature they answer. jrs is not trying to become Gradle
 (SPEC §1.2), so each one is the declarative version of what a
 Gradle build gets from a plugin or a DSL block, and it arrives with its row in
 `jrs migrate` and a fixture in `tests/fixtures/migrate/`, as `test.forks` did
 for `maxParallelForks` (`gradle-forks`). Anything that touches a
-[non-goal](SPEC.md#12-non-goals) or adds a crate is a spec-level
+[non-goal](../SPEC.md#12-non-goals) or adds a crate is a spec-level
 decision (see the last section) — it needs a spec change before it needs code.
 
 ---
@@ -244,19 +244,19 @@ listed so the discussion has a home, not because they are planned.
 
 | Idea | What it crosses |
 | --- | --- |
-| Composite builds (Gradle's `includeBuild`), dependency substitution with a local checkout | Non-goal: a workspace's members live under its root ([WORKSPACES.md §9](specs/WORKSPACES.md#9-what-stays-out)). Without them, the way to try a change to a library in the project that uses it is a `-SNAPSHOT` in `~/.m2` through a `file://` repository |
+| Composite builds (Gradle's `includeBuild`), dependency substitution with a local checkout | Non-goal: a workspace's members live under its root ([WORKSPACES.md §9](WORKSPACES.md#9-what-stays-out)). Without them, the way to try a change to a library in the project that uses it is a `-SNAPSHOT` in `~/.m2` through a `file://` repository |
 | Publishing (Gradle's `maven-publish`, `publishToMavenLocal`) | Non-goal: SPEC §1.2 rules out `deploy`/`publish`. Done properly it means generating a POM from the manifest, sources and Javadoc jars (`jrs package --sources --javadoc` writes them), signing, and uploading with credentials. A `jrs install` into `~/.m2` is the smallest version, and it is the one that makes library development across projects bearable without a reactor |
 | JDK auto-provisioning (Gradle's toolchain resolvers, foojay) | Downloads from a host that is not a Maven repository. Unix JDKs ship as tar.gz, which means new crates. Today a pinned JDK that is not installed is an error listing the ones that are (SPEC §7.1) |
 | A wrapper that fetches the pinned jrs (Gradle's `gradlew`) | jrs would download and run executables. Today `project.jrs-version` (SPEC §4.3) makes an older jrs stop and name the version the project needs |
 | Per-suite dependencies, `java-test-fixtures`, multi-release jars | `[test.suites]` (SPEC §10.2) gives a second test suite its own sources, JVM and `jrs test --suite` selection on the one test classpath. Dependencies of its own, as Gradle's JVM Test Suite plugin has them, would put a graph per suite in the lockfile; multi-release jars need a source root per Java release |
 | Build variants (Gradle `-P` properties, Maven profiles) | The manifest is one fixed configuration. Conditional configuration is the start of a DSL |
 | PGP signature verification (Gradle's dependency verification) | An OpenPGP crate and a trust store. `jrs.lock` already pins a checksum for every non-snapshot jar, which covers the "bytes changed under the same version" case |
-| A compiler daemon (the Gradle daemon) | Non-goal: SPEC §1.2 rules out a compiler process that outlives the command that started it. A `--watch` session already keeps a `javac` worker for its own lifetime (SPEC §7.5). What is left is a daemon across commands, which jrs would have to find and manage, and a worker for kotlinc and scalac, which add a second or so of JVM start-up to a changed build ([JVM_LANGUAGES.md §14.1](specs/JVM_LANGUAGES.md#14-open-questions)) and wait for a measurement saying it is felt |
+| A compiler daemon (the Gradle daemon) | Non-goal: SPEC §1.2 rules out a compiler process that outlives the command that started it. A `--watch` session already keeps a `javac` worker for its own lifetime (SPEC §7.5). What is left is a daemon across commands, which jrs would have to find and manage, and a worker for kotlinc and scalac, which add a second or so of JVM start-up to a changed build ([JVM_LANGUAGES.md §14.1](JVM_LANGUAGES.md#14-open-questions)) and wait for a measurement saying it is felt |
 | A Build Server Protocol server | A long-lived JSON-RPC process that IntelliJ, Metals and VS Code can talk to. `jrs metadata` (SPEC §5.4) is the first step and needs no daemon |
 | Annotation-processor path in the manifest | Non-goal: no annotation-processor configuration. Processors on the compile classpath, as `compile-only` dependencies with `-proc:full`, work today. Error Prone, NullAway and other `javac` plugins need a processor path too |
 | JPMS (`module-info.java`, module path) | Non-goal |
 | JVM languages beyond Kotlin, Scala and Groovy; Kotlin Multiplatform | Non-goal (SPEC §1.2) |
-| Kotlin compiler plugins with configuration, kapt/KSP | `[kotlin] plugins` turns on the plugins that need only their name (`serialization`, `spring`, `jpa`, `power-assert`, and `allopen`/`noarg` with their options in `kotlinc-args`). A plugin block of its own (`allOpen { annotation(...) }`) is plugin configuration ([JVM_LANGUAGES.md §14.2](specs/JVM_LANGUAGES.md#14-open-questions)); kapt and KSP run processors over Kotlin and need a processor path |
+| Kotlin compiler plugins with configuration, kapt/KSP | `[kotlin] plugins` turns on the plugins that need only their name (`serialization`, `spring`, `jpa`, `power-assert`, and `allopen`/`noarg` with their options in `kotlinc-args`). A plugin block of its own (`allOpen { annotation(...) }`) is plugin configuration ([JVM_LANGUAGES.md §14.2](JVM_LANGUAGES.md#14-open-questions)); kapt and KSP run processors over Kotlin and need a processor path |
 | Dokka | A plugin host with its own configuration (JVM_LANGUAGES.md §14.4). `jrs doc` runs Scaladoc and Groovydoc, but a Kotlin unit's Kotlin sources are still left out of its `javadoc`, with a warning |
 | sbt-style `%%` cross-version keys | New key syntax, touching `edit.rs`, the lockfile and migration (JVM_LANGUAGES.md §14.3) |
 | TestNG | SPEC §13.7: the JUnit Platform only (Jupiter and Vintage) |
@@ -270,7 +270,7 @@ listed so the discussion has a home, not because they are planned.
 
 jrs starts faster than Gradle: it is a native binary with no configuration
 phase. Where Gradle still wins is the JVM work itself. Most of that gap is
-closed now ([specs/FASTER_BUILDS.md](specs/FASTER_BUILDS.md)): the compiler
+closed now ([specs/FASTER_BUILDS.md](FASTER_BUILDS.md)): the compiler
 JVMs start from class-data-sharing archives, and the test JVM can too
 (`test.share-classes`, SPEC §10.2); a build cache restores compiled classes,
 passing test runs and the outputs of tasks that opt in with `cache = true`
@@ -285,7 +285,7 @@ which gap is real, and every item here is judged by them.
   The launcher's class loader changes which copy of a name a test finds
   first and registries cannot be checked by name, so the default waits for
   the corpus of section 1 to run green with it on.
-  [specs/TEST_JVM_BENCHMARK.md](specs/TEST_JVM_BENCHMARK.md) is the plan
+  [specs/TEST_JVM_BENCHMARK.md](TEST_JVM_BENCHMARK.md) is the plan
   and its decision rules; `cargo bench --bench test_jvm` is the harness.
   Its first pass (§7 there) keeps both opt-in and names what blocks them: a
   jar deserialising a project class cannot see it under the shared layout,
@@ -294,7 +294,7 @@ which gap is real, and every item here is judged by them.
   directory.
 - **Per-class test results in the build cache**, keyed by each class's
   reach, so that a branch switch reuses part of a suite's results rather
-  than all or nothing: [specs/TEST_RESULT_CACHE.md](specs/TEST_RESULT_CACHE.md),
+  than all or nothing: [specs/TEST_RESULT_CACHE.md](TEST_RESULT_CACHE.md),
   a proposal.
 
 What stays out: a background daemon and an in-house compiler. Both would trade
@@ -303,7 +303,7 @@ away the "no daemon, just a driver" defaults the Why page rests on.
 ## 7. Multi-module projects
 
 **Done.** Workspaces are designed in
-[specs/WORKSPACES.md](specs/WORKSPACES.md), which narrowed the "one module per
+[specs/WORKSPACES.md](WORKSPACES.md), which narrowed the "one module per
 manifest" non-goal (SPEC §1.2) and reversed SPEC open question 11, and
 `examples/ledger` is one. In short:
 

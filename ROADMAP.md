@@ -9,8 +9,8 @@ when it counts as done.
 
 The roadmap before this one, with the positioning ("Where jrs is aimed"), the
 IntelliJ plugin's open items and the table of ideas that need a spec decision
-first, is kept in [ROADMAP_ARCHIVE.md](ROADMAP_ARCHIVE.md). Its open items
-are still open; they are just not next.
+first, is kept in [specs/ROADMAP_ARCHIVE.md](specs/ROADMAP_ARCHIVE.md). Its
+open items are still open; they are just not next.
 
 **Order of work.** Section 1 comes first because a user whose first project
 does not migrate never sees anything else. Section 2 runs on the projects
