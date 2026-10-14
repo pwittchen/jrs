@@ -22,15 +22,17 @@
 
 use std::collections::HashSet;
 use std::fs::File;
-use std::io::{BufRead, BufReader, Write};
-use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use jrs::resolve::repo::sha1_hex;
+
+#[path = "support/mirror.rs"]
+mod mirror;
+
+use mirror::Server;
 
 const GROUP: &str = "bench";
 
@@ -347,89 +349,6 @@ fn level_widths() -> Vec<usize> {
             .collect();
     }
     widths
-}
-
-/// A static-file HTTP server that stands in for a remote repository: a thread
-/// per connection, one request per connection, and a fixed sleep before every
-/// answer to model the round trip.
-struct Server {
-    url: String,
-    shared: Arc<Shared>,
-}
-
-#[derive(Default)]
-struct Shared {
-    latency_ms: AtomicU64,
-    requests: AtomicU64,
-    misses: AtomicU64,
-}
-
-impl Server {
-    fn start(root: PathBuf) -> Server {
-        let listener = TcpListener::bind("127.0.0.1:0").expect("bind the bench server");
-        let url = format!("http://{}", listener.local_addr().expect("server address"));
-        let shared = Arc::new(Shared::default());
-        let state = shared.clone();
-        std::thread::spawn(move || {
-            for stream in listener.incoming() {
-                let Ok(stream) = stream else { continue };
-                let (root, state) = (root.clone(), state.clone());
-                std::thread::spawn(move || {
-                    let _ = serve(stream, &root, &state);
-                });
-            }
-        });
-        Server { url, shared }
-    }
-
-    fn set_latency(&self, ms: u64) {
-        self.shared.latency_ms.store(ms, Ordering::Relaxed);
-    }
-
-    fn counts(&self) -> (u64, u64) {
-        let s = &self.shared;
-        (
-            s.requests.load(Ordering::Relaxed),
-            s.misses.load(Ordering::Relaxed),
-        )
-    }
-}
-
-fn serve(stream: TcpStream, root: &Path, state: &Shared) -> std::io::Result<()> {
-    let mut reader = BufReader::new(stream.try_clone()?);
-    let mut request_line = String::new();
-    reader.read_line(&mut request_line)?;
-    let mut header = String::new();
-    while reader.read_line(&mut header)? > 0 && header != "\r\n" {
-        header.clear();
-    }
-
-    state.requests.fetch_add(1, Ordering::Relaxed);
-    std::thread::sleep(Duration::from_millis(
-        state.latency_ms.load(Ordering::Relaxed),
-    ));
-
-    let path = request_line.split_whitespace().nth(1).unwrap_or("/");
-    let body = if path.split('/').any(|s| s == "..") {
-        None
-    } else {
-        std::fs::read(root.join(path.trim_start_matches('/'))).ok()
-    };
-    let (status, body) = match body {
-        Some(body) => ("200 OK", body),
-        None => {
-            state.misses.fetch_add(1, Ordering::Relaxed);
-            ("404 Not Found", Vec::new())
-        }
-    };
-    let mut stream = stream;
-    write!(
-        stream,
-        "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-        body.len()
-    )?;
-    stream.write_all(&body)?;
-    stream.flush()
 }
 
 /// The benchmark's working directory, removed however `main` ends.

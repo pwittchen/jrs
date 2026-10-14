@@ -32,16 +32,28 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
-use std::fs::File;
-use std::io::{Read as _, Write as _};
-use std::net::{TcpStream, ToSocketAddrs};
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, ExitStatus, Stdio};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant, SystemTime};
 
 use jrs::json::Json;
-use jrs::test_report::{self, Status};
 use serde::Deserialize;
+
+#[path = "support/host.rs"]
+mod host;
+#[path = "support/junit.rs"]
+mod junit;
+#[path = "support/proc.rs"]
+mod proc;
+
+use host::{host_jdk, jdk_version, os_version, stamp};
+use junit::{Reports, Tests};
+use proc::{Exec, http_status, spawn, stop};
+
+/// [`proc::exec`] with the corpus's deadline.
+fn exec(command: &mut Command, log: &Path, stdout: Option<&Path>) -> Exec {
+    proc::exec(command, log, stdout, STEP_TIMEOUT)
+}
 
 /// The steps in order. `clone` always runs; `JRS_CORPUS_STEPS` picks among
 /// the rest.
@@ -1004,168 +1016,11 @@ impl ClasspathDiff {
     }
 }
 
-/// Where a side writes its `JUnit` XML.
-#[derive(Clone, Copy)]
-enum Reports {
-    /// Surefire: `target/surefire-reports`.
-    Surefire,
-    /// Gradle: `build/test-results/test`.
-    Gradle,
-    /// jrs: `target/test-reports`.
-    Jrs,
-}
-
 impl Build {
     fn reports(self) -> Reports {
         match self {
             Build::Maven => Reports::Surefire,
             Build::Gradle => Reports::Gradle,
-        }
-    }
-}
-
-impl Reports {
-    fn holds(self, dir: &Path) -> bool {
-        let name = |p: &Path| p.file_name().map(|n| n.to_string_lossy().into_owned());
-        match self {
-            Reports::Surefire => name(dir).as_deref() == Some("surefire-reports"),
-            Reports::Gradle => {
-                name(dir).as_deref() == Some("test")
-                    && dir.parent().and_then(name).as_deref() == Some("test-results")
-            }
-            Reports::Jrs => name(dir).as_deref() == Some("test-reports"),
-        }
-    }
-}
-
-#[derive(Default, Clone, Copy, PartialEq, Eq)]
-struct Counts {
-    tests: usize,
-    failed: usize,
-    skipped: usize,
-}
-
-impl Counts {
-    fn ran(self) -> usize {
-        self.tests - self.skipped
-    }
-
-    fn passed(self) -> usize {
-        self.ran() - self.failed
-    }
-}
-
-impl std::fmt::Display for Counts {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "{} tests, {} failed, {} skipped",
-            self.tests, self.failed, self.skipped
-        )
-    }
-}
-
-/// Test counts by class, from every report directory under a tree.
-struct Tests {
-    classes: BTreeMap<String, Counts>,
-}
-
-impl Tests {
-    fn collect(root: &Path, reports: Reports, exclude: &[String]) -> Tests {
-        let mut classes: BTreeMap<String, Counts> = BTreeMap::new();
-        let mut dirs = Vec::new();
-        report_dirs(root, reports, &mut dirs);
-        for dir in dirs {
-            let mut files: Vec<PathBuf> = std::fs::read_dir(&dir)
-                .into_iter()
-                .flatten()
-                .flatten()
-                .map(|e| e.path())
-                .filter(|p| {
-                    p.file_name().is_some_and(|n| {
-                        let n = n.to_string_lossy();
-                        n.starts_with("TEST-") && n.ends_with(".xml")
-                    })
-                })
-                .collect();
-            files.sort();
-            for file in files {
-                let Ok(bytes) = std::fs::read(&file) else {
-                    continue;
-                };
-                let Ok(cases) = test_report::parse_report(&bytes) else {
-                    continue;
-                };
-                for case in cases {
-                    let outer = case.class.split('$').next().unwrap_or(&case.class);
-                    if exclude.iter().any(|x| x == outer) {
-                        continue;
-                    }
-                    let counts = classes.entry(outer.to_string()).or_default();
-                    counts.tests += 1;
-                    match case.status {
-                        Status::Failed => counts.failed += 1,
-                        Status::Skipped => counts.skipped += 1,
-                        Status::Flaky | Status::Passed => {}
-                    }
-                }
-            }
-        }
-        Tests { classes }
-    }
-
-    fn total(&self) -> Counts {
-        self.classes
-            .values()
-            .fold(Counts::default(), |t, c| Counts {
-                tests: t.tests + c.tests,
-                failed: t.failed + c.failed,
-                skipped: t.skipped + c.skipped,
-            })
-    }
-
-    /// One line per class whose counts differ, or which one side alone ran.
-    fn compare(&self, reference: &Tests) -> Vec<String> {
-        let names: BTreeSet<&String> = self
-            .classes
-            .keys()
-            .chain(reference.classes.keys())
-            .collect();
-        names
-            .into_iter()
-            .filter_map(
-                |name| match (self.classes.get(name), reference.classes.get(name)) {
-                    (Some(o), Some(r)) if o == r => None,
-                    (Some(o), Some(r)) => Some(format!("~ {name}: jrs {o}; the reference {r}")),
-                    (Some(o), None) => Some(format!("+ {name}: jrs alone ran it ({o})")),
-                    (None, Some(r)) => Some(format!("- {name}: the reference alone ran it ({r})")),
-                    (None, None) => None,
-                },
-            )
-            .collect()
-    }
-}
-
-fn report_dirs(dir: &Path, reports: Reports, out: &mut Vec<PathBuf>) {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
-    };
-    let mut children: Vec<PathBuf> = entries
-        .flatten()
-        .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
-        .map(|e| e.path())
-        .filter(|p| {
-            p.file_name().is_none_or(|n| {
-                ![".git", ".gradle", "node_modules", ".jrs"].contains(&&*n.to_string_lossy())
-            })
-        })
-        .collect();
-    children.sort();
-    for child in children {
-        if reports.holds(&child) {
-            out.push(child);
-        } else {
-            report_dirs(&child, reports, out);
         }
     }
 }
@@ -1234,162 +1089,6 @@ fn started_and_answered(command: &mut Command, probe: &Probe, log: &Path) -> Res
     outcome
 }
 
-/// The status line's code of a `GET`, or `None` while nothing listens.
-fn http_status(url: &str) -> Option<u16> {
-    let rest = url.strip_prefix("http://")?;
-    let (host, path) = match rest.split_once('/') {
-        Some((host, path)) => (host, format!("/{path}")),
-        None => (rest, "/".to_string()),
-    };
-    let address = if host.contains(':') {
-        host.to_string()
-    } else {
-        format!("{host}:80")
-    };
-    let mut stream = address
-        .to_socket_addrs()
-        .ok()?
-        .find_map(|a| TcpStream::connect_timeout(&a, Duration::from_secs(2)).ok())?;
-    stream
-        .set_read_timeout(Some(Duration::from_secs(30)))
-        .ok()?;
-    write!(
-        stream,
-        "GET {path} HTTP/1.1\r\nHost: {host}\r\nAccept: */*\r\nConnection: close\r\n\r\n"
-    )
-    .ok()?;
-    let mut head = [0u8; 64];
-    let mut read = 0;
-    while read < 12 {
-        let n = stream.read(&mut head[read..]).ok()?;
-        if n == 0 {
-            break;
-        }
-        read += n;
-    }
-    String::from_utf8_lossy(&head[..read])
-        .split_whitespace()
-        .nth(1)?
-        .parse()
-        .ok()
-}
-
-/// A finished command: its status, `None` when it could not start or was
-/// killed at [`STEP_TIMEOUT`].
-struct Exec {
-    status: Option<ExitStatus>,
-    failure: Option<String>,
-}
-
-impl Exec {
-    fn success(&self) -> bool {
-        self.status.is_some_and(|s| s.success())
-    }
-
-    fn describe(&self) -> String {
-        match (&self.status, &self.failure) {
-            (_, Some(f)) => f.clone(),
-            (Some(s), None) => format!(
-                "exited with {}",
-                s.code().map_or_else(|| s.to_string(), |c| c.to_string())
-            ),
-            (None, None) => "did not finish".to_string(),
-        }
-    }
-}
-
-/// Run `command` to its end, its output appended to `log` (stdout to
-/// `stdout` instead, when given), killed with its process group at
-/// [`STEP_TIMEOUT`].
-fn exec(command: &mut Command, log: &Path, stdout: Option<&Path>) -> Exec {
-    let mut child = match spawn(command, log, stdout) {
-        Ok(child) => child,
-        Err(e) => {
-            return Exec {
-                status: None,
-                failure: Some(format!("could not start: {e}")),
-            };
-        }
-    };
-    let deadline = Instant::now() + STEP_TIMEOUT;
-    loop {
-        match child.try_wait() {
-            Ok(Some(status)) => {
-                return Exec {
-                    status: Some(status),
-                    failure: None,
-                };
-            }
-            Ok(None) if Instant::now() > deadline => {
-                stop(&mut child);
-                return Exec {
-                    status: None,
-                    failure: Some(format!(
-                        "timed out after {} min",
-                        STEP_TIMEOUT.as_secs() / 60
-                    )),
-                };
-            }
-            Ok(None) => std::thread::sleep(Duration::from_millis(200)),
-            Err(e) => {
-                return Exec {
-                    status: None,
-                    failure: Some(e.to_string()),
-                };
-            }
-        }
-    }
-}
-
-/// Start `command` in a process group of its own, so that [`stop`] reaches
-/// the JVM `jrs run` or a wrapper started too.
-fn spawn(command: &mut Command, log: &Path, stdout: Option<&Path>) -> std::io::Result<Child> {
-    let mut file = File::options().create(true).append(true).open(log)?;
-    writeln!(file, "$ {command:?}")?;
-    let out = match stdout {
-        Some(path) => File::create(path)?,
-        None => file.try_clone()?,
-    };
-    command.stdin(Stdio::null()).stdout(out).stderr(file);
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt as _;
-        command.process_group(0);
-    }
-    command.spawn()
-}
-
-/// `SIGTERM` to the child's process group, so shutdown hooks run and the
-/// port is free for the next step; `SIGKILL` after fifteen seconds.
-fn stop(child: &mut Child) {
-    #[cfg(unix)]
-    {
-        let Ok(group) = i32::try_from(child.id()) else {
-            let _ = child.kill();
-            let _ = child.wait();
-            return;
-        };
-        // SAFETY: `kill` takes no pointers; a stale group id fails with ESRCH.
-        unsafe {
-            libc::kill(-group, libc::SIGTERM);
-        }
-        let deadline = Instant::now() + Duration::from_secs(15);
-        while Instant::now() < deadline {
-            if matches!(child.try_wait(), Ok(Some(_))) {
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(200));
-        }
-        // The group outlives its leader when the JVM ignored the signal.
-        // SAFETY: as above.
-        unsafe {
-            libc::kill(-group, libc::SIGKILL);
-        }
-    }
-    let _ = child.kill();
-    let _ = child.wait();
-}
-
 /// Copy a tree, leaving out `.git`.
 fn copy_tree(from: &Path, to: &Path) {
     let _ = std::fs::remove_dir_all(to);
@@ -1408,58 +1107,6 @@ fn copy_tree(from: &Path, to: &Path) {
             std::fs::copy(entry.path(), &target).expect("copy a file");
         }
     }
-}
-
-/// The JDK's feature release, from `java -version`.
-fn host_jdk() -> Option<u32> {
-    let java = std::env::var_os("JAVA_HOME")
-        .map(|home| PathBuf::from(home).join("bin/java"))
-        .filter(|p| p.is_file())
-        .unwrap_or_else(|| PathBuf::from("java"));
-    let output = Command::new(java).arg("-version").output().ok()?;
-    let text = String::from_utf8_lossy(&output.stderr);
-    let version = text.split('"').nth(1)?;
-    let version = version.strip_prefix("1.").unwrap_or(version);
-    version.split(['.', '-', '+']).next()?.parse().ok()
-}
-
-fn jdk_version() -> String {
-    Command::new("java")
-        .arg("-version")
-        .output()
-        .ok()
-        .and_then(|o| {
-            String::from_utf8_lossy(&o.stderr)
-                .split('"')
-                .nth(1)
-                .map(str::to_string)
-        })
-        .unwrap_or_else(|| "none".to_string())
-}
-
-fn os_version() -> String {
-    let sw_vers = || {
-        let output = Command::new("sw_vers")
-            .arg("-productVersion")
-            .output()
-            .ok()?;
-        Some(format!(
-            "macOS {}",
-            String::from_utf8_lossy(&output.stdout).trim()
-        ))
-    };
-    let os_release = || {
-        let text = std::fs::read_to_string("/etc/os-release").ok()?;
-        text.lines()
-            .find_map(|l| l.strip_prefix("PRETTY_NAME="))
-            .map(|v| v.trim_matches('"').to_string())
-    };
-    match std::env::consts::OS {
-        "macos" => sw_vers(),
-        "linux" => os_release(),
-        _ => None,
-    }
-    .unwrap_or_else(|| std::env::consts::OS.to_string())
 }
 
 fn header(repo_root: &Path, started: SystemTime, steps: &BTreeSet<&str>, host: &Host) -> String {
@@ -1503,39 +1150,6 @@ fn header(repo_root: &Path, started: SystemTime, steps: &BTreeSet<&str>, host: &
         );
     }
     header
-}
-
-/// The run's directory name (`2026-10-20-142501`, UTC), or its date alone.
-fn stamp(at: SystemTime, with_time: bool) -> String {
-    let secs = at.duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs());
-    let days = i64::try_from(secs / 86_400).unwrap_or(0);
-    let (year, month, day) = civil(days);
-    let date = format!("{year:04}-{month:02}-{day:02}");
-    if !with_time {
-        return date;
-    }
-    let time = secs % 86_400;
-    format!(
-        "{date}-{:02}{:02}{:02}",
-        time / 3600,
-        time % 3600 / 60,
-        time % 60
-    )
-}
-
-/// Days since 1970-01-01 to a proleptic Gregorian date (Howard Hinnant's
-/// `civil_from_days`).
-fn civil(days: i64) -> (i64, i64, i64) {
-    let z = days + 719_468;
-    let era = z.div_euclid(146_097);
-    let doe = z.rem_euclid(146_097);
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let day = doy - (153 * mp + 2) / 5 + 1;
-    let month = if mp < 10 { mp + 3 } else { mp - 9 };
-    let year = yoe + era * 400 + i64::from(month <= 2);
-    (year, month, day)
 }
 
 fn summary(row: &Row) -> String {
