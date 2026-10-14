@@ -18,7 +18,11 @@ class JrsChangesNotificationProvider : EditorNotificationProvider {
             JrsFiles.projectRoot(project) == null -> return null
             !state.isLinked -> "This jrs project has not been loaded into the IDE"
             JrsSync.isRunning(project) || !state.isOutOfDate() -> return null
-            else -> "jrs.toml or jrs.lock changed since the project was loaded"
+            else -> if (state.isWorkspace) {
+                "A jrs.toml or jrs.lock in the workspace changed since it was loaded"
+            } else {
+                "jrs.toml or jrs.lock changed since the project was loaded"
+            }
         }
         return Function { editor ->
             EditorNotificationPanel(editor, EditorNotificationPanel.Status.Info).apply {

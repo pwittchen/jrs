@@ -4,8 +4,10 @@ import com.intellij.openapi.actionSystem.ActionUpdateThread
 import com.intellij.openapi.actionSystem.AnActionEvent
 import com.intellij.openapi.project.DumbAwareAction
 import com.intellij.openapi.project.Project
+import com.intellij.util.execution.ParametersListUtil
 import dev.getjrs.intellij.JrsFiles
 import dev.getjrs.intellij.run.JrsCommands
+import dev.getjrs.intellij.sync.JrsProjectState
 import dev.getjrs.intellij.sync.JrsSync
 
 /** An action available in a project with a `jrs.toml`. */
@@ -35,7 +37,29 @@ class JrsSyncAction : JrsProjectAction() {
 
 class JrsBuildAction : JrsCommandAction("build")
 
-class JrsTestAction : JrsCommandAction("test")
+/**
+ * `jrs test`. In a workspace, every test of every member: run at the
+ * workspace's root, so a project opened at one member's directory is not
+ * narrowed to it, and with `--all`, so neither the selection of what a change
+ * reaches nor a cached passing run leaves a member's tests out of the tree.
+ */
+class JrsTestAction : JrsProjectAction() {
+    override fun perform(project: Project) {
+        val state = JrsProjectState.getInstance(project)
+        val workspace = state.state.workspaceRoot?.takeIf { state.isWorkspace }
+        if (workspace == null) {
+            JrsCommands.run(project, "test")
+        } else {
+            JrsCommands.run(project, "test", arguments(workspace), name = "jrs test (all modules)")
+        }
+    }
+
+    companion object {
+        /** The arguments of a run of every test in the workspace at [workspaceRoot]. */
+        fun arguments(workspaceRoot: String): String =
+            ParametersListUtil.join("--manifest-path", workspaceRoot, "--all")
+    }
+}
 
 class JrsRunAction : JrsCommandAction("run")
 

@@ -102,4 +102,29 @@ class JrsMetadataTest {
             libraries.map { it.entry.displayName to it.scope },
         )
     }
+
+    @Test
+    fun `a workspace holds a model per member, with the members each depends on`() {
+        val core = json.replace("\"name\": \"app\"", "\"name\": \"core\"")
+        val app = json.replace(
+            "\"a-key-from-a-newer-jrs\": true",
+            "\"workspace\": \"/work\", \"modules\": [ { \"name\": \"core\", \"version\": \"1.0.0\", " +
+                "\"root\": \"/work/core\", \"output\": \"/work/core/target/classes\", " +
+                "\"classpath\": \"runtime\", \"direct\": true } ]",
+        )
+        val workspace = """{ "version": 1, "jrs": "0.9.0",
+            "workspace": { "name": "w", "root": "/work", "manifest": "/work/jrs.toml", "lockfile": "/work/jrs.lock" },
+            "members": [ $core, $app ] }"""
+        val members = JrsMetadata.parseAll(workspace)
+        assertEquals(listOf("core", "app"), members.map { it.project.name })
+        assertEquals(emptyList<JrsMetadata.ModuleRef>(), members[0].modules)
+        assertNull(members[0].workspace)
+        assertEquals("/work", members[1].workspace)
+        val ref = members[1].modules.single()
+        assertEquals("core", ref.name)
+        assertEquals("/work/core/target/classes", ref.output)
+        assertEquals(DependencyScope.RUNTIME, JrsModelApplier.scope(ref.classpath))
+        // A single project's model is a list of one.
+        assertEquals(listOf("app"), JrsMetadata.parseAll(json).map { it.project.name })
+    }
 }

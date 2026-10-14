@@ -23,7 +23,17 @@ data class JrsMetadata(
     /** Null when the model came from `jrs metadata --no-deps`. */
     val classpaths: Classpaths?,
     val tasks: List<Task>,
+    /**
+     * In a workspace (SPEC §5.4, `specs/WORKSPACES.md` §7): the members this
+     * one depends on, nearest first; empty for a single project.
+     */
+    val modules: List<ModuleRef> = emptyList(),
+    /** In a workspace, its root directory; null for a single project. */
+    val workspace: String? = null,
 ) {
+    /** A workspace member another depends on: its classes, and the classpath they go on. */
+    data class ModuleRef(val name: String, val output: String, val classpath: String, val direct: Boolean)
+
     data class ProjectInfo(
         val name: String,
         val version: String,
@@ -67,17 +77,39 @@ data class JrsMetadata(
         const val FORMAT_VERSION = 1
 
         /** Parses `jrs metadata`'s stdout; throws [IllegalArgumentException] on anything else. */
-        fun parse(json: String): JrsMetadata {
+        fun parse(json: String): JrsMetadata = parseAll(json).single()
+
+        /**
+         * Parses `jrs metadata`'s stdout: one project's model, or a workspace's,
+         * which holds one per member under `members`. Throws
+         * [IllegalArgumentException] on anything else.
+         */
+        fun parseAll(json: String): List<JrsMetadata> {
             val root = try {
                 JsonParser.parseString(json).asJsonObject
             } catch (e: RuntimeException) {
                 throw IllegalArgumentException("jrs metadata did not print a JSON object", e)
             }
+            checkVersion(root)
+            if (root.has("members")) {
+                val members = root.array("members").map { it.asJsonObject }
+                require(members.isNotEmpty()) { "the workspace in jrs metadata has no members" }
+                return members.map(::member)
+            }
+            return listOf(member(root))
+        }
+
+        private fun checkVersion(root: JsonObject): Int {
             val version = root.int("version") ?: throw IllegalArgumentException("no `version` in jrs metadata")
             require(version == FORMAT_VERSION) {
                 "jrs metadata format version $version is not supported by this plugin (expected $FORMAT_VERSION); " +
                     "update the jrs plugin"
             }
+            return version
+        }
+
+        private fun member(root: JsonObject): JrsMetadata {
+            val version = checkVersion(root)
             val project = root.obj("project")
             return JrsMetadata(
                 version = version,
@@ -108,6 +140,15 @@ data class JrsMetadata(
                 },
                 tasks = root.array("tasks").map { it.asJsonObject }.map {
                     Task(it.req("name"), it.str("description"), it.strings("hooks"))
+                },
+                workspace = root.str("workspace"),
+                modules = root.array("modules").map { it.asJsonObject }.map {
+                    ModuleRef(
+                        it.req("name"),
+                        it.req("output"),
+                        it.str("classpath") ?: "compile",
+                        it.value("direct")?.asBoolean ?: true,
+                    )
                 },
             )
         }

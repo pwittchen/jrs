@@ -72,7 +72,10 @@ object JrsBuild {
             return false
         }
         val pending = StringBuilder()
-        fun line(text: String, stdout: Boolean) {
+        val classifier = dev.getjrs.intellij.run.JrsOutput()
+        fun line(text: String, fromStdout: Boolean) {
+            // jrs's transcript is on stderr; only its errors are shown as such.
+            val stdout = fromStdout || !classifier.isError(text)
             view.onEvent(buildId, output(buildId, text + "\n", stdout))
             val diagnostic = CompilerDiagnostics.parse(text) ?: return
             val path = runCatching { Path.of(diagnostic.path) }.getOrNull() ?: return
@@ -125,10 +128,15 @@ object JrsBuild {
             .build()
 
     private fun refreshOutputs(project: Project, root: Path) {
-        val metadata = JrsProjectState.getInstance(project).metadata
-        val target = metadata?.targetDir?.let(Path::of) ?: root.resolve("target")
-        LocalFileSystem.getInstance().refreshAndFindFileByNioFile(target)?.let {
-            VfsUtil.markDirtyAndRefresh(true, true, true, it)
+        val state = JrsProjectState.getInstance(project)
+        // In a workspace, every member writes a target directory of its own.
+        val targets = state.members.map { Path.of(it.targetDir) }.ifEmpty {
+            listOf(state.metadata?.targetDir?.let(Path::of) ?: root.resolve("target"))
+        }
+        for (target in targets) {
+            LocalFileSystem.getInstance().refreshAndFindFileByNioFile(target)?.let {
+                VfsUtil.markDirtyAndRefresh(true, true, true, it)
+            }
         }
     }
 }

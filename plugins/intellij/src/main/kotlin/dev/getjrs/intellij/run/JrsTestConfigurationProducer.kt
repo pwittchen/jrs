@@ -15,7 +15,9 @@ import org.jetbrains.uast.getUastParentOfType
 
 /**
  * `jrs test` from a test class or method in the editor or the gutter: a class
- * becomes `--filter '^<class>$'`, a method `--method <class>#<method>`.
+ * becomes `--filter '^<class>$'`, a method `--method <class>#<method>`. In a
+ * workspace, `-p <member>` comes first, so only the member that holds the test
+ * runs it (after building what it depends on).
  */
 class JrsTestConfigurationProducer : LazyRunConfigurationProducer<JrsRunConfiguration>() {
     override fun getConfigurationFactory(): ConfigurationFactory = JrsConfigurationType.getInstance().factory
@@ -43,7 +45,9 @@ class JrsTestConfigurationProducer : LazyRunConfigurationProducer<JrsRunConfigur
     private fun target(context: ConfigurationContext): Target? {
         val element = context.psiLocation ?: return null
         val module = ModuleUtilCore.findModuleForPsiElement(element) ?: return null
-        if (!JrsProjectState.getInstance(context.project).isJrsModule(module)) return null
+        val state = JrsProjectState.getInstance(context.project)
+        if (!state.isJrsModule(module)) return null
+        val member = state.memberOf(module)?.let { "-p $it " }.orEmpty()
         val file = element.containingFile?.virtualFile ?: return null
         if (!ProjectFileIndex.getInstance(context.project).isInTestSourceContent(file)) return null
 
@@ -51,9 +55,9 @@ class JrsTestConfigurationProducer : LazyRunConfigurationProducer<JrsRunConfigur
         val uClass = method?.getContainingUClass() ?: element.getUastParentOfType(UClass::class.java) ?: return null
         val className = uClass.qualifiedName ?: return null
         if (method != null && !method.isConstructor) {
-            return Target("--method $className#${method.name}", "${uClass.name}.${method.name}")
+            return Target("$member--method $className#${method.name}", "${uClass.name}.${method.name}")
         }
         // JUnit matches the pattern against the binary name; `.` also matches a nested class's `$`.
-        return Target("--filter ^$className\$", uClass.name ?: className)
+        return Target("$member--filter ^$className\$", uClass.name ?: className)
     }
 }

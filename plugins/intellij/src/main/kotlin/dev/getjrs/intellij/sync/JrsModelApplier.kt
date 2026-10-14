@@ -15,6 +15,7 @@ import com.intellij.openapi.roots.DependencyScope
 import com.intellij.openapi.roots.LanguageLevelProjectExtension
 import com.intellij.openapi.roots.LibraryOrderEntry
 import com.intellij.openapi.roots.ModifiableRootModel
+import com.intellij.openapi.roots.ModuleOrderEntry
 import com.intellij.openapi.roots.ModuleRootManager
 import com.intellij.openapi.roots.OrderRootType
 import com.intellij.openapi.roots.ProjectRootManager
@@ -30,7 +31,11 @@ import org.jetbrains.jps.model.java.JavaSourceRootType
 import org.jetbrains.jps.model.java.JpsJavaExtensionService
 import java.nio.file.Path
 
-/** Turns a [JrsMetadata] into one IntelliJ module, the project JDK and the module's libraries. */
+/**
+ * Turns a [JrsMetadata] into one IntelliJ module, the project JDK and the
+ * module's libraries; a workspace's models into one module per member, each
+ * depending on the members it depends on.
+ */
 object JrsModelApplier {
     /** Prefix of the module libraries a sync owns, so the next sync can replace them. */
     const val LIBRARY_PREFIX = "jrs: "
@@ -82,8 +87,112 @@ object JrsModelApplier {
         for (path in paths) fs.refreshAndFindFileByNioFile(Path.of(path))
     }
 
+    /** The IntelliJ scope of a member's classes on a dependent's classpath. */
+    fun scope(classpath: String): DependencyScope = when (classpath) {
+        "provided" -> DependencyScope.PROVIDED
+        "runtime" -> DependencyScope.RUNTIME
+        "test" -> DependencyScope.TEST
+        else -> DependencyScope.COMPILE
+    }
+
+    /**
+     * Applies a workspace's models, one module per member, then each member's
+     * dependencies on the others; must run on the EDT. Returns the modules.
+     */
+    fun applyAll(project: Project, members: List<JrsMetadata>): List<Module> {
+        if (members.size == 1 && members[0].modules.isEmpty()) return listOf(apply(project, members[0]))
+        val modules = members.map { apply(project, it, byName = true) }
+        val byName = members.zip(modules).associate { (m, module) -> m.project.name to module }
+        WriteAction.run<RuntimeException> { clearOthers(project, members, modules) }
+        WriteAction.run<RuntimeException> {
+            for ((metadata, module) in members.zip(modules)) {
+                val model = ModuleRootManager.getInstance(module).modifiableModel
+                try {
+                    model.orderEntries
+                        .filterIsInstance<ModuleOrderEntry>()
+                        .filter { it.moduleName in byName }
+                        .forEach(model::removeOrderEntry)
+                    // Every member it reaches, not only those it names: jrs puts
+                    // them all on its classpaths, nearest first.
+                    for (ref in metadata.modules) {
+                        val upstream = byName[ref.name] ?: continue
+                        model.addModuleOrderEntry(upstream).scope = scope(ref.classpath)
+                    }
+                    model.commit()
+                } catch (e: RuntimeException) {
+                    model.dispose()
+                    throw e
+                }
+            }
+        }
+        return modules
+    }
+
+    /**
+     * The modules beside a workspace's members. IntelliJ sets a folder up
+     * before the plugin runs: one module over the whole tree, or a module per
+     * source folder it detects (`app/src/main` as `main3`). Either claims the
+     * members' sources, and since a file belongs to the module whose content
+     * root is nearest, a member's file would land in a module with none of its
+     * libraries or module dependencies. So, for every module that is not a
+     * member: a content root inside a member's directory is removed, and a
+     * module left with none goes; a content root above the members stays as
+     * the workspace's root, without source folders, jrs libraries or module
+     * dependencies. A module a previous sync made for a member that is no
+     * longer one goes too. Modules elsewhere are the user's, and stay as they
+     * are.
+     */
+    private fun clearOthers(project: Project, members: List<JrsMetadata>, modules: List<Module>) {
+        val manager = ModuleManager.getInstance(project)
+        val state = JrsProjectState.getInstance(project).state
+        val memberRoots = members.map { FileUtil.toSystemIndependentName(it.project.root) }
+        val previous = state.memberModules.toSet()
+        val gone = mutableListOf<Module>()
+        for (other in manager.modules.filter { it !in modules }) {
+            if (other.name in previous) {
+                gone += other
+                continue
+            }
+            val roots = ModuleRootManager.getInstance(other).contentEntries.map {
+                it to VfsUtilCore.urlToPath(it.url)
+            }
+            val inside = roots.filter { (_, path) -> memberRoots.any { FileUtil.isAncestor(it, path, false) } }
+            val above = roots.filter { (_, path) -> memberRoots.any { FileUtil.isAncestor(path, it, true) } }
+            if (inside.isEmpty() && above.isEmpty()) continue
+            if (inside.size == roots.size) {
+                gone += other
+                continue
+            }
+            val model = ModuleRootManager.getInstance(other).modifiableModel
+            try {
+                val stale = (inside + above).map { (entry, _) -> entry.url }.toSet()
+                model.contentEntries.filter { it.url in stale }.forEach(model::removeContentEntry)
+                // What stays above the members is the workspace's own directory.
+                for ((_, path) in above) model.addContentEntry(url(path)).addExcludeFolder(url("$path/target"))
+                model.orderEntries
+                    .filter {
+                        it is ModuleOrderEntry ||
+                            (it is LibraryOrderEntry && it.libraryName?.startsWith(LIBRARY_PREFIX) == true)
+                    }
+                    .forEach(model::removeOrderEntry)
+                model.commit()
+            } catch (e: RuntimeException) {
+                model.dispose()
+                throw e
+            }
+        }
+        if (gone.isNotEmpty()) {
+            val model = manager.getModifiableModel()
+            gone.forEach(model::disposeModule)
+            model.commit()
+        }
+    }
+
     /** Applies the model; must run on the EDT. Returns the module it set up. */
-    fun apply(project: Project, metadata: JrsMetadata): Module = WriteAction.compute<Module, RuntimeException> {
+    fun apply(project: Project, metadata: JrsMetadata): Module = apply(project, metadata, byName = false)
+
+    private fun apply(project: Project, metadata: JrsMetadata, byName: Boolean): Module =
+        WriteAction.compute<Module, RuntimeException> {
         val sdk = metadata.jdk?.home?.let { findOrCreateSdk(it, metadata.jdk.version) }
         if (sdk != null) ProjectRootManager.getInstance(project).projectSdk = sdk
         val release = metadata.java.release ?: metadata.jdk?.version
@@ -91,7 +200,7 @@ object JrsModelApplier {
             LanguageLevelProjectExtension.getInstance(project).languageLevel = it
         }
 
-        val module = findOrCreateModule(project, metadata)
+        val module = findOrCreateModule(project, metadata, byName)
         val model = ModuleRootManager.getInstance(module).modifiableModel
         try {
             configure(model, metadata)
@@ -103,11 +212,16 @@ object JrsModelApplier {
         module
     }
 
-    private fun findOrCreateModule(project: Project, metadata: JrsMetadata): Module {
+    /**
+     * The module for [metadata]: by the name the last sync gave it, by the
+     * project's name, or by its content root. A workspace member is never
+     * found by the last sync's single module name, which another member may own.
+     */
+    private fun findOrCreateModule(project: Project, metadata: JrsMetadata, byName: Boolean): Module {
         val manager = ModuleManager.getInstance(project)
         val state = JrsProjectState.getInstance(project).state
         val rootUrl = url(metadata.project.root)
-        val existing = state.moduleName?.let(manager::findModuleByName)
+        val existing = state.moduleName?.takeUnless { byName }?.let(manager::findModuleByName)
             ?: manager.findModuleByName(metadata.project.name)
             ?: manager.modules.firstOrNull { m ->
                 ModuleRootManager.getInstance(m).contentRootUrls.any { it == rootUrl }

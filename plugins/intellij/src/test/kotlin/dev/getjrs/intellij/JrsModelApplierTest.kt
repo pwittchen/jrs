@@ -3,6 +3,7 @@ package dev.getjrs.intellij
 import com.intellij.openapi.roots.CompilerModuleExtension
 import com.intellij.openapi.roots.DependencyScope
 import com.intellij.openapi.roots.LibraryOrderEntry
+import com.intellij.openapi.roots.ModuleOrderEntry
 import com.intellij.openapi.roots.ModuleRootManager
 import com.intellij.openapi.roots.OrderRootType
 import com.intellij.testFramework.HeavyPlatformTestCase
@@ -69,5 +70,52 @@ class JrsModelApplierTest : HeavyPlatformTestCase() {
         assertEquals("jrs: g:lib:1", library.libraryName)
         assertEquals(DependencyScope.COMPILE, library.scope)
         assertTrue(library.getRootUrls(OrderRootType.CLASSES).single().endsWith("lib.jar!/"))
+    }
+
+    fun `test a workspace becomes a module per member, depending on each other`() {
+        val root = createTempDirectory().toPath()
+        val r = root.toString().replace('\\', '/')
+        fun member(name: String, modules: String): String {
+            Files.createDirectories(root.resolve("$name/src/main/java"))
+            return """
+                {
+                  "version": 1, "jrs": "0.9.0",
+                  "project": { "name": "$name", "version": "1.0.0", "main-class": null, "jrs-version": null,
+                               "root": "$r/$name", "manifest": "$r/$name/jrs.toml", "lockfile": "$r/jrs.lock" },
+                  "jdk": null,
+                  "java": { "release": 21, "target": null, "encoding": "UTF-8", "javac-args": [] },
+                  "languages": [ { "name": "java", "version": null, "compiler": null } ],
+                  "main": { "sources": [ { "language": "java", "dir": "$r/$name/src/main/java" } ],
+                            "generated-sources": [], "resources": [], "generated-resources": [],
+                            "output": "$r/$name/target/classes" },
+                  "test": { "sources": [], "generated-sources": [], "resources": [], "generated-resources": [],
+                            "output": "$r/$name/target/test-classes" },
+                  "target-dir": "$r/$name/target", "jar": "$r/$name/target/$name-1.0.0.jar",
+                  "classpaths": { "compile": [], "runtime": [], "test": [] },
+                  "tasks": [], "workspace": "$r", "modules": $modules
+                }
+            """.trimIndent()
+        }
+        val core = member("core", "[]")
+        val app = member(
+            "app",
+            """[ { "name": "core", "version": "1.0.0", "root": "$r/core", "output": "$r/core/target/classes",
+                   "classpath": "compile", "direct": true } ]""",
+        )
+        val members = JrsMetadata.parseAll("""{ "version": 1, "jrs": "0.9.0", "members": [ $core, $app ] }""")
+        members.forEach(JrsModelApplier::refreshFiles)
+        val modules = JrsModelApplier.applyAll(project, members)
+        // A second sync replaces the module dependencies rather than adding to them.
+        JrsModelApplier.applyAll(project, members)
+
+        assertEquals(listOf("core", "app"), modules.map { it.name })
+        val dependency = ModuleRootManager.getInstance(modules[1]).orderEntries
+            .filterIsInstance<ModuleOrderEntry>()
+            .single()
+        assertEquals("core", dependency.moduleName)
+        assertEquals(DependencyScope.COMPILE, dependency.scope)
+        assertTrue(
+            ModuleRootManager.getInstance(modules[0]).orderEntries.none { it is ModuleOrderEntry },
+        )
     }
 }

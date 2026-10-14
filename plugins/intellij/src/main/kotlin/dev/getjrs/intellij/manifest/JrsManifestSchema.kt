@@ -9,7 +9,7 @@ package dev.getjrs.intellij.manifest
 object JrsManifestSchema {
     val TOP_KEYS = listOf(
         "project", "java", "run", "test", "package", "resources", "obfuscate", "kotlin", "scala", "groovy",
-        "dependencies", "dev-dependencies", "managed", "repositories", "tasks", "hooks",
+        "dependencies", "dev-dependencies", "managed", "repositories", "tasks", "hooks", "workspace",
     )
     private val PROJECT_KEYS = listOf(
         "name", "version", "main-class", "source-dir", "test-dir", "resource-dir", "test-resource-dir",
@@ -29,6 +29,7 @@ object JrsManifestSchema {
         "description", "run", "shell", "script", "main", "dependencies", "args", "depends-on", "env", "cwd",
         "inputs", "outputs", "source-outputs", "resource-outputs", "cache",
     )
+    private val WORKSPACE_KEYS = listOf("members")
     val HOOKS = listOf("pre-compile", "post-compile", "pre-test", "post-test", "post-package", "pre-run")
 
     private fun languageKeys(compiler: String, kotlin: Boolean = false) =
@@ -50,6 +51,7 @@ object JrsManifestSchema {
             "scala" -> languageKeys("scalac")
             "groovy" -> languageKeys("groovyc")
             "hooks" -> HOOKS
+            "workspace" -> WORKSPACE_KEYS
             else -> null
         }
         table.size == 2 && table[0] == "tasks" -> TASK_KEYS

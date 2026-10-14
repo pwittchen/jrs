@@ -7,7 +7,6 @@ import com.intellij.execution.Executor
 import com.intellij.execution.configurations.CommandLineState
 import com.intellij.execution.executors.DefaultDebugExecutor
 import com.intellij.execution.filters.RegexpFilter
-import com.intellij.execution.process.KillableColoredProcessHandler
 import com.intellij.execution.process.ProcessHandler
 import com.intellij.execution.process.ProcessTerminatedListener
 import com.intellij.execution.runners.ExecutionEnvironment
@@ -42,14 +41,27 @@ class JrsRunState(private val configuration: JrsRunConfiguration, environment: E
     override fun startProcess(): ProcessHandler {
         val commandLine = JrsCli.commandLine(root, configuration.commandArguments(debugPort?.let { "127.0.0.1:$it" }))
         val handler = if (configuration.isTest) {
-            val metadata = JrsProjectState.getInstance(environment.project).metadata
-            val reports = Path.of(metadata?.targetDir ?: root.resolve("target").toString(), "test-reports")
-            JrsTestProcessHandler(commandLine, reports)
+            JrsTestProcessHandler(commandLine, reportDirs())
         } else {
-            KillableColoredProcessHandler(commandLine)
+            JrsProcessHandler(commandLine)
         }
         ProcessTerminatedListener.attach(handler)
         return handler
+    }
+
+    /**
+     * Where `jrs test` writes its JUnit XML: the project's `target/test-reports`,
+     * or in a workspace each tested member's — those `-p` names, else all of them.
+     */
+    private fun reportDirs(): List<Path> {
+        val state = JrsProjectState.getInstance(environment.project)
+        if (state.members.isEmpty()) {
+            val target = state.metadata?.targetDir ?: root.resolve("target").toString()
+            return listOf(Path.of(target, "test-reports"))
+        }
+        val named = JrsRunConfiguration.memberArguments(configuration.arguments)
+        val tested = if (named.isEmpty()) state.members else named.mapNotNull(state::member)
+        return tested.map { Path.of(it.targetDir, "test-reports") }
     }
 
     override fun execute(executor: Executor, runner: ProgramRunner<*>): ExecutionResult {

@@ -77,4 +77,26 @@ class JrsRunConfiguration(project: Project, factory: ConfigurationFactory, name:
 
     /** `jrs <command> <arguments>`, the name a configuration made from an action gets. */
     fun commandName(): String = (listOf("jrs", command) + ParametersListUtil.parse(arguments)).joinToString(" ")
+
+    companion object {
+        /** The workspace members `-p` / `--module` name in [arguments], in order. */
+        fun memberArguments(arguments: String): List<String> {
+            val args = ParametersListUtil.parse(arguments)
+            return buildList {
+                var i = 0
+                while (i < args.size) {
+                    val arg = args[i]
+                    when {
+                        (arg == "-p" || arg == "--module") && i + 1 < args.size -> {
+                            add(args[i + 1])
+                            i++
+                        }
+                        arg.startsWith("--module=") -> add(arg.removePrefix("--module="))
+                        arg.startsWith("-p") && arg.length > 2 -> add(arg.removePrefix("-p"))
+                    }
+                    i++
+                }
+            }
+        }
+    }
 }

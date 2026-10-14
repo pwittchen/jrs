@@ -82,6 +82,31 @@ Loading runs `jrs metadata` and sets up one module from it:
   *Compile* scope, compile-only ones *Provided*, runtime-only ones *Runtime*,
   and test dependencies *Test*.
 
+A [workspace](../../DOCS.md#workspaces) — opened at the directory of its root
+`jrs.toml`, or of any member, which imports the whole workspace — gets one
+module per member, each set up as above, and each
+depending on the members it depends on, with the scope of the classpath their
+classes go on. Then:
+
+- **jrs test** from the gutter runs with `-p <member>`, so only the member
+  holding the test runs it, and its results come from that member's
+  `target/test-reports`;
+- the tool window has a node per member, with its tasks, the members it
+  depends on and its dependencies; a task runs with `-p <member>`;
+- **Add** / **Remove Dependency** edit one member's `jrs.toml`: the member
+  selected in the tool window, or the one holding the file in the editor, and
+  the dialog lets you pick another;
+- a change to any member's `jrs.toml`, or to the root's `jrs.toml` or
+  `jrs.lock`, shows the **Load jrs changes** banner.
+
+Whatever IntelliJ set up when it first opened the folder — one module over the
+whole tree, or a module per source folder it detected (`main`, `main2`, …) —
+is cleared on load: a module that claimed a member's directory gives it up,
+and goes when nothing of its own is left, so every file belongs to its
+member's module and sees that member's libraries and the members it depends
+on. A module over the workspace's root stays as its root module, with no
+sources of its own; modules outside the workspace are left alone.
+
 The first load runs `jrs metadata --no-deps` before the full one, so the
 source roots are there before resolution has finished. Once a project is
 loaded, it is loaded again each time it is opened.
@@ -127,6 +152,12 @@ name.
   debugger, the plugin attaches the IDE's debugger to it, so breakpoints work as
   usual.
 - `javac` diagnostics in the console link to the source line.
+- **Only errors in red.** jrs writes its whole transcript to stderr, as Cargo
+  does, which a console would paint red. The plugin shows jrs's phase lines,
+  summary and warnings as ordinary output, and in red only what is an error:
+  jrs's closing `error:` message and the compiler's errors. Anything else on
+  stderr — the program `jrs run` started, a task, a test — is shown as it was
+  written. The Build tool window sorts its lines the same way.
 
 ### The jrs tool window
 
@@ -140,7 +171,8 @@ The **jrs** tool window, on the right, shows:
 Its toolbar has the same actions as **Tools | jrs**: load, `build`, `test`,
 `run`, `package`, `clean`, `tree`, Download Sources, Add and Remove
 Dependency, and under **More** `outdated`, `update` and `verify`. Commands run
-in the Run tool window.
+in the Run tool window. In a workspace, `test` runs every member's tests, all of
+them (`--all`), from the workspace's root.
 
 ### Editing jrs.toml
 
@@ -182,8 +214,6 @@ migration report and then loads the new jrs project.
   up and their runtime libraries are on the classpath, so the IDE's language
   plugins analyse the code. The compiler arguments and `[kotlin] plugins` are
   not passed to them yet, because `jrs metadata` does not carry them.
-- **One module per project.** jrs builds single-module projects, and the
-  plugin sets up one IntelliJ module to match.
 
 ## Layout
 

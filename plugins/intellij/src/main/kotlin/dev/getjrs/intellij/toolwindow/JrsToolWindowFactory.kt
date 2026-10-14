@@ -23,6 +23,7 @@ import com.intellij.util.ui.tree.TreeUtil
 import dev.getjrs.intellij.JrsFiles
 import dev.getjrs.intellij.JrsIcons
 import dev.getjrs.intellij.actions.SELECTED_DEPENDENCY
+import dev.getjrs.intellij.actions.SELECTED_MEMBER
 import dev.getjrs.intellij.model.JrsMetadata
 import dev.getjrs.intellij.run.JrsCommands
 import dev.getjrs.intellij.sync.JrsModelApplier
@@ -32,7 +33,10 @@ import javax.swing.JTree
 import javax.swing.tree.DefaultMutableTreeNode
 import javax.swing.tree.DefaultTreeModel
 
-/** The jrs tool window: the project's tasks and dependencies, and the commands as a toolbar. */
+/**
+ * The jrs tool window: the project's tasks and dependencies, and the commands
+ * as a toolbar. A workspace shows a node per member, each with its own.
+ */
 class JrsToolWindowFactory : ToolWindowFactory, DumbAware {
     override suspend fun isApplicableAsync(project: Project): Boolean = JrsFiles.projectRoot(project) != null
 
@@ -46,9 +50,12 @@ class JrsToolWindowFactory : ToolWindowFactory, DumbAware {
 
 private sealed interface Node {
     data class Root(val text: String) : Node
+    data class Member(val name: String, val text: String) : Node
     data class Group(val text: String) : Node
-    data class TaskNode(val task: JrsMetadata.Task) : Node
-    data class Dependency(val entry: JrsMetadata.Entry) : Node
+
+    /** [member] is the workspace member the task is declared in; null outside a workspace. */
+    data class TaskNode(val task: JrsMetadata.Task, val member: String?) : Node
+    data class Dependency(val entry: JrsMetadata.Entry, val member: String?) : Node
     data class Hint(val text: String) : Node
 }
 
@@ -81,7 +88,8 @@ private class JrsToolWindowPanel(private val project: Project) :
         object : DoubleClickListener() {
             override fun onDoubleClick(event: MouseEvent): Boolean {
                 val node = selected() as? Node.TaskNode ?: return false
-                JrsCommands.run(project, "task", node.task.name)
+                val member = node.member?.let { "-p $it " }.orEmpty()
+                JrsCommands.run(project, "task", member + node.task.name)
                 return true
             }
         }.installOn(tree)
@@ -97,19 +105,46 @@ private class JrsToolWindowPanel(private val project: Project) :
         (tree.lastSelectedPathComponent as? DefaultMutableTreeNode)?.userObject as? Node
 
     override fun uiDataSnapshot(sink: DataSink) {
+        val path = tree.selectionPath ?: return
+        // The member a selection is under, for the actions that edit one.
+        path.path.asSequence()
+            .mapNotNull { (it as? DefaultMutableTreeNode)?.userObject as? Node.Member }
+            .firstOrNull()
+            ?.let { sink[SELECTED_MEMBER] = it.name }
         val dependency = selected() as? Node.Dependency ?: return
         dependency.entry.key?.let { sink[SELECTED_DEPENDENCY] = it }
     }
 
     private fun rebuild() {
-        val metadata = JrsProjectState.getInstance(project).metadata
+        val state = JrsProjectState.getInstance(project)
+        val metadata = state.metadata
         if (metadata == null) {
             treeModel.setRoot(DefaultMutableTreeNode(Node.Hint("Load the jrs project to see its tasks and dependencies")))
             return
         }
-        val root = DefaultMutableTreeNode(Node.Root("${metadata.project.name} ${metadata.project.version}"))
+        if (state.members.isEmpty()) {
+            val root = DefaultMutableTreeNode(Node.Root("${metadata.project.name} ${metadata.project.version}"))
+            addContents(root, metadata, null)
+            treeModel.setRoot(root)
+            TreeUtil.expand(tree, 2)
+            return
+        }
+        val base = project.basePath?.substringAfterLast('/')?.substringAfterLast('\\') ?: "workspace"
+        val root = DefaultMutableTreeNode(Node.Root("$base (${state.members.size} members)"))
+        for (member in state.members) {
+            val name = member.project.name
+            val node = DefaultMutableTreeNode(Node.Member(name, "$name ${member.project.version}"))
+            addContents(node, member, name)
+            root.add(node)
+        }
+        treeModel.setRoot(root)
+        TreeUtil.expand(tree, 1)
+    }
+
+    /** A project's or member's Tasks and Dependencies under [root]. */
+    private fun addContents(root: DefaultMutableTreeNode, metadata: JrsMetadata, member: String?) {
         val tasks = DefaultMutableTreeNode(Node.Group("Tasks"))
-        metadata.tasks.forEach { tasks.add(DefaultMutableTreeNode(Node.TaskNode(it))) }
+        metadata.tasks.forEach { tasks.add(DefaultMutableTreeNode(Node.TaskNode(it, member))) }
         if (metadata.tasks.isEmpty()) tasks.add(DefaultMutableTreeNode(Node.Hint("No [tasks] in jrs.toml")))
         root.add(tasks)
 
@@ -123,13 +158,18 @@ private class JrsToolWindowPanel(private val project: Project) :
                 val libraries = byScope[scope].orEmpty()
                 if (libraries.isEmpty()) continue
                 val group = DefaultMutableTreeNode(Node.Group("$label (${libraries.size})"))
-                libraries.forEach { group.add(DefaultMutableTreeNode(Node.Dependency(it.entry))) }
+                libraries.forEach { group.add(DefaultMutableTreeNode(Node.Dependency(it.entry, member))) }
                 dependencies.add(group)
             }
         }
+        if (metadata.modules.any { it.direct }) {
+            val modules = DefaultMutableTreeNode(Node.Group("Modules"))
+            metadata.modules.filter { it.direct }.forEach {
+                modules.add(DefaultMutableTreeNode(Node.Hint("${it.name} (${it.classpath})")))
+            }
+            root.add(modules)
+        }
         root.add(dependencies)
-        treeModel.setRoot(root)
-        TreeUtil.expand(tree, 2)
     }
 
     override fun dispose() = Unit
@@ -147,6 +187,10 @@ private class JrsToolWindowPanel(private val project: Project) :
             when (val node = (value as? DefaultMutableTreeNode)?.userObject) {
                 is Node.Root -> {
                     icon = JrsIcons.Jrs
+                    append(node.text, SimpleTextAttributes.REGULAR_BOLD_ATTRIBUTES)
+                }
+                is Node.Member -> {
+                    icon = AllIcons.Nodes.Module
                     append(node.text, SimpleTextAttributes.REGULAR_BOLD_ATTRIBUTES)
                 }
                 is Node.Group -> {

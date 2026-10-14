@@ -65,14 +65,31 @@ object JrsSync {
         indicator: ProgressIndicator,
         quiet: Boolean,
     ): JrsMetadata? {
-        val metadata = try {
+        var opened: String? = null
+        val members = try {
             val output = JrsCli.run(root, args, indicator)
             if (output.isCancelled) return null
             if (output.exitCode != 0) {
                 fail(project, "jrs ${args.joinToString(" ")} failed:\n${JrsCli.failureMessage(output)}", quiet)
                 return null
             }
-            JrsMetadata.parse(output.stdout)
+            val parsed = JrsMetadata.parseAll(output.stdout)
+            // Opened at one member's directory, jrs describes that member
+            // alone; the members it depends on are modules too, so the whole
+            // workspace is imported, the opened member first in view.
+            val single = parsed.singleOrNull()
+            if (single?.workspace != null) {
+                val whole = JrsCli.run(root, listOf("--manifest-path", single.workspace) + args, indicator)
+                if (whole.isCancelled) return null
+                if (whole.exitCode != 0) {
+                    fail(project, "jrs ${args.joinToString(" ")} failed:\n${JrsCli.failureMessage(whole)}", quiet)
+                    return null
+                }
+                opened = single.project.name
+                JrsMetadata.parseAll(whole.stdout)
+            } else {
+                parsed
+            }
         } catch (e: ExecutionException) {
             fail(project, "Could not run ${JrsCli.executable()}: ${e.message}\nSet the jrs executable in Settings | Build, Execution, Deployment | Build Tools | jrs.", quiet)
             return null
@@ -80,13 +97,28 @@ object JrsSync {
             fail(project, e.message ?: "jrs metadata printed something this plugin cannot read.", quiet)
             return null
         }
-        JrsModelApplier.refreshFiles(metadata)
+        members.forEach(JrsModelApplier::refreshFiles)
+        // In a workspace, the tool window shows the application: the member
+        // with a main class, else the first.
+        val primary = opened?.let { name -> members.indexOfFirst { it.project.name == name } }?.takeIf { it >= 0 }
+            ?: members.indexOfFirst { it.project.mainClass != null }.takeIf { it >= 0 }
+            ?: 0
+        val metadata = members[primary]
         var failure: Throwable? = null
         ApplicationManager.getApplication().invokeAndWait({
             if (project.isDisposed) return@invokeAndWait
             try {
-                val module = JrsModelApplier.apply(project, metadata)
-                JrsProjectState.getInstance(project).linked(module.name, metadata, root)
+                val modules = JrsModelApplier.applyAll(project, members)
+                val workspace = members.size > 1 || members[0].modules.isNotEmpty()
+                val names = if (workspace) modules.map { it.name } else emptyList()
+                JrsProjectState.getInstance(project).linked(
+                    modules[primary].name,
+                    metadata,
+                    root,
+                    names,
+                    if (workspace) members else emptyList(),
+                    members[primary].workspace,
+                )
             } catch (e: RuntimeException) {
                 failure = e
             }

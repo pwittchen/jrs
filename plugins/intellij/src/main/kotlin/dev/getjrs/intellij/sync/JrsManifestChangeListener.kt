@@ -12,13 +12,17 @@ import dev.getjrs.intellij.settings.JrsSettings
 class JrsManifestChangeListener(private val project: Project) : BulkFileListener {
     override fun after(events: List<VFileEvent>) {
         val root = JrsFiles.projectRoot(project)?.toString() ?: return
+        val state = JrsProjectState.getInstance(project)
+        // A workspace member's own jrs.toml counts too: its lockfile is the root's.
+        val memberRoots = state.state.memberRoots.map { it.replace('\\', '/') }.toSet()
+        val roots = setOfNotNull(root.replace('\\', '/'), state.state.workspaceRoot?.replace('\\', '/'))
         val touched = events.any { event ->
             val name = event.path.substringAfterLast('/')
-            (name == JrsFiles.MANIFEST || name == JrsFiles.LOCKFILE) &&
-                event.path.substringBeforeLast('/') == root.replace('\\', '/')
+            val dir = event.path.substringBeforeLast('/')
+            ((name == JrsFiles.MANIFEST || name == JrsFiles.LOCKFILE) && dir in roots) ||
+                (name == JrsFiles.MANIFEST && dir in memberRoots)
         }
         if (!touched) return
-        val state = JrsProjectState.getInstance(project)
         if (!state.isLinked || JrsSync.isRunning(project)) return
         ApplicationManager.getApplication().executeOnPooledThread {
             if (project.isDisposed || !state.isOutOfDate()) return@executeOnPooledThread
