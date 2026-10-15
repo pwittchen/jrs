@@ -462,7 +462,36 @@ h3 {
   max-width: 66ch;
 }
 
-/* ---- intellij ---------------------------------------------------------- */
+/* ---- intellij, github actions ------------------------------------------ */
+
+/* The heading and lede on the left, the tool's logo to their right. */
+.section-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 2rem;
+  margin-bottom: 2rem;
+}
+
+.section-head .section-lede {
+  margin-bottom: 0;
+}
+
+.section-logo {
+  flex: none;
+  width: 6.5rem;
+  height: 6.5rem;
+  fill: var(--muted);
+  opacity: 0.5;
+}
+
+@media (max-width: 36rem) {
+  .section-logo {
+    width: 3.5rem;
+    height: 3.5rem;
+    align-self: flex-start;
+  }
+}
 
 .ide-features {
   margin: 0;
