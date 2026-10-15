@@ -1,4 +1,4 @@
-//! The critical path through a workspace's members (specs/todo/GRADLE_GAPS.md
+//! The critical path through a workspace's members (specs/GRADLE_GAPS.md
 //! §2.1): how long a clean build of it would take with unlimited cores, from
 //! each member's wall time in `--timings`.
 //!
@@ -158,7 +158,7 @@ pub fn report(out: &mut String, results: &[Outcome]) {
     }
     out.push_str(
         "## Workspace members at once\n\n\
-         specs/todo/GRADLE_GAPS.md §2.1: each member's wall time in jrs's clean build, \
+         specs/GRADLE_GAPS.md §2.1: each member's wall time in jrs's clean build, \
          summed (`sequential`) and along the longest path through the member graph \
          (`critical path`, the floor with unlimited cores), beside jrs's and Gradle's \
          `--parallel` clean builds. The gate holds when the critical path is at least \

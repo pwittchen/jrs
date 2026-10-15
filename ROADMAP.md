@@ -74,7 +74,7 @@ website at [getjrs.dev/benchmarks](https://getjrs.dev/benchmarks/).
 
 ## 3. Closing the gaps where Gradle wins
 
-[specs/todo/GRADLE_GAPS.md](specs/todo/GRADLE_GAPS.md)
+[specs/GRADLE_GAPS.md](specs/GRADLE_GAPS.md)
 
 Four gaps, each judged by the section 2 numbers before it gets code:
 
@@ -93,7 +93,7 @@ at a time, `kotlinc` has a warm worker under `--watch`, `jrs jdk install`
 and an opt-in `[jdk] download` fetch a pinned JDK, and `jrs wrapper`,
 `jrs self update --to` and `setup-jrs`'s `version: manifest` pin jrs. The
 benchmarks that judge the first two are in place; their corpus numbers are
-still to be taken ([§9](specs/todo/GRADLE_GAPS.md#9-what-was-built)).
+still to be taken ([§9](specs/GRADLE_GAPS.md#9-what-was-built)).
 
 ## 4. Reaching more users
 

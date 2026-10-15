@@ -3,7 +3,7 @@
 Four places where a Gradle build does something a jrs build does not, and
 what jrs would do instead: workspace members built in parallel, the cost of
 starting `kotlinc`, a pinned JDK that is not installed, and a pinned jrs.
-This is [ROADMAP §3](../../ROADMAP.md#3-closing-the-gaps-where-gradle-wins).
+This is [ROADMAP §3](../ROADMAP.md#3-closing-the-gaps-where-gradle-wins).
 
 Status: **implemented**, all of G1–G7 (§8). The SPEC.md edits of §6 are
 made, and C's and D's decisions taken as proposed: downloading a JDK is
@@ -12,9 +12,9 @@ their gates; the benchmarks that measure them are in place, and §9 has the
 first number and what changed on the way.
 
 As first written: parts A and B are speed, and each waits for a number from
-the benchmark of [BENCHMARKS.md](../BENCHMARKS.md) before it gets code (§1).
+the benchmark of [BENCHMARKS.md](BENCHMARKS.md) before it gets code (§1).
 Parts C and D are not speed; they cross lines drawn in SPEC §1.2 and listed
-in [ROADMAP_ARCHIVE §5](../ROADMAP_ARCHIVE.md#5-needs-a-spec-decision-first),
+in [ROADMAP_ARCHIVE §5](ROADMAP_ARCHIVE.md#5-needs-a-spec-decision-first),
 so each needs its SPEC.md edits (§6) agreed before code.
 
 ---
@@ -40,7 +40,7 @@ a feature of the same name.
 Today `cli/members.rs` builds members one after another in
 `Workspace::order`: `build_upstream` and `build` loop over
 `with_upstream(..)`, each member a `Session` of its own, and
-[WORKSPACES.md §9](../WORKSPACES.md#9-what-stays-out) keeps parallel members
+[WORKSPACES.md §9](WORKSPACES.md#9-what-stays-out) keeps parallel members
 out "to keep the phase lines in a fixed order without buffering a member's
 output", calling it "the first thing to revisit if a large workspace shows
 it". §9 also says each member's compile "is already parallel inside
@@ -159,7 +159,7 @@ rows, and the report's total is wall time, so the saving shows.
 
 A Kotlin unit's first step runs `org.jetbrains.kotlin.cli.jvm.K2JVMCompiler`
 (`compile/lang.rs`) in a fresh JVM, from a class-data-sharing archive
-(`compile/share.rs`). [JVM_LANGUAGES.md §14.1](../JVM_LANGUAGES.md#14-open-questions)
+(`compile/share.rs`). [JVM_LANGUAGES.md §14.1](JVM_LANGUAGES.md#14-open-questions)
 measured one small mixed unit at 1.8 s in `kotlinc` and decided "no daemon
 for now"; FASTER_BUILDS §6.4 left a `kotlinc` worker out until "a
 measurement on the corpus saying the second of JVM start-up is felt". Part

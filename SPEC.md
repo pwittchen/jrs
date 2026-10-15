@@ -2723,7 +2723,7 @@ produces something runnable.
 - ☑ `cargo bench --bench kotlinc` and the critical path through a
   workspace's members in the comparison
 - The design and its gates are in
-  [GRADLE_GAPS.md](specs/todo/GRADLE_GAPS.md).
+  [GRADLE_GAPS.md](specs/GRADLE_GAPS.md).
 
 Tick the corresponding README boxes as each lands — the README is the
 user-facing progress tracker, this document is the design behind it.

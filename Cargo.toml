@@ -34,7 +34,7 @@ harness = false
 name = "incremental"
 harness = false
 
-# specs/todo/GRADLE_GAPS.md §3.1: what `kotlinc` costs on a real project,
+# specs/GRADLE_GAPS.md §3.1: what `kotlinc` costs on a real project,
 # by JRS_BENCH_PROJECT, and what a warm one saves.
 [[bench]]
 name = "kotlinc"

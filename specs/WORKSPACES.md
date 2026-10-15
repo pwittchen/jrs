@@ -263,7 +263,7 @@ v1.0.0` already did; the lines that did not — the tests' `Compiling` and
 `Testing`, `Task`, `Fresh (task)` — are prefixed with the member's name in a
 workspace.
 
-**Members build at once** ([GRADLE_GAPS.md §2](todo/GRADLE_GAPS.md#2-a--workspace-members-in-parallel)).
+**Members build at once** ([GRADLE_GAPS.md §2](GRADLE_GAPS.md#2-a--workspace-members-in-parallel)).
 A member is ready when every member it depends on has built; ready members
 start in build order, up to `--jobs` at once, each on a thread of its own
 with a session of its own. The graph and every jar are fetched before they
@@ -425,7 +425,7 @@ nested aggregator, a BOM module, a profile's module, plugin inheritance) and
   tests run one member at a time: two suites at once would need a fork
   budget shared across members, and would still fight over the ports and
   databases both use. To measure with the `test JVM` rows per member first
-  ([GRADLE_GAPS.md §7](todo/GRADLE_GAPS.md#7-open-questions)).
+  ([GRADLE_GAPS.md §7](GRADLE_GAPS.md#7-open-questions)).
 
 ## 10. SPEC.md edits
 

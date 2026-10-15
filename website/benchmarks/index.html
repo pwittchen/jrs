@@ -201,7 +201,7 @@
             <h3>Gradle's daemon still wins</h3>
             <ul>
               <li><strong>An API change in a big project.</strong> jrs recompiles everything that reaches the changed class; Gradle's analysis recompiles less, in a warm compiler. 1.84&nbsp;s against 0.64&nbsp;s on 2000 classes.</li>
-              <li><strong>Workspaces.</strong> Members compile one after another, each in a fresh <code>javac</code>; on six members a clean build takes 1.98&nbsp;s against the daemon's 0.79&nbsp;s and Maven's 1.58&nbsp;s. Building members in parallel is <a href="https://github.com/pwittchen/jrs/blob/master/specs/todo/GRADLE_GAPS.md">next on the roadmap</a>.</li>
+              <li><strong>Workspaces.</strong> Members compile one after another, each in a fresh <code>javac</code>; on six members a clean build takes 1.98&nbsp;s against the daemon's 0.79&nbsp;s and Maven's 1.58&nbsp;s. Building members in parallel is <a href="https://github.com/pwittchen/jrs/blob/master/specs/GRADLE_GAPS.md">next on the roadmap</a>.</li>
               <li><strong>Long compiles.</strong> At 2000 classes a hot, JIT-warmed <code>javac</code> overtakes a fresh one: 1.55&nbsp;s against 1.26&nbsp;s for a clean build.</li>
               <li><strong>Spring Boot's jar.</strong> 719&nbsp;ms against <code>bootJar</code>'s 513&nbsp;ms; jrs unpacks every dependency into one jar where Boot nests them.</li>
             </ul>

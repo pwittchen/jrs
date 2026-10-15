@@ -1,5 +1,5 @@
 //! What `kotlinc` costs, and what a warm one would save
-//! (specs/todo/GRADLE_GAPS.md §3.1).
+//! (specs/GRADLE_GAPS.md §3.1).
 //!
 //! It copies the project at `JRS_BENCH_PROJECT` into a scratch directory,
 //! leaving the original alone, runs `jrs build --timings --no-build-cache`
@@ -87,7 +87,7 @@ fn main() {
     let original = std::fs::read_to_string(&file).expect("read the Kotlin source");
     let driver = compile_driver(&toolchain, &scratch);
 
-    println!("jrs kotlinc benchmark (specs/todo/GRADLE_GAPS.md §3.1)\n");
+    println!("jrs kotlinc benchmark (specs/GRADLE_GAPS.md §3.1)\n");
     println!("  project  {}", source.display());
     println!(
         "  edited   {}",

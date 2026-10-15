@@ -120,7 +120,7 @@ a tool that beat jrs.
   sequence; Gradle's daemon does the same work in 0.5–0.8 s, and even
   Maven's single-threaded reactor is faster, since it compiles in one warm
   JVM. This is the evidence for "workspace members built in parallel" in
-  [GRADLE_GAPS.md](todo/GRADLE_GAPS.md); a warm in-process `javac`
+  [GRADLE_GAPS.md](GRADLE_GAPS.md); a warm in-process `javac`
   across members ([FASTER_BUILDS.md](FASTER_BUILDS.md) §6's worker
   outside `--watch`) would help as much.
 - **An API change recompiles more than it needs to.** `abi` on `gen-2000` is

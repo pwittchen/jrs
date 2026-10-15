@@ -13,7 +13,7 @@ import java.nio.charset.Charset;
 import java.nio.charset.StandardCharsets;
 
 /**
- * jrs's warm kotlinc (specs/todo/GRADLE_GAPS.md §3.3): one JVM for a
+ * jrs's warm kotlinc (specs/GRADLE_GAPS.md §3.3): one JVM for a
  * `--watch` session, compiling every request in process instead of starting
  * the Kotlin compiler again. JavacWorker's protocol, a second time.
  *

@@ -25,7 +25,7 @@ claim the Why page and the README make ("fast start, no daemon") and leave
 unbacked: `website/why/index.html` says the timings are "on the roadmap".
 
 This benchmark is the evidence. It is also the judge of
-[GRADLE_GAPS.md](todo/GRADLE_GAPS.md): each gap there gets code only when a
+[GRADLE_GAPS.md](GRADLE_GAPS.md): each gap there gets code only when a
 scenario here shows it, and FASTER_BUILDS.md §9.1's "measured by" column
 names scenarios defined in §4 below.
 
@@ -225,7 +225,7 @@ them:
   `--no-daemon`, what a CI job or a first command sees. On a multi-module
   project a fourth, `gradle (daemon, --parallel)`, is what a team that turns
   on `org.gradle.parallel` sees, and what jrs's members built at once answer
-  ([GRADLE_GAPS.md §2.1](todo/GRADLE_GAPS.md#21-what-must-be-measured-first));
+  ([GRADLE_GAPS.md §2.1](GRADLE_GAPS.md#21-what-must-be-measured-first));
   the report's "Workspace members at once" section sets it beside the
   critical path through jrs's members. `gradle --stop` runs between columns
   and between projects, so no daemon outlives its column.

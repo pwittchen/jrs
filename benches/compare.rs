@@ -375,7 +375,7 @@ enum Column {
     GradleCc,
     GradleNoDaemon,
     /// `--parallel` with a warm daemon, on a multi-module project only
-    /// (specs/todo/GRADLE_GAPS.md §2.1).
+    /// (specs/GRADLE_GAPS.md §2.1).
     GradleParallel,
 }
 
@@ -1158,7 +1158,7 @@ struct Outcome {
     gradle_version: Option<String>,
     maven_version: Option<String>,
     /// A workspace's members, each with the members it depends on, for the
-    /// critical path (specs/todo/GRADLE_GAPS.md §2.1); empty for a project
+    /// critical path (specs/GRADLE_GAPS.md §2.1); empty for a project
     /// of one.
     member_graph: Vec<(String, Vec<String>)>,
 }
