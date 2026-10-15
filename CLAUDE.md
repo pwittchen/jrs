@@ -37,7 +37,7 @@ CI (`.github/workflows/rust.yml`) runs exactly those four on Linux, macOS and
 Windows (`fmt` on Linux only), plus the network tests on Linux, on push and PR
 against `master`. Its `reproducible` job packages every `examples/` project
 from two checkouts at different paths and compares what was written byte for
-byte: a compiler or writer that records a path or a time fails there. Changes that only touch `*.md`, `LICENSE` or `website/` are
+byte: a compiler or writer that records a path or a time fails there. Changes that only touch `*.md`, `specs/`, `LICENSE` or `website/` are
 excluded via `paths-ignore` — they cannot break the build, so they do not run it;
 neither do changes under `plugins/`. `.github/workflows/intellij.yml` tests and
 builds the IntelliJ plugin with Gradle on changes to it or to a `jrs.toml` under

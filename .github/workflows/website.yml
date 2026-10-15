@@ -17,7 +17,7 @@ on:
     branches: [ "master" ]
     paths:
       - 'website/**'
-      - '!website/README.md'
+      - '!website/**/*.md'
       - 'logo.png'
       - '.github/workflows/website.yml'
   workflow_call:
