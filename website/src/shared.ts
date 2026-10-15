@@ -69,7 +69,7 @@ export function setupCopy(root: ParentNode = document) {
       const text = button.closest(".shell, .code")?.querySelector("pre")?.textContent ?? "";
       try {
         await navigator.clipboard.writeText(text.trim());
-        button.textContent = "Copied";
+        button.textContent = "Copied ✓";
       } catch {
         button.textContent = "Select and copy";
       }
