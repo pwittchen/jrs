@@ -245,20 +245,25 @@ tar -xf jrs-x86_64-pc-windows-msvc.zip jrs.exe</pre>
 
 <h3>In GitHub Actions</h3>
 <p>
-  The repository is also an action that installs a prebuilt jrs on the runner, checked against the
-  release's <code>SHA256SUMS</code>, and puts it on <code>PATH</code>: on Linux, macOS and Windows,
-  x86_64 and ARM64.
+  The <a href="https://github.com/pwittchen/setup-jrs">setup-jrs</a> action, on the
+  <a href="https://github.com/marketplace/actions/set-up-jrs">GitHub Marketplace</a>, installs a
+  prebuilt jrs on the runner, checked against the release's <code>SHA256SUMS</code>, and puts it on
+  <code>PATH</code>: on Linux, macOS and Windows, x86_64 and ARM64.
 </p>
-<pre data-lang="plain">- uses: actions/setup-java@v6
+<pre data-lang="plain">- uses: actions/checkout@v5
+- uses: actions/setup-java@v6
   with: { distribution: temurin, java-version: '21' }
-- uses: pwittchen/jrs/setup-jrs@v0.9.0   # installs jrs 0.9.0
+- uses: pwittchen/setup-jrs@v1
+  with: { cache: true }
 - run: jrs test</pre>
 <p>
-  Used at a release tag, it installs that release; <code>with: { version: '0.8.0' }</code> or
-  <code>version: latest</code> picks another. Its <code>version</code> output is the version
-  installed. The action is
-  <a href="https://github.com/pwittchen/jrs/blob/master/setup-jrs/action.yml">setup-jrs/action.yml</a>
-  in the repository. See <a href="#ci">Continuous integration</a> for a whole workflow.
+  It installs the latest release; <code>with: { version: '0.11.1' }</code> picks another.
+  <code>cache: true</code> points <code>JRS_CACHE_DIR</code> at a fixed directory and saves it with
+  <code>actions/cache</code>, keyed on the runner's OS and architecture and the hash of every
+  <code>jrs.lock</code> (<code>cache-dependency-path</code> changes the glob), so dependencies and
+  the <a href="#build-cache">build cache</a> survive between runs. Its outputs are
+  <code>version</code>, the version installed, <code>path</code>, the directory it went into, and
+  <code>cache-hit</code>. See <a href="#ci">Continuous integration</a> for a whole workflow.
 </p>
 <p>
   <code>version: manifest</code> installs the newest release the project's
@@ -268,8 +273,14 @@ tar -xf jrs-x86_64-pc-windows-msvc.zip jrs.exe</pre>
   since a <code>0.x</code> minor may break; from <code>1.0</code>, the newest release of the same
   major version at or above it.
 </p>
-<pre data-lang="plain">- uses: pwittchen/jrs/setup-jrs@v0.11.1
+<pre data-lang="plain">- uses: pwittchen/setup-jrs@v1
   with: { version: manifest }        # or add manifest: path/to/jrs.toml</pre>
+<p>
+  The older form, <code>uses: pwittchen/jrs/setup-jrs@&lt;tag&gt;</code>
+  (<a href="https://github.com/pwittchen/jrs/blob/master/setup-jrs/action.yml">setup-jrs/action.yml</a>
+  in the jrs repository), still works: it installs the release it is used at, and has no
+  <code>cache</code> input.
+</p>
 
 <h3>From source</h3>
 <pre>git clone https://github.com/pwittchen/jrs.git
@@ -3130,23 +3141,16 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-java@v4
+      - uses: actions/setup-java@v6
         with:
           distribution: temurin
           java-version: 21
 
-      - name: Install jrs
-        run: |
-          curl -fsSL https://getjrs.dev/install.sh | sh
-          echo "$HOME/.local/bin" &gt;&gt; "$GITHUB_PATH"
-
-      - uses: actions/cache@v4
+      - uses: pwittchen/setup-jrs@v1
         with:
-          path: ~/.cache/jrs
-          key: jrs-${{ runner.os }}-${{ hashFiles('jrs.lock') }}
-          restore-keys: jrs-${{ runner.os }}-
+          cache: true
 
       - run: jrs fetch
       - run: jrs test --offline --coverage
@@ -3163,14 +3167,17 @@ jobs:
   variables it exports, so several JDKs can be installed side by side.
 </p>
 <p>
-  Instead of the install script, the <a href="#installation-in-github-actions"><code>setup-jrs</code>
-  action</a> installs jrs in one step, on every runner OS:
+  The <a href="#installation-in-github-actions"><code>setup-jrs</code> action</a>
+  (<a href="https://github.com/pwittchen/setup-jrs">repository</a>,
+  <a href="https://github.com/marketplace/actions/set-up-jrs">Marketplace</a>) installs jrs on every
+  runner OS and, with <code>cache: true</code>, restores and saves the jrs cache keyed on
+  <code>jrs.lock</code>. With <code>version: manifest</code> it installs the newest release the
+  project's <code>jrs-version</code> allows instead of the latest. Without the action, install jrs
+  with the script and cache <code>~/.cache/jrs</code> yourself:
 </p>
-<pre data-lang="plain">      - uses: pwittchen/jrs/setup-jrs@v0.9.0</pre>
-<p>
-  With <code>with: { version: manifest }</code> it installs the newest release the project's
-  <code>jrs-version</code> allows instead.
-</p>
+<pre data-lang="plain">      - run: |
+          curl -fsSL https://getjrs.dev/install.sh | sh
+          echo "$HOME/.local/bin" &gt;&gt; "$GITHUB_PATH"</pre>
 </section>
 
 <section id="editors">

@@ -82,29 +82,42 @@ then move `jrs.exe` to a directory on your `PATH`. Each release also carries a
 
 ### In GitHub Actions
 
-The repository is also an action that installs a prebuilt jrs on the runner,
-checked against the release's `SHA256SUMS`, and puts it on `PATH` — on Linux,
-macOS and Windows, x86_64 and ARM64:
+The [`setup-jrs`](https://github.com/pwittchen/setup-jrs) action, on the
+[GitHub Marketplace](https://github.com/marketplace/actions/set-up-jrs),
+installs a prebuilt jrs on the runner, checked against the release's
+`SHA256SUMS`, and puts it on `PATH` — on Linux, macOS and Windows, x86_64 and
+ARM64:
 
 ```yaml
+- uses: actions/checkout@v5
 - uses: actions/setup-java@v6
   with: { distribution: temurin, java-version: '21' }
-- uses: pwittchen/jrs/setup-jrs@v0.9.0   # installs jrs 0.9.0
+- uses: pwittchen/setup-jrs@v1
+  with: { cache: true }
 - run: jrs test
 ```
 
-Used at a release tag, it installs that release; `with: { version: '0.8.0' }`
-or `version: latest` picks another. `version: manifest` installs the newest
-release the project's [`jrs-version`](#project) allows, read from `jrs.toml`
-(or the file `manifest:` names): `"0.10"` is the newest `0.10.x`, `"0.10.1"`
-that release exactly, since a `0.x` minor may break; from `1.0`, the newest
-release of the same major version at or above it. Its `version` output is the
-version installed. The action is [`setup-jrs/action.yml`](setup-jrs/action.yml).
+It installs the latest release; `with: { version: '0.11.1' }` picks another.
+`version: manifest` installs the newest release the project's
+[`jrs-version`](#project) allows, read from `jrs.toml` (or the file
+`manifest:` names): `"0.10"` is the newest `0.10.x`, `"0.10.1"` that release
+exactly, since a `0.x` minor may break; from `1.0`, the newest release of the
+same major version at or above it.
 
 ```yaml
-- uses: pwittchen/jrs/setup-jrs@v0.11.1
+- uses: pwittchen/setup-jrs@v1
   with: { version: manifest }
 ```
+
+`cache: true` points `JRS_CACHE_DIR` at a fixed directory and saves it with
+`actions/cache`, keyed on the runner's OS and architecture and the hash of
+every `jrs.lock` (`cache-dependency-path` changes the glob), so dependencies
+and the build cache survive between runs. Its outputs are `version`, the
+version installed, `path`, the directory it went into, and `cache-hit`.
+
+The older form, `uses: pwittchen/jrs/setup-jrs@<tag>`
+([`setup-jrs/action.yml`](setup-jrs/action.yml) in this repository), still
+works: it installs the release it is used at, and has no `cache` input.
 
 The installer takes the same choice: `curl -fsSL https://getjrs.dev/install.sh
 | sh -s -- --version-from jrs.toml`.

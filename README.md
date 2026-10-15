@@ -91,8 +91,20 @@ or, with a Rust toolchain, from source:
 cargo install --git https://github.com/pwittchen/jrs.git
 ```
 
-Windows binaries, other versions, manual installation and the `setup-jrs`
-GitHub Action are covered in [DOCS.md](DOCS.md#installation). A prebuilt jrs updates itself:
+In GitHub Actions, [`setup-jrs`](https://github.com/pwittchen/setup-jrs)
+([Marketplace](https://github.com/marketplace/actions/set-up-jrs)) installs jrs
+on Linux, macOS and Windows runners and can cache its dependencies between runs:
+
+```yaml
+- uses: actions/setup-java@v6
+  with: { distribution: temurin, java-version: '21' }
+- uses: pwittchen/setup-jrs@v1
+  with: { cache: true }
+- run: jrs test
+```
+
+Windows binaries, other versions, manual installation and the action's inputs
+are covered in [DOCS.md](DOCS.md#installation). A prebuilt jrs updates itself:
 `jrs self check` says whether a newer release is out, and `jrs self update`
 installs it ([Updating](DOCS.md#updating)); `jrs wrapper` pins a project to
 one release, as `gradlew` does ([Pinning jrs](DOCS.md#pinning-jrs-for-a-team)).

@@ -355,6 +355,29 @@ jrs migrate         <span class="c"># or start from an existing pom.xml / build.
         </p>
       </section>
 
+      <section class="wrap section" id="github-actions">
+        <h2>GitHub Actions</h2>
+        <p class="section-lede">
+          The <code>setup-jrs</code> action installs jrs on Linux, macOS and Windows runners,
+          checksum verified, and can cache its dependencies and compiled classes between runs.
+        </p>
+        <div class="shell">
+<pre><code>- uses: actions/setup-java@v6
+  with: { distribution: temurin, java-version: '21' }
+- uses: pwittchen/setup-jrs@v1
+  with: { cache: true }
+- run: jrs test</code></pre>
+          <button class="copy" type="button" data-fast-goal="copy_setup_jrs">Copy</button>
+        </div>
+        <p class="note">
+          It is on the
+          <a href="https://github.com/marketplace/actions/set-up-jrs">GitHub Marketplace</a>, with
+          its source in <a href="https://github.com/pwittchen/setup-jrs">pwittchen/setup-jrs</a>.
+          <code>version: manifest</code> installs the release your <code>jrs.toml</code> asks for.
+          More in <a href="docs/#installation-in-github-actions">the docs</a>.
+        </p>
+      </section>
+
       <section class="wrap section" id="contact">
         <h2>Contact, support &amp; consulting</h2>
         <p class="section-lede">
