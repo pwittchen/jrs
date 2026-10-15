@@ -147,8 +147,9 @@ a jrs project from `jrs metadata` with its source roots, JDK and libraries,
 and a workspace as one module per member.
 Build Project runs `jrs build`, and it has run configurations for `jrs run`,
 `jrs test` and `jrs task`, with the debugger and the test runner tree. It also
-adds a jrs tool window and completion in `jrs.toml`. Each release carries it
-as `jrs-intellij.zip`, and its [README](plugins/intellij/README.md) says how
+adds a jrs tool window and completion in `jrs.toml`. Install it from the
+[JetBrains Marketplace](https://plugins.jetbrains.com/plugin/35092-jrs); each
+release also carries it as `jrs-intellij.zip`, and its [README](plugins/intellij/README.md) says how
 to build, install and use it.
 
 ## Documentation
