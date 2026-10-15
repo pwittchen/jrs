@@ -61,6 +61,10 @@ export function highlight(pre: HTMLPreElement) {
 
 export function setupCopy(root: ParentNode = document) {
   for (const button of $$<HTMLButtonElement>(".copy", root)) {
+    const shell = button.closest(".shell");
+    if (shell && !shell.querySelector("pre")?.textContent?.trim().includes("\n")) {
+      shell.classList.add("single");
+    }
     button.addEventListener("click", async () => {
       const text = button.closest(".shell, .code")?.querySelector("pre")?.textContent ?? "";
       try {

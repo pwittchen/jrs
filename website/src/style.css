@@ -594,6 +594,11 @@ h3 {
   background: var(--sunk);
 }
 
+.shell.single .copy {
+  top: 50%;
+  transform: translateY(-50%);
+}
+
 .note {
   margin: 0.9rem 0 0;
   max-width: 70ch;
