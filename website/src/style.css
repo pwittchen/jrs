@@ -498,6 +498,12 @@ h3 {
   color-scheme: light;
 }
 
+/* The GitHub Actions snippet sits as far from its note as the install
+   button does from the IntelliJ one. */
+#github-actions .note {
+  margin-top: 1.5rem;
+}
+
 /* ---- install ----------------------------------------------------------- */
 
 .tabs {
