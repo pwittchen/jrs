@@ -47,7 +47,7 @@ is findings 12–19 in
 OS profiles, two more migration gaps, and differences from Gradle's
 resolution that are non-goals.
 
-**Status: done.** The harness, the corpus and the ledger are in place, and
+**Status: ✅ done.** The harness, the corpus and the ledger are in place, and
 the remaining findings are tracked in
 [specs/corpus/FINDINGS.md](specs/corpus/FINDINGS.md).
 
@@ -67,7 +67,7 @@ Maven and Gradle builds in [`benchmarks/projects/`](benchmarks/projects/),
 `.github/workflows/benchmarks.yml` on demand). What is left is the first
 report from the reference machine, and the links to it.
 
-**Status: done.** The comparison harness, the parity set and the on-demand
+**Status: ✅ done.** The comparison harness, the parity set and the on-demand
 workflow are in place. The summary is in
 [specs/BENCHMARKS_SUMMARY.md](specs/BENCHMARKS_SUMMARY.md), and the results are on the
 website at [getjrs.dev/benchmarks](https://getjrs.dev/benchmarks/).
@@ -88,7 +88,7 @@ Four gaps, each judged by the section 2 numbers before it gets code:
 - **Pinning jrs itself**: what Gradle's wrapper gives a team, from
   `project.jrs-version` and `setup-jrs`.
 
-**Status: done.** Members build at once with a transcript that reads as one
+**Status: ✅ done.** Members build at once with a transcript that reads as one
 at a time, `kotlinc` has a warm worker under `--watch`, `jrs jdk install`
 and an opt-in `[jdk] download` fetch a pinned JDK, and `jrs wrapper`,
 `jrs self update --to` and `setup-jrs`'s `version: manifest` pin jrs. The
