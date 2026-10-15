@@ -1,10 +1,10 @@
-// The benchmarks page: the first pass of `cargo bench --bench compare`
+// The benchmarks page: the latest pass of `cargo bench --bench compare`
 // (specs/BENCHMARKS_SUMMARY.md), drawn from one table of numbers so the bars
 // and the tables cannot disagree. Keep RESULTS in step with that file.
 
 import { $, $$, setupCopy, stampVersion } from "./shared";
 
-type Tool = "jrs" | "maven" | "gradle" | "gradleCc" | "gradleNoDaemon";
+type Tool = "jrs" | "maven" | "gradle" | "gradleCc" | "gradleNoDaemon" | "gradleParallel";
 
 /** `short` names a bar, where the value beside it leaves less room. */
 const TOOLS: { id: Tool; name: string; short: string }[] = [
@@ -13,10 +13,22 @@ const TOOLS: { id: Tool; name: string; short: string }[] = [
   { id: "gradle", name: "Gradle (daemon)", short: "Gradle daemon" },
   { id: "gradleCc", name: "Gradle (daemon, CC)", short: "Gradle CC" },
   { id: "gradleNoDaemon", name: "Gradle (no daemon)", short: "Gradle no daemon" },
+  { id: "gradleParallel", name: "Gradle (daemon, --parallel)", short: "Gradle --parallel" },
 ];
 
-/** Milliseconds per tool; `null` when the scenario was not timed. */
-type Row = [scenario: string, jrs: number | null, maven: number, gradle: number, gradleCc: number, gradleNoDaemon: number];
+/**
+ * Milliseconds per tool; `null` when the scenario was not timed. Gradle
+ * `--parallel` is timed on workspaces only, so other rows leave it out.
+ */
+type Row = [
+  scenario: string,
+  jrs: number | null,
+  maven: number,
+  gradle: number,
+  gradleCc: number,
+  gradleNoDaemon: number,
+  gradleParallel?: number,
+];
 
 interface Project {
   id: string;
@@ -31,15 +43,15 @@ const RESULTS: Project[] = [
     name: "wordstats",
     what: "a few classes, Guava, JUnit",
     rows: [
-      ["cold", 557, 1430, 11300, 11300, 11200],
-      ["clean", 325, 1110, 454, 428, 2400],
-      ["noop", 63, 821, 357, 333, 2050],
-      ["incremental", 245, 1090, 392, 365, 2320],
-      ["abi", 426, 1100, 382, 376, 2340],
-      ["test", 369, 1140, 604, 575, 2420],
-      ["test-edit", 543, 1460, 652, 681, 2690],
-      ["run", 126, 933, 439, 460, 2160],
-      ["package", 207, 1430, 600, 657, 2420],
+      ["cold", 554, 1430, 11200, 11300, 11200],
+      ["clean", 322, 1130, 444, 417, 2370],
+      ["noop", 63, 829, 342, 325, 2020],
+      ["incremental", 245, 1120, 392, 363, 2290],
+      ["abi", 417, 1190, 389, 361, 2290],
+      ["test", 358, 1180, 609, 585, 2400],
+      ["test-edit", 546, 1490, 635, 673, 2630],
+      ["run", 126, 985, 415, 454, 2100],
+      ["package", 206, 1470, 604, 625, 2410],
     ],
   },
   {
@@ -47,15 +59,15 @@ const RESULTS: Project[] = [
     name: "bookmarks",
     what: "Spring Boot 4.1, MockMvc tests",
     rows: [
-      ["cold", 632, 1840, 12300, 12500, 12400],
-      ["clean", 336, 1230, 558, 616, 2600],
-      ["noop", 63, 961, 450, 329, 2310],
-      ["incremental", 285, 1210, 489, 392, 2600],
-      ["abi", 475, 1370, 453, 387, 2610],
-      ["test", 1080, 2190, 1630, 1520, 3670],
-      ["test-edit", 1300, 2610, 1650, 1740, 4060],
-      ["run", 762, 1880, 1010, 1080, 2930],
-      ["package", 719, 1450, 513, 556, 2490],
+      ["cold", 643, 1840, 12300, 12500, 12000],
+      ["clean", 342, 1180, 574, 610, 2590],
+      ["noop", 62, 946, 453, 323, 2340],
+      ["incremental", 296, 1210, 483, 397, 2650],
+      ["abi", 471, 1190, 457, 415, 2560],
+      ["test", 1080, 2180, 1650, 1500, 3580],
+      ["test-edit", 1270, 2520, 1610, 1750, 4180],
+      ["run", 738, 1900, 1010, 1050, 2930],
+      ["package", 753, 1370, 515, 536, 2430],
     ],
   },
   {
@@ -63,15 +75,15 @@ const RESULTS: Project[] = [
     name: "gen-300",
     what: "300 classes, 30 dependencies",
     rows: [
-      ["cold", 891, 1920, 12300, 12400, 12200],
-      ["clean", 673, 1480, 640, 593, 2790],
-      ["noop", 66, 869, 370, 344, 2110],
-      ["incremental", 271, 1450, 432, 405, 2450],
-      ["abi", 843, 1450, 461, 415, 2520],
-      ["test", 474, 1230, 654, 614, 2550],
-      ["test-edit", 671, 1950, 709, 762, 2860],
-      ["run", 132, 980, 438, 453, 2190],
-      ["package", 758, 2250, 1500, 1550, 3450],
+      ["cold", 906, 1910, 12100, 12200, 11800],
+      ["clean", 684, 1450, 613, 611, 2800],
+      ["noop", 65, 880, 356, 328, 2050],
+      ["incremental", 264, 1450, 421, 395, 2370],
+      ["abi", 852, 1490, 466, 416, 2520],
+      ["test", 450, 1230, 655, 609, 2490],
+      ["test-edit", 655, 1910, 704, 759, 2800],
+      ["run", 131, 1020, 398, 446, 2100],
+      ["package", 731, 2220, 1480, 1490, 3240],
     ],
   },
   {
@@ -79,15 +91,15 @@ const RESULTS: Project[] = [
     name: "gen-2000",
     what: "2000 classes, 60 dependencies",
     rows: [
-      ["cold", 1850, 3010, 14200, 14400, 14100],
-      ["clean", 1550, 2330, 1260, 1240, 3910],
-      ["noop", 85, 1010, 388, 332, 2230],
-      ["incremental", 386, 2490, 593, 556, 2880],
-      ["abi", 1840, 2510, 641, 588, 3060],
-      ["test", 910, 1660, 851, 811, 2870],
-      ["test-edit", 1200, 3300, 1060, 1130, 3560],
-      ["run", 237, 1110, 507, 540, 2340],
-      ["package", 1410, 3390, 2580, 2650, 4520],
+      ["cold", 1910, 3110, 14300, 14200, 13900],
+      ["clean", 1530, 2470, 1280, 1260, 3770],
+      ["noop", 83, 1060, 377, 335, 2230],
+      ["incremental", 394, 2460, 583, 595, 2890],
+      ["abi", 1870, 2530, 654, 612, 3090],
+      ["test", 901, 1690, 831, 795, 2790],
+      ["test-edit", 1190, 3250, 1030, 1070, 3430],
+      ["run", 218, 1060, 496, 536, 2300],
+      ["package", 1400, 3350, 2560, 2570, 4480],
     ],
   },
   {
@@ -95,14 +107,14 @@ const RESULTS: Project[] = [
     name: "gen-ws",
     what: "a six-member workspace, 300 classes",
     rows: [
-      ["cold", 2220, 2080, 13900, 13900, 13500],
-      ["clean", 1980, 1580, 791, 671, 3040],
-      ["noop", 81, 911, 395, 331, 2220],
-      ["incremental", 287, 1220, 443, 379, 2530],
-      ["abi", 2090, 1580, 519, 446, 2660],
-      ["test", 1890, 2260, 1830, 714, 3870],
-      ["test-edit", 626, 2620, 681, 748, 2930],
-      ["package", 803, 3040, 1490, 1540, 3470],
+      ["cold", 1900, 2050, 13700, 13500, 13400, 13400],
+      ["clean", 1700, 1600, 803, 675, 3030, 724],
+      ["noop", 83, 926, 400, 339, 2220, 387],
+      ["incremental", 278, 1230, 439, 372, 2430, 422],
+      ["abi", 1770, 1580, 505, 432, 2700, 476],
+      ["test", 1800, 2270, 1850, 716, 3870, 729],
+      ["test-edit", 620, 2610, 670, 754, 2890, 656],
+      ["package", 818, 3050, 1490, 1520, 3450, 1490],
     ],
   },
 ];
@@ -115,6 +127,7 @@ const MARKS: Partial<Record<Tool, string>> = {
 };
 MARKS.gradleCc = MARKS.gradle;
 MARKS.gradleNoDaemon = MARKS.gradle;
+MARKS.gradleParallel = MARKS.gradle;
 
 const SVG = "http://www.w3.org/2000/svg";
 
@@ -192,7 +205,7 @@ function renderBars(host: HTMLElement): void {
   const list = el("ol", "bars");
   TOOLS.forEach((tool, i) => {
     const value = values[i];
-    if (value === null) return;
+    if (value === null || value === undefined) return;
     const item = el("li", tool.id === "jrs" ? "bar jrs" : "bar");
     const compared = jrs && tool.id !== "jrs" ? (value < jrs ? faster(value, jrs) : ratio(value, jrs)) : "";
     const versus = !compared ? "" : value < jrs! ? `, ${compared} than jrs` : `, ${compared} jrs's time`;
@@ -223,7 +236,10 @@ function renderTables(host: HTMLElement): void {
     const table = el("table");
     const head = el("tr");
     head.append(el("th", "scenario", "Scenario"));
-    for (const tool of TOOLS) head.append(toolHead(tool));
+    // The tools this project was timed with: a column only some rows have
+    // is still a column for all of them.
+    const tools = TOOLS.slice(0, Math.max(...project.rows.map((r) => r.length - 1)));
+    for (const tool of tools) head.append(toolHead(tool));
     const thead = el("thead");
     thead.append(head);
     table.append(thead);
@@ -234,10 +250,11 @@ function renderTables(host: HTMLElement): void {
       th.append(el("code", undefined, scenario), el("span", "what", SCENARIOS[scenario] ?? ""));
       tr.append(th);
       const jrs = values[0];
-      const best = Math.min(...values.filter((v): v is number => v !== null));
-      values.forEach((value, i) => {
+      const best = Math.min(...values.filter((v): v is number => v != null));
+      tools.forEach((_, i) => {
+        const value = values[i];
         const td = el("td", i === 0 ? "jrs" : undefined);
-        if (value === null) {
+        if (value === null || value === undefined) {
           td.textContent = "—";
         } else if (i === 0 || jrs === null) {
           td.textContent = format(value);
