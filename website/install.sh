@@ -8,6 +8,10 @@
 #
 #   curl -fsSL https://getjrs.dev/install.sh | sh -s -- --version 0.5.0 --to /usr/local/bin
 #
+# or, to install the release a project's `project.jrs-version` asks for:
+#
+#   curl -fsSL https://getjrs.dev/install.sh | sh -s -- --version-from jrs.toml
+#
 # or come from the environment as JRS_INSTALL_VERSION and JRS_INSTALL_DIR.
 # macOS and Linux only; Windows instructions are at https://getjrs.dev/#install.
 #
@@ -23,10 +27,14 @@ usage() {
     cat <<EOF
 Install jrs, a Java build system, from $RELEASES.
 
-usage: install.sh [--version <version>] [--to <dir>]
+usage: install.sh [--version <version> | --version-from <jrs.toml>] [--to <dir>]
 
-  --version <version>  the release to install, such as 0.5.0 (default: latest)
-  --to <dir>           the directory to install into (default: ~/.local/bin)
+  --version <version>       the release to install, such as 0.5.0 (default: latest)
+  --version-from <jrs.toml> the newest release the manifest's project.jrs-version
+                            allows: "0.10" is the newest 0.10.x, "0.10.1" that
+                            release exactly (a 1.x or later pin takes the newest
+                            release of its major version at or above it)
+  --to <dir>                the directory to install into (default: ~/.local/bin)
   -h, --help           print this help
 
 JRS_INSTALL_VERSION and JRS_INSTALL_DIR set the same from the environment.
@@ -49,6 +57,7 @@ need() {
 main() {
     version="${JRS_INSTALL_VERSION:-latest}"
     dir="${JRS_INSTALL_DIR:-${HOME:?HOME is not set}/.local/bin}"
+    manifest=""
 
     while [ $# -gt 0 ]; do
         case "$1" in
@@ -59,6 +68,15 @@ main() {
                 ;;
             --version=*)
                 version="${1#*=}"
+                shift
+                ;;
+            --version-from)
+                [ $# -ge 2 ] || die "--version-from needs a value"
+                manifest="$2"
+                shift 2
+                ;;
+            --version-from=*)
+                manifest="${1#*=}"
                 shift
                 ;;
             --to)
@@ -83,6 +101,13 @@ main() {
     need uname
     need tar
     need mktemp
+
+    if [ -n "$manifest" ]; then
+        required="$(jrs_version_of "$manifest")" || exit 1
+        version="$(list_tags | newest_matching "$required")"
+        [ -n "$version" ] || die "no jrs release satisfies jrs-version = \"$required\" in $manifest"
+        say "$manifest asks for jrs $required; the newest release that satisfies it is $version"
+    fi
 
     target="$(detect_target)" || exit 1
     asset="jrs-$target.tar.gz"
@@ -162,6 +187,71 @@ detect_target() {
             die "there is no prebuilt jrs for $os; build it from source, see https://getjrs.dev/#install"
             ;;
     esac
+}
+
+# Prints `project.jrs-version` from the manifest $1. The key is a plain quoted
+# string in the [project] table; anything else stops, naming the line.
+jrs_version_of() {
+    [ -f "$1" ] || die "$1 does not exist"
+    found="$(awk '
+        /^[[:space:]]*\[/ { project = ($0 ~ /^[[:space:]]*\[project\][[:space:]]*(#.*)?$/); next }
+        project && /^[[:space:]]*jrs-version[[:space:]]*=/ {
+            v = $0
+            sub(/^[^=]*=[[:space:]]*/, "", v)
+            sub(/[[:space:]]*(#.*)?$/, "", v)
+            if (v ~ /^"[0-9]+\.[0-9]+(\.[0-9]+)?"$/ || v ~ /^\047[0-9]+\.[0-9]+(\.[0-9]+)?\047$/) {
+                print substr(v, 2, length(v) - 2)
+            } else {
+                print "line " NR ": " $0
+            }
+            exit
+        }' "$1")"
+    case "$found" in
+        "") die "$1 has no project.jrs-version to install a release for" ;;
+        "line "*) die "could not read project.jrs-version in $1, $found" ;;
+    esac
+    printf '%s\n' "$found"
+}
+
+# Prints the release tags, one `v0.10.1` per line: from git when it is here,
+# which nothing rate-limits, else from the GitHub API.
+list_tags() {
+    if command -v git >/dev/null 2>&1; then
+        git ls-remote --tags --refs "https://github.com/$REPO" 'v*' 2>/dev/null |
+            sed 's|.*refs/tags/||'
+    else
+        tags="$(mktemp)"
+        download "https://api.github.com/repos/$REPO/tags?per_page=100" "$tags" ||
+            die "could not list the jrs releases"
+        sed -n 's/.*"name"[[:space:]]*:[[:space:]]*"\(v[^"]*\)".*/\1/p' "$tags"
+        rm -f "$tags"
+    fi
+}
+
+# Reads tags on stdin and prints the newest release that satisfies the
+# jrs-version $1: on 0.x, "0.10" is any 0.10.x and "0.10.1" only itself,
+# since a 0.x minor may break; from 1.0, any release of the same major
+# version at or above it.
+newest_matching() {
+    awk -v want="$1" '
+        BEGIN { n = split(want, w, ".") }
+        {
+            t = $0
+            sub(/^v/, "", t)
+            if (t !~ /^[0-9]+\.[0-9]+\.[0-9]+$/) next
+            split(t, v, ".")
+            if (v[1] + 0 != w[1] + 0) next
+            if (w[1] + 0 == 0) {
+                if (v[2] + 0 != w[2] + 0) next
+                if (n == 3 && v[3] + 0 != w[3] + 0) next
+            } else {
+                if (v[2] + 0 < w[2] + 0) next
+                if (n == 3 && v[2] + 0 == w[2] + 0 && v[3] + 0 < w[3] + 0) next
+            }
+            key = sprintf("%09d%09d%09d", v[1], v[2], v[3])
+            if (key > best) { best = key; found = t }
+        }
+        END { if (found != "") print found }'
 }
 
 download() {

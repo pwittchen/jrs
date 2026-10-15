@@ -676,3 +676,75 @@ fn a_retried_run_counts_its_flaky_test_apart() {
         assert!(text.contains(line), "the animated run lost {line:?}");
     }
 }
+
+/// Two workspace members built at once, played the way the driver plays
+/// them: each through a `Ui` of its own, the second held back while the
+/// first is unfinished, and released when the first is done. The second
+/// finishes first.
+fn play_members_at_once(ui: &Ui, frames: usize) {
+    let fan = ui.fan_out("Compiling", "");
+    let first = ui.deferred();
+    let second = ui.deferred();
+    second.hold();
+    fan.say("a, b (2 of 3 modules)");
+    for _ in 0..frames {
+        ui.render_frame();
+    }
+    std::thread::scope(|scope| {
+        scope.spawn(|| {
+            second.phase("Compiling", "b v1.0.0 (2 source files)");
+            second.passthrough(Stream::Err, "warning: [b] noted");
+            // A member's own spinner never takes the region from the parent.
+            second.spinner("Compiling", "b").finish();
+        });
+    });
+    for _ in 0..frames {
+        ui.render_frame();
+    }
+    first.phase("Compiling", "a v1.0.0 (3 source files)");
+    first.passthrough(Stream::Err, "warning: [a] noted");
+    second.release();
+    second.phase("Packaging", "b-1.0.0.jar");
+    drop(fan);
+    ui.phase("Finished", "build in 1.00s");
+}
+
+/// The same members one after the other.
+fn play_members_in_turn(ui: &Ui) {
+    ui.phase("Compiling", "a v1.0.0 (3 source files)");
+    ui.passthrough(Stream::Err, "warning: [a] noted");
+    ui.phase("Compiling", "b v1.0.0 (2 source files)");
+    ui.passthrough(Stream::Err, "warning: [b] noted");
+    ui.phase("Packaging", "b-1.0.0.jar");
+    ui.phase("Finished", "build in 1.00s");
+}
+
+#[test]
+fn members_built_at_once_read_as_members_built_in_turn() {
+    let (ui, capture) = Ui::captured(options(When::Never, CharsetChoice::Ascii), geometry(WIDTH));
+    play_members_at_once(&ui, 2);
+    let (turn, turn_capture) =
+        Ui::captured(options(When::Never, CharsetChoice::Ascii), geometry(WIDTH));
+    play_members_in_turn(&turn);
+    assert_eq!(capture.stderr(), turn_capture.stderr());
+
+    // Animated, the scrollback is the same, and the live row names what runs.
+    let (ui, animated) = Ui::captured(options(When::Always, CharsetChoice::Ascii), geometry(WIDTH));
+    play_members_at_once(&ui, 2);
+    let raw = animated.stderr();
+    assert!(
+        raw.contains("Compiling | a, b (2 of 3 modules)")
+            || raw.contains("Compiling / a, b (2 of 3 modules)"),
+        "{raw:?}"
+    );
+    assert!(!raw.contains("Compiling | b\n"), "the member drew: {raw:?}");
+    let scrollback = turn_capture.stderr();
+    let text = plain_text(&raw);
+    let mut at = 0;
+    for line in scrollback.lines() {
+        let found = text[at..]
+            .find(line)
+            .unwrap_or_else(|| panic!("{line:?} missing or out of order in {text}"));
+        at += found + line.len();
+    }
+}

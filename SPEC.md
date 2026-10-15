@@ -46,8 +46,13 @@ in [§12.1](#121-where-the-implementation-diverges), and the decisions taken on
   anything off the JVM (Multiplatform, JS, Native, Android), compiler
   plugins, kapt/KSP, incremental compilation and compiler daemons (§7.7).
   A compiler daemon is a process that outlives the jrs command that started
-  it; a `--watch` session may keep one `javac` worker for its own lifetime
-  (§7.5), which no later command can reach.
+  it; a `--watch` session may keep one worker per compiler — `javac`, and
+  `kotlinc` — for its own lifetime (§7.5), which no later command can reach.
+- Installing programs nobody asked for. A JDK is downloaded only for a
+  version a project pins, only when the user's config allows it or
+  `jrs jdk install` asks, and only from the vendor's API (§7.1). jrs itself
+  is fetched only by `jrs self update` and by the `jrsw` scripts a project
+  commits (§4.3).
 - Android, JPMS module descriptors, annotation-processor configuration,
   built-in code generators, or IDE project file generation. A generator can
   run as a task (§7.6); jrs does not ship one.
@@ -257,8 +262,24 @@ older jrs stops with exit `2` — naming the version the project needs, its own
 version, and where releases are — instead of warning about keys it does not
 know or failing on a form it cannot read. A pre-release suffix on the running
 version is ignored (`0.9.0-dev` satisfies `0.9`). `jrs init` and `jrs migrate`
-do not write the key. Fetching the right jrs, as `gradlew` does, is not part
-of it.
+do not write the key. The error names `jrs self update --to <version>`, which
+installs that release.
+
+The key is a minimum. Fetching the right jrs, as `gradlew` does, is two other
+things. `jrs wrapper [--version <v>]` writes `jrsw` (POSIX `sh`) and
+`jrsw.cmd` (Windows) beside the manifest: each holds one jrs version, this
+jrs's unless `--version` says, and the SHA-256 of every release archive, read
+from that release's `SHA256SUMS` when the scripts are written. Run, a script
+looks for `<cache>/dist/<version>/jrs`, and when it is not there downloads the
+archive for the machine, checks it against the checksum it carries, unpacks it
+there (`tar`, or PowerShell's `Expand-Archive`) and runs it with its
+arguments, so every checkout builds with the same bytes. The POSIX script's
+platform detection is `website/install.sh`'s, copied in when it is written.
+And in CI the `setup-jrs` action's `version: manifest` installs the newest
+release `project.jrs-version` allows, as `website/install.sh --version-from
+<jrs.toml>` does: `"0.10"` is the newest `0.10.x`, `"0.10.1"` that release
+exactly, since a `0.x` minor may break; from `1.0`, the newest release of the
+same major version at or above it.
 
 ### 4.4 Lockfile (`jrs.lock`)
 
@@ -355,6 +376,10 @@ jrs <command> [options]
 | `jrs audit [--runtime] [--ignore id]` | Check the resolved graph against the OSV vulnerability database; exit `1` on an advisory not ignored (§8.12). |
 | `jrs add` / `jrs remove` | Edit `[dependencies]` / `[dev-dependencies]` in place, then re-resolve (§4.5). `jrs add` leaves the version out of what `[managed]` covers (§8.9). |
 | `jrs cache path` / `jrs cache prune` | Show or prune the shared cache (§8.6). |
+| `jrs jdk list` | Print every JDK jrs can see — the `[jdks]` table's, the one at `JAVA_HOME` or on `PATH`, the installed ones and those `jrs jdk install` downloaded — where each is, and which one the project here would build with (§7.1). |
+| `jrs jdk install <n>` | Download the newest GA build of JDK `n` into `<cache>/jdks`, whatever the config says (§7.1). |
+| `jrs self check` / `jrs self update [--to <version>]` | Say whether this jrs is the latest release, or replace it with the latest — or with `--to`'s, older ones included — after checking it against the release's `SHA256SUMS`. |
+| `jrs wrapper [--version <v>]` | Write `jrsw` and `jrsw.cmd`, which run one pinned jrs release (§4.3). |
 | `jrs init [--lib] [--lang java\|kotlin\|scala\|groovy]` | Scaffold `jrs.toml`, a starter class and a starter test: JUnit 5 for Java and Kotlin, MUnit for Scala, and for Groovy Java code with Spock specs (§7.7). `--check` adds a `check` task running PMD's `quickstart` rules as a tool (§7.6), in the `post-compile` hook; it is refused for Kotlin and Scala, whose starters have no Java sources. `--format` adds a `format` task and a `format-check` task in the `post-compile` hook: google-java-format (AOSP style) for Java and Groovy, ktfmt (kotlinlang style) for Kotlin, as the starters are written; refused for Scala. |
 | `jrs migrate` | Generate `jrs.toml` from an existing `pom.xml` or Gradle build (§11). |
 | `jrs completions <shell>` | Print a bash, zsh or fish completion script. |
@@ -389,7 +414,7 @@ while it waits.
 | `-v, --verbose` | Echo every subprocess command line and its exit status. |
 | `-q, --quiet` | Errors only. |
 | `--offline` | Fail rather than hit the network; use cache + lockfile only. |
-| `--jobs <n>` | Cap parallelism; defaults to the user config's `jobs` (§8.5), else available cores. |
+| `--jobs <n>` | Cap parallelism — downloads, and in a workspace the members built at once (§5.3.10); defaults to the user config's `jobs` (§8.5), else available cores. `--jobs 1` builds one member at a time. |
 | `--manifest-path <p>` | Run against a manifest outside the CWD. |
 | `-p, --module <name>` | In a workspace, act on this member and the members it depends on; repeatable. Outside one, a usage error. |
 | `--progress <auto\|always\|never>` | Live animated output. `auto` = on when stderr is a TTY. |
@@ -570,6 +595,27 @@ tab-separated `phase` and `ms` columns and a `total` row, for scripts and the
 benchmark. `jrs run` reports before the program starts, since the program's
 own run is not a build phase. `jrs test` reports for a failing run too; a
 command that fails before its summary reports nothing.
+
+#### 5.3.10 Workspace members at once
+
+In a workspace, members whose upstream members have built build at once, up
+to `--jobs` of them, each in a session of its own on a thread of its own
+([WORKSPACES.md §6.2](specs/WORKSPACES.md#62-building-the-graph)). The transcript reads
+the same whatever the timing:
+
+> The earliest unfinished member in build order writes to the terminal; every
+> other member writes to a buffer. When the writing member finishes, the next
+> member in order is released: its buffer is replayed and it writes straight
+> through from then on.
+
+So the plain transcript is line for line the one `--jobs 1` prints, and the
+member at the head still streams `javac`'s diagnostics as they arrive. A
+member's own spinners and bars stay down while members build at once; the
+live region is one spinner naming what runs, `Compiling core, api (2 of 5
+modules)`. When a member fails, no other starts, the running ones finish, and
+every member that finished is released in build order; the command fails with
+the first failure in build order. `--timings` gains a `member <name>` row per
+member that built at once.
 
 ### 5.4 The project model (`jrs metadata`) and `jrs fetch`
 
@@ -789,9 +835,42 @@ version is looked for in this order:
    - `/Library/Java/JavaVirtualMachines`, `/usr/lib/jvm` and `Program Files`
    - the `JAVA_HOME_<n>_<arch>` variables CI setups export
 
+   - `<cache>/jdks`, where `jrs jdk install` puts them
+
 Installed JDKs are identified by their `release` file, so looking costs reads
 and not JVM starts. The newest build of the pinned version wins. None found →
-an error naming the versions that were.
+the download step below when the user's config turns it on, and otherwise an
+error naming the versions that were, and saying that `jrs jdk install <n>`
+downloads it. Only a pin triggers a download: an unpinned project without a
+JDK fails as above, since `java.source` is a minimum, not a choice. With
+`--offline` nothing is downloaded, and the error says so.
+
+**Downloading a pinned JDK.** With `jdk.download = true` in the user config
+(§8.5), or `JRS_JDK_DOWNLOAD=1`, a pinned version found nowhere is
+downloaded, as `jrs jdk install <n>` downloads one on request:
+
+1. The vendor's API — Adoptium's, `jdk.url`, for Temurin, the only vendor —
+   names the newest GA build of the version for this OS and architecture
+   (`/v3/assets/latest/<n>/hotspot`), with its archive's URL and SHA-256.
+2. The archive streams to a temp file in `<cache>/jdks/`, hashed as it
+   arrives, behind a byte-counting download bar.
+3. Its SHA-256 is compared before anything is unpacked; a mismatch deletes
+   it and fails.
+4. It is unpacked into a temp directory there: `tar -xzf` on macOS and Linux,
+   the `zip` crate on Windows, refusing an entry that would land outside it.
+5. The JDK's home is the directory holding `release` within three levels
+   (`Contents/Home` in a macOS bundle), checked with `javac -version`.
+6. The archive's top directory is renamed to
+   `<cache>/jdks/temurin-<version>-<os>-<arch>/`, so an interrupted install
+   leaves nothing a lookup could pick, as for cache jars (§8.3).
+
+The phase lines are `Downloading JDK 21.0.5+11 (temurin, linux-x64)` and
+`Installed JDK 21.0.5+11 in <path>`. The JDK goes in no lockfile — an archive
+differs per platform and `jrs.lock` does not — and jrs changes neither
+`PATH` nor `JAVA_HOME`. No other vendor, no early-access build and no GraalVM
+(§9.7) is downloaded. The checksum comes from the same API as the archive, so
+it catches a broken download, not a compromised host, as `jrs self update`'s
+does for GitHub.
 
 Other JDK tools (`javadoc`, `jdeps`, `jlink`, `jpackage`) are taken from beside
 the selected `javac`, and a JDK that lacks one is an error naming it.
@@ -991,6 +1070,23 @@ step runs as a forked `javac`, whose output alone reaches the terminal.
 Outside `--watch` nothing changes: a single build would pay the worker's
 start-up for one compile. This is not a compiler daemon (§1.2): a daemon
 outlives the command that started it and is found again by later ones.
+
+**A warm `kotlinc`.** The same session keeps a second worker for a Kotlin
+unit's first step, under the same rules. Its program,
+`compile/KotlincWorker.java`, is compiled the same way into
+`<cache>/worker/kotlinc-<jrs version>-jdk<n>/` and runs with the Kotlin
+compiler's jars on its classpath and `kotlin.compiler-jvm-args` on its JVM; it
+reaches `K2JVMCompiler` by reflection, through the
+`exec(PrintStream, String...)` every Kotlin CLI tool has, so one program
+serves every Kotlin version. A forked `kotlinc` reads its own arguments and
+sources from an argfile of their own, `target/.jrs/kotlinc-<unit>.compiler.args`,
+passed to it as `@argfile` from the launcher's; the worker is sent the same
+file, so a forked and a warm run read the same bytes. It starts a new JVM
+after 20 compilations, since the compiler keeps more static state than
+`javac`, and whenever the JDK, the compiler's classpath or its JVM flags
+change. On `examples/orders`, `kotlinc` takes 1.1 s forked and 0.3 s warm
+(`cargo bench --bench kotlinc`). The incremental Kotlin compiler and the
+Build Tools API stay out: this is the same whole-unit compile, warm.
 
 ### 7.6 Tasks and hooks
 
@@ -1519,6 +1615,9 @@ unknown keys warn, errors name the key — and a missing file means every defaul
 | `build-cache.push` | Whether this machine writes to the remote: `true` on CI, and nowhere else. Default `false`. |
 | `build-cache.credentials` | The `[credentials.<name>]` entry the remote is reached with; `JRS_REPO_<NAME>_*` apply to it as to a repository. |
 | `audit.url` | An OSV-compatible API for `jrs audit` (§8.12), instead of `https://api.osv.dev`; `JRS_AUDIT_URL` overrides it. |
+| `jdk.download` | `true` downloads a pinned JDK that is installed nowhere jrs looks (§7.1). Default `false`; `JRS_JDK_DOWNLOAD=1` (or `true`) turns it on, `0` off, over the file. |
+| `jdk.vendor` | The vendor to download from; `"temurin"`, the only one, and the default. |
+| `jdk.url` | The vendor's API, or a mirror of it. Default `https://api.adoptium.net`. |
 | `build-cache.tasks` | Whether the remote also serves, and with `push` takes, the entries of tasks that say `cache = true` (§7.6, §7.8). Default `false`: the remote holds compile and test entries only. |
 
 - Credentials from `JRS_REPO_<NAME>_USERNAME` + `JRS_REPO_<NAME>_PASSWORD` or
@@ -1554,7 +1653,9 @@ left empty go too:
 - `jrs cache prune --unused-for <days>` removes what no build has used for that
   long (§8.3), whatever references it.
 
-Either takes `--dry-run`. What a lockfile does not name — parent POMs, BOMs,
+Either takes `--dry-run`. The JDKs `jrs jdk install` put in `<cache>/jdks`
+(§7.1) are left alone unless `--jdks` is given, since one is slow to fetch
+again; each then goes whole, as a version directory does. What a lockfile does not name — parent POMs, BOMs,
 the test launcher, JaCoCo — is pruned too, and downloaded again when next
 wanted. So are the class-data-sharing archives under `cds/`, which the next
 run dumps again, and the `javac` worker's program under `worker/`.
@@ -2610,6 +2711,20 @@ produces something runnable.
 - Added after M9; the design, and the argument for narrowing §1.2, is in
   [WORKSPACES.md](specs/WORKSPACES.md).
 
+### M11 — Closing the gaps where Gradle wins
+- ☑ workspace members built at once, up to `--jobs`, with a transcript that
+  reads as one at a time (§5.3.10)
+- ☑ `kotlinc` started with the small-run JVM flags, and a warm `kotlinc`
+  worker under `--watch` (§7.5)
+- ☑ `jrs jdk list`, `jrs jdk install` and the opt-in download of a pinned JDK
+  (§7.1, §8.5)
+- ☑ `jrs self update --to`, `setup-jrs`'s `version: manifest`,
+  `install.sh --version-from` and `jrs wrapper` (§4.3)
+- ☑ `cargo bench --bench kotlinc` and the critical path through a
+  workspace's members in the comparison
+- The design and its gates are in
+  [GRADLE_GAPS.md](specs/todo/GRADLE_GAPS.md).
+
 Tick the corresponding README boxes as each lands — the README is the
 user-facing progress tracker, this document is the design behind it.
 
@@ -2654,7 +2769,9 @@ still the interesting part; the **decision** lines record what was settled on.
    **Decision:** `clap`, `toml` (with `serde` for its derives), `ureq`,
    `quick-xml`, `zip`, `rayon`, `thiserror`, `sha1`/`sha2`, `terminal_size`,
    and `libc` on unix for the signal handler. No `indicatif`, no `console`,
-   no `walkdir` — see 10.
+   no `walkdir` — see 10. Downloading a JDK (§7.1) added none: `ureq`,
+   `sha2`, `zip`, `json.rs` and the system `tar` cover it, and the `jrsw`
+   scripts (§4.3) are shell.
    `jrs add`/`jrs remove` and shell completions looked as if they needed
    `toml_edit` and `clap_complete`; both are hand-rolled instead. The first is
    a line editor for the dependency tables that refuses what it cannot edit

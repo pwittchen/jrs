@@ -49,7 +49,7 @@ const HEADER: &str = "jrs compile index 1";
 /// JVM with [`javac::QUICK_JVM_FLAGS`]. Measured on JDK 25, C1 and the serial
 /// collector beat the full JIT up to a few hundred small sources; a
 /// whole-unit compile keeps the full JIT whatever its size.
-const QUICK_SOURCES: usize = 100;
+pub(super) const QUICK_SOURCES: usize = 100;
 
 /// The service file through which `javac` finds annotation processors on
 /// its classpath.

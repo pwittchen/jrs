@@ -56,6 +56,8 @@ use std::time::{Duration, Instant, SystemTime};
 
 use jrs::json::Json;
 
+#[path = "support/critical.rs"]
+mod critical;
 #[path = "support/host.rs"]
 mod host;
 #[path = "support/junit.rs"]
@@ -372,14 +374,18 @@ enum Column {
     GradleDaemon,
     GradleCc,
     GradleNoDaemon,
+    /// `--parallel` with a warm daemon, on a multi-module project only
+    /// (specs/todo/GRADLE_GAPS.md §2.1).
+    GradleParallel,
 }
 
-const COLUMNS: [Column; 5] = [
+const COLUMNS: [Column; 6] = [
     Column::Jrs,
     Column::Maven,
     Column::GradleDaemon,
     Column::GradleCc,
     Column::GradleNoDaemon,
+    Column::GradleParallel,
 ];
 
 impl Column {
@@ -387,7 +393,10 @@ impl Column {
         match self {
             Column::Jrs => Tool::Jrs,
             Column::Maven => Tool::Maven,
-            Column::GradleDaemon | Column::GradleCc | Column::GradleNoDaemon => Tool::Gradle,
+            Column::GradleDaemon
+            | Column::GradleCc
+            | Column::GradleNoDaemon
+            | Column::GradleParallel => Tool::Gradle,
         }
     }
 
@@ -399,6 +408,7 @@ impl Column {
             Column::GradleDaemon => "gradle-daemon",
             Column::GradleCc => "gradle-daemon-cc",
             Column::GradleNoDaemon => "gradle-no-daemon",
+            Column::GradleParallel => "gradle-daemon-parallel",
         }
     }
 
@@ -409,6 +419,7 @@ impl Column {
             Column::GradleDaemon => "Gradle (daemon)",
             Column::GradleCc => "Gradle (daemon, CC)",
             Column::GradleNoDaemon => "Gradle (no daemon)",
+            Column::GradleParallel => "Gradle (daemon, --parallel)",
         }
     }
 }
@@ -1146,6 +1157,10 @@ struct Outcome {
     /// The Gradle version a wrapper picked, when the project ships one.
     gradle_version: Option<String>,
     maven_version: Option<String>,
+    /// A workspace's members, each with the members it depends on, for the
+    /// critical path (specs/todo/GRADLE_GAPS.md §2.1); empty for a project
+    /// of one.
+    member_graph: Vec<(String, Vec<String>)>,
 }
 
 impl Outcome {
@@ -1218,12 +1233,14 @@ fn bench_project(project: &Project, env: &Env, settings: &Settings, tools: &Tool
         edits: Vec::new(),
         gradle_version: None,
         maven_version: None,
+        member_graph: Vec::new(),
     };
     let template = work.join("template");
     if let Err(e) = materialize(project, &template) {
         outcome.refused = Some(format!("cannot set it up: {e}"));
         return outcome;
     }
+    outcome.member_graph = critical::member_graph(&template);
     let edits = choose_edits(project, &template);
     outcome.edits = [
         edits
@@ -1241,6 +1258,8 @@ fn bench_project(project: &Project, env: &Env, settings: &Settings, tools: &Tool
         .copied()
         .filter(|c| project.tools.contains(&c.tool()))
         .filter(|c| !tools.missing.contains_key(&c.tool()) || has_wrapper(&template, c.tool()))
+        // Members at once mean nothing in a project of one.
+        .filter(|c| *c != Column::GradleParallel || !project.members.is_empty())
         .collect();
     outcome.columns.clone_from(&columns);
     if has_wrapper(&template, Tool::Gradle) {
@@ -2228,6 +2247,9 @@ impl Lane {
                     }
                     Column::GradleNoDaemon => {
                         command.arg("--no-daemon");
+                    }
+                    Column::GradleParallel => {
+                        command.arg("--parallel");
                     }
                     _ => {}
                 }
@@ -3541,6 +3563,8 @@ fn report(
             out.push('\n');
         }
     }
+
+    critical::report(&mut out, results);
 
     out.push_str("## Notes\n\n");
     for row in results {

@@ -219,14 +219,33 @@ impl Cache {
     /// [`JrsError::Io`] when the cache cannot be walked, a file's metadata
     /// cannot be read, or a version directory cannot be removed.
     pub fn prune(&self, rule: &Prune, dry_run: bool) -> Result<Pruned> {
+        self.prune_with(rule, dry_run, false)
+    }
+
+    /// [`Cache::prune`], which leaves the JDKs `jrs jdk install` downloaded
+    /// alone unless `jdks` says otherwise: they are slow to fetch again, and
+    /// no lockfile names one. Each goes whole.
+    ///
+    /// # Errors
+    ///
+    /// As for [`Cache::prune`].
+    pub fn prune_with(&self, rule: &Prune, dry_run: bool, jdks: bool) -> Result<Pruned> {
         let mut groups: BTreeMap<PathBuf, (u64, SystemTime)> = BTreeMap::new();
         let bookkeeping = self.root.join(".jrs");
         let build = self.root.join("build");
+        let installed = self.root.join(crate::jdk::JDKS_DIR);
         for file in crate::project::find_all(&self.root)? {
-            if file.starts_with(&bookkeeping) {
+            if file.starts_with(&bookkeeping) || (!jdks && file.starts_with(&installed)) {
                 continue;
             }
-            let dir = if file.starts_with(&build) {
+            let jdk = file
+                .strip_prefix(&installed)
+                .ok()
+                .and_then(|rest| rest.components().next())
+                .map(|first| installed.join(first));
+            let dir = if let Some(jdk) = &jdk {
+                Some(jdk.as_path())
+            } else if file.starts_with(&build) {
                 Some(file.as_path())
             } else {
                 file.parent()
@@ -477,6 +496,31 @@ mod tests {
             .prune(&Prune::UnusedFor(Duration::from_secs(3600)), false)
             .unwrap();
         assert!(fresh.removed.is_empty());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn downloaded_jdks_are_kept_unless_asked_and_then_go_whole() {
+        let dir = temp_dir("prune-jdks");
+        let cache = Cache::with_root(&dir);
+        let java = dir.join("jdks/temurin-21.0.5+11-linux-x64/bin/java");
+        let release = dir.join("jdks/temurin-21.0.5+11-linux-x64/release");
+        for file in [&java, &release] {
+            write_atomic(file, b"x").unwrap();
+        }
+        let kept = cache
+            .prune(&Prune::Unreferenced(HashSet::new()), false)
+            .unwrap();
+        assert!(kept.removed.is_empty(), "{:?}", kept.removed);
+        assert!(java.is_file());
+        let gone = cache
+            .prune_with(&Prune::Unreferenced(HashSet::new()), false, true)
+            .unwrap();
+        assert_eq!(
+            gone.removed,
+            vec!["jdks/temurin-21.0.5+11-linux-x64".to_string()]
+        );
+        assert!(!java.exists());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

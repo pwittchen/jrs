@@ -54,7 +54,9 @@ Homebrew, Scoop and winget manifests from their checksums
 those is manual). The tag must point at the tip of `master`. Don't
 bump the version by hand — tagging is the release process. `setup-jrs/action.yml`
 is the GitHub Action that installs a release (`uses: pwittchen/jrs/setup-jrs@<tag>`);
-it, `website/install.sh` and `packaging/manifests.sh` all depend on the asset names.
+it, `website/install.sh`, `packaging/manifests.sh` and the `jrsw` scripts
+`jrs wrapper` writes (`src/wrapper.rs`, which copies `install.sh`'s
+`detect_target` in) all depend on the asset names.
 `.github/workflows/corpus.yml` runs the corpus (below) on demand only
 (`workflow_dispatch`, with `projects` and `jdk` inputs) and puts its
 `REPORT.md` in the job summary; nothing calls it, so no release waits on a
@@ -84,6 +86,7 @@ cargo test --features network-tests --test network  # the Maven Central tests
 cargo bench --bench resolution                      # SPEC §12 M5: network vs jrs vs renderer
 cargo bench --bench incremental                     # SPEC §7.2: rebuild time after one edit, javac's share
 JRS_BENCH_PROJECT=<path> cargo bench --bench test_jvm  # SPEC §10.2: share-classes off/true/"aot" on a real project
+JRS_BENCH_PROJECT=<path> cargo bench --bench kotlinc   # GRADLE_GAPS §3.1: kotlinc vs its floor vs a warm compiler
 JRS_CORPUS=all cargo bench --bench corpus       # ROADMAP §1: real projects vs their own Maven/Gradle build
 JRS_BENCH_RECORD=1 cargo bench --bench compare  # ROADMAP §2: fill the local mirror the comparison reads
 cargo bench --bench compare                     # ROADMAP §2: jrs vs Maven vs Gradle, into benchmarks/REPORT.md
@@ -243,10 +246,15 @@ regression, not a style nit.
   left out of it serves wrong classes. A unit that cannot be keyed compiles,
   and no cache failure fails a build. The in-process `jrs()` test helper
   passes `--no-build-cache`, since it shares the user's cache.
-- **The `--watch` `javac` worker never outlives the command** (`compile/worker.rs`):
-  it is a child reading a pipe jrs holds, and any failure of it falls back to
-  a forked `javac`. A process that outlives the command is the compiler daemon
-  SPEC §1.2 rules out.
+- **The `--watch` `javac` and `kotlinc` workers never outlive the command**
+  (`compile/worker.rs`): each is a child reading a pipe jrs holds, and any
+  failure of one falls back to a forked compiler. A process that outlives the
+  command is the compiler daemon SPEC §1.2 rules out.
+- **Members built at once print what one at a time prints**
+  (`cli/members.rs`, `Ui::deferred`): each member writes through a `Ui` of its
+  own, held back until every member before it in build order has finished.
+  Nothing a member prints may bypass its `Ui`, or the transcript stops being
+  the same at every `--jobs`.
 - **Toolchain output is passed through verbatim.** `javac` and the JUnit launcher have
   good diagnostics; jrs never reformats them, it only tears the live region down first.
 - **`jrs.lock` records no absolute paths.** Cache paths are recomputed on load; the

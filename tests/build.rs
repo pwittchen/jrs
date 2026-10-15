@@ -3192,6 +3192,115 @@ fn a_mixed_kotlin_project_compiles_in_two_steps_and_runs() {
     assert_ne!(p.modified("target/.jrs/javac-main.args"), javac_at);
 }
 
+/// `jrs build --watch` keeps one `kotlinc` worker for the session beside
+/// its `javac` one, and a forked `kotlinc` reads the compiler argfile the
+/// worker does.
+#[test]
+fn a_watch_session_compiles_kotlin_in_one_kotlinc_worker() {
+    use std::io::BufRead as _;
+    let toolchain = require_jdk!();
+    let scratch = Scratch::new("watch-kotlinc");
+    let p = kotlin_app(&scratch, &toolchain);
+
+    // Forked first: the launcher's argfile hands kotlinc its own.
+    let (code, _, stderr) = p.jrs(&["build"]);
+    assert_eq!(code, 0, "{stderr}");
+    let launcher = std::fs::read_to_string(p.root.join("target/.jrs/kotlinc-main.args")).unwrap();
+    assert!(
+        launcher.contains("-XX:TieredStopAtLevel=1"),
+        "a small unit starts kotlinc quickly: {launcher}"
+    );
+    assert!(
+        launcher.contains("kotlinc-main.compiler.args"),
+        "{launcher}"
+    );
+    assert!(!launcher.contains("Greeter.kt"), "{launcher}");
+    let kotlinc = p.record("classes", "kotlinc");
+    assert!(pair(&kotlinc, "-module-name", "mixed"), "{kotlinc:?}");
+    assert!(
+        kotlinc.iter().any(|a| a.ends_with("Greeter.kt")),
+        "{kotlinc:?}"
+    );
+
+    struct Session(std::process::Child);
+    impl Drop for Session {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+    let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_jrs"))
+        .arg("--manifest-path")
+        .arg(&p.root)
+        .args([
+            "--progress",
+            "never",
+            "--color",
+            "never",
+            "-v",
+            "build",
+            "--watch",
+        ])
+        .env("JRS_CACHE_DIR", &p.cache)
+        .env("JRS_CONFIG", &p.config)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let stderr = child.stderr.take().unwrap();
+    let session = Session(child);
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        for line in std::io::BufReader::new(stderr)
+            .lines()
+            .map_while(Result::ok)
+        {
+            if tx.send(line).is_err() {
+                break;
+            }
+        }
+    });
+    let mut seen = Vec::new();
+    let wait_for_watching = |seen: &mut Vec<String>| loop {
+        match rx.recv_timeout(std::time::Duration::from_secs(60)) {
+            Ok(line) => {
+                let watching = line.contains("Watching for changes");
+                seen.push(line);
+                if watching {
+                    return;
+                }
+            }
+            Err(e) => panic!("no rebuild ({e}):\n{}", seen.join("\n")),
+        }
+    };
+    wait_for_watching(&mut seen);
+    let greeter = p.root.join("src/main/kotlin/com/example/Greeter.kt");
+    for edit in 1..=2 {
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        let mark = "!".repeat(edit);
+        std::fs::write(&greeter, format!("{GREETER_KT}// edit {mark}\n")).unwrap();
+        wait_for_watching(&mut seen);
+    }
+    drop(session);
+    let transcript = seen.join("\n");
+    let started = seen
+        .iter()
+        .filter(|l| l.contains("started a kotlinc worker"))
+        .count();
+    assert_eq!(started, 1, "{transcript}");
+    let served = seen
+        .iter()
+        .filter(|l| l.contains("kotlinc worker (pid ") && l.contains("): @"))
+        .count();
+    assert_eq!(served, 2, "{transcript}");
+    assert!(!transcript.contains("runs on its own"), "{transcript}");
+    let kotlinc = p.record("classes", "kotlinc");
+    assert!(
+        kotlinc.contains(&"support=fake-compiler-support".to_string()),
+        "the worker runs with the compiler's whole graph: {kotlinc:?}"
+    );
+}
+
 /// What the fake doc tool wrote into `target/doc/index.html`: the tool's
 /// name, its arguments one per line, then its classpath and graph.
 fn doc_page(p: &Polyglot) -> Vec<String> {

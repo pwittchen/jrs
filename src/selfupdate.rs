@@ -58,6 +58,13 @@ impl Version {
             .collect::<Option<Vec<_>>>()?;
         Some(Version { parts, pre })
     }
+
+    /// Whether this names one release, `0.10.0`, rather than a line of them
+    /// such as `0.10`.
+    #[must_use]
+    pub fn is_release(&self) -> bool {
+        self.parts.len() == 3
+    }
 }
 
 impl PartialOrd for Version {
@@ -221,6 +228,20 @@ impl Releases {
         Ok(archive)
     }
 
+    /// Release `version`'s `SHA256SUMS`.
+    ///
+    /// # Errors
+    ///
+    /// [`JrsError::Resolve`] when it cannot be downloaded: most often, when
+    /// there is no such release.
+    pub fn sums(&self, version: &Version) -> Result<String> {
+        let url = format!("{RELEASES}/download/v{version}/SHA256SUMS");
+        let bytes = self.get(&url).map_err(|e| {
+            JrsError::resolve(format!("{e}\n\nis {version} a jrs release? see {RELEASES}"))
+        })?;
+        Ok(String::from_utf8_lossy(&bytes).into_owned())
+    }
+
     fn get(&self, url: &str) -> Result<Vec<u8>> {
         let fail =
             |e: &dyn fmt::Display| JrsError::resolve(format!("could not download {url}\n\n{e}"));
@@ -238,7 +259,7 @@ impl Releases {
     }
 }
 
-fn agent(proxy: Option<&ProxyConfig>, redirects: u32) -> Result<ureq::Agent> {
+pub(crate) fn agent(proxy: Option<&ProxyConfig>, redirects: u32) -> Result<ureq::Agent> {
     let mut config = ureq::Agent::config_builder()
         .http_status_as_error(false)
         .max_redirects(redirects)
@@ -403,6 +424,8 @@ mod tests {
         assert_eq!(v("0.7").cmp(&v("0.7.0")), Ordering::Equal);
         assert_eq!(v("0.8.0-rc.1").to_string(), "0.8.0-rc.1");
         assert_eq!(v("v0.7.0").to_string(), "0.7.0");
+        assert!(v("0.10.0").is_release());
+        assert!(!v("0.10").is_release());
     }
 
     #[test]

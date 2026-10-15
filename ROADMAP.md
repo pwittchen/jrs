@@ -88,6 +88,13 @@ Four gaps, each judged by the section 2 numbers before it gets code:
 - **Pinning jrs itself**: what Gradle's wrapper gives a team, from
   `project.jrs-version` and `setup-jrs`.
 
+**Status: done.** Members build at once with a transcript that reads as one
+at a time, `kotlinc` has a warm worker under `--watch`, `jrs jdk install`
+and an opt-in `[jdk] download` fetch a pinned JDK, and `jrs wrapper`,
+`jrs self update --to` and `setup-jrs`'s `version: manifest` pin jrs. The
+benchmarks that judge the first two are in place; their corpus numbers are
+still to be taken ([§9](specs/todo/GRADLE_GAPS.md#9-what-was-built)).
+
 ## 4. Reaching more users
 
 [specs/todo/REACH.md](specs/todo/REACH.md)

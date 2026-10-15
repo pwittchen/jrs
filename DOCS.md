@@ -94,8 +94,20 @@ macOS and Windows, x86_64 and ARM64:
 ```
 
 Used at a release tag, it installs that release; `with: { version: '0.8.0' }`
-or `version: latest` picks another. Its `version` output is the version
-installed. The action is [`setup-jrs/action.yml`](setup-jrs/action.yml).
+or `version: latest` picks another. `version: manifest` installs the newest
+release the project's [`jrs-version`](#project) allows, read from `jrs.toml`
+(or the file `manifest:` names): `"0.10"` is the newest `0.10.x`, `"0.10.1"`
+that release exactly, since a `0.x` minor may break; from `1.0`, the newest
+release of the same major version at or above it. Its `version` output is the
+version installed. The action is [`setup-jrs/action.yml`](setup-jrs/action.yml).
+
+```yaml
+- uses: pwittchen/jrs/setup-jrs@v0.11.1
+  with: { version: manifest }
+```
+
+The installer takes the same choice: `curl -fsSL https://getjrs.dev/install.sh
+| sh -s -- --version-from jrs.toml`.
 
 ### From source
 
@@ -110,17 +122,40 @@ This places the `jrs` binary in `~/.cargo/bin`.
 ### Updating
 
 ```
-jrs self check      # is this the latest release, and which is?
-jrs self update     # install the latest release over this jrs
+jrs self check                # is this the latest release, and which is?
+jrs self update               # install the latest release over this jrs
+jrs self update --to 0.10.0   # install that release, older ones included
 ```
 
 `jrs self update` downloads the latest release's binary for the machine, checks
 it against the release's `SHA256SUMS`, makes sure it runs, and renames it over
 the running `jrs` (through a symlink, the file it points at), so a failed
 update leaves the old binary in place. A jrs that is already the latest, or
-newer, is left alone. Both reach GitHub, through the proxy in the
+newer, is left alone; `--to` installs the release it names whatever this one
+is. Both reach GitHub, through the proxy in the
 [config file](#user-configuration) when one is set, and refuse `--offline`. A
 jrs installed with `cargo install` is better updated the same way it came.
+
+### Pinning jrs for a team
+
+`project.jrs-version` is a minimum. To build every checkout with the same
+jrs, as `gradlew` does for Gradle, commit a wrapper:
+
+```
+jrs wrapper                     # pin this jrs's version
+jrs wrapper --version 0.11.1    # or another release
+./jrsw build                    # jrsw.cmd on Windows
+```
+
+`jrs wrapper` writes `jrsw` (POSIX `sh`) and `jrsw.cmd` beside `jrs.toml`.
+Each holds one jrs version and the SHA-256 of every release archive, read
+from that release's `SHA256SUMS` when it is written. Run, it looks for the
+binary in jrs's cache (`<cache>/dist/<version>/`), and when it is not there
+downloads the archive for the machine, checks it against the checksum it
+carries — a re-uploaded release fails to run — unpacks it and runs it with
+the arguments it was given. It needs `curl` or `wget`, `tar` and `sha256sum`
+or `shasum`; `jrsw.cmd` needs PowerShell. Run `jrs wrapper --version <v>` to
+move the pin.
 
 ## Uninstallation
 
@@ -216,8 +251,10 @@ javac-args = ["-Xlint:all", "-Werror"]
 | `jrs-version` | — | The oldest jrs that may build the project, as `"0.9"` or `"0.9.1"`. |
 
 `jrs-version` works like Cargo's `rust-version`. An older jrs stops with exit
-code `2`, says which version the project needs and where to download it, and
-does not try to build a manifest it may not understand.
+code `2`, says which version the project needs and that
+`jrs self update --to <version>` installs it, and does not try to build a
+manifest it may not understand. To pin jrs exactly, see
+[Pinning jrs for a team](#pinning-jrs-for-a-team).
 
 ### `[java]`
 
@@ -608,7 +645,10 @@ for any repository.
 | `jrs init [--lib] [--lang <java\|kotlin\|scala\|groovy>] [--check] [--format] [--name <name>] [path]` | Scaffold `jrs.toml`, a starter class and its test; `--check` adds a PMD `check` task in the `post-compile` hook, `--format` a formatter (see [Tasks and hooks](#tasks-and-hooks)). |
 | `jrs migrate` | Generate `jrs.toml` from an existing `pom.xml` or Gradle build. |
 | `jrs completions <bash\|zsh\|fish>` | Print a shell completion script. See [Shell completions](#shell-completions). |
-| `jrs self check` / `jrs self update` | Say whether jrs is the latest release, or update it to that release. See [Updating](#updating). |
+| `jrs self check` / `jrs self update [--to <version>]` | Say whether jrs is the latest release, or update it to that release or the one `--to` names. See [Updating](#updating). |
+| `jrs wrapper [--version <v>]` | Write `jrsw` and `jrsw.cmd`, which run one pinned jrs release. See [Pinning jrs for a team](#pinning-jrs-for-a-team). |
+| `jrs jdk list` | Print every JDK jrs can see, where it found it, and which one the project here builds with. See [Choosing the JDK](#choosing-the-jdk). |
+| `jrs jdk install <version>` | Download the newest Temurin build of that Java version into jrs's cache, where a project that pins it finds it. |
 | `jrs task <name> [--watch] [-- args...]` | Run a task from `jrs.toml`, and whatever it depends on. See [Tasks and hooks](#tasks-and-hooks). |
 | `jrs task --list` | List the tasks, their descriptions and the hooks that run them. |
 | `jrs metadata [--no-deps]` | Print the project model as JSON, for editors and tools. |
@@ -619,9 +659,11 @@ for any repository.
 
 `--watch` keeps one `javac` JVM running for the session and hands it every
 rebuild, so the second and later compiles skip the JVM's start-up and run
-with a warm JIT. It is a child of `jrs` and stops with it: nothing runs in the
-background between commands. If it ever fails, that compile runs in a fresh
-`javac` as usual; `-v` says so.
+with a warm JIT; a Kotlin project gets a warm `kotlinc` beside it, which takes
+a small project's Kotlin compile from about a second to a third of one. Each
+is a child of `jrs` and stops with it: nothing runs in the background between
+commands. If one ever fails, that compile runs in a fresh JVM as usual; `-v`
+says so.
 
 `jrs run --watch` restarts the program, as Spring's devtools or a Ktor `-t`
 build do: when a main source, a resource or `jrs.toml` changes, it stops the
@@ -631,7 +673,8 @@ the tests restarts nothing. A program that exits on its own, or a build that
 fails, is waited out until the next change. The program keeps the terminal
 while it runs, so its input still reaches it.
 
-Global flags: `-v/--verbose`, `-q/--quiet`, `--offline`, `-j/--jobs <n>`,
+Global flags: `-v/--verbose`, `-q/--quiet`, `--offline`, `-j/--jobs <n>`
+(downloads at once, and in a workspace members built at once),
 `--manifest-path <p>`, `-p/--module <name>` (in a [workspace](#workspaces),
 act on that member and the members it depends on; repeatable),
 `--progress <auto|always|never>`, `--color <auto|always|never>`,
@@ -786,6 +829,8 @@ The cache also holds `cds/`, where jrs keeps a class-data-sharing archive
 for each compiler on each JDK: `javac`, kotlinc, scalac and groovyc start
 faster from one. The first compile after a new JDK or compiler writes it, and
 `prune` drops the directory like any other; the next compile writes it again.
+The JDKs `jrs jdk install` downloaded, under `jdks/`, are kept unless
+`--jdks` is given, since one takes a while to download again.
 `--unused-for` goes by when each artifact was last used. jrs records that in
 the file's access time at most once a day, so it works even on filesystems
 mounted `noatime`.
@@ -892,6 +937,10 @@ push = false
 
 [audit]                                   # an OSV mirror for `jrs audit`
 url = "https://osv.example.com"
+
+[jdk]                                     # see "Choosing the JDK"
+download = true                           # download a pinned JDK that is missing
+url = "https://api.adoptium.net"          # or a mirror of Adoptium's API
 ```
 
 - **Credentials** are sent as HTTP basic auth (`username` + `password`) or as a
@@ -913,6 +962,11 @@ url = "https://osv.example.com"
   `JRS_BUILD_CACHE_URL` and `JRS_BUILD_CACHE_PUSH` override it.
 - **Audit**: `[audit] url` points `jrs audit` at an OSV-compatible API
   instead of `https://api.osv.dev`; `JRS_AUDIT_URL` overrides it.
+- **JDK downloads**: `[jdk] download = true` downloads a JDK a project pins
+  when it is installed nowhere jrs looks; see
+  [Choosing the JDK](#choosing-the-jdk). `JRS_JDK_DOWNLOAD=1` turns it on
+  for one machine, a CI runner say, and `0` off; `vendor` can only be
+  `"temurin"`.
 
 A dropped connection or an HTTP 429/5xx from a repository is retried twice,
 with a backoff, before the build fails. A 404 or a 401 is believed the first
@@ -936,9 +990,28 @@ usual places:
 - `Program Files` on Windows
 - `JAVA_HOME_<version>_<arch>`, as exported by `actions/setup-java`
 
+- `jrs jdk install`'s, in jrs's cache under `jdks/`
+
 When several builds of that version are installed, the newest wins. If none
-is found, the error lists the versions that were found. `jrs -v build` names
-the JDK it picked.
+is found, the error lists the versions that were found and says how to get
+one. `jrs -v build` names the JDK it picked, and `jrs jdk list` lists every
+JDK jrs can see and marks the one the project here builds with.
+
+A pinned JDK that is missing can be downloaded:
+
+```
+jrs jdk install 21        # the newest Temurin 21, into jrs's cache
+```
+
+or, with `download = true` under `[jdk]` in the
+[user configuration](#user-configuration) (or `JRS_JDK_DOWNLOAD=1`), on the
+first build that needs it. jrs asks the Adoptium API for the newest GA build
+for the machine, downloads it, checks its SHA-256 before unpacking anything,
+checks that it runs, and only then moves it into place, so an interrupted
+download leaves nothing behind. Only a pin triggers a download — a project
+that pins nothing and finds no JDK still fails — and `--offline` never
+downloads. jrs changes neither `PATH` nor `JAVA_HOME`: the JDK is used for
+the projects that pin its version.
 
 ## Tests
 
@@ -1409,6 +1482,18 @@ changes what they can see — a method's body leaves them fresh — and
 `jrs test` runs the tests a change reaches, across members. Phase lines name
 the member: `Compiling core v1.0.0`, `Compiling app: 4 test sources`.
 
+Members that do not depend on each other build at once, up to `--jobs` of
+them. The output still reads as if they had built one after the other: each
+member's lines come out in build order, and the member at the front streams
+as it goes while the others wait their turn; the live line names the members
+compiling. `jrs package` writes each member's jar as part of the same work.
+`jrs test` builds every member first and then runs each member's tests in
+turn, since a test JVM already uses the cores it is given. `--jobs 1` builds
+one member at a time, as do `--watch` and a workspace whose tasks depend on
+another member's. `--timings` adds a `member <name>` row for each member
+built at once. When a member fails, no other starts; what already ran is
+printed, then the error.
+
 In a fat jar, a member's sibling members' classes are packaged under the same
 rules as a dependency's; in the portable layout they are jars in `lib/`. At the
 root, `--fat`, `--dist`, `--jlink`, `--jpackage` and `--native-image` apply to
@@ -1805,6 +1890,17 @@ cargo bench --bench incremental
 JRS_BENCH_CLASSES=1000 JRS_BENCH_RUNS=7 cargo bench --bench incremental
 ```
 
+The `kotlinc` benchmark copies a Kotlin project, builds it once, then edits
+one Kotlin source and builds again, `JRS_BENCH_RUNS` times for a body edit and
+for an API edit. For each it prints the `kotlinc` and `javac` rows of
+`--timings`, the floor — the same JVM compiling one empty file — and what the
+same compile takes warm, run a second time in one JVM; `kotlinc − warm` is
+what the `--watch` worker saves:
+
+```
+JRS_BENCH_PROJECT=examples/orders cargo bench --bench kotlinc
+```
+
 The corpus takes the real projects listed in `specs/corpus/corpus.toml` — Spring
 Boot and Ktor applications on Maven and on Gradle, each cloned at a pinned
 commit — through `jrs migrate`, `build`, `test`, `run` and `package` with no
@@ -1833,7 +1929,11 @@ projects whose last corpus run passed every step join them. Before it times a
 project it checks that every tool resolves the same runtime classpath, runs
 the same tests, and starts the same application and jar; a project that fails
 the check is reported, not timed. Gradle is timed three ways: with a warm
-daemon, with the daemon and `--configuration-cache`, and with `--no-daemon`.
+daemon, with the daemon and `--configuration-cache`, and with `--no-daemon`;
+a multi-module project adds a fourth, the daemon with `--parallel`. For a
+workspace the report also sets each member's time in jrs's clean build,
+summed and along the critical path through the member graph, beside jrs's
+and Gradle's `--parallel` clean builds.
 
 No timed run touches the network: every tool reads a local mirror of Maven
 Central and the Gradle Plugin Portal, which one recording run fills. It needs

@@ -620,20 +620,12 @@ fn run_foreign(
             &foreign.jvm_args,
         )
     });
-    let mut args = lang::jvm_flags(unit, foreign);
-    args.extend([
-        "-cp".to_string(),
-        Toolchain::classpath(&foreign.classpath),
-        compiler.main_class.to_string(),
-    ]);
-    args.extend(
-        lang::flags(unit, foreign, joint)
-            .map_err(|e| JrsError::manifest(format!("`java.javac-args`: {e}")))?,
-    );
+    let mut compiler_args = lang::flags(unit, foreign, joint)
+        .map_err(|e| JrsError::manifest(format!("`java.javac-args`: {e}")))?;
     if !foreign.color
         && let Some(flag) = lang::no_color_flag(foreign)
     {
-        args.push(flag.to_string());
+        compiler_args.push(flag.to_string());
     }
     // Kotlin and Scala read the Java sources for their symbols and write only
     // their own classes; Groovy compiles both.
@@ -643,11 +635,54 @@ fn run_foreign(
     let argfile = unit
         .work_dir
         .join(format!("{}-{}.args", language.compiler_name(), unit.label));
-    let output = share::run(share, CapturedOutput::ok, |shared| {
-        let flags: Vec<String> = shared.iter().cloned().chain(args.iter().cloned()).collect();
-        std::fs::write(&argfile, render_argfile(&flags, &sources)).path(&argfile)?;
-        run_captured(ui, &toolchain.java, &[format!("@{}", argfile.display())])
-    })?;
+    let mut args = Vec::new();
+    // A Kotlin unit compiles whole, so its size decides, as a file-by-file
+    // `javac` run's does (SPEC §7.2).
+    if language == Language::Kotlin && unit.sources.len() <= incremental::QUICK_SOURCES {
+        args.extend(javac::QUICK_JVM_FLAGS.iter().map(|f| (*f).to_string()));
+    }
+    args.extend(lang::jvm_flags(unit, foreign));
+    args.extend([
+        "-cp".to_string(),
+        Toolchain::classpath(&foreign.classpath),
+        compiler.main_class.to_string(),
+    ]);
+    let mut warm = None;
+    if language == Language::Kotlin {
+        // kotlinc's own arguments go in a file of their own, which a forked
+        // run reads as `@argfile` and the `--watch` worker reads as it is.
+        let compiler_argfile = unit
+            .work_dir
+            .join(format!("kotlinc-{}.compiler.args", unit.label));
+        std::fs::write(&compiler_argfile, render_argfile(&compiler_args, &sources))
+            .path(&compiler_argfile)?;
+        warm = unit.worker.as_ref().and_then(|worker| {
+            worker.kotlinc(
+                toolchain,
+                &foreign.classpath,
+                &lang::jvm_flags(unit, foreign),
+                compiler.main_class,
+                &compiler_argfile,
+                ui,
+            )
+        });
+        args.push(format!("@{}", compiler_argfile.display()));
+    } else {
+        args.extend(compiler_args);
+    }
+    let compiler_sources: &[PathBuf] = if language == Language::Kotlin {
+        &[]
+    } else {
+        &sources
+    };
+    let output = match warm {
+        Some(output) => output,
+        None => share::run(share, CapturedOutput::ok, |shared| {
+            let flags: Vec<String> = shared.iter().cloned().chain(args.iter().cloned()).collect();
+            std::fs::write(&argfile, render_argfile(&flags, compiler_sources)).path(&argfile)?;
+            run_captured(ui, &toolchain.java, &[format!("@{}", argfile.display())])
+        })?,
+    };
 
     if !output.stderr.trim().is_empty() {
         ui.passthrough(Stream::Err, output.stderr.trim_end());

@@ -5,11 +5,16 @@ what jrs would do instead: workspace members built in parallel, the cost of
 starting `kotlinc`, a pinned JDK that is not installed, and a pinned jrs.
 This is [ROADMAP §3](../../ROADMAP.md#3-closing-the-gaps-where-gradle-wins).
 
-Status: **proposed.** Nothing here is implemented. Parts A and B are speed,
-and each waits for a number from the benchmark of
-[BENCHMARKS.md](../BENCHMARKS.md) before it gets code (§1). Parts C and D are
-not speed; they cross lines drawn in SPEC §1.2 and listed in
-[ROADMAP_ARCHIVE §5](../ROADMAP_ARCHIVE.md#5-needs-a-spec-decision-first),
+Status: **implemented**, all of G1–G7 (§8). The SPEC.md edits of §6 are
+made, and C's and D's decisions taken as proposed: downloading a JDK is
+opt-in, and `jrs wrapper` exists. A and B were built without waiting for
+their gates; the benchmarks that measure them are in place, and §9 has the
+first number and what changed on the way.
+
+As first written: parts A and B are speed, and each waits for a number from
+the benchmark of [BENCHMARKS.md](../BENCHMARKS.md) before it gets code (§1).
+Parts C and D are not speed; they cross lines drawn in SPEC §1.2 and listed
+in [ROADMAP_ARCHIVE §5](../ROADMAP_ARCHIVE.md#5-needs-a-spec-decision-first),
 so each needs its SPEC.md edits (§6) agreed before code.
 
 ---
@@ -427,3 +432,48 @@ is one copy of it, and `jrs wrapper --version <v>` to move the pin.
 
 G2 and G3 need no measurement and can start now; G5 and G6 start only if
 G1's numbers clear §2.1 and §3.1.
+
+## 9. What was built
+
+Where the code differs from the plan above, and what was measured.
+
+- **G1.** `cargo bench --bench kotlinc` measures §3.1's four columns and
+  prints whether the gate holds. On `examples/orders` (3 Kotlin and 1 Java
+  source, JDK 25, Apple M-series): `kotlinc` 1117 ms, `floor` 683 ms,
+  `warm` 334 ms, `javac` 182 ms, so a warm compiler saves 783 ms (70%) on a
+  body edit — under the gate's one second on a project this small. The
+  Ktor and Spring-Kotlin corpus projects are still to be run. The
+  comparison (`cargo bench --bench compare`) gains a
+  `Gradle (daemon, --parallel)` column on multi-module projects and a
+  "Workspace members at once" section: each member's wall time from jrs's
+  clean build, summed and along the critical path, beside jrs's and
+  Gradle's `--parallel` clean builds, with §2.1's verdict
+  (`benches/support/critical.rs`).
+- **G2.** As planned. The list of releases `version: manifest` and
+  `--version-from` choose from comes from `git ls-remote --tags`, which
+  nothing rate-limits, and in `install.sh` from the GitHub API when `git`
+  is missing.
+- **G3, G4.** As planned. An Alpine machine asks for `alpine-linux` builds,
+  whose musl a glibc JDK cannot run on. `jrs jdk list` labels each JDK by
+  where it was found: `[jdks]`, `JAVA_HOME`, `PATH`, `installed` or
+  `jrs jdk install`. Two jrs processes installing the same JDK at once keep
+  the first rename and discard the second's.
+- **G5.** The unit of work a member runs on its thread is its build *and*
+  what the command then does with it, so `jrs package` writes each member's
+  jar on the member's thread and its transcript is line for line
+  `--jobs 1`'s, jars byte for byte. `jrs test` builds every member first, at
+  once, and then tests member by member; at `--jobs 1` it builds and tests
+  each in turn, as before. The parent's spinner says `Compiling`.
+- **G6.** `KotlincWorker.java` reaches `K2JVMCompiler` by reflection, so it
+  compiles with a bare `javac` into
+  `<cache>/worker/kotlinc-<jrs version>-jdk<n>/` and serves every Kotlin
+  version, rather than being compiled against each compiler's jars. One
+  `Worker` holds both JVMs, so nothing in the session's plumbing changed.
+  `RESTART_AFTER` for `kotlinc` is 20, to be revisited with the bench's heap
+  numbers. On `examples/orders` under `--watch`, `kotlinc` takes 0.3 s warm
+  against 1.2 s forked.
+- **G7.** `jrs wrapper` pins the running jrs's version unless `--version`
+  says otherwise. `jrsw.cmd` is a `cmd` script that runs the binary itself
+  and hands only the download to the PowerShell after its `##powershell`
+  marker, so arguments reach jrs as `cmd` passed them. `jdk` and `wrapper`
+  join the task names a manifest may not use.

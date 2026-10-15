@@ -94,7 +94,8 @@ cargo install --git https://github.com/pwittchen/jrs.git
 Windows binaries, other versions, manual installation and the `setup-jrs`
 GitHub Action are covered in [DOCS.md](DOCS.md#installation). A prebuilt jrs updates itself:
 `jrs self check` says whether a newer release is out, and `jrs self update`
-installs it ([Updating](DOCS.md#updating)).
+installs it ([Updating](DOCS.md#updating)); `jrs wrapper` pins a project to
+one release, as `gradlew` does ([Pinning jrs](DOCS.md#pinning-jrs-for-a-team)).
 
 ## Getting started
 

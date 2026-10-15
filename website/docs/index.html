@@ -210,6 +210,13 @@
   <a href="https://github.com/pwittchen/jrs/blob/master/website/install.sh">website/install.sh</a>
   in the repository, if you want to read it before piping it into a shell.
 </p>
+<p>
+  <code>--version-from</code> installs the newest release a project's
+  <a href="#manifest-requiring-a-jrs-version"><code>jrs-version</code></a> allows, read from its
+  <code>jrs.toml</code>, by the same rules as the <a href="#installation-in-github-actions">action's
+  <code>version: manifest</code></a>:
+</p>
+<pre>curl -fsSL https://getjrs.dev/install.sh | sh -s -- --version-from jrs.toml</pre>
 
 <h3>Prebuilt binaries by hand</h3>
 <p>Every tagged <a href="https://github.com/pwittchen/jrs/releases">release</a> ships a binary for each of these platforms:</p>
@@ -253,6 +260,16 @@ tar -xf jrs-x86_64-pc-windows-msvc.zip jrs.exe</pre>
   <a href="https://github.com/pwittchen/jrs/blob/master/setup-jrs/action.yml">setup-jrs/action.yml</a>
   in the repository. See <a href="#ci">Continuous integration</a> for a whole workflow.
 </p>
+<p>
+  <code>version: manifest</code> installs the newest release the project's
+  <a href="#manifest-requiring-a-jrs-version"><code>jrs-version</code></a> allows, read from
+  <code>jrs.toml</code>, or from the file the <code>manifest</code> input names:
+  <code>"0.10"</code> is the newest <code>0.10.x</code>, <code>"0.10.1"</code> that release exactly,
+  since a <code>0.x</code> minor may break; from <code>1.0</code>, the newest release of the same
+  major version at or above it.
+</p>
+<pre data-lang="plain">- uses: pwittchen/jrs/setup-jrs@v0.11.1
+  with: { version: manifest }        # or add manifest: path/to/jrs.toml</pre>
 
 <h3>From source</h3>
 <pre>git clone https://github.com/pwittchen/jrs.git
@@ -269,10 +286,37 @@ jrs build --help      # one command's flags</pre>
 </p>
 
 <h3>Upgrading</h3>
+<pre>jrs self check                # is this the latest release, and which is?
+jrs self update               # install the latest release over this jrs
+jrs self update --to 0.10.0   # install that release, older ones included</pre>
 <p>
-  Run the install script again for the latest release, or download the new archive by hand. A
-  project that needs a newer jrs than the one installed says so itself when it declares
-  <a href="#manifest-requiring-a-jrs-version"><code>jrs-version</code></a>.
+  <a href="#cmd-self"><code>jrs self update</code></a> replaces the running binary after checking
+  it against the release's <code>SHA256SUMS</code>; running the install script again, or
+  downloading the new archive by hand, works as well. A project that needs a newer jrs than the
+  one installed says so itself when it declares
+  <a href="#manifest-requiring-a-jrs-version"><code>jrs-version</code></a>, and names the
+  <code>jrs self update --to</code> that installs it.
+</p>
+
+<h3>Pinning jrs for a team</h3>
+<p>
+  <code>project.jrs-version</code> is a minimum. To build every checkout with the same jrs, as
+  <code>gradlew</code> does for Gradle, commit a wrapper:
+</p>
+<pre>jrs wrapper                     # pin this jrs's version
+jrs wrapper --version 0.11.1    # or another release
+./jrsw build                    # jrsw.cmd on Windows</pre>
+<p>
+  <a href="#cmd-wrapper"><code>jrs wrapper</code></a> writes <code>jrsw</code> (POSIX
+  <code>sh</code>) and <code>jrsw.cmd</code> beside <code>jrs.toml</code>. Each holds one jrs
+  version and the SHA-256 of every release archive, read from that release's
+  <code>SHA256SUMS</code> when it is written. Run, it looks for the binary in jrs's cache
+  (<code>&lt;cache&gt;/dist/&lt;version&gt;/</code>), and when it is not there downloads the archive
+  for the machine, checks it against the checksum it carries — a re-uploaded release fails to run
+  — unpacks it and runs it with the arguments it was given. It needs <code>curl</code> or
+  <code>wget</code>, <code>tar</code> and <code>sha256sum</code> or <code>shasum</code>;
+  <code>jrsw.cmd</code> needs PowerShell. Run <code>jrs wrapper --version &lt;v&gt;</code> to move
+  the pin.
 </p>
 
 <h3>Uninstalling</h3>
@@ -556,9 +600,16 @@ version = "1.0.0"
 jrs-version = "0.5"          # or "0.5.1"</pre>
 <p>
   It is checked before any other key is read. An older jrs stops with exit code <code>2</code>,
-  naming the version the project needs, its own version, and where to download releases. A
+  naming the version the project needs, its own version, and that
+  <code>jrs self update --to &lt;version&gt;</code> installs it. A
   pre-release suffix on the running version is ignored (<code>0.9.0-dev</code> satisfies
   <code>0.9</code>). <code>jrs init</code> and <code>jrs migrate</code> do not write the key.
+</p>
+<p>
+  The key is a minimum. To build every checkout with exactly one jrs, commit a wrapper: see
+  <a href="#installation-pinning-jrs-for-a-team">Pinning jrs for a team</a>. In CI, the
+  <a href="#installation-in-github-actions">setup-jrs action</a>'s <code>version: manifest</code>
+  installs the newest release the key allows.
 </p>
 
 <h3>Where jrs finds the manifest</h3>
@@ -1191,7 +1242,9 @@ checksum = "sha1:…"</pre>
     <tr><td><a href="#cmd-init"><code>init</code></a></td><td>Scaffold a new project.</td></tr>
     <tr><td><a href="#cmd-migrate"><code>migrate</code></a></td><td>Generate <code>jrs.toml</code> from Maven or Gradle.</td></tr>
     <tr><td><a href="#cmd-completions"><code>completions</code></a></td><td>Print a shell completion script.</td></tr>
-    <tr><td><a href="#cmd-self"><code>self</code></a></td><td>Check for a newer jrs, or update to it.</td></tr>
+    <tr><td><a href="#cmd-self"><code>self</code></a></td><td>Check for a newer jrs, or update to it or to a release you name.</td></tr>
+    <tr><td><a href="#cmd-wrapper"><code>wrapper</code></a></td><td>Write <code>jrsw</code> and <code>jrsw.cmd</code>, which run one pinned jrs release.</td></tr>
+    <tr><td><a href="#cmd-jdk"><code>jdk</code></a></td><td>List the JDKs jrs can see, or download one into its cache.</td></tr>
   </tbody>
 </table>
 <p><code>jrs --help</code> lists the commands, and <code>jrs &lt;command&gt; --help</code> a command's flags.</p>
@@ -1204,7 +1257,7 @@ checksum = "sha1:…"</pre>
     <tr><td><code>-v</code>, <code>--verbose</code></td><td>Echo every subprocess command line and its exit status. Also names the JDK picked.</td></tr>
     <tr><td><code>-q</code>, <code>--quiet</code></td><td>Errors only.</td></tr>
     <tr><td><code>--offline</code></td><td>Never touch the network; use the cache and lockfile only, and fail on a miss.</td></tr>
-    <tr><td><code>-j</code>, <code>--jobs &lt;N&gt;</code></td><td>Cap parallelism. Defaults to the user configuration's <code>jobs</code>, else the number of cores, with a floor of 4 for network work.</td></tr>
+    <tr><td><code>-j</code>, <code>--jobs &lt;N&gt;</code></td><td>Cap parallelism: downloads at once, and in a <a href="#workspaces-members-built-at-once">workspace</a> the members built at once. Defaults to the user configuration's <code>jobs</code>, else the number of cores, with a floor of 4 for network work.</td></tr>
     <tr><td><code>--manifest-path &lt;PATH&gt;</code></td><td>Use a manifest outside the working directory: the file or its directory.</td></tr>
     <tr><td><code>-p</code>, <code>--module &lt;NAME&gt;</code></td><td>In a <a href="#workspaces">workspace</a>, act on this member and the members it depends on instead of every member. Repeatable.</td></tr>
     <tr><td><code>--progress &lt;auto|always|never&gt;</code></td><td>Live animated output. <code>auto</code> animates only on an interactive terminal.</td></tr>
@@ -1655,13 +1708,14 @@ org.apache.logging.log4j:log4j-core:2.14.1  GHSA-jfh8-c2jp-5v3q (CVE-2021-44228)
 <section id="cmd-cache">
 <h2><code>jrs cache</code></h2>
 <pre data-lang="plain">jrs cache path
-jrs cache prune [--unused-for DAYS] [--dry-run]</pre>
+jrs cache prune [--unused-for DAYS] [--jdks] [--dry-run]</pre>
 <table>
   <thead><tr><th>Command</th><th>Effect</th></tr></thead>
   <tbody>
     <tr><td><code>jrs cache path</code></td><td>Print where the shared cache is.</td></tr>
     <tr><td><code>jrs cache prune</code></td><td>Remove what no known project's <code>jrs.lock</code> names.</td></tr>
     <tr><td><code>jrs cache prune --unused-for &lt;DAYS&gt;</code></td><td>Instead, remove what no build has used for that many days.</td></tr>
+    <tr><td><code>--jdks</code></td><td>Also remove the JDKs <a href="#cmd-jdk"><code>jrs jdk install</code></a> downloaded, which are kept otherwise.</td></tr>
     <tr><td><code>--dry-run</code></td><td>Say what would be removed; remove nothing.</td></tr>
   </tbody>
 </table>
@@ -1719,20 +1773,68 @@ jrs completions fish | source           # in ~/.config/fish/config.fish</pre>
 <section id="cmd-self">
 <h2><code>jrs self</code></h2>
 <pre data-lang="plain">jrs self check
-jrs self update</pre>
+jrs self update [--to VERSION]</pre>
 <table>
   <thead><tr><th>Command</th><th>Effect</th></tr></thead>
   <tbody>
     <tr><td><code>jrs self check</code></td><td>Say whether this jrs is the latest release on GitHub, and which release is.</td></tr>
     <tr><td><code>jrs self update</code></td><td>When a newer release exists, install it over this jrs.</td></tr>
+    <tr><td><code>jrs self update --to &lt;VERSION&gt;</code></td><td>Install that release over this jrs, whatever this one is: older releases included.</td></tr>
   </tbody>
 </table>
+<pre>jrs self update --to 0.10.0</pre>
 <p>
   <code>jrs self update</code> downloads the release's binary for the machine, checks it against the
   release's <code>SHA256SUMS</code>, makes sure it runs, and renames it over the running
-  <code>jrs</code>, so a failed update leaves the old binary in place. Both commands reach GitHub,
-  through the configured proxy when there is one, and refuse <code>--offline</code>. A jrs installed
-  with <code>cargo install</code> is better updated the same way it came.
+  <code>jrs</code> (through a symlink, the file it points at), so a failed update leaves the old
+  binary in place. Without <code>--to</code>, a jrs that is already the latest, or newer, is left
+  alone. Both commands reach GitHub, through the configured proxy when there is one, and refuse
+  <code>--offline</code>. A jrs installed with <code>cargo install</code> is better updated the
+  same way it came.
+</p>
+</section>
+
+<section id="cmd-wrapper">
+<h2><code>jrs wrapper</code></h2>
+<pre data-lang="plain">jrs wrapper [--version VERSION]</pre>
+<table>
+  <thead><tr><th>Flag</th><th>Effect</th></tr></thead>
+  <tbody>
+    <tr><td><code>--version &lt;VERSION&gt;</code></td><td>The jrs release the scripts run; defaults to this jrs's own version.</td></tr>
+  </tbody>
+</table>
+<pre>jrs wrapper                     # pin this jrs's version
+jrs wrapper --version 0.11.1    # or another release
+./jrsw build                    # jrsw.cmd on Windows</pre>
+<p>
+  Writes <code>jrsw</code> (POSIX <code>sh</code>) and <code>jrsw.cmd</code> (Windows) beside
+  <code>jrs.toml</code>, to be committed. Each holds one jrs version and the SHA-256 of every
+  release archive, read from that release's <code>SHA256SUMS</code> when it is written. Run, a
+  script uses the binary in <code>&lt;cache&gt;/dist/&lt;version&gt;/</code>, or downloads the
+  archive for the machine, checks it against the checksum it carries, unpacks it there and runs it
+  with its arguments, so every checkout builds with the same bytes. Run
+  <code>jrs wrapper --version &lt;v&gt;</code> again to move the pin. See
+  <a href="#installation-pinning-jrs-for-a-team">Pinning jrs for a team</a>.
+</p>
+</section>
+
+<section id="cmd-jdk">
+<h2><code>jrs jdk</code></h2>
+<pre data-lang="plain">jrs jdk list
+jrs jdk install &lt;VERSION&gt;</pre>
+<table>
+  <thead><tr><th>Command</th><th>Effect</th></tr></thead>
+  <tbody>
+    <tr><td><code>jrs jdk list</code></td><td>Print every JDK jrs can see — the <code>[jdks]</code> table's, the one at <code>JAVA_HOME</code> or on <code>PATH</code>, the installed ones and those <code>jrs jdk install</code> downloaded — where each is, and which one the project here builds with.</td></tr>
+    <tr><td><code>jrs jdk install &lt;VERSION&gt;</code></td><td>Download the newest Temurin GA build of that Java feature version into jrs's cache, under <code>jdks/</code>, whatever the user configuration says.</td></tr>
+  </tbody>
+</table>
+<pre>jrs jdk list
+jrs jdk install 21        # the newest Temurin 21, into jrs's cache</pre>
+<p>
+  A project that pins that version finds the downloaded JDK on its own; jrs changes neither
+  <code>PATH</code> nor <code>JAVA_HOME</code>. <code>jrs cache prune</code> keeps it unless given
+  <code>--jdks</code>. See <a href="#jdk">Choosing the JDK</a>.
 </p>
 </section>
 
@@ -1929,9 +2031,11 @@ jrs run --watch</pre>
 </p>
 <p>
   Watch mode keeps one <code>javac</code> JVM running for the session and hands it every rebuild,
-  so the second and later compiles skip the JVM's start-up and run with a warm JIT. It is a child
-  of <code>jrs</code> and stops with it: nothing keeps running between commands. If it ever fails,
-  that compile runs in a fresh <code>javac</code> as usual, and <code>-v</code> says so.
+  so the second and later compiles skip the JVM's start-up and run with a warm JIT. A Kotlin
+  project gets a warm <code>kotlinc</code> beside it, which takes a small project's Kotlin compile
+  from about a second to a third of one. Each is a child of <code>jrs</code> and stops with it:
+  nothing keeps running between commands. If one ever fails, that compile runs in a fresh JVM as
+  usual, and <code>-v</code> says so.
 </p>
 <p>
   <code>jrs run --watch</code> also stops and restarts the program; see
@@ -2736,6 +2840,22 @@ jrs -p core add com.google.guava:guava</pre>
   plain jar.
 </p>
 
+<h3>Members built at once</h3>
+<p>
+  Members that do not depend on each other build at once, up to <code>--jobs</code> of them. The
+  output still reads as if they had built one after the other: each member's lines come out in
+  build order, line for line what <code>--jobs 1</code> prints, and the member at the front streams
+  as it goes while the others wait their turn; the live line names the members compiling, as in
+  <code>Compiling core, api (2 of 5 modules)</code>.
+</p>
+<ul>
+  <li><code>jrs package</code> writes each member's jar as part of the same work.</li>
+  <li><code>jrs test</code> builds every member first and then runs each member's tests in turn, since a test JVM already uses the cores it is given.</li>
+  <li><code>--jobs 1</code> builds one member at a time, as do <code>--watch</code> and a workspace whose tasks depend on another member's.</li>
+  <li><code>--timings</code> adds a <code>member &lt;name&gt;</code> row for each member built at once.</li>
+  <li>When a member fails, no other starts; what already ran is printed, then the error.</li>
+</ul>
+
 <h3>Tasks across members</h3>
 <p>
   <code>[tasks]</code> and <code>[hooks]</code> stay per member, and a task can depend on another
@@ -2792,14 +2912,38 @@ javac-args = ["-proc:full"]        # needed from JDK 23 on
   <li>The user configuration's <code>[jdks]</code> table.</li>
   <li>The JDK at <code>JAVA_HOME</code> or on <code>PATH</code>, if it is that version.</li>
   <li>The JDKs installed in the usual places: SDKMAN!, asdf, mise, IntelliJ and Gradle toolchain directories in your home; <code>/Library/Java/JavaVirtualMachines</code>, <code>/usr/lib/jvm</code>, <code>/usr/java</code> and <code>/opt/java</code>; <code>Program Files</code> on Windows; and the <code>JAVA_HOME_&lt;version&gt;_&lt;arch&gt;</code> variables <code>actions/setup-java</code> exports.</li>
+  <li>The JDKs <a href="#cmd-jdk"><code>jrs jdk install</code></a> downloaded, in jrs's cache under <code>jdks/</code>.</li>
 </ol>
 <p>
   When several builds of that version are installed, the newest wins. If none is found, the error
-  lists the versions that were. <code>jrs -v build</code> names the JDK it picked.
+  lists the versions that were and says how to get one. <code>jrs -v build</code> names the JDK it
+  picked, and <code>jrs jdk list</code> lists every JDK jrs can see and marks the one the project
+  here builds with.
 </p>
 <pre data-lang="toml" data-file="~/.config/jrs/config.toml">[jdks]
 21 = "/opt/jdks/temurin-21"
 25 = "/opt/graalvm-25"</pre>
+
+<h3>Downloading a pinned JDK</h3>
+<p>A pinned JDK that is missing can be downloaded:</p>
+<pre>jrs jdk install 21        # the newest Temurin 21, into jrs's cache</pre>
+<p>
+  or, with <code>download = true</code> under <code>[jdk]</code> in the
+  <a href="#user-config-jdks-and-parallelism">user configuration</a> (or
+  <code>JRS_JDK_DOWNLOAD=1</code>), on the first build that needs it:
+</p>
+<pre data-lang="toml" data-file="~/.config/jrs/config.toml">[jdk]
+download = true                           # download a pinned JDK that is missing
+url = "https://api.adoptium.net"          # or a mirror of Adoptium's API</pre>
+<p>
+  jrs asks the Adoptium API for the newest GA build for the machine, downloads it, checks its
+  SHA-256 before unpacking anything, checks that it runs, and only then moves it into place, so an
+  interrupted download leaves nothing behind. Only a pin triggers a download — a project that pins
+  nothing and finds no JDK still fails — and <code>--offline</code> never downloads. jrs changes
+  neither <code>PATH</code> nor <code>JAVA_HOME</code>: the JDK is used for the projects that pin
+  its version. <code>jrs cache prune</code> keeps the downloaded JDKs unless given
+  <code>--jdks</code>.
+</p>
 
 <h3>The other JDK tools</h3>
 <p>
@@ -2854,7 +2998,9 @@ jrs cache prune --unused-for 30       # drop what no build has used in 30 days</
   <code>share-classes</code>. The first compile after a new JDK or compiler writes it;
   <code>prune</code> drops it like anything else. The <a href="#build-cache">build cache</a> lives
   under <code>build/</code>: a plain <code>prune</code> drops all of it, <code>--unused-for</code>
-  the entries no build has hit.
+  the entries no build has hit. The JDKs <code>jrs jdk install</code> downloaded, under
+  <code>jdks/</code>, are kept unless <code>--jdks</code> is given, since one takes a while to
+  download again.
   <code>--unused-for</code> goes by when each artifact was last used, recorded in its access time
   at most once a day, so it works even on filesystems mounted <code>noatime</code>.
 </p>
@@ -2895,7 +3041,11 @@ url = "https://cache.example.com/jrs"
 push = false
 
 [audit]                                   # an OSV mirror for jrs audit
-url = "https://osv.example.com"</pre>
+url = "https://osv.example.com"
+
+[jdk]                                     # see Choosing the JDK
+download = true                           # download a pinned JDK that is missing
+url = "https://api.adoptium.net"          # or a mirror of Adoptium's API</pre>
 
 <h3>Credentials</h3>
 <p>
@@ -2932,6 +3082,14 @@ export JRS_REPO_MY_REPO_TOKEN=…          # for a repository named my-repo</pre
 <p>
   <code>[jdks]</code> maps a Java feature version to a JDK home, for a pinned version installed
   where jrs does not look. <code>jobs</code> sets the default for <code>--jobs</code>.
+</p>
+<p>
+  <code>[jdk] download = true</code> downloads a JDK a project pins when it is installed nowhere jrs
+  looks; see <a href="#jdk-downloading-a-pinned-jdk">Downloading a pinned JDK</a>.
+  <code>JRS_JDK_DOWNLOAD=1</code> turns it on for one machine, a CI runner say, and <code>0</code>
+  off. <code>url</code> points at a mirror of Adoptium's API (default
+  <code>https://api.adoptium.net</code>), and <code>vendor</code> can only be
+  <code>"temurin"</code>.
 </p>
 
 <h3>Build cache</h3>
@@ -3009,6 +3167,10 @@ jobs:
   action</a> installs jrs in one step, on every runner OS:
 </p>
 <pre data-lang="plain">      - uses: pwittchen/jrs/setup-jrs@v0.9.0</pre>
+<p>
+  With <code>with: { version: manifest }</code> it installs the newest release the project's
+  <code>jrs-version</code> allows instead.
+</p>
 </section>
 
 <section id="editors">
@@ -3120,7 +3282,9 @@ jobs:
   <code>--timings</code> on <code>build</code>, <code>test</code>, <code>run</code> and
   <code>package</code> adds this table after the summary (before the program, for
   <code>jrs run</code>). The same numbers go to <code>target/.jrs/timings.txt</code> as
-  tab-separated <code>phase</code> and <code>ms</code> columns, even under <code>-q</code>.
+  tab-separated <code>phase</code> and <code>ms</code> columns, even under <code>-q</code>. In a
+  <a href="#workspaces-members-built-at-once">workspace</a>, each member built at once with others
+  adds a <code>member &lt;name&gt;</code> row.
 </p>
 </section>
 
@@ -3307,6 +3471,7 @@ jrs migrate                # write jrs.toml; the original build file is untouche
     <tr><td><code>JRS_BUILD_CACHE</code></td><td class="wrap"><code>off</code> turns the build cache off.</td></tr>
     <tr><td><code>JRS_BUILD_CACHE_URL</code>, <code>JRS_BUILD_CACHE_PUSH</code></td><td class="wrap">The remote build cache, and whether to write to it (<code>true</code> or <code>1</code>). They override <code>[build-cache]</code>.</td></tr>
     <tr><td><code>JRS_AUDIT_URL</code></td><td class="wrap">The OSV-compatible API <code>jrs audit</code> asks. It overrides <code>[audit] url</code>.</td></tr>
+    <tr><td><code>JRS_JDK_DOWNLOAD</code></td><td class="wrap"><code>1</code> (or <code>true</code>) downloads a pinned JDK that is installed nowhere jrs looks, <code>0</code> never does. It overrides <code>[jdk] download</code>.</td></tr>
     <tr><td><code>JRS_REPO_&lt;NAME&gt;_USERNAME</code><br /><code>JRS_REPO_&lt;NAME&gt;_PASSWORD</code><br /><code>JRS_REPO_&lt;NAME&gt;_TOKEN</code></td><td class="wrap">Credentials for the repository named <code>&lt;name&gt;</code>, upper-cased with other characters as <code>_</code>. They override the configuration file.</td></tr>
     <tr><td><code>HTTPS_PROXY</code>, <code>HTTP_PROXY</code>, <code>ALL_PROXY</code>, <code>NO_PROXY</code></td><td class="wrap">The proxy, when the configuration has no <code>[proxy]</code>.</td></tr>
     <tr><td><code>XDG_CACHE_HOME</code>, <code>XDG_CONFIG_HOME</code></td><td class="wrap">Base directories for the cache and configuration on Unix.</td></tr>
@@ -3343,6 +3508,7 @@ jrs migrate                # write jrs.toml; the original build file is untouche
 ├── jrs.toml                     the manifest (commit)
 ├── jrs.lock                     the resolved graphs and checksums (commit)
 ├── .java-version / .sdkmanrc    optional JDK pin
+├── jrsw / jrsw.cmd              optional jrs pin, from jrs wrapper (commit)
 ├── src/main/{java,kotlin,scala,groovy,resources}
 ├── src/test/{java,kotlin,scala,groovy,resources}
 └── target/                      disposable: jrs clean removes it</pre>
@@ -3372,7 +3538,7 @@ jrs migrate                # write jrs.toml; the original build file is untouche
 <table>
   <thead><tr><th>What</th><th>Where</th></tr></thead>
   <tbody>
-    <tr><td>Dependency cache</td><td class="wrap"><code>JRS_CACHE_DIR</code>, or <code>~/Library/Caches/jrs</code>, <code>$XDG_CACHE_HOME/jrs</code> / <code>~/.cache/jrs</code>, <code>%LOCALAPPDATA%\jrs\cache</code>. It also keeps <code>.jrs/projects</code>, the lockfiles <code>jrs cache prune</code> keeps alive; <code>cds/</code>, the class-data-sharing archives; <code>build/</code>, the build cache; and <code>worker/</code>, the <code>--watch</code> <code>javac</code> worker.</td></tr>
+    <tr><td>Dependency cache</td><td class="wrap"><code>JRS_CACHE_DIR</code>, or <code>~/Library/Caches/jrs</code>, <code>$XDG_CACHE_HOME/jrs</code> / <code>~/.cache/jrs</code>, <code>%LOCALAPPDATA%\jrs\cache</code>. It also keeps <code>.jrs/projects</code>, the lockfiles <code>jrs cache prune</code> keeps alive; <code>cds/</code>, the class-data-sharing archives; <code>build/</code>, the build cache; <code>worker/</code>, the <code>--watch</code> <code>javac</code> and <code>kotlinc</code> workers; <code>jdks/</code>, the JDKs <code>jrs jdk install</code> downloaded; and <code>dist/</code>, the jrs releases the <code>jrsw</code> wrapper runs.</td></tr>
     <tr><td>Configuration</td><td class="wrap"><code>JRS_CONFIG</code>, or <code>$XDG_CONFIG_HOME/jrs/config.toml</code> / <code>~/.config/jrs/config.toml</code>, <code>%APPDATA%\jrs\config.toml</code>.</td></tr>
     <tr><td>The binary</td><td class="wrap"><code>~/.local/bin/jrs</code> from the install script, <code>~/.cargo/bin/jrs</code> from source.</td></tr>
   </tbody>
@@ -3387,8 +3553,9 @@ jrs migrate                # write jrs.toml; the original build file is untouche
 <p>
   Set <code>JAVA_HOME</code> to a JDK 17 or newer, or put its <code>bin/</code> on
   <code>PATH</code>. For a pinned version, the error lists the versions jrs did find; add the
-  missing one to <code>[jdks]</code> in the <a href="#user-config">user configuration</a>.
-  <code>jrs -v build</code> names the JDK in use.
+  missing one to <code>[jdks]</code> in the <a href="#user-config">user configuration</a>, or
+  download it with <code>jrs jdk install &lt;version&gt;</code>. <code>jrs jdk list</code> shows
+  every JDK jrs can see, and <code>jrs -v build</code> names the JDK in use.
 </p>
 
 <h3>Lombok or another processor does nothing</h3>

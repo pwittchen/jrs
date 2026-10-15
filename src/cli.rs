@@ -189,7 +189,7 @@ impl GlobalFlags {
 }
 
 /// `--jobs` beats the config file's `jobs`, which beats [`default_jobs`].
-fn effective_jobs(flag: Option<usize>, config: Option<usize>) -> usize {
+pub(super) fn effective_jobs(flag: Option<usize>, config: Option<usize>) -> usize {
     flag.filter(|j| *j > 0)
         .or(config)
         .unwrap_or_else(default_jobs)
@@ -420,6 +420,20 @@ pub enum Command {
         sources: bool,
     },
 
+    /// Write jrsw and jrsw.cmd, which run one pinned jrs release, downloading
+    /// and checking it first, so that every checkout builds with the same jrs.
+    Wrapper {
+        /// The release to pin, such as 0.11.1. Defaults to this jrs's version.
+        #[arg(long, value_name = "VERSION", value_parser = parse_release)]
+        version: Option<selfupdate::Version>,
+    },
+
+    /// List the JDKs jrs can see, or download one.
+    Jdk {
+        #[command(subcommand)]
+        action: JdkCommand,
+    },
+
     /// Check for a newer jrs release, or update jrs to it.
     #[command(name = "self")]
     SelfCmd {
@@ -590,6 +604,24 @@ pub enum CacheCommand {
         /// Say what would be removed; remove nothing.
         #[arg(long)]
         dry_run: bool,
+        /// Also remove the JDKs `jrs jdk install` downloaded, which are
+        /// otherwise kept.
+        #[arg(long)]
+        jdks: bool,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum JdkCommand {
+    /// Print every JDK jrs can see, where it is, and which one the project
+    /// would build with.
+    List,
+    /// Download a JDK into the cache, where a project that pins its version
+    /// finds it.
+    Install {
+        /// The Java feature version, such as 21.
+        #[arg(value_name = "VERSION")]
+        version: u32,
     },
 }
 
@@ -598,7 +630,19 @@ pub enum SelfCommand {
     /// Say whether this jrs is the latest release, and which release is.
     Check,
     /// Replace this jrs with the latest release, when it is newer.
-    Update,
+    Update {
+        /// Install this release instead, older ones included, such as
+        /// `0.10.0`: what `project.jrs-version` or a team pins.
+        #[arg(long, value_name = "VERSION", value_parser = parse_release)]
+        to: Option<selfupdate::Version>,
+    },
+}
+
+/// `--to`'s value: a release as its tag names it, `0.10.0` or `v0.10.0`.
+fn parse_release(text: &str) -> std::result::Result<selfupdate::Version, String> {
+    selfupdate::Version::parse(text)
+        .filter(selfupdate::Version::is_release)
+        .ok_or_else(|| format!("`{text}` is not a jrs release such as 0.10.0"))
 }
 
 impl Command {
@@ -718,6 +762,8 @@ fn dispatch(cli: &Cli, ui: &Ui) -> Result<i32> {
         Command::Completions { shell } => return completions_command(ui, shell),
         Command::Cache { action } => return cache_command(cli, ui, action),
         Command::SelfCmd { action } => return self_command(cli, ui, action),
+        Command::Jdk { action } => return jdk_command(cli, ui, action),
+        Command::Wrapper { version } => return wrapper_command(cli, ui, version.as_ref()),
         _ => {}
     }
 
@@ -781,6 +827,8 @@ fn dispatch(cli: &Cli, ui: &Ui) -> Result<i32> {
         | Command::Completions { .. }
         | Command::Cache { .. }
         | Command::SelfCmd { .. }
+        | Command::Jdk { .. }
+        | Command::Wrapper { .. }
         | Command::Add { .. }
         | Command::Remove { .. } => unreachable!("handled above"),
     }
@@ -1133,7 +1181,23 @@ impl<'a> Session<'a> {
             return Ok(toolchain.clone());
         }
         let pin = toolchain::project_pin(self.manifest.java.jdk, &self.manifest.root);
-        let toolchain = Toolchain::select(pin.as_ref(), &self.config.jdks)?;
+        let toolchain = match &pin {
+            None => Toolchain::discover()?,
+            Some(pin) => match Toolchain::select_installed(pin, &self.config.jdks)? {
+                Some(toolchain) => toolchain,
+                None if !self.config.jdk.download => {
+                    return Err(Toolchain::missing(pin, toolchain::Missing::Install));
+                }
+                None if self.offline => {
+                    return Err(Toolchain::missing(pin, toolchain::Missing::Offline));
+                }
+                None => {
+                    install_jdk(self.ui, &self.config, pin.version)?;
+                    Toolchain::select_installed(pin, &self.config.jdks)?
+                        .ok_or_else(|| Toolchain::missing(pin, toolchain::Missing::Install))?
+                }
+            },
+        };
         if let Some(pin) = &pin {
             self.ui.verbose(format!(
                 "using JDK {} at {}, as {} asks",
@@ -5904,6 +5968,7 @@ fn cache_command(cli: &Cli, ui: &Ui, action: &CacheCommand) -> Result<i32> {
         CacheCommand::Prune {
             unused_for,
             dry_run,
+            jdks,
         } => {
             // The project jrs is run from is a user of the cache whether or
             // not it was built since projects started being recorded.
@@ -5921,7 +5986,7 @@ fn cache_command(cli: &Cli, ui: &Ui, action: &CacheCommand) -> Result<i32> {
                 if *dry_run { "Checking" } else { "Pruning" },
                 cache.root().display(),
             );
-            let pruned = cache.prune(&rule, *dry_run)?;
+            let pruned = cache.prune_with(&rule, *dry_run, *jdks)?;
             if *dry_run {
                 ui.suspend();
                 for dir in &pruned.removed {
@@ -5942,6 +6007,165 @@ fn cache_command(cli: &Cli, ui: &Ui, action: &CacheCommand) -> Result<i32> {
     }
 }
 
+/// `jrs wrapper`: `jrsw` and `jrsw.cmd` beside the manifest, or in the
+/// working directory when there is none (SPEC §4.3).
+fn wrapper_command(cli: &Cli, ui: &Ui, version: Option<&selfupdate::Version>) -> Result<i32> {
+    if cli.global.offline {
+        return Err(JrsError::usage(
+            "`jrs wrapper` reads the release's checksums from GitHub, which --offline rules out",
+        ));
+    }
+    let config = Config::load()?;
+    for warning in &config.warnings {
+        ui.warn(warning);
+    }
+    let version = version.cloned().unwrap_or_else(selfupdate::current_version);
+    let dir = manifest_path(cli)
+        .ok()
+        .filter(|p| p.is_file())
+        .and_then(|p| p.parent().map(Path::to_path_buf))
+        .unwrap_or_else(|| PathBuf::from("."));
+
+    let releases = Releases::new(config.proxy.as_ref())?;
+    ui.phase("Checking", format!("the checksums of jrs {version}"));
+    let scope = ui.spinner(
+        "Checking",
+        format!("{}/download/v{version}", selfupdate::RELEASES),
+    );
+    let sums = releases.sums(&version);
+    scope.finish();
+    let targets = crate::wrapper::targets(&sums?);
+    if targets.is_empty() {
+        return Err(JrsError::resolve(format!(
+            "the SHA256SUMS of jrs {version} lists no release archive"
+        )));
+    }
+
+    let posix = dir.join(crate::wrapper::POSIX);
+    std::fs::write(&posix, crate::wrapper::posix(&version, &targets)).path(&posix)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&posix, std::fs::Permissions::from_mode(0o755)).path(&posix)?;
+    }
+    let windows = dir.join(crate::wrapper::WINDOWS);
+    std::fs::write(&windows, crate::wrapper::windows(&version, &targets)).path(&windows)?;
+    ui.phase(
+        "Wrote",
+        format!(
+            "{} and {} (jrs {version}, {} targets)",
+            crate::wrapper::POSIX,
+            crate::wrapper::WINDOWS,
+            targets.len()
+        ),
+    );
+    Ok(exit::SUCCESS)
+}
+
+/// `jrs jdk list` and `jrs jdk install` (SPEC §7.1).
+fn jdk_command(cli: &Cli, ui: &Ui, action: &JdkCommand) -> Result<i32> {
+    let config = Config::load()?;
+    for warning in &config.warnings {
+        ui.warn(warning);
+    }
+    match action {
+        JdkCommand::Install { version } => {
+            if cli.global.offline {
+                return Err(JrsError::usage(
+                    "`jrs jdk install` downloads a JDK, which --offline rules out",
+                ));
+            }
+            install_jdk(ui, &config, *version)?;
+            Ok(exit::SUCCESS)
+        }
+        JdkCommand::List => {
+            // The project here, if there is one, says which JDK it would pick.
+            let picked = manifest_path(cli)
+                .ok()
+                .and_then(|path| Manifest::load(path).ok())
+                .and_then(|manifest| {
+                    let pin = toolchain::project_pin(manifest.java.jdk, &manifest.root);
+                    let toolchain = match &pin {
+                        Some(pin) => Toolchain::select_installed(pin, &config.jdks).ok()??,
+                        None => Toolchain::discover().ok()?,
+                    };
+                    toolchain.home
+                })
+                .map(|home| home.canonicalize().unwrap_or(home));
+            let visible = Toolchain::visible(&config.jdks);
+            if visible.is_empty() {
+                ui.phase("Finished", "jrs sees no JDK");
+                return Ok(exit::SUCCESS);
+            }
+            let width = visible.iter().map(|j| j.version.len()).max().unwrap_or(0);
+            let source = visible.iter().map(|j| j.source.len()).max().unwrap_or(0);
+            for jdk in &visible {
+                let home = jdk.home.canonicalize().unwrap_or_else(|_| jdk.home.clone());
+                let mark = if picked.as_ref() == Some(&home) {
+                    "  (this project)"
+                } else {
+                    ""
+                };
+                ui.println_out(format!(
+                    "{:width$}  {:source$}  {}{mark}",
+                    jdk.version,
+                    jdk.source,
+                    jdk.home.display()
+                ));
+            }
+            Ok(exit::SUCCESS)
+        }
+    }
+}
+
+/// Download the newest GA build of JDK `feature` into `<cache>/jdks`, with
+/// its phase lines, and return its home.
+fn install_jdk(ui: &Ui, config: &Config, feature: u32) -> Result<PathBuf> {
+    let jdks = Cache::discover()?.root().join(crate::jdk::JDKS_DIR);
+    let vendor = crate::jdk::Vendor::new(&config.jdk, config.proxy.as_ref())?;
+    let scope = ui.spinner("Checking", format!("{} for JDK {feature}", config.jdk.url));
+    let build = vendor.latest(feature);
+    scope.finish();
+    let build = build?;
+    ui.phase(
+        "Downloading",
+        format!("JDK {} ({})", build.version, build.platform()),
+    );
+    let scope = ui.downloads(1);
+    ui.update_live(|live| {
+        if let ui::Live::Downloads(d) = live {
+            d.active.push(ui::Transfer {
+                id: 0,
+                name: build.name.clone(),
+                done: 0,
+                total: build.size,
+                verifying: false,
+            });
+        }
+    });
+    let archive = vendor.download(&build, &jdks, &mut |done, total| {
+        ui.update_live(|live| {
+            if let ui::Live::Downloads(d) = live
+                && let Some(t) = d.active.first_mut()
+            {
+                t.done = done;
+                t.total = total;
+            }
+        });
+    });
+    scope.finish();
+    let archive = archive?;
+    let scope = ui.spinner("Unpacking", &build.name);
+    let home = crate::jdk::install(&archive, &build, feature, &jdks);
+    scope.finish();
+    let home = home?;
+    ui.phase(
+        "Installed",
+        format!("JDK {} in {}", build.version, home.display()),
+    );
+    Ok(home)
+}
+
 /// `jrs self check` and `jrs self update`, against the GitHub releases.
 fn self_command(cli: &Cli, ui: &Ui, action: &SelfCommand) -> Result<i32> {
     if cli.global.offline {
@@ -5956,30 +6180,39 @@ fn self_command(cli: &Cli, ui: &Ui, action: &SelfCommand) -> Result<i32> {
     let releases = Releases::new(config.proxy.as_ref())?;
     let current = selfupdate::current_version();
 
-    ui.phase(
-        "Checking",
-        format!("{} for the latest jrs", selfupdate::RELEASES),
-    );
-    let scope = ui.spinner("Checking", "the latest release");
-    let latest = releases.latest();
-    scope.finish();
-    let latest = latest?;
+    let wanted = if let SelfCommand::Update { to: Some(to) } = action {
+        if *to == current {
+            ui.phase("Finished", format!("jrs {current} is already installed"));
+            return Ok(exit::SUCCESS);
+        }
+        to.clone()
+    } else {
+        ui.phase(
+            "Checking",
+            format!("{} for the latest jrs", selfupdate::RELEASES),
+        );
+        let scope = ui.spinner("Checking", "the latest release");
+        let latest = releases.latest();
+        scope.finish();
+        let latest = latest?;
 
-    let standing = selfupdate::standing(&current, &latest);
-    if matches!(action, SelfCommand::Check) || standing != Standing::Outdated {
-        let msg = match standing {
-            Standing::UpToDate => format!("jrs {current} is the latest release"),
-            Standing::Ahead => {
-                format!("jrs {current} is newer than the latest release, {latest}")
-            }
-            Standing::Outdated => format!(
-                "jrs {current} is outdated; the latest release is {latest}, \
-                 `jrs self update` installs it"
-            ),
-        };
-        ui.phase("Finished", msg);
-        return Ok(exit::SUCCESS);
-    }
+        let standing = selfupdate::standing(&current, &latest);
+        if matches!(action, SelfCommand::Check) || standing != Standing::Outdated {
+            let msg = match standing {
+                Standing::UpToDate => format!("jrs {current} is the latest release"),
+                Standing::Ahead => {
+                    format!("jrs {current} is newer than the latest release, {latest}")
+                }
+                Standing::Outdated => format!(
+                    "jrs {current} is outdated; the latest release is {latest}, \
+                     `jrs self update` installs it"
+                ),
+            };
+            ui.phase("Finished", msg);
+            return Ok(exit::SUCCESS);
+        }
+        latest
+    };
 
     let target = selfupdate::target().ok_or_else(|| {
         JrsError::usage(format!(
@@ -5991,9 +6224,9 @@ fn self_command(cli: &Cli, ui: &Ui, action: &SelfCommand) -> Result<i32> {
     })?;
     let exe = selfupdate::current_exe()?;
     let asset = selfupdate::asset_name(target);
-    ui.phase("Downloading", format!("{asset} ({latest})"));
+    ui.phase("Downloading", format!("{asset} ({wanted})"));
     let scope = ui.spinner("Downloading", &asset);
-    let archive = releases.download(&latest, target);
+    let archive = releases.download(&wanted, target);
     scope.finish();
     let archive = archive?;
 

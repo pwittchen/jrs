@@ -67,6 +67,24 @@ impl Toolchain {
         let Some(pin) = pin else {
             return Toolchain::discover();
         };
+        match Toolchain::select_installed(pin, configured)? {
+            Some(toolchain) => Ok(toolchain),
+            None => Err(Toolchain::missing(pin, Missing::Install)),
+        }
+    }
+
+    /// The pinned JDK, wherever [`Toolchain::select`] would find it, or `None`
+    /// when it is installed nowhere jrs looks — which is when it may be
+    /// downloaded (SPEC §7.1).
+    ///
+    /// # Errors
+    ///
+    /// [`JrsError::Toolchain`] if the configured home for the pinned version is
+    /// not a JDK, or is another version.
+    pub fn select_installed(
+        pin: &JdkPin,
+        configured: &BTreeMap<u32, PathBuf>,
+    ) -> Result<Option<Toolchain>> {
         if let Some(home) = configured.get(&pin.version) {
             let toolchain = Toolchain::probe_home(home)?;
             if toolchain.version != pin.version {
@@ -77,28 +95,32 @@ impl Toolchain {
                     toolchain.version
                 )));
             }
-            return Ok(toolchain);
+            return Ok(Some(toolchain));
         }
-        let default = Toolchain::discover().ok();
-        if let Some(toolchain) = &default
+        if let Ok(toolchain) = Toolchain::discover()
             && toolchain.version == pin.version
         {
-            return Ok(toolchain.clone());
+            return Ok(Some(toolchain));
         }
 
-        let installed = installed_jdks();
-        let best = installed
-            .iter()
+        let best = installed_jdks()
+            .into_iter()
             .filter(|(v, _)| feature_version(v) == Some(pin.version))
             .max_by(|a, b| compare_versions(&a.0, &b.0));
-        if let Some((_, home)) = best {
-            return Toolchain::probe_home(home);
+        match best {
+            Some((_, home)) => Toolchain::probe_home(&home).map(Some),
+            None => Ok(None),
         }
+    }
 
-        let mut versions: Vec<u32> = installed
+    /// The error for a pinned JDK installed nowhere jrs looks, naming the
+    /// versions it did find and, by `why`, how this one could be had.
+    #[must_use]
+    pub fn missing(pin: &JdkPin, why: Missing) -> JrsError {
+        let mut versions: Vec<u32> = installed_jdks()
             .iter()
             .filter_map(|(v, _)| feature_version(v))
-            .chain(default.as_ref().map(|t| t.version))
+            .chain(Toolchain::discover().ok().map(|t| t.version))
             .collect();
         versions.sort_unstable();
         versions.dedup();
@@ -108,16 +130,71 @@ impl Toolchain {
             let list: Vec<String> = versions.iter().map(u32::to_string).collect();
             format!("found JDK {}", list.join(", "))
         };
-        Err(JrsError::toolchain(format!(
+        let v = pin.version;
+        let download = match why {
+            Missing::Install => format!(
+                "\n\n`jrs jdk install {v}` downloads it, or `download = true` under [jdk] \
+                 in the same file downloads a pinned JDK whenever one is missing"
+            ),
+            Missing::Offline => format!(
+                "\n\n--offline is set, so it was not downloaded; `jrs jdk install {v}` \
+                 downloads it"
+            ),
+        };
+        JrsError::toolchain(format!(
             "{} pins JDK {v}, but none is installed where jrs looks ({seen})\n\n\
-             install JDK {v}, or say where it is in {}:\n\n    [jdks]\n    {v} = \"/path/to/jdk-{v}\"",
+             install JDK {v}, or say where it is in {}:\n\n    [jdks]\n    {v} = \"/path/to/jdk-{v}\"\
+             {download}",
             pin.from,
             crate::config::default_path().map_or_else(
                 || "the jrs config file".to_string(),
                 |p| p.display().to_string()
             ),
-            v = pin.version,
-        )))
+        ))
+    }
+
+    /// Every JDK jrs can see, for `jrs jdk list`: the `[jdks]` table's, the
+    /// one at `JAVA_HOME` or on `PATH`, and those installed where installers,
+    /// version managers and `jrs jdk install` put them, each once, in that
+    /// order.
+    #[must_use]
+    pub fn visible(configured: &BTreeMap<u32, PathBuf>) -> Vec<Visible> {
+        let mut out: Vec<Visible> = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        let mut add = |version: String, home: PathBuf, source: &'static str| {
+            if seen.insert(home.canonicalize().unwrap_or_else(|_| home.clone())) {
+                out.push(Visible {
+                    version,
+                    home,
+                    source,
+                });
+            }
+        };
+        for (feature, home) in configured {
+            let version = release_version(home).unwrap_or_else(|| feature.to_string());
+            add(version, home.clone(), "[jdks]");
+        }
+        if let Ok(toolchain) = Toolchain::discover()
+            && let Some(home) = &toolchain.home
+        {
+            let version = release_version(home).unwrap_or_else(|| toolchain.version.to_string());
+            let source = if std::env::var_os("JAVA_HOME").is_some_and(|h| !h.is_empty()) {
+                "JAVA_HOME"
+            } else {
+                "PATH"
+            };
+            add(version, home.clone(), source);
+        }
+        let jdks = downloaded_root();
+        for (version, home) in installed_jdks() {
+            let source = if jdks.as_ref().is_some_and(|r| home.starts_with(r)) {
+                "jrs jdk install"
+            } else {
+                "installed"
+            };
+            add(version, home, source);
+        }
+        out
     }
 
     /// Another JDK tool — `javadoc`, `jdeps`, `jlink`, `jpackage` — beside
@@ -146,7 +223,7 @@ impl Toolchain {
         )))
     }
 
-    fn probe_home(home: &Path) -> Result<Toolchain> {
+    pub(crate) fn probe_home(home: &Path) -> Result<Toolchain> {
         let javac = home.join("bin").join(exe("javac"));
         if !javac.is_file() {
             return Err(JrsError::toolchain(format!(
@@ -273,6 +350,34 @@ impl Toolchain {
     }
 }
 
+/// Why a pinned JDK is missing, for [`Toolchain::missing`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Missing {
+    /// It could be downloaded, but downloading is not turned on.
+    Install,
+    /// `--offline` rules downloading out.
+    Offline,
+}
+
+/// A JDK [`Toolchain::visible`] found.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Visible {
+    /// `JAVA_VERSION` from its `release` file: `21.0.5`.
+    pub version: String,
+    pub home: PathBuf,
+    /// Where jrs found it: `[jdks]`, `JAVA_HOME`, `PATH`, `installed`, or
+    /// `jrs jdk install`.
+    pub source: &'static str,
+}
+
+/// Where `jrs jdk install` puts JDKs: `<cache>/jdks`.
+#[must_use]
+pub fn downloaded_root() -> Option<PathBuf> {
+    crate::resolve::cache::Cache::discover()
+        .ok()
+        .map(|c| c.root().join(crate::jdk::JDKS_DIR))
+}
+
 /// Parse `javac 23.0.2`, `javac 21`, or the pre-9 `javac 1.8.0_292`.
 #[must_use]
 pub fn parse_javac_version(text: &str) -> Option<u32> {
@@ -355,7 +460,8 @@ fn feature_version(version: &str) -> Option<u32> {
 /// The `release` file is read rather than `javac -version` run, so looking at
 /// a dozen installed JDKs costs a dozen small reads, not a dozen JVM starts.
 fn installed_jdks() -> Vec<(String, PathBuf)> {
-    let mut roots: Vec<PathBuf> = Vec::new();
+    // What `jrs jdk install` downloaded is one root more (`jdk.rs`).
+    let mut roots: Vec<PathBuf> = downloaded_root().into_iter().collect();
     if let Some(home) = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")) {
         let home = PathBuf::from(home);
         for relative in [
@@ -405,7 +511,12 @@ fn installed_jdks() -> Vec<(String, PathBuf)> {
         let Ok(entries) = std::fs::read_dir(&root) else {
             continue;
         };
-        let mut dirs: Vec<PathBuf> = entries.flatten().map(|e| e.path()).collect();
+        // A dot directory is an install still being unpacked (`jdk.rs`).
+        let mut dirs: Vec<PathBuf> = entries
+            .flatten()
+            .filter(|e| !e.file_name().to_string_lossy().starts_with('.'))
+            .map(|e| e.path())
+            .collect();
         dirs.sort();
         for dir in dirs {
             // macOS bundles keep the JDK under Contents/Home.
@@ -1101,6 +1212,9 @@ mod tests {
             .to_string();
         assert!(err.contains(".java-version pins JDK 3"), "{err}");
         assert!(err.contains("[jdks]"), "{err}");
+        assert!(err.contains("`jrs jdk install 3` downloads it"), "{err}");
+        let offline = Toolchain::missing(&pin, Missing::Offline).to_string();
+        assert!(offline.contains("--offline is set"), "{offline}");
     }
 
     #[test]

@@ -28,6 +28,11 @@
 //!
 //! [audit]                             # SPEC §8.12
 //! url = "https://osv.example.com"     # an OSV-compatible API
+//!
+//! [jdk]                               # SPEC §7.1
+//! download = true                     # download a pinned JDK not installed
+//! vendor = "temurin"                  # the only vendor jrs knows
+//! url = "https://api.adoptium.net"    # an API-compatible mirror
 //! ```
 //!
 //! Like the manifest it is parsed by hand, so an unknown key is a warning and
@@ -93,7 +98,32 @@ pub struct Config {
     /// The OSV-compatible API `jrs audit` asks, from `audit.url` or
     /// `JRS_AUDIT_URL`; `None` for the public one.
     pub audit_url: Option<String>,
+    /// `[jdk]`, with `JRS_JDK_DOWNLOAD` applied.
+    pub jdk: JdkConfig,
     pub warnings: Vec<String>,
+}
+
+/// `[jdk]`: whether, and from where, a JDK a project pins is downloaded when
+/// it is installed nowhere jrs looks (SPEC §7.1). It belongs to the machine,
+/// so it is never in `jrs.toml`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JdkConfig {
+    /// Off unless the user turns it on.
+    pub download: bool,
+    /// The vendor; only `temurin` is known.
+    pub vendor: String,
+    /// The vendor's API, or a mirror of it.
+    pub url: String,
+}
+
+impl Default for JdkConfig {
+    fn default() -> Self {
+        JdkConfig {
+            download: false,
+            vendor: crate::jdk::TEMURIN.to_string(),
+            url: crate::jdk::ADOPTIUM.to_string(),
+        }
+    }
 }
 
 /// `[build-cache]`: the build cache of SPEC §7.8. It names infrastructure,
@@ -133,8 +163,10 @@ const TOP_KEYS: &[&str] = &[
     "jdks",
     "build-cache",
     "audit",
+    "jdk",
 ];
 const AUDIT_KEYS: &[&str] = &["url"];
+const JDK_KEYS: &[&str] = &["download", "vendor", "url"];
 const BUILD_CACHE_KEYS: &[&str] = &["enabled", "url", "push", "credentials", "tasks"];
 const PROXY_KEYS: &[&str] = &["url", "no-proxy"];
 const CREDENTIAL_KEYS: &[&str] = &["username", "password", "password-env", "token", "token-env"];
@@ -286,6 +318,8 @@ impl Config {
         if let Some(url) = env("JRS_AUDIT_URL") {
             config.audit_url = Some(url.trim_end_matches('/').to_string());
         }
+
+        config.jdk = parse_jdk(table.get("jdk"), env, &shown, &fail, &mut config.warnings)?;
 
         Ok(config)
     }
@@ -466,6 +500,57 @@ fn parse_audit(
                 .ok_or_else(|| fail("`audit.url` must be a URL string".into()))
         })
         .transpose()
+}
+
+/// `[jdk]`: downloading a pinned JDK (SPEC §7.1), then `JRS_JDK_DOWNLOAD`,
+/// through which CI turns it on.
+fn parse_jdk(
+    value: Option<&toml::Value>,
+    env: &dyn Fn(&str) -> Option<String>,
+    shown: &str,
+    fail: &dyn Fn(String) -> JrsError,
+    warnings: &mut Vec<String>,
+) -> Result<JdkConfig> {
+    let mut jdk = JdkConfig::default();
+    if let Some(download) = env("JRS_JDK_DOWNLOAD") {
+        jdk.download = matches!(download.to_ascii_lowercase().as_str(), "true" | "1");
+    }
+    let Some(value) = value else {
+        return Ok(jdk);
+    };
+    let t = value
+        .as_table()
+        .ok_or_else(|| fail("`jdk` must be a table".into()))?;
+    warn_unknown(t, JDK_KEYS, "jdk.", shown, warnings);
+    if let Some(v) = t.get("download") {
+        let download = v
+            .as_bool()
+            .ok_or_else(|| fail("`jdk.download` must be `true` or `false`".into()))?;
+        // The environment wins over the file.
+        if env("JRS_JDK_DOWNLOAD").is_none() {
+            jdk.download = download;
+        }
+    }
+    if let Some(v) = t.get("vendor") {
+        let vendor = v
+            .as_str()
+            .ok_or_else(|| fail("`jdk.vendor` must be a string".into()))?;
+        if vendor != crate::jdk::TEMURIN {
+            return Err(fail(format!(
+                "`jdk.vendor` is \"{vendor}\", but the only vendor jrs knows is \"{}\"",
+                crate::jdk::TEMURIN
+            )));
+        }
+        jdk.vendor = vendor.to_string();
+    }
+    if let Some(v) = t.get("url") {
+        jdk.url = v
+            .as_str()
+            .ok_or_else(|| fail("`jdk.url` must be a URL string".into()))?
+            .trim_end_matches('/')
+            .to_string();
+    }
+    Ok(jdk)
 }
 
 fn string_list(t: &toml::Table, key: &str) -> std::result::Result<Vec<String>, ()> {
@@ -679,6 +764,28 @@ token = "ghp_x"
         let config = Config::parse("[audit]\nurl = 'https://osv.example.com'", None, &env).unwrap();
         assert_eq!(config.audit_url.as_deref(), Some("http://localhost:1"));
         assert!(parse("[audit]\nurl = 1").is_err());
+    }
+
+    #[test]
+    fn jdk_downloads_are_off_unless_configured_and_the_environment_wins() {
+        let config = parse("").unwrap();
+        assert!(!config.jdk.download);
+        assert_eq!(config.jdk.vendor, "temurin");
+        assert_eq!(config.jdk.url, "https://api.adoptium.net");
+        let config = parse("[jdk]\ndownload = true\nurl = 'https://mirror.example/'").unwrap();
+        assert!(config.jdk.download);
+        assert_eq!(config.jdk.url, "https://mirror.example");
+        let env = |name: &str| (name == "JRS_JDK_DOWNLOAD").then(|| "1".to_string());
+        assert!(Config::parse("", None, &env).unwrap().jdk.download);
+        let env = |name: &str| (name == "JRS_JDK_DOWNLOAD").then(|| "0".to_string());
+        assert!(
+            !Config::parse("[jdk]\ndownload = true", None, &env)
+                .unwrap()
+                .jdk
+                .download
+        );
+        assert!(parse("[jdk]\nvendor = 'zulu'").is_err());
+        assert!(parse("[jdk]\ndownload = 'yes'").is_err());
     }
 
     #[test]

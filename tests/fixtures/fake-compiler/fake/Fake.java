@@ -80,6 +80,54 @@ public final class Fake {
         return ok ? 0 : 1;
     }
 
+    /**
+     * The arguments with every {@code @argfile} replaced by what it holds,
+     * read as kotlinc reads one: separated by whitespace, a double-quoted
+     * argument taking a backslash as an escape.
+     */
+    public static String[] expand(String[] args) throws IOException {
+        List<String> out = new ArrayList<>();
+        for (String arg : args) {
+            if (!arg.startsWith("@")) {
+                out.add(arg);
+                continue;
+            }
+            String text = Files.readString(Path.of(arg.substring(1)));
+            StringBuilder current = null;
+            boolean quoted = false;
+            for (int i = 0; i < text.length(); i++) {
+                char c = text.charAt(i);
+                if (quoted) {
+                    if (c == '\\' && i + 1 < text.length()) {
+                        current.append(text.charAt(++i));
+                    } else if (c == '"') {
+                        quoted = false;
+                    } else {
+                        current.append(c);
+                    }
+                } else if (Character.isWhitespace(c)) {
+                    if (current != null) {
+                        out.add(current.toString());
+                        current = null;
+                    }
+                } else {
+                    if (current == null) {
+                        current = new StringBuilder();
+                    }
+                    if (c == '"') {
+                        quoted = true;
+                    } else {
+                        current.append(c);
+                    }
+                }
+            }
+            if (current != null) {
+                out.add(current.toString());
+            }
+        }
+        return out.toArray(new String[0]);
+    }
+
     /** Options of the doc tools whose value is the next argument. */
     private static final Set<String> DOC_VALUE_OPTIONS =
             Set.of("-classpath", "-project", "-project-version", "-doc-title", "-doc-version",

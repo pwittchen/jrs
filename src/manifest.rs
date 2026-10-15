@@ -1258,6 +1258,8 @@ pub const RESERVED_TASK_NAMES: &[&str] = &[
     "metadata",
     "fetch",
     "self",
+    "jdk",
+    "wrapper",
 ];
 
 impl Manifest {
@@ -3887,8 +3889,10 @@ pub fn check_jrs_version(required: &str, running: &str, path: &Path) -> Result<(
     }
     Err(JrsError::manifest(format!(
         "{} needs jrs {required} or newer (`project.jrs-version`), but this is jrs \
-         {running}\n\ninstall a newer release from {RELEASES_URL}",
-        path.display()
+         {running}\n\n`jrs self update --to {}` installs it, or install a newer release \
+         from {RELEASES_URL}",
+        path.display(),
+        needed.map(|p| p.to_string()).join(".")
     )))
 }
 

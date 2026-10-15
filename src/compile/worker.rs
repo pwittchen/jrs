@@ -1,24 +1,32 @@
-//! A warm `javac` for `--watch` (SPEC §7.5).
+//! Warm compilers for `--watch` (SPEC §7.5): a `javac` worker, and a
+//! `kotlinc` one.
 //!
 //! A `--watch` session keeps one jrs process alive across rebuilds, and in
-//! it, one `javac` worker JVM: started the first time a `javac` step runs,
-//! and sent every later one. The worker is `JavacWorker.java`, embedded
-//! here and compiled on first use with the project's own `javac` into
-//! `<cache>/worker/<jrs version>-jdk<n>/`, so jrs ships no binary and
-//! downloads nothing. It runs `javac` in process, through
-//! `ToolProvider.getSystemJavaCompiler()`, over the argfile jrs writes for a
-//! forked `javac` anyway, and answers with the exit code and both streams,
-//! which pass through verbatim as a forked run's do.
+//! it, one worker JVM per compiler: started the first time that compiler's
+//! step runs, and sent every later one. The `javac` worker is
+//! `JavacWorker.java`, embedded here and compiled on first use with the
+//! project's own `javac` into `<cache>/worker/<jrs version>-jdk<n>/`, so jrs
+//! ships no binary and downloads nothing. It runs `javac` in process,
+//! through `ToolProvider.getSystemJavaCompiler()`, over the argfile jrs
+//! writes for a forked `javac` anyway, and answers with the exit code and
+//! both streams, which pass through verbatim as a forked run's do.
 //!
-//! The worker is not a compiler daemon (SPEC §1.2). It is a child of the
+//! The `kotlinc` worker is `KotlincWorker.java`, compiled the same way into
+//! `<cache>/worker/kotlinc-<jrs version>-jdk<n>/` and run with the Kotlin
+//! compiler's jars on its classpath. It reaches the compiler by reflection,
+//! so one program serves every Kotlin version, and reads the argfile that
+//! holds the compiler's own arguments — the file a forked `kotlinc` reads as
+//! `@argfile` too. A third kind would be a Java file and a main class.
+//!
+//! A worker is not a compiler daemon (SPEC §1.2). It is a child of the
 //! jrs process and nothing else can reach it: it reads its requests from a
 //! pipe jrs holds and exits when that pipe closes, which happens however jrs
-//! exits. jrs starts a new one after [`RESTART_AFTER`] compilations, to
-//! bound what a processor's leaked class loaders cost, and whenever the JDK
+//! exits. jrs starts a new one after a number of compilations of its kind
+//! ([`RESTART_AFTER`], [`KOTLINC_RESTART_AFTER`]), to bound what leaked class
+//! loaders and static state cost, and whenever the JDK or the compiler
 //! changes. And it may never fail a build: a worker that dies, answers
-//! garbage or takes far longer than a forked `javac` would is killed, and
-//! that step runs as a forked `javac`, whose output alone reaches the
-//! terminal.
+//! garbage or takes far longer than a forked run would is killed, and that
+//! step runs as a forked compiler, whose output alone reaches the terminal.
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
@@ -31,24 +39,86 @@ use super::share::Share;
 use crate::toolchain::{CapturedOutput, Toolchain};
 use crate::ui::Ui;
 
-/// The worker's source, compiled on first use.
-const SOURCE: &str = include_str!("JavacWorker.java");
-
-/// The worker's main class.
-const MAIN_CLASS: &str = "JavacWorker";
-
-/// How many compilations one worker JVM serves before a new one takes over.
+/// How many compilations one `javac` worker JVM serves before a new one
+/// takes over.
 pub const RESTART_AFTER: u32 = 50;
+
+/// The same for `kotlinc`, which keeps more static state than `javac` from
+/// one compile to the next.
+pub const KOTLINC_RESTART_AFTER: u32 = 20;
 
 /// The least a request may take before the worker counts as hung; past it,
 /// ten times the slowest compile the worker has answered.
 const PATIENCE: Duration = Duration::from_secs(120);
 
-/// The `javac` worker of one `--watch` session.
+/// Which compiler a worker JVM runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Kind {
+    Javac,
+    Kotlinc,
+}
+
+impl Kind {
+    fn name(self) -> &'static str {
+        match self {
+            Kind::Javac => "javac",
+            Kind::Kotlinc => "kotlinc",
+        }
+    }
+
+    /// The worker's source, compiled on first use.
+    fn source(self) -> &'static str {
+        match self {
+            Kind::Javac => include_str!("JavacWorker.java"),
+            Kind::Kotlinc => include_str!("KotlincWorker.java"),
+        }
+    }
+
+    /// The worker's main class.
+    fn main_class(self) -> &'static str {
+        match self {
+            Kind::Javac => "JavacWorker",
+            Kind::Kotlinc => "KotlincWorker",
+        }
+    }
+
+    fn restart_after(self) -> u32 {
+        match self {
+            Kind::Javac => RESTART_AFTER,
+            Kind::Kotlinc => KOTLINC_RESTART_AFTER,
+        }
+    }
+
+    /// The directory under `<cache>/worker` its program is compiled into.
+    fn program_dir(self, jdk: u32) -> String {
+        let version = env!("CARGO_PKG_VERSION");
+        match self {
+            Kind::Javac => format!("{version}-jdk{jdk}"),
+            Kind::Kotlinc => format!("kotlinc-{version}-jdk{jdk}"),
+        }
+    }
+}
+
+/// How to start a worker JVM, and what makes a running one stale.
+struct Launch<'a> {
+    toolchain: &'a Toolchain,
+    /// The compiler's own jars, beside the worker's program.
+    classpath: &'a [PathBuf],
+    /// Flags for the worker's JVM.
+    jvm_args: &'a [String],
+    /// Arguments to the worker's program.
+    args: &'a [&'a str],
+    /// What a worker started with these settings is known by: a request
+    /// with another key replaces it.
+    key: String,
+}
+
+/// The warm compilers of one `--watch` session.
 pub struct Worker {
     /// `<cache>/worker`.
     dir: PathBuf,
     running: Mutex<Option<Running>>,
+    kotlinc: Mutex<Option<Running>>,
 }
 
 impl std::fmt::Debug for Worker {
@@ -64,8 +134,8 @@ struct Running {
     child: Child,
     stdin: Option<ChildStdin>,
     stdout: Option<BufReader<ChildStdout>>,
-    /// The `javac` whose JDK it runs on.
-    javac: PathBuf,
+    /// [`Launch::key`] of the settings it was started with.
+    key: String,
     compilations: u32,
     slowest: Duration,
     /// Its class-data-sharing archive, put in place once it exits.
@@ -73,48 +143,93 @@ struct Running {
 }
 
 impl Worker {
-    /// A worker whose program and archive live under `dir`. Nothing starts
+    /// Workers whose programs and archives live under `dir`. Nothing starts
     /// until the first compile.
     #[must_use]
     pub fn new(dir: PathBuf) -> Worker {
         Worker {
             dir,
             running: Mutex::new(None),
+            kotlinc: Mutex::new(None),
         }
     }
 
     /// Compile with the argfile at `argfile`, as `javac @argfile` would.
     /// `None` when the worker could not answer: the caller forks `javac`
     /// instead, and the next request starts a new worker.
-    ///
-    /// # Panics
-    ///
-    /// If a thread panicked while holding the lock on the worker.
     pub fn compile(
         &self,
         toolchain: &Toolchain,
         argfile: &Path,
         ui: &Ui,
     ) -> Option<CapturedOutput> {
-        let mut running = self.running.lock().unwrap();
+        let launch = Launch {
+            toolchain,
+            classpath: &[],
+            jvm_args: &[],
+            args: &[],
+            key: toolchain.javac.display().to_string(),
+        };
+        self.serve(Kind::Javac, &self.running, &launch, argfile, ui)
+    }
+
+    /// Run the Kotlin compiler `main_class`, from `classpath`, in a JVM
+    /// started with `jvm_args`, over the compiler argfile at `argfile` — as
+    /// `java -cp <classpath> <main_class> @argfile` would. `None` when the
+    /// worker could not answer, as for [`Worker::compile`].
+    pub fn kotlinc(
+        &self,
+        toolchain: &Toolchain,
+        classpath: &[PathBuf],
+        jvm_args: &[String],
+        main_class: &str,
+        argfile: &Path,
+        ui: &Ui,
+    ) -> Option<CapturedOutput> {
+        let key = format!(
+            "{}\n{}\n{}\n{main_class}",
+            toolchain.javac.display(),
+            Toolchain::classpath(classpath),
+            jvm_args.join("\n")
+        );
+        let launch = Launch {
+            toolchain,
+            classpath,
+            jvm_args,
+            args: &[main_class],
+            key,
+        };
+        self.serve(Kind::Kotlinc, &self.kotlinc, &launch, argfile, ui)
+    }
+
+    fn serve(
+        &self,
+        kind: Kind,
+        slot: &Mutex<Option<Running>>,
+        launch: &Launch<'_>,
+        argfile: &Path,
+        ui: &Ui,
+    ) -> Option<CapturedOutput> {
+        let name = kind.name();
+        let mut running = slot.lock().unwrap();
         let stale = running
             .as_ref()
-            .is_some_and(|r| r.javac != toolchain.javac || r.compilations >= RESTART_AFTER);
+            .is_some_and(|r| r.key != launch.key || r.compilations >= kind.restart_after());
         if stale && let Some(old) = running.take() {
             old.stop();
         }
         if running.is_none() {
-            match self.start(toolchain, ui) {
+            match self.start(kind, launch, ui) {
                 Ok(started) => *running = Some(started),
                 Err(why) => {
-                    ui.verbose(format!("javac worker: not started: {why}"));
+                    ui.verbose(format!("{name} worker: not started: {why}"));
                     return None;
                 }
             }
         }
         let worker = running.as_mut()?;
         ui.verbose(format!(
-            "javac worker (pid {}): @{}",
+            "{name} worker (pid {}): @{}",
             worker.child.id(),
             argfile.display()
         ));
@@ -122,7 +237,7 @@ impl Worker {
             Ok(output) => Some(output),
             Err(why) => {
                 ui.verbose(format!(
-                    "javac worker: {why}; it is stopped, and javac runs on its own"
+                    "{name} worker: {why}; it is stopped, and {name} runs on its own"
                 ));
                 if let Some(mut failed) = running.take() {
                     let _ = failed.child.kill();
@@ -136,7 +251,7 @@ impl Worker {
         }
     }
 
-    /// The worker's process id, while one runs.
+    /// The `javac` worker's process id, while one runs.
     ///
     /// # Panics
     ///
@@ -146,52 +261,73 @@ impl Worker {
         self.running.lock().unwrap().as_ref().map(|r| r.child.id())
     }
 
-    /// Start a worker JVM on `toolchain`'s JDK, compiling its program first
-    /// if this jrs and JDK have not.
-    fn start(&self, toolchain: &Toolchain, ui: &Ui) -> Result<Running, String> {
-        let jar = self.program(toolchain)?;
-        let share = Share::new(
-            &self.dir.join("cds"),
-            toolchain,
-            MAIN_CLASS,
-            std::slice::from_ref(&jar),
-            &[],
-        );
+    /// The `kotlinc` worker's process id, while one runs.
+    ///
+    /// # Panics
+    ///
+    /// If a thread panicked while holding the lock on the worker.
+    #[must_use]
+    pub fn kotlinc_pid(&self) -> Option<u32> {
+        self.kotlinc.lock().unwrap().as_ref().map(|r| r.child.id())
+    }
+
+    /// Start a worker JVM of `kind` on `launch`'s JDK, compiling its program
+    /// first if this jrs and JDK have not.
+    fn start(&self, kind: Kind, launch: &Launch<'_>, ui: &Ui) -> Result<Running, String> {
+        let toolchain = launch.toolchain;
+        let jar = self.program(kind, toolchain)?;
+        // The `kotlinc` worker loads the compiler's classes, which the
+        // compiler's own archive already maps for forked runs.
+        let share = (kind == Kind::Javac)
+            .then(|| {
+                Share::new(
+                    &self.dir.join("cds"),
+                    toolchain,
+                    kind.main_class(),
+                    std::slice::from_ref(&jar),
+                    &[],
+                )
+            })
+            .flatten();
+        let mut classpath = vec![jar];
+        classpath.extend(launch.classpath.iter().cloned());
         let mut command = Command::new(&toolchain.java);
         if let Some(share) = &share {
             command.args(&share.flags);
         }
         let mut child = command
+            .args(launch.jvm_args)
             .arg("-cp")
-            .arg(&jar)
-            .arg(MAIN_CLASS)
+            .arg(Toolchain::classpath(&classpath))
+            .arg(kind.main_class())
+            .args(launch.args)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             // Nothing of the worker's own may reach the terminal.
             .stderr(Stdio::null())
             .spawn()
             .map_err(|e| format!("{}: {e}", toolchain.java.display()))?;
-        ui.verbose(format!("started a javac worker (pid {})", child.id()));
+        ui.verbose(format!(
+            "started a {} worker (pid {})",
+            kind.name(),
+            child.id()
+        ));
         Ok(Running {
             stdin: child.stdin.take(),
             stdout: child.stdout.take().map(BufReader::new),
             child,
-            javac: toolchain.javac.clone(),
+            key: launch.key.clone(),
             compilations: 0,
             slowest: Duration::ZERO,
             share,
         })
     }
 
-    /// The worker's program as a jar — a class directory could not be
+    /// A worker's program as a jar — a class directory could not be
     /// mapped from a class-data-sharing archive — compiled with
     /// `toolchain`'s `javac` once per jrs version and JDK.
-    fn program(&self, toolchain: &Toolchain) -> Result<PathBuf, String> {
-        let home = self.dir.join(format!(
-            "{}-jdk{}",
-            env!("CARGO_PKG_VERSION"),
-            toolchain.version
-        ));
+    fn program(&self, kind: Kind, toolchain: &Toolchain) -> Result<PathBuf, String> {
+        let home = self.dir.join(kind.program_dir(toolchain.version));
         let jar = home.join("worker.jar");
         if jar.is_file() {
             return Ok(jar);
@@ -200,8 +336,8 @@ impl Worker {
         let _ = std::fs::remove_dir_all(&work);
         let classes = work.join("classes");
         std::fs::create_dir_all(&classes).map_err(|e| format!("{}: {e}", classes.display()))?;
-        let source = work.join(format!("{MAIN_CLASS}.java"));
-        std::fs::write(&source, SOURCE).map_err(|e| format!("{}: {e}", source.display()))?;
+        let source = work.join(format!("{}.java", kind.main_class()));
+        std::fs::write(&source, kind.source()).map_err(|e| format!("{}: {e}", source.display()))?;
         let output = Command::new(&toolchain.javac)
             .arg("-d")
             .arg(&classes)
@@ -279,10 +415,12 @@ impl Running {
 
 impl Drop for Worker {
     fn drop(&mut self) {
-        if let Ok(mut running) = self.running.lock()
-            && let Some(running) = running.take()
-        {
-            running.stop();
+        for slot in [&self.running, &self.kotlinc] {
+            if let Ok(mut running) = slot.lock()
+                && let Some(running) = running.take()
+            {
+                running.stop();
+            }
         }
     }
 }

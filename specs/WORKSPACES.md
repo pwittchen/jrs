@@ -261,8 +261,36 @@ every machine.
 **Phase lines name their module.** `Compiling core v1.0.0`, `Fresh app
 v1.0.0` already did; the lines that did not — the tests' `Compiling` and
 `Testing`, `Task`, `Fresh (task)` — are prefixed with the member's name in a
-workspace. Members run one after another, so the transcript comes in the
-same order on every run (§9 has what that costs).
+workspace.
+
+**Members build at once** ([GRADLE_GAPS.md §2](todo/GRADLE_GAPS.md#2-a--workspace-members-in-parallel)).
+A member is ready when every member it depends on has built; ready members
+start in build order, up to `--jobs` at once, each on a thread of its own
+with a session of its own. The graph and every jar are fetched before they
+fan out, so two members never race for a download. The unit of work is a
+member's build and what the command then does with it — `package`'s jar
+included — so the transcript is the same at any `--jobs`:
+
+> The earliest unfinished member in build order writes to the terminal;
+> every other member writes to a buffer (`Ui::deferred`). When the writing
+> member finishes, the next member in order is released: its buffer is
+> replayed and it writes straight through from then on.
+
+While members build at once, the live region is one spinner naming those
+running, `Compiling core, api (2 of 5 modules)`; a member's own spinners and
+bars stay down. When a member fails, no other starts, the running ones
+finish, every member that finished is released in build order, and the
+command fails with the first failure in build order. `--timings` gains a
+`member <name>` row per member built at once.
+
+What stays one member at a time: `run` (one member), `--watch` (its one
+`javac` worker would queue them), `--jobs 1`, and any workspace where a
+member's hook or task depends on another member's task (§6.3), since that
+task runs in the other member's session, which lives on another thread —
+`-v` says why. Tests run member by member too: a test JVM already forks per
+core (`test.forks`), and two suites at once would fight over cores and
+ports. `jrs test` builds every member first, at once, then tests them in
+build order; at `--jobs 1` each member builds and tests in turn, as before.
 
 ### 6.3 Tasks and hooks
 
@@ -393,11 +421,11 @@ nested aggregator, a BOM module, a profile's module, plugin inheritance) and
 - **Per-module lockfiles.** One lockfile is what makes the versions agree.
 - **Composite builds across repositories** (Gradle's `includeBuild`): a
   workspace's members live under its root.
-- **Members built in parallel.** The roadmap planned independent members on
-  the `rayon` pool. Each member's compile is already parallel inside
-  `javac`, and building members one after another is what keeps the phase
-  lines in a fixed order without buffering a member's output; it is the
-  first thing to revisit if a large workspace shows it.
+- **Members tested in parallel.** Members build at once (§6.2), but their
+  tests run one member at a time: two suites at once would need a fork
+  budget shared across members, and would still fight over the ports and
+  databases both use. To measure with the `test JVM` rows per member first
+  ([GRADLE_GAPS.md §7](todo/GRADLE_GAPS.md#7-open-questions)).
 
 ## 10. SPEC.md edits
 

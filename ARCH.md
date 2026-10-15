@@ -91,6 +91,7 @@ src/
 ├── project.rs         layout, source globbing, target/, resource sync, snapshots
 ├── expand.rs          [resources]: ${name} expansion of resources as they are copied
 ├── toolchain.rs       finding the JDK; running subprocesses (captured/inherited)
+├── jdk.rs             `jrs jdk install`: a pinned JDK from Adoptium, verified, into <cache>/jdks
 ├── build_cache.rs     the build cache: keys, deterministic zips, local and remote stores
 ├── compile/
 │   ├── mod.rs         CompileUnit: steps, fingerprint, staleness, argfiles
@@ -98,8 +99,9 @@ src/
 │   ├── incremental.rs file-by-file compilation of a Java unit: <unit>.index
 │   ├── share.rs       class-data-sharing archives for the compilers, the test JVM
 │   │                  and the javac worker: <cache>/cds
-│   ├── worker.rs      the warm javac of a --watch session, and its protocol
-│   ├── JavacWorker.java  the worker's program, embedded with include_str!
+│   ├── worker.rs      the warm javac and kotlinc of a --watch session, and their protocol
+│   ├── JavacWorker.java  the javac worker's program, embedded with include_str!
+│   ├── KotlincWorker.java  the kotlinc worker's, reaching the compiler by reflection
 │   ├── impact.rs      which test classes a change reaches: <suite>.tested
 │   ├── javac.rs       javac and javadoc
 │   ├── doc.rs         Scaladoc and Groovydoc
@@ -125,7 +127,8 @@ src/
 ├── sbom.rs            --sbom: the runtime graph as a CycloneDX document
 ├── audit.rs           `jrs audit`: the graph's coordinates against the OSV API
 ├── runner.rs          `jrs run`'s command line: debugger, java agents, jvm-args
-├── selfupdate.rs      `jrs self check|update`: GitHub releases, checksum, binary swap
+├── selfupdate.rs      `jrs self check|update [--to]`: GitHub releases, checksum, binary swap
+├── wrapper.rs         `jrs wrapper`: jrsw and jrsw.cmd, one pinned release and its checksums
 ├── task.rs            [tasks] and [hooks]: plan, cycles, placeholders, freshness
 ├── migrate/
 │   ├── mod.rs         detection, report, manifest emission
@@ -705,6 +708,16 @@ an exit, garbage, no answer within two minutes or ten times the slowest one
 always did. The worker is replaced after 50 compilations or a new JDK, and
 stops when its stdin closes; its archive is put in place only then.
 
+A Kotlin unit's first step writes `kotlinc`'s own arguments and sources to an
+argfile of their own, `kotlinc-<unit>.compiler.args`, which the launcher's
+argfile passes to `K2JVMCompiler` as `@argfile`; a unit of at most 100
+sources starts that JVM with `QUICK_JVM_FLAGS`, as a small `javac` run does.
+Under `--watch` the same `Worker` holds a second JVM, `KotlincWorker` with
+the compiler's jars on its classpath, which reaches the compiler by
+reflection and is sent that argfile, so a forked and a warm run read the
+same bytes. It is replaced after 20 compilations, or when the JDK, the
+compiler's classpath or its JVM flags change.
+
 The test unit compiles against `target/classes`, which is a directory, not a
 jar, so its size and mtime say nothing. What its fingerprint holds instead is
 `compile::api_digest` of it (`compile/abi.rs`): a hand-written class-file
@@ -1050,8 +1063,27 @@ it, which narrows the command to that member.
    │                   root     = the build cache's {root}
    │  prepared(i)  ─► the other members' tasks i's hooks reach, run in theirs
    ▼
- for each member, in build order:  build / test / package / … as for one project
+ at_once(members, work)  ─► up to --jobs members at once, each as soon as
+   │                          its upstream members' work is done:
+   │    new_session(i) on the main thread, moved to a scoped thread,
+   │    work(&session) there (build, or build + package), moved back
+   │    member_ui(i): Ui::deferred; all but the first in order hold()
+   │    a member finishes ─► the next unfinished one in order release()s
+   │    the parent's Ui::fan_out spinner names those running
+   ▼
+ for each member, in build order:  test / doc / run / … as for one project
 ```
+
+Members build at once when `parallel_jobs()` allows it: `--jobs` (or the
+config's `jobs`) above one, no `--watch`, and no member whose hooks reach
+another member's task — that task runs in the other member's session, which
+lives on one thread. A `Session` is `Send`, so it is built where the
+`Driver`'s graph is and handed to a thread; what crosses threads is `&Cli`,
+the member's own `Ui`, and the session, which comes back to `sessions` when
+its work is done. Each member writes through its own deferred `Ui`, so the
+transcript is the one `--jobs 1` prints (§12). `jrs package`'s work is the
+build and the jar together; `jrs test` builds every member at once first and
+tests member by member.
 
 A member's `Session` never resolves: `gather()` hands back the preset graph.
 Everything else is the single-project spine, with the upstream members' class
@@ -1133,6 +1165,16 @@ that only advances when a test calls `render_frame`, which is how
 Before a subprocess writes to the terminal — `javac` diagnostics, a test run,
 `jrs run` handing stdio to the user's program — the live region is torn down
 (`Ui::suspend`), and the output is passed through untouched.
+
+Workspace members built at once each write through a `Ui::deferred`: a
+clone sharing the renderer, with a gate of its own. A closed gate (`hold`)
+sends every permanent line — phase, status, warning, error, verbose and
+passthrough — to a buffer of `(Stream, String)`; `release` replays it in one
+lock on the renderer and opens the gate. The driver keeps the earliest
+unfinished member in build order open and the rest held, so the scrollback is
+line for line the sequential one. While `Ui::fan_out`'s spinner lives, a
+deferred `Ui`'s live scopes are inert and its `update_live` does nothing:
+the one live row is the parent's, naming the members running.
 
 The `--timings` table is one more composite output, like the summary.
 `Ui::timings` takes rows of labels and `Duration`s that `Session` collected,
@@ -1227,14 +1269,18 @@ poisoning, which is documented under each function's `# Panics`.
  ├── build/<k..2>/<key>.zip       the build cache: compile units' output and
  │                                passing test runs' reports, pruned one by one
  ├── worker/<version>-jdk<n>/worker.jar   the --watch javac worker's program
- │   └── (worker/cds/)            and its CDS archive
+ │   ├── kotlinc-<version>-jdk<n>/worker.jar  the --watch kotlinc worker's
+ │   └── (worker/cds/)            and the javac worker's CDS archive
+ ├── jdks/temurin-<version>-<os>-<arch>/   JDKs `jrs jdk install` downloaded,
+ │                                which `jrs cache prune` keeps unless --jdks
+ ├── dist/<version>/jrs           the release a project's jrsw runs
  └── .jrs/projects                the lockfiles of every project built with it,
                                   which `jrs cache prune` keeps alive
 
  user config   (JRS_CONFIG, or $XDG_CONFIG_HOME/jrs/config.toml,
                ~/.config/jrs/config.toml, %APPDATA%\jrs\config.toml)
                jobs, [proxy], [mirrors], [credentials.<repo>], [jdks],
-               [build-cache]
+               [build-cache], [audit], [jdk]
 ```
 
 Nothing is written into `target/` that cannot be regenerated, so `jrs clean`
@@ -1316,7 +1362,8 @@ design regression, not a style nit.
 | Nearest-wins, breadth-first by level, ties on declaration order; no ranges | `resolve/mod.rs`, `manifest.rs` |
 | Atomic, checksum-verified cache writes | `resolve/cache.rs`, `resolve/repo.rs` |
 | A build-cache key holds no absolute path and no mtime; what cannot be keyed is compiled; no cache failure fails a build | `build_cache.rs`, `compile/mod.rs` |
-| The `javac` worker lives no longer than its `--watch` command, and any failure of it falls back to a forked `javac` | `compile/worker.rs` |
+| The `javac` and `kotlinc` workers live no longer than their `--watch` command, and any failure of one falls back to a forked compiler | `compile/worker.rs` |
+| Members built at once print what one member at a time prints | `cli/members.rs` (`at_once`), `Ui::deferred` |
 | Fat-jar merge rules: `META-INF/services/*`, Groovy extension modules and Spring's registries merged, never overwritten; the project's copy first | `package.rs` |
 | Relocation rewrites only a class's `CONSTANT_Utf8` entries, never their number or order; a class it cannot read fails the jar | `relocate.rs` |
 | Toolchain output passed through verbatim | `compile/`, `test.rs`, `image.rs` |

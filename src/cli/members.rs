@@ -6,8 +6,17 @@
 //! and the command runs member by member in build order. The members' phase
 //! lines name them and come in that fixed order, so `--progress never` reads
 //! the same on every run.
+//!
+//! Members whose upstream members have built build at once, up to `--jobs`
+//! of them, each on a thread of its own with its own session ([`Driver::build_all`]).
+//! Each writes through a `Ui` of its own ([`Ui::deferred`]): the earliest
+//! unfinished member in build order writes to the terminal, every other
+//! one to a buffer, released in build order — so the transcript is line
+//! for line the one `--jobs 1` prints.
 
+use std::collections::HashSet;
 use std::rc::Rc;
+use std::time::Duration;
 
 use super::{
     Arc, CacheCommand, Cli, Command, Config, HashMap, Instant, JrsError, Language, MemberContext,
@@ -21,6 +30,9 @@ use crate::workspace::Workspace;
 struct Driver<'a> {
     cli: &'a Cli,
     ui: &'a Ui,
+    /// Each member's own `Ui` ([`Ui::deferred`]), by index; a member past
+    /// its end (a workspace reloaded under `--watch`) writes through `ui`.
+    member_uis: &'a [Ui],
     workspace: Workspace,
     /// The member the command was run from inside, if any.
     location: Option<usize>,
@@ -34,6 +46,11 @@ struct Driver<'a> {
     /// Each member's session, once it is needed: a member is built at most
     /// once per command, however many others depend on it.
     sessions: RefCell<HashMap<usize, Rc<Session<'a>>>>,
+    /// The wall time of each member built at once with others, for
+    /// `--timings`.
+    member_times: RefCell<Vec<(usize, Duration)>>,
+    /// [`Driver::parallel_jobs`], once worked out.
+    parallel: OnceCell<usize>,
 }
 
 /// Run the command `cli` names over `workspace`; `location` is the member
@@ -61,9 +78,11 @@ pub(super) fn dispatch(
     for warning in &config.warnings {
         ui.warn(warning);
     }
+    let member_uis: Vec<Ui> = workspace.members.iter().map(|_| ui.deferred()).collect();
     let driver = Driver {
         cli,
         ui,
+        member_uis: &member_uis,
         workspace,
         location,
         config,
@@ -72,6 +91,8 @@ pub(super) fn dispatch(
         aggregate: OnceCell::new(),
         graph: OnceCell::new(),
         sessions: RefCell::new(HashMap::new()),
+        member_times: RefCell::new(Vec::new()),
+        parallel: OnceCell::new(),
     };
     driver.command()
 }
@@ -164,7 +185,9 @@ impl<'a> Driver<'a> {
             | Command::Cache {
                 action: CacheCommand::Path | CacheCommand::Prune { .. },
             }
-            | Command::SelfCmd { .. } => unreachable!("dispatched before a workspace is loaded"),
+            | Command::SelfCmd { .. }
+            | Command::Jdk { .. }
+            | Command::Wrapper { .. } => unreachable!("dispatched before a workspace is loaded"),
         }
     }
 
@@ -269,6 +292,18 @@ impl<'a> Driver<'a> {
         if let Some(session) = self.sessions.borrow().get(&i) {
             return Ok(Rc::clone(session));
         }
+        let session = Rc::new(self.new_session(i)?);
+        self.sessions.borrow_mut().insert(i, Rc::clone(&session));
+        Ok(session)
+    }
+
+    /// Member `i`'s own `Ui`.
+    fn member_ui(&self, i: usize) -> &'a Ui {
+        self.member_uis.get(i).unwrap_or(self.ui)
+    }
+
+    /// A new session for member `i`, which [`Driver::session`] keeps.
+    fn new_session(&self, i: usize) -> Result<Session<'a>> {
         let graph = self.graph()?;
         let member = &self.workspace.members[i];
         let manifest = member.manifest.clone();
@@ -307,15 +342,13 @@ impl<'a> Driver<'a> {
             obfuscator,
             agents,
         );
-        let mut session = Session::new(self.cli, self.ui, manifest, self.config.clone())
+        let mut session = Session::new(self.cli, self.member_ui(i), manifest, self.config.clone())
             .with_worker(self.worker.clone());
         session.member = Some(MemberContext {
             preset,
             upstream: self.workspace.upstream_of(i),
             root: self.workspace.root.clone(),
         });
-        let session = Rc::new(session);
-        self.sessions.borrow_mut().insert(i, Rc::clone(&session));
         Ok(session)
     }
 
@@ -337,18 +370,233 @@ impl<'a> Driver<'a> {
     /// Build every member `members` depends on, in build order, so that
     /// their classes are there to compile against.
     fn build_upstream(&self, members: &[usize]) -> Result<()> {
-        for i in self.workspace.with_upstream(members) {
-            if !members.contains(&i) {
-                self.prepared(i, None)?.build()?;
+        let upstream: Vec<usize> = self
+            .workspace
+            .with_upstream(members)
+            .into_iter()
+            .filter(|i| !members.contains(i))
+            .collect();
+        self.build_all(&upstream)
+    }
+
+    /// How many members may build at once: `--jobs`, or one when a member's
+    /// task runs in another member's session, which lives on one thread,
+    /// or under `--watch`, whose one `javac` worker would queue them.
+    fn parallel_jobs(&self) -> usize {
+        *self.parallel.get_or_init(|| self.work_out_parallel_jobs())
+    }
+
+    fn work_out_parallel_jobs(&self) -> usize {
+        let jobs = super::effective_jobs(self.cli.global.jobs, self.config.jobs);
+        if jobs <= 1 || self.worker.is_some() {
+            return 1;
+        }
+        let crossing = (0..self.workspace.members.len()).find(|i| {
+            self.workspace
+                .member_tasks(*i, None)
+                .iter()
+                .any(|(other, _)| other != i)
+        });
+        if let Some(i) = crossing {
+            self.ui.verbose(format!(
+                "members build one at a time: `{}` runs another member's task",
+                self.workspace.members[i].manifest.name
+            ));
+            return 1;
+        }
+        jobs
+    }
+
+    /// Whether member `i` has built in this command already.
+    fn is_built(&self, i: usize) -> bool {
+        self.sessions
+            .borrow()
+            .get(&i)
+            .is_some_and(|s| s.built.get().is_some())
+    }
+
+    /// Build `members` that have not built yet, as [`Driver::at_once`] runs
+    /// work.
+    fn build_all(&self, members: &[usize]) -> Result<()> {
+        let todo: Vec<usize> = members
+            .iter()
+            .copied()
+            .filter(|i| !self.is_built(*i))
+            .collect();
+        self.at_once(&todo, &|session| session.build().map(|_| ()))?;
+        Ok(())
+    }
+
+    /// Run `work` — a build, and whatever the command does with a member
+    /// once it is built — over `members`, which are in build order with what
+    /// they depend on among them or built already, and return what it gave
+    /// for each, in that order. Up to [`Driver::parallel_jobs`] run at once,
+    /// each as soon as its upstream members' work is done; their output
+    /// comes out in build order, as if one had run after the other
+    /// (`specs/WORKSPACES.md` §6.2). When one fails, no other starts, the
+    /// running ones finish, and the first failure in build order is the
+    /// command's.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the schedule, the release in build order and the results, one loop's state"
+    )]
+    fn at_once<T: Send>(
+        &self,
+        todo: &[usize],
+        work: &(dyn Fn(&Session<'a>) -> Result<T> + Sync),
+    ) -> Result<Vec<T>> {
+        let jobs = if todo.len() > 1 {
+            self.parallel_jobs()
+        } else {
+            1
+        };
+        if jobs <= 1 {
+            let mut out = Vec::new();
+            for i in todo {
+                out.push(work(&*self.prepared(*i, None)?)?);
+            }
+            return Ok(out);
+        }
+
+        // The graph, and every jar, before the fan-out: two members never
+        // race for one download.
+        self.graph()?;
+        // Every member but the first in build order holds its lines back
+        // from here on, its JDK's included.
+        for (k, i) in todo.iter().enumerate() {
+            if k > 0 {
+                self.member_ui(*i).hold();
             }
         }
-        Ok(())
+        let mut waiting: Vec<Option<Session<'a>>> = Vec::new();
+        for i in todo {
+            let session = match self.new_session(*i) {
+                Ok(session) => session,
+                Err(e) => {
+                    for i in todo {
+                        self.member_ui(*i).release();
+                    }
+                    return Err(e);
+                }
+            };
+            // The JDK too, one member after the other: a pinned JDK that
+            // has to be downloaded is downloaded once. What it says goes
+            // to the member's own lines; a failure is the member's build's
+            // to report, in its turn.
+            let _ = session.toolchain();
+            waiting.push(Some(session));
+        }
+        let upstream: Vec<Vec<usize>> = todo
+            .iter()
+            .map(|i| {
+                self.workspace
+                    .upstream(*i)
+                    .into_iter()
+                    .filter_map(|(u, _)| todo.iter().position(|t| *t == u))
+                    .collect()
+            })
+            .collect();
+
+        let names = |running: &[usize]| {
+            running
+                .iter()
+                .map(|k| self.workspace.members[todo[*k]].manifest.name.clone())
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        let fan = self.ui.fan_out("Compiling", "");
+        let mut finished: Vec<Option<(Session<'a>, Result<T>, Duration)>> =
+            todo.iter().map(|_| None).collect();
+        std::thread::scope(|scope| {
+            let (tx, rx) = std::sync::mpsc::channel();
+            let mut running: Vec<usize> = Vec::new();
+            let mut done: HashSet<usize> = HashSet::new();
+            let mut failed = false;
+            let mut head = 0;
+            loop {
+                while !failed && running.len() < jobs {
+                    let ready = (0..todo.len()).find(|k| {
+                        waiting[*k].is_some()
+                            && upstream[*k].iter().all(|u| {
+                                done.contains(u)
+                                    && finished[*u].as_ref().is_some_and(|f| f.1.is_ok())
+                            })
+                    });
+                    let Some(k) = ready else { break };
+                    let Some(session) = waiting[k].take() else {
+                        break;
+                    };
+                    let tx = tx.clone();
+                    running.push(k);
+                    scope.spawn(move || {
+                        let started = std::time::Instant::now();
+                        let result = work(&session);
+                        let _ = tx.send((k, session, result, started.elapsed()));
+                    });
+                }
+                if running.is_empty() {
+                    break;
+                }
+                fan.say(format!(
+                    "{} ({} of {} modules)",
+                    names(&running),
+                    done.len() + running.len(),
+                    todo.len()
+                ));
+                let Ok((k, session, result, took)) = rx.recv() else {
+                    break;
+                };
+                running.retain(|r| *r != k);
+                done.insert(k);
+                failed |= result.is_err();
+                finished[k] = Some((session, result, took));
+                // The earliest unfinished member in build order writes to
+                // the terminal from now on, after what it held back.
+                while head < todo.len() && done.contains(&head) {
+                    head += 1;
+                    if head < todo.len() {
+                        self.member_ui(todo[head]).release();
+                    }
+                }
+            }
+        });
+        drop(fan);
+        // After a failure, whatever finished comes out too, in build order,
+        // so that nothing that ran is hidden.
+        for (k, i) in todo.iter().enumerate() {
+            if finished[k].is_some() {
+                self.member_ui(*i).release();
+            }
+        }
+
+        let mut first_error = None;
+        let mut out = Vec::new();
+        for (k, i) in todo.iter().enumerate() {
+            let Some((session, result, took)) = finished[k].take() else {
+                // Never started: its gate opens for whatever runs next.
+                self.member_ui(*i).release();
+                continue;
+            };
+            self.member_times.borrow_mut().push((*i, took));
+            self.sessions.borrow_mut().insert(*i, Rc::new(session));
+            match result {
+                Ok(value) => out.push(value),
+                Err(e) => {
+                    first_error.get_or_insert(e);
+                }
+            }
+        }
+        match first_error {
+            Some(e) => Err(e),
+            None => Ok(out),
+        }
     }
 
     // ---- commands ---------------------------------------------------------
 
     fn build(&self) -> Result<i32> {
         let members = self.workspace.with_upstream(&self.selected()?);
+        self.build_all(&members)?;
         let mut classes = 0;
         for i in &members {
             classes += self.prepared(*i, None)?.build()?.classes;
@@ -379,6 +627,11 @@ impl<'a> Driver<'a> {
         let mut failed: Vec<String> = Vec::new();
         let mut shortfalls: Vec<String> = Vec::new();
         let mut tested = 0;
+        // The build part first, members at once; the tests then run member
+        // by member, since a test JVM already takes the cores it is given.
+        if self.parallel_jobs() > 1 {
+            self.build_all(&self.workspace.with_upstream(&selected))?;
+        }
         for i in self.workspace.with_upstream(&selected) {
             let session = self.prepared(i, None)?;
             if !selected.contains(&i) {
@@ -487,10 +740,7 @@ impl<'a> Driver<'a> {
     fn package(&self, args: &PackageArgs) -> Result<i32> {
         let members = self.workspace.with_upstream(&self.selected()?);
         let chosen = self.chosen();
-        let mut classes = 0;
-        let mut rows: Vec<(&'static str, String)> = Vec::new();
-        for i in &members {
-            let session = self.prepared(*i, None)?;
+        let packaged = self.at_once(&members, &|session| {
             let mut member_args = args.clone();
             if !chosen && session.manifest.main_class.is_none() {
                 // A library is not run with `java -jar`: the portable layout
@@ -505,14 +755,17 @@ impl<'a> Driver<'a> {
                 member_args.dist = false;
                 member_args.native_image = false;
             }
-            classes += session.build()?.classes;
-            rows.extend(
-                session
-                    .package(&member_args)?
-                    .into_iter()
-                    .filter(|(key, _)| !matches!(*key, "build" | "deps")),
-            );
-        }
+            let classes = session.build()?.classes;
+            let rows: Vec<(&'static str, String)> = session
+                .package(&member_args)?
+                .into_iter()
+                .filter(|(key, _)| !matches!(*key, "build" | "deps"))
+                .collect();
+            Ok((classes, rows))
+        })?;
+        let classes: usize = packaged.iter().map(|(classes, _)| classes).sum();
+        let rows: Vec<(&'static str, String)> =
+            packaged.into_iter().flat_map(|(_, rows)| rows).collect();
         self.ui
             .phase("Finished", format!("build in {}", self.elapsed()));
         let mut summary = vec![
@@ -717,6 +970,16 @@ impl<'a> Driver<'a> {
                 }
             }
         }
+        // Members that built at once: each one's wall time, beside the
+        // phases, while the total is the command's.
+        for (i, took) in self.member_times.borrow().iter() {
+            if members.contains(i) {
+                all.record(
+                    format!("member {}", self.workspace.members[*i].manifest.name),
+                    *took,
+                );
+            }
+        }
         let rows = all.rows();
         let total = self.started.elapsed();
         self.ui.timings(&rows, total);
@@ -771,6 +1034,7 @@ impl<'a> Driver<'a> {
                 Ok((workspace, location)) => Config::load().ok().map(|config| Driver {
                     cli,
                     ui,
+                    member_uis: &[],
                     workspace,
                     location,
                     config,
@@ -779,6 +1043,8 @@ impl<'a> Driver<'a> {
                     aggregate: OnceCell::new(),
                     graph: OnceCell::new(),
                     sessions: RefCell::new(HashMap::new()),
+                    member_times: RefCell::new(Vec::new()),
+                    parallel: OnceCell::new(),
                 }),
                 Err(e) => {
                     report(ui, &e);
@@ -875,6 +1141,7 @@ fn reopen<'a>(
         Ok(Driver {
             cli,
             ui,
+            member_uis: &[],
             workspace,
             location,
             config: Config::load()?,
@@ -883,6 +1150,8 @@ fn reopen<'a>(
             aggregate: OnceCell::new(),
             graph: OnceCell::new(),
             sessions: RefCell::new(HashMap::new()),
+            member_times: RefCell::new(Vec::new()),
+            parallel: OnceCell::new(),
         })
     });
     match opened {

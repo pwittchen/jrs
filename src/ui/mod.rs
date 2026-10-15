@@ -154,13 +154,22 @@ struct Inner {
     running: AtomicBool,
     /// Suppressed in captured mode so tests drive frames by hand.
     threaded: bool,
+    /// Set while workspace members build at once ([`Ui::fan_out`]): the
+    /// parent's spinner owns the live region, and no member's may.
+    fanned_out: AtomicBool,
 }
+
+/// What a [`Ui::deferred`] holds back: `Some` lines while its gate is
+/// closed, `None` once it writes straight through.
+type Gate = Mutex<Option<Vec<(Stream, String)>>>;
 
 /// The handle every command carries. Cheap to clone; all clones share one
 /// terminal.
 #[derive(Clone)]
 pub struct Ui {
     inner: Arc<Inner>,
+    /// A workspace member's gate, for a [`Ui::deferred`] one.
+    gate: Option<Arc<Gate>>,
 }
 
 impl Ui {
@@ -180,7 +189,9 @@ impl Ui {
                 tick: AtomicU64::new(0),
                 running: AtomicBool::new(false),
                 threaded: true,
+                fanned_out: AtomicBool::new(false),
             }),
+            gate: None,
         }
     }
 
@@ -206,7 +217,9 @@ impl Ui {
                 tick: AtomicU64::new(0),
                 running: AtomicBool::new(false),
                 threaded: false,
+                fanned_out: AtomicBool::new(false),
             }),
+            gate: None,
         };
         (ui, capture)
     }
@@ -266,20 +279,104 @@ impl Ui {
     }
 
     /// Mutate the live region's state. Workers call this; nothing here touches
-    /// the terminal.
+    /// the terminal. A member's `Ui` does nothing here while members build at
+    /// once: the live region is the parent's.
     ///
     /// # Panics
     ///
     /// If a thread panicked while holding the live-state lock.
     pub fn update_live(&self, f: impl FnOnce(&mut Live)) {
+        if !self.owns_live() {
+            return;
+        }
         let mut live = self.inner.live.lock().unwrap();
         f(&mut live);
+    }
+
+    // ---- workspace members at once ----------------------------------------
+
+    /// A `Ui` for one workspace member that shares this one's terminal but
+    /// has a gate of its own (`specs/WORKSPACES.md` §6.2). Open, as it starts,
+    /// it writes straight through; [`Ui::hold`] closes it, and then every
+    /// permanent line goes to a buffer until [`Ui::release`] replays it. Code
+    /// that takes a `&Ui` sees no difference.
+    #[must_use]
+    pub fn deferred(&self) -> Ui {
+        Ui {
+            inner: Arc::clone(&self.inner),
+            gate: Some(Arc::new(Mutex::new(None))),
+        }
+    }
+
+    /// Close a deferred `Ui`'s gate: what it says from now on is held back.
+    ///
+    /// # Panics
+    ///
+    /// If a thread panicked while holding the gate.
+    pub fn hold(&self) {
+        if let Some(gate) = &self.gate {
+            gate.lock().unwrap().get_or_insert_with(Vec::new);
+        }
+    }
+
+    /// Open a deferred `Ui`'s gate: what it held back is written, in one
+    /// go, and from then on it writes straight through.
+    ///
+    /// # Panics
+    ///
+    /// If a thread panicked while holding the gate or the renderer.
+    pub fn release(&self) {
+        if let Some(gate) = &self.gate {
+            let mut held = gate.lock().unwrap();
+            if let Some(lines) = held.take() {
+                let mut renderer = self.inner.renderer.lock().unwrap();
+                for (stream, line) in lines {
+                    renderer.permanent(stream, &line);
+                }
+            }
+        }
+    }
+
+    /// While the returned scope lives, members build at once: this `Ui`'s
+    /// spinner, `verb` and `msg`, is the live region, and no deferred one
+    /// may draw. [`FanOut::say`] changes what it says.
+    #[must_use]
+    pub fn fan_out(&self, verb: &str, msg: impl std::fmt::Display) -> FanOut {
+        let scope = self.spinner(verb, msg);
+        self.inner.fanned_out.store(true, Ordering::SeqCst);
+        FanOut {
+            ui: self.clone(),
+            scope: Some(scope),
+        }
+    }
+
+    /// Whether this `Ui` may draw the live region now.
+    fn owns_live(&self) -> bool {
+        self.gate.is_none() || !self.inner.fanned_out.load(Ordering::SeqCst)
     }
 
     // ---- permanent output -------------------------------------------------
 
     fn permanent(&self, stream: Stream, text: &str) {
+        if let Some(gate) = &self.gate {
+            // The gate is held while writing, so a release cannot slip its
+            // replay between a check and a write.
+            let mut held = gate.lock().unwrap();
+            if let Some(lines) = held.as_mut() {
+                lines.push((stream, text.to_string()));
+                return;
+            }
+            self.inner.renderer.lock().unwrap().permanent(stream, text);
+            return;
+        }
         self.inner.renderer.lock().unwrap().permanent(stream, text);
+    }
+
+    /// Whether this `Ui`'s gate is closed, so its lines are held back.
+    fn holding(&self) -> bool {
+        self.gate
+            .as_ref()
+            .is_some_and(|gate| gate.lock().unwrap().is_some())
     }
 
     /// A Cargo-style phase line: bold green verb, right-aligned in 12 columns.
@@ -336,6 +433,12 @@ impl Ui {
         if text.is_empty() {
             return;
         }
+        if self.gate.is_some() {
+            for line in text.lines() {
+                self.permanent(stream, line);
+            }
+            return;
+        }
         let mut renderer = self.inner.renderer.lock().unwrap();
         renderer.clear_live();
         for line in text.lines() {
@@ -349,6 +452,10 @@ impl Ui {
     ///
     /// If a thread panicked while holding the renderer lock.
     pub fn passthrough_line(&self, stream: Stream, line: &str) {
+        if self.gate.is_some() {
+            self.permanent(stream, line);
+            return;
+        }
         let mut renderer = self.inner.renderer.lock().unwrap();
         renderer.clear_live();
         renderer.permanent(stream, line);
@@ -361,6 +468,9 @@ impl Ui {
     ///
     /// If a thread panicked while holding the renderer lock.
     pub fn suspend(&self) {
+        if self.holding() {
+            return;
+        }
         self.inner.renderer.lock().unwrap().clear_live();
     }
 
@@ -388,7 +498,7 @@ impl Ui {
     ///
     /// If a thread panicked while holding the live-state or renderer lock.
     pub fn spinner(&self, verb: &str, msg: impl std::fmt::Display) -> LiveScope {
-        if !self.inner.mode.animates() {
+        if !self.inner.mode.animates() || !self.owns_live() {
             return LiveScope::inert();
         }
         *self.inner.live.lock().unwrap() = Live::Spinner {
@@ -405,7 +515,7 @@ impl Ui {
     /// If a thread panicked while holding the live-state or renderer lock.
     #[must_use]
     pub fn downloads(&self, total: usize) -> LiveScope {
-        if !self.inner.mode.animates() {
+        if !self.inner.mode.animates() || !self.owns_live() {
             return LiveScope::inert();
         }
         *self.inner.live.lock().unwrap() = Live::Downloads(DownloadState {
@@ -423,7 +533,7 @@ impl Ui {
     /// If a thread panicked while holding the live-state or renderer lock.
     #[must_use]
     pub fn tests(&self) -> LiveScope {
-        if !self.inner.mode.animates() {
+        if !self.inner.mode.animates() || !self.owns_live() {
             return LiveScope::inert();
         }
         *self.inner.live.lock().unwrap() = Live::Tests(TestState::default());
@@ -533,6 +643,34 @@ impl LiveScope {
 impl Drop for LiveScope {
     fn drop(&mut self) {
         self.stop();
+    }
+}
+
+/// The parent's live region while workspace members build at once
+/// ([`Ui::fan_out`]).
+pub struct FanOut {
+    ui: Ui,
+    scope: Option<LiveScope>,
+}
+
+impl FanOut {
+    /// Say `msg` beside the spinner from now on.
+    pub fn say(&self, msg: impl std::fmt::Display) {
+        let msg = msg.to_string();
+        self.ui.update_live(|live| {
+            if let Live::Spinner { msg: shown, .. } = live {
+                *shown = msg;
+            }
+        });
+    }
+}
+
+impl Drop for FanOut {
+    fn drop(&mut self) {
+        if let Some(scope) = self.scope.take() {
+            scope.finish();
+        }
+        self.ui.inner.fanned_out.store(false, Ordering::SeqCst);
     }
 }
 

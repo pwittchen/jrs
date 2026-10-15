@@ -21,6 +21,7 @@ pub mod edit;
 pub mod error;
 pub mod expand;
 pub mod image;
+pub mod jdk;
 pub mod lockfile;
 pub mod manifest;
 pub mod migrate;
@@ -39,6 +40,7 @@ pub mod test_report;
 pub mod toolchain;
 pub mod ui;
 pub mod workspace;
+pub mod wrapper;
 
 pub mod json;
 pub mod model;

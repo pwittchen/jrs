@@ -34,6 +34,12 @@ harness = false
 name = "incremental"
 harness = false
 
+# specs/todo/GRADLE_GAPS.md §3.1: what `kotlinc` costs on a real project,
+# by JRS_BENCH_PROJECT, and what a warm one saves.
+[[bench]]
+name = "kotlinc"
+harness = false
+
 # SPEC §10.2: `test.share-classes` on a real project, by JRS_BENCH_PROJECT:
 # the test JVM in each mode, and whether its outcome changed.
 [[bench]]

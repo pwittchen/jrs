@@ -8,6 +8,11 @@
 # Used at a release tag, it installs that release unless `version` says
 # otherwise; at a branch, the latest. The archive is checked against the
 # release's SHA256SUMS. Linux, macOS and Windows, x86_64 and arm64.
+#
+# `version: manifest` installs the newest release the project's
+# `project.jrs-version` allows, read from jrs.toml (or `manifest`): "0.10" is
+# the newest 0.10.x, "0.10.1" that release exactly, since a 0.x minor may
+# break; from 1.0, the newest release of the same major version at or above it.
 name: Set up jrs
 description: Install jrs, a Java build system, from its GitHub releases
 author: Piotr Wittchen
@@ -17,9 +22,13 @@ branding:
 
 inputs:
   version:
-    description: The release to install, such as 0.9.0, or `latest`. Defaults to the release the action is used at, or the latest.
+    description: The release to install, such as 0.9.0, `latest`, or `manifest` for the newest release the project's `project.jrs-version` allows. Defaults to the release the action is used at, or the latest.
     required: false
     default: ''
+  manifest:
+    description: The jrs.toml that `version: manifest` reads, relative to the working directory.
+    required: false
+    default: jrs.toml
 
 outputs:
   version:
@@ -33,6 +42,7 @@ runs:
       shell: bash
       env:
         VERSION: ${{ inputs.version }}
+        MANIFEST: ${{ inputs.manifest }}
         ACTION_REF: ${{ github.action_ref }}
         RUNNER_OS_NAME: ${{ runner.os }}
         RUNNER_ARCH_NAME: ${{ runner.arch }}
@@ -44,6 +54,53 @@ runs:
             v[0-9]*) VERSION="${ACTION_REF#v}" ;;
             *) VERSION=latest ;;
           esac
+        fi
+        if [ "$VERSION" = manifest ]; then
+          [ -f "$MANIFEST" ] || { echo "::error::$MANIFEST does not exist"; exit 1; }
+          # The key is a plain quoted string in [project]; anything else
+          # fails the step, naming the line.
+          required="$(awk '
+            /^[[:space:]]*\[/ { project = ($0 ~ /^[[:space:]]*\[project\][[:space:]]*(#.*)?$/); next }
+            project && /^[[:space:]]*jrs-version[[:space:]]*=/ {
+              v = $0
+              sub(/^[^=]*=[[:space:]]*/, "", v)
+              sub(/[[:space:]]*(#.*)?$/, "", v)
+              if (v ~ /^"[0-9]+\.[0-9]+(\.[0-9]+)?"$/ || v ~ /^\047[0-9]+\.[0-9]+(\.[0-9]+)?\047$/) {
+                print substr(v, 2, length(v) - 2)
+              } else {
+                print "line " NR ": " $0
+              }
+              exit
+            }' "$MANIFEST")"
+          case "$required" in
+            "") echo "::error file=$MANIFEST::$MANIFEST has no project.jrs-version"; exit 1 ;;
+            "line "*) echo "::error file=$MANIFEST::could not read project.jrs-version, $required"; exit 1 ;;
+          esac
+          VERSION="$(git ls-remote --tags --refs "https://github.com/$repo" 'v*' | sed 's|.*refs/tags/||' |
+            awk -v want="$required" '
+              BEGIN { n = split(want, w, ".") }
+              {
+                t = $0
+                sub(/^v/, "", t)
+                if (t !~ /^[0-9]+\.[0-9]+\.[0-9]+$/) next
+                split(t, v, ".")
+                if (v[1] + 0 != w[1] + 0) next
+                if (w[1] + 0 == 0) {
+                  if (v[2] + 0 != w[2] + 0) next
+                  if (n == 3 && v[3] + 0 != w[3] + 0) next
+                } else {
+                  if (v[2] + 0 < w[2] + 0) next
+                  if (n == 3 && v[2] + 0 == w[2] + 0 && v[3] + 0 < w[3] + 0) next
+                }
+                key = sprintf("%09d%09d%09d", v[1], v[2], v[3])
+                if (key > best) { best = key; found = t }
+              }
+              END { if (found != "") print found }')"
+          if [ -z "$VERSION" ]; then
+            echo "::error file=$MANIFEST::no jrs release satisfies jrs-version = \"$required\""
+            exit 1
+          fi
+          echo "$MANIFEST asks for jrs $required; installing $VERSION"
         fi
         if [ "$VERSION" = latest ]; then
           base="https://github.com/$repo/releases/latest/download"

@@ -533,3 +533,128 @@ fn one_members_exclusion_does_not_take_a_jar_from_another() {
         assert!(!out.contains("lib-"), "{round}: a excludes lib: {out}");
     }
 }
+
+/// A workspace of three for members built at once: `a` and `b` depend on
+/// nothing, `c` on both.
+fn diamond(scratch: &Scratch, dir: &str) -> std::path::PathBuf {
+    scratch.write(
+        &format!("{dir}/jrs.toml"),
+        "[workspace]\nmembers = [\"a\", \"b\", \"c\"]\n\n[java]\nsource = 17\n",
+    );
+    for name in ["a", "b"] {
+        scratch.write(
+            &format!("{dir}/{name}/jrs.toml"),
+            &format!("[project]\nname = \"{name}\"\nversion = \"1.0.0\"\n"),
+        );
+        for class in 0..20 {
+            scratch.write(
+                &format!("{dir}/{name}/src/main/java/demo/{name}/C{class}.java"),
+                &format!(
+                    "package demo.{name};\n\npublic class C{class} {{\n    \
+                     public static int value() {{ return {class}; }}\n}}\n"
+                ),
+            );
+        }
+    }
+    scratch.write(
+        &format!("{dir}/c/jrs.toml"),
+        "[project]\nname = \"c\"\nversion = \"1.0.0\"\n\n[dependencies]\n\
+         a = { path = \"../a\" }\nb = { path = \"../b\" }\n",
+    );
+    scratch.write(
+        &format!("{dir}/c/src/main/java/demo/c/Sum.java"),
+        "package demo.c;\n\npublic class Sum {\n    public static int sum() {\n        \
+         return demo.a.C1.value() + demo.b.C2.value();\n    }\n}\n",
+    );
+    scratch.join(dir)
+}
+
+/// The transcript without the lines that carry a duration.
+fn untimed(stderr: &str) -> Vec<String> {
+    stderr
+        .lines()
+        .filter(|l| !l.contains("Finished") && !l.trim_start().starts_with("time"))
+        .map(str::to_string)
+        .collect()
+}
+
+/// Members built at once print what one built after the other prints, and
+/// write the same jars (`specs/WORKSPACES.md` §6.2).
+#[test]
+fn members_built_at_once_print_and_write_what_one_at_a_time_does() {
+    let _toolchain = require_jdk!();
+    let scratch = Scratch::new("ws-parallel");
+    let root = diamond(&scratch, "ws");
+    let jars = |root: &Path| -> Vec<Vec<u8>> {
+        ["a", "b", "c"]
+            .iter()
+            .map(|m| {
+                std::fs::read(root.join(m).join("target").join(format!("{m}-1.0.0.jar"))).unwrap()
+            })
+            .collect()
+    };
+
+    let (code, _, at_once) = jrs(
+        &scratch,
+        &root,
+        &["--jobs", "4", "package", "--no-build-cache"],
+    );
+    assert_eq!(code, 0, "{at_once}");
+    let parallel = jars(&root);
+    let (code, _, err) = jrs(&scratch, &root, &["clean"]);
+    assert_eq!(code, 0, "{err}");
+    let (code, _, in_turn) = jrs(
+        &scratch,
+        &root,
+        &["--jobs", "1", "package", "--no-build-cache"],
+    );
+    assert_eq!(code, 0, "{in_turn}");
+    assert_eq!(
+        untimed(&at_once),
+        untimed(&in_turn),
+        "--jobs 4:\n{at_once}\n--jobs 1:\n{in_turn}"
+    );
+    assert!(
+        parallel == jars(&root),
+        "the jars differ between --jobs 4 and --jobs 1"
+    );
+
+    // The member rows of `--timings`, for the members that built at once.
+    let (code, _, err) = jrs(&scratch, &root, &["clean"]);
+    assert_eq!(code, 0, "{err}");
+    let (code, _, err) = jrs(
+        &scratch,
+        &root,
+        &["--jobs", "4", "build", "--timings", "--no-build-cache"],
+    );
+    assert_eq!(code, 0, "{err}");
+    for member in ["a", "b", "c"] {
+        assert!(err.contains(&format!("member {member} ")), "{err}");
+    }
+}
+
+/// A compile error in one member built at once reports that member, after
+/// the lines of the members before it in build order.
+#[test]
+fn a_member_that_fails_at_once_with_others_is_reported_in_build_order() {
+    let _toolchain = require_jdk!();
+    let scratch = Scratch::new("ws-parallel-fail");
+    let root = diamond(&scratch, "ws");
+    scratch.write(
+        "ws/b/src/main/java/demo/b/Broken.java",
+        "package demo.b;\n\npublic class Broken { int x = \"no\"; }\n",
+    );
+
+    let (code, _, err) = jrs(
+        &scratch,
+        &root,
+        &["--jobs", "4", "build", "--no-build-cache"],
+    );
+    assert_eq!(code, 1, "{err}");
+    let a = line_of(&err, "Compiling a v1.0.0");
+    let b = line_of(&err, "Compiling b v1.0.0");
+    let broken = line_of(&err, "Broken.java");
+    let failed = line_of(&err, "error: compilation failed");
+    assert!(a < b && b < broken && broken < failed, "{err}");
+    assert!(!err.contains("Compiling c v1.0.0"), "c needs b: {err}");
+}

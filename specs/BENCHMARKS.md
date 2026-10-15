@@ -78,7 +78,7 @@ JRS_BENCH_TOOLS=jrs,gradle JRS_BENCH_PROJECTS=gen-300 \
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
-| `JRS_BENCH_TOOLS` | `jrs,maven,gradle` | tools to run; `gradle` covers the three Gradle columns (§5) |
+| `JRS_BENCH_TOOLS` | `jrs,maven,gradle` | tools to run; `gradle` covers the Gradle columns (§5) |
 | `JRS_BENCH_PROJECTS` | all | a comma list of names from §2 |
 | `JRS_BENCH_SCENARIOS` | all | a comma list of the ids in §4 |
 | `JRS_BENCH_RUNS` | `7` | measured runs per cell |
@@ -222,8 +222,13 @@ them:
   runs and reused by the measured ones, which is what a developer at a
   desk sees. `gradle (daemon, CC)`: the same with `--configuration-cache`,
   Gradle's own answer to configuration cost on `noop`. `gradle (no daemon)`:
-  `--no-daemon`, what a CI job or a first command sees. `gradle --stop` runs
-  between columns and between projects, so no daemon outlives its column.
+  `--no-daemon`, what a CI job or a first command sees. On a multi-module
+  project a fourth, `gradle (daemon, --parallel)`, is what a team that turns
+  on `org.gradle.parallel` sees, and what jrs's members built at once answer
+  ([GRADLE_GAPS.md §2.1](todo/GRADLE_GAPS.md#21-what-must-be-measured-first));
+  the report's "Workspace members at once" section sets it beside the
+  critical path through jrs's members. `gradle --stop` runs between columns
+  and between projects, so no daemon outlives its column.
 - **Maven as shipped.** `mvn` with no `-T`, unless the project's
   `.mvn/maven.config` sets one. `mvnd` is not a column (open question 1).
 - **Interleaved runs.** The measured runs go round-robin over the tools —
