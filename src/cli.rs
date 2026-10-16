@@ -2543,8 +2543,11 @@ impl<'a> Session<'a> {
     }
 
     /// The test JVM's class-data-sharing archive under `dir`, for a run in
-    /// one JVM: read, or dumped by this run. Forks only read one, which
-    /// they get here, so that no two JVMs dump at once.
+    /// one JVM: read, or dumped by this run. Forks read one they all get
+    /// here; when there is none yet, the first fork alone dumps it, so that
+    /// no two JVMs dump at once and a suite large enough to fork still gets
+    /// an archive (`specs/TEST_JVM_BENCHMARK.md` §7.1, finding 3). What it
+    /// returns is the share the caller finishes once its JVM is done.
     fn test_archive(
         &self,
         dir: &Path,
@@ -2560,7 +2563,7 @@ impl<'a> Session<'a> {
             &project,
             &run.classpath,
             &run.jvm_args,
-            forks.is_empty(),
+            true,
             self.manifest.test.share_classes == ShareClasses::Aot,
         )?;
         if let Some(archive) = share.archive() {
@@ -2574,6 +2577,10 @@ impl<'a> Session<'a> {
                 .verbose(format!("test JVM: {what} {}", archive.display()));
         }
         if forks.is_empty() {
+            return Some(share);
+        }
+        if share.dumps() {
+            forks[0].0.share_flags.clone_from(&share.flags);
             return Some(share);
         }
         for (fork, _) in forks {
@@ -2704,8 +2711,23 @@ impl<'a> Session<'a> {
             }
             return outcome;
         }
-        let runs: Vec<junit::TestRun> = forks.iter().map(|(fork, _)| fork.clone()).collect();
-        let result = junit::run_forks(toolchain, run, &runs, self.ui);
+        let mut runs: Vec<junit::TestRun> = forks.iter().map(|(fork, _)| fork.clone()).collect();
+        let mut result = junit::run_forks(toolchain, run, &runs, self.ui);
+        // The first fork dumped the archive: it goes in place if that fork
+        // got as far as running tests. One that did not may have failed for
+        // the dump alone, so the forks run again without it.
+        if let Some(share) = share {
+            let started = result.as_ref().is_ok_and(|forks| {
+                forks.first().is_some_and(|f| {
+                    f.outcome.ok() || f.outcome.found > 0 || f.outcome.stopped_early
+                })
+            });
+            share.finish(started);
+            if !started {
+                runs[0].share_flags.clear();
+                result = junit::run_forks(toolchain, run, &runs, self.ui);
+            }
+        }
         if let Some(scope) = scope {
             scope.finish();
         }

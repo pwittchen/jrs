@@ -4676,6 +4676,46 @@ fn shared_test_classes_map_an_archive_and_still_run_new_code() {
     assert!(!launches(&stdout)[0].contains("--class-path"), "{stdout}");
 }
 
+/// A suite that forks still gets an archive: the first fork dumps it, and
+/// the next run's forks all map it.
+#[test]
+fn the_first_fork_dumps_the_test_archive_the_others_map() {
+    let toolchain = require_jdk!();
+    let scratch = Scratch::new("tests-share-forks");
+    let other = ADD_TEST.replace("class AddTest", "class AgainTest");
+    let p = junit_project(
+        &scratch,
+        &toolchain,
+        FAKE_LAUNCHER_6,
+        "share-classes = true\nforks = 2",
+        &[("AddTest.java", ADD_TEST), ("AgainTest.java", &other)],
+    );
+    let (code, stdout, stderr) = p.jrs(&["-v", "test"]);
+    assert_eq!(code, 0, "{stdout}\n{stderr}");
+    if !stderr.contains("test JVM: dumping the class-data archive") {
+        eprintln!("SKIPPED: this JDK cannot dump a class-data archive\n{stderr}");
+        return;
+    }
+    assert!(stderr.contains("Fork 2 of 2"), "{stderr}");
+    let archives = std::fs::read_dir(p.cache.join("cds"))
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .filter(|name| name.starts_with("test-") && name.ends_with(".jsa"))
+        .count();
+    assert_eq!(archives, 1, "the first fork's dump is in place");
+    let (code, stdout, stderr) = p.jrs(&["-v", "test", "--all"]);
+    assert_eq!(code, 0, "{stdout}\n{stderr}");
+    assert!(
+        stderr.contains("test JVM: mapping the class-data archive"),
+        "{stderr}"
+    );
+    let mapping = stderr
+        .lines()
+        .filter(|l| l.starts_with("+ ") && l.contains("-XX:SharedArchiveFile="))
+        .count();
+    assert_eq!(mapping, 2, "both forks map it:\n{stderr}");
+}
+
 /// `test.share-classes = "aot"`: on JDK 24 and later the first run records,
 /// jrs assembles an AOT cache out of sight, and the next run maps the
 /// launcher from it; the recording leaves nothing in the tests' output.
