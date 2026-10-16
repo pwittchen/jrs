@@ -727,6 +727,7 @@ mod tests {
             share_dir: None,
             build_cache: None,
             worker: None,
+            tracked: Vec::new(),
         }
     }
 

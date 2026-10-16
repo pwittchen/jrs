@@ -2299,6 +2299,9 @@ impl<'a> Session<'a> {
             api.push_str(&upstream);
         }
         unit.main_api = Some(api);
+        // And when it changes, only the tests that use what changed compile.
+        unit.tracked = vec![project.classes_dir()];
+        unit.tracked.extend(self.upstream_dirs(|_| true));
         if self.cache_use == CacheUse::Verify {
             compile::forget(&unit);
         }
@@ -4032,6 +4035,9 @@ impl<'a> Session<'a> {
             Vec::new(),
         )?;
         unit.main_api = self.upstream_api(Classpath::compiles)?;
+        // An upstream API change compiles what uses the classes that changed
+        // (`specs/todo/BEATING_THE_DAEMON.md` §3).
+        unit.tracked = self.upstream_dirs(Classpath::compiles);
         Ok(unit)
     }
 
@@ -4154,6 +4160,7 @@ impl<'a> Session<'a> {
             share_dir: Cache::discover().ok().map(|c| c.root().join("cds")),
             build_cache: self.build_cache(),
             worker: self.worker.clone(),
+            tracked: Vec::new(),
         })
     }
 

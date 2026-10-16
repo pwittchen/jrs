@@ -658,3 +658,73 @@ fn a_member_that_fails_at_once_with_others_is_reported_in_build_order() {
     assert!(a < b && b < broken && broken < failed, "{err}");
     assert!(!err.contains("Compiling c v1.0.0"), "c needs b: {err}");
 }
+
+/// An API change upstream compiles the sources of a dependent that use the
+/// class that changed, not the whole member; a removal compiles what reaches
+/// it, and a member none of whose sources uses it is only re-indexed.
+#[test]
+fn an_upstream_api_change_compiles_only_what_uses_the_changed_class() {
+    let _toolchain = require_jdk!();
+    let scratch = Scratch::new("ws-tracked");
+    let root = workspace(&scratch);
+    scratch.write(
+        "ws/core/src/main/java/demo/core/Unused.java",
+        "package demo.core;\n\npublic class Unused {\n    public static int one() { return 1; }\n}\n",
+    );
+    scratch.write(
+        "ws/app/src/main/java/demo/app/Other.java",
+        "package demo.app;\n\nclass Other {\n    int two() { return 2; }\n}\n",
+    );
+    let (code, _, err) = jrs(&scratch, &root, &["build", "--no-build-cache"]);
+    assert_eq!(code, 0, "{err}");
+
+    let greeter = root.join("core/src/main/java/demo/core/Greeter.java");
+    let source = std::fs::read_to_string(&greeter).unwrap();
+    bump_mtime();
+    std::fs::write(
+        &greeter,
+        source.replace(
+            "public class Greeter {",
+            "public class Greeter {\n    public static int answer() { return 42; }",
+        ),
+    )
+    .unwrap();
+    let (code, _, err) = jrs(&scratch, &root, &["-v", "build", "--no-build-cache"]);
+    assert_eq!(code, 0, "{err}");
+    assert!(err.contains("Compiling app v2.0.0"), "{err}");
+    assert!(
+        err.contains("main unit: compiled 1 of 2 source files"),
+        "only Main uses Greeter:\n{err}"
+    );
+
+    // A class app never names changes: app is stale, compiles nothing, and
+    // the next build finds it fresh.
+    let unused = root.join("core/src/main/java/demo/core/Unused.java");
+    bump_mtime();
+    std::fs::write(
+        &unused,
+        "package demo.core;\n\npublic class Unused {\n    public static int one() { return 1; }\n    \
+         public static int two() { return 2; }\n}\n",
+    )
+    .unwrap();
+    let (code, _, err) = jrs(&scratch, &root, &["-v", "build", "--no-build-cache"]);
+    assert_eq!(code, 0, "{err}");
+    assert!(
+        err.contains("main unit: compiled 0 of 2 source files"),
+        "nothing in app uses Unused:\n{err}"
+    );
+    let (code, _, err) = jrs(&scratch, &root, &["build", "--no-build-cache"]);
+    assert_eq!(code, 0, "{err}");
+    assert!(err.contains("Fresh app v2.0.0"), "{err}");
+
+    // Taking `greet` away breaks Main, which has to be compiled — and fail.
+    bump_mtime();
+    std::fs::write(
+        &greeter,
+        "package demo.core;\n\npublic class Greeter {\n    public static int answer() { return 42; }\n}\n",
+    )
+    .unwrap();
+    let (code, _, err) = jrs(&scratch, &root, &["build", "--no-build-cache"]);
+    assert_eq!(code, 1, "{err}");
+    assert!(err.contains("Main.java"), "{err}");
+}

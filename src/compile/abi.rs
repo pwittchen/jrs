@@ -173,6 +173,16 @@ pub(super) struct ClassInfo {
     pub constants: String,
     /// Every class name its constant pool mentions, the class's own too.
     pub refs: BTreeSet<String>,
+    /// A digest of what [`api_digest`] keeps of the class less its members:
+    /// its flags, supertypes, generic signature, annotations and nesting.
+    /// The same as `api` when the class counts by its bytes.
+    pub header: String,
+    /// A short digest of each visible member, sorted: a class whose header
+    /// is unchanged and which kept every member it had only gained some.
+    /// Empty when the class counts by its bytes.
+    pub members: Vec<String>,
+    /// Its superclass and interfaces, by name.
+    pub supers: Vec<String>,
 }
 
 /// Read one class file. `None` if it cannot be parsed.
@@ -193,6 +203,18 @@ pub(super) fn class_info(bytes: &[u8]) -> Option<ClassInfo> {
     } else {
         sha256_hex(&parsed.constants)
     };
+    let (header, members) = match parsed.verdict {
+        Verdict::Fine => {
+            let mut members: Vec<String> = parsed
+                .members
+                .iter()
+                .map(|m| sha256_hex(m)[..16].to_string())
+                .collect();
+            members.sort();
+            (sha256_hex(&parsed.header), members)
+        }
+        _ => (api.clone(), Vec::new()),
+    };
     Some(ClassInfo {
         name: String::from_utf8_lossy(parsed.name).into_owned(),
         source_file: parsed
@@ -202,6 +224,9 @@ pub(super) fn class_info(bytes: &[u8]) -> Option<ClassInfo> {
         api,
         constants,
         refs: parsed.refs,
+        header,
+        members,
+        supers: parsed.supers,
     })
 }
 
@@ -354,6 +379,11 @@ struct Parsed<'a> {
     /// Whether the class has an `InnerClasses` entry of its own.
     nested: bool,
     refs: BTreeSet<String>,
+    /// `rendered` without its members.
+    header: Vec<u8>,
+    /// Each visible member as `rendered` holds it.
+    members: Vec<Vec<u8>>,
+    supers: Vec<String>,
 }
 
 fn parse(bytes: &[u8]) -> Option<Parsed<'_>> {
@@ -384,6 +414,9 @@ fn parse(bytes: &[u8]) -> Option<Parsed<'_>> {
             source_file: None,
             nested: false,
             refs: BTreeSet::new(),
+            header: Vec::new(),
+            members: Vec::new(),
+            supers: Vec::new(),
         });
     }
 
@@ -394,6 +427,10 @@ fn parse(bytes: &[u8]) -> Option<Parsed<'_>> {
     num(&mut out, major);
     num(&mut out, access);
     put(&mut out, name);
+    let mut supers = Vec::new();
+    if superclass != 0 {
+        supers.push(String::from_utf8_lossy(class.class_name(superclass)?).into_owned());
+    }
     put(
         &mut out,
         if superclass == 0 {
@@ -405,46 +442,24 @@ fn parse(bytes: &[u8]) -> Option<Parsed<'_>> {
     let interfaces = r.u2()?;
     num(&mut out, interfaces);
     for _ in 0..interfaces {
-        put(&mut out, class.class_name(r.u2()?)?);
+        let interface = class.class_name(r.u2()?)?;
+        supers.push(String::from_utf8_lossy(interface).into_owned());
+        put(&mut out, interface);
     }
 
+    let members_start = out.len();
+    let mut visible = Vec::new();
     for kind in [&b"field"[..], &b"method"[..]] {
-        let count = r.u2()?;
-        let mut members = Vec::new();
-        let mut constant_members = Vec::new();
-        for _ in 0..count {
-            let flags = r.u2()?;
-            let name = class.utf8(r.u2()?)?;
-            let descriptor = class.utf8(r.u2()?)?;
-            let mut member = Vec::new();
-            put(&mut member, kind);
-            num(&mut member, flags);
-            put(&mut member, name);
-            put(&mut member, descriptor);
-            // A private member's attributes are read past, and cannot make
-            // the class opaque: nothing outside it sees them.
-            let mut own = Verdict::Fine;
-            class.constant.set(false);
-            class.attributes(&mut r, &mut member, &mut own)?;
-            if flags & (ACC_PRIVATE | ACC_SYNTHETIC) == 0 {
-                raise(&mut verdict, own);
-                if class.constant.get() {
-                    constant_members.push(member.clone());
-                }
-                members.push(member);
-            }
-        }
-        // Declaration order is not API: moving a method changes nothing a
-        // caller compiles against.
-        members.sort();
+        let (members, constant_members) = class.members(&mut r, kind, &mut verdict)?;
         for member in members {
-            out.extend(member);
+            out.extend(&member);
+            visible.push(member);
         }
-        constant_members.sort();
         for member in constant_members {
             constants.extend(member);
         }
     }
+    let members_end = out.len();
     class.attributes(&mut r, &mut out, &mut verdict)?;
     if !r.done() {
         return None;
@@ -452,6 +467,8 @@ fn parse(bytes: &[u8]) -> Option<Parsed<'_>> {
     if access & ACC_SYNTHETIC != 0 {
         verdict = Verdict::Hidden;
     }
+    let mut header = out[..members_start].to_vec();
+    header.extend(&out[members_end..]);
     let refs = class.refs();
     Some(Parsed {
         verdict,
@@ -461,8 +478,14 @@ fn parse(bytes: &[u8]) -> Option<Parsed<'_>> {
         source_file: class.source_file.get().and_then(|i| class.utf8(i)),
         nested: class.nested.get(),
         refs,
+        header,
+        members: visible,
+        supers,
     })
 }
+
+/// Members, each rendered on its own.
+type Rendered = Vec<Vec<u8>>;
 
 struct Class<'a> {
     pool: Vec<Const<'a>>,
@@ -494,6 +517,45 @@ impl<'a> Class<'a> {
             }
         }
         out
+    }
+
+    /// Read one `fields` or `methods` table: its visible members rendered,
+    /// sorted — declaration order is not API, and moving a method changes
+    /// nothing a caller compiles against — and those with a constant value.
+    fn members(
+        &self,
+        r: &mut Reader<'a>,
+        kind: &[u8],
+        verdict: &mut Verdict,
+    ) -> Option<(Rendered, Rendered)> {
+        let count = r.u2()?;
+        let mut members = Vec::new();
+        let mut constant_members = Vec::new();
+        for _ in 0..count {
+            let flags = r.u2()?;
+            let name = self.utf8(r.u2()?)?;
+            let descriptor = self.utf8(r.u2()?)?;
+            let mut member = Vec::new();
+            put(&mut member, kind);
+            num(&mut member, flags);
+            put(&mut member, name);
+            put(&mut member, descriptor);
+            // A private member's attributes are read past, and cannot make
+            // the class opaque: nothing outside it sees them.
+            let mut own = Verdict::Fine;
+            self.constant.set(false);
+            self.attributes(r, &mut member, &mut own)?;
+            if flags & (ACC_PRIVATE | ACC_SYNTHETIC) == 0 {
+                raise(verdict, own);
+                if self.constant.get() {
+                    constant_members.push(member.clone());
+                }
+                members.push(member);
+            }
+        }
+        members.sort();
+        constant_members.sort();
+        Some((members, constant_members))
     }
 
     fn utf8(&self, index: u16) -> Option<&'a [u8]> {
@@ -1181,6 +1243,40 @@ mod tests {
             class_info(&anonymous("com/example/Calc$1")).unwrap().kind,
             Kind::Hidden
         );
+    }
+
+    #[test]
+    fn class_info_keeps_the_members_apart_from_the_header() {
+        let info = class_info(&calc(&[1], 10, &[], 0)).unwrap();
+        assert_eq!(info.supers, ["java/lang/Object"]);
+        assert_eq!(info.members.len(), 2, "LIMIT and add");
+        let mut sorted = info.members.clone();
+        sorted.sort();
+        assert_eq!(info.members, sorted);
+        let wider = class_info(&calc(&[1], 10, &[member(PUBLIC, "sub", "(II)I")], 0)).unwrap();
+        assert_ne!(wider.api, info.api);
+        assert_eq!(
+            wider.header, info.header,
+            "a new method is not a new header"
+        );
+        assert!(info.members.iter().all(|m| wider.members.contains(m)));
+        let kotlin = class_info(&{
+            let mut c = ClassFile::default();
+            let kind = c.utf8("Lkotlin/Metadata;");
+            let mut annotations = ClassFile::u2(1);
+            annotations.extend(ClassFile::u2(kind));
+            annotations.extend(ClassFile::u2(0));
+            c.build(
+                PUBLIC | 0x0020,
+                "com/example/UtilKt",
+                &[],
+                &[],
+                &[("RuntimeVisibleAnnotations", annotations)],
+            )
+        })
+        .unwrap();
+        assert_eq!(kotlin.header, kotlin.api, "a class counted by its bytes");
+        assert!(kotlin.members.is_empty());
     }
 
     #[test]

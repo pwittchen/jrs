@@ -79,6 +79,13 @@ pub struct CompileUnit {
     /// The `--watch` session's warm `javac` (`worker.rs`), which every
     /// `javac` step asks first; `None` forks `javac` for each.
     pub worker: Option<Arc<worker::Worker>>,
+    /// Class directories on the classpath whose classes the incremental
+    /// index follows one by one (`incremental.rs`): the main classes for the
+    /// tests, and the upstream members' for a workspace member. With them,
+    /// an API change there compiles the sources that use the changed
+    /// classes rather than the whole unit, and `main_api` is left out of
+    /// the settings the index is taken under.
+    pub tracked: Vec<PathBuf>,
 }
 
 /// A Kotlin, Scala or Groovy compiler, and what its run needs beyond the
@@ -172,6 +179,11 @@ impl CompileUnit {
     /// A class directory on the classpath is not a jar: the tests see
     /// `target/classes` through `main_api` instead.
     fn settings(&self) -> String {
+        self.settings_with(true)
+    }
+
+    /// [`settings`](Self::settings), with or without `main_api`.
+    fn settings_with(&self, main_api: bool) -> String {
         let mut s = String::new();
         s.push_str(&self.javac_flags(false).join("\u{1}"));
         s.push('\n');
@@ -204,7 +216,7 @@ impl CompileUnit {
                 let _ = writeln!(s, "jar {} {modified}", meta.len());
             }
         }
-        if let Some(api) = &self.main_api {
+        if main_api && let Some(api) = &self.main_api {
             let _ = writeln!(s, "main-api {api}");
         }
         s
@@ -758,6 +770,7 @@ mod tests {
             share_dir: None,
             build_cache: None,
             worker: None,
+            tracked: Vec::new(),
         }
     }
 

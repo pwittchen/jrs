@@ -59,6 +59,7 @@ fn compile_main(manifest: &Manifest, toolchain: &Toolchain, classpath: Vec<PathB
         share_dir: None,
         build_cache: None,
         worker: None,
+        tracked: Vec::new(),
     };
     match compile::compile(toolchain, &unit, &silent_ui()).unwrap() {
         compile::Outcome::Compiled { classes, .. } => classes,
@@ -204,6 +205,7 @@ fn a_second_build_is_up_to_date_and_a_touched_source_is_not() {
         share_dir: None,
         build_cache: None,
         worker: None,
+        tracked: Vec::new(),
     };
 
     compile::compile(&toolchain, &unit(), &silent_ui()).unwrap();
@@ -265,6 +267,7 @@ fn tests_recompile_when_the_main_api_changes_and_only_then() {
         share_dir: None,
         build_cache: None,
         worker: None,
+        tracked: Vec::new(),
     };
     let main = || unit("main", &calc, classes.clone(), Vec::new());
     // As `jrs test` builds it: the main classes' API, taken after main built.
@@ -377,6 +380,7 @@ fn a_compilation_error_fails_the_build_and_leaves_no_fingerprint() {
         share_dir: None,
         build_cache: None,
         worker: None,
+        tracked: Vec::new(),
     };
     let error = compile::compile(&toolchain, &unit, &silent_ui()).unwrap_err();
     assert!(error.to_string().contains("compilation failed"), "{error}");
@@ -404,6 +408,7 @@ fn java_unit(toolchain: &Toolchain, root: &Path, out: &str) -> CompileUnit {
         share_dir: None,
         build_cache: None,
         worker: None,
+        tracked: Vec::new(),
     }
 }
 
@@ -543,6 +548,65 @@ fn an_api_change_reaches_callers_through_a_subclass() {
     );
     assert_matches_a_whole_build(&toolchain, &root);
     assert_eq!(rebuild(&toolchain, &root).unwrap(), 0);
+}
+
+/// `Base` is used by `Middle`, which `Top` uses; `Other` uses nothing.
+fn chain(scratch: &Scratch) -> PathBuf {
+    for (path, text) in [
+        (
+            "chain/src/p/Base.java",
+            "package p;\n\npublic class Base {\n    public int one() {\n        return 1;\n    }\n\n    \
+             public int unused() {\n        return 0;\n    }\n}\n",
+        ),
+        (
+            "chain/src/p/Middle.java",
+            "package p;\n\npublic class Middle {\n    public int two() {\n        \
+             return new Base().one() * 2;\n    }\n}\n",
+        ),
+        (
+            "chain/src/p/Top.java",
+            "package p;\n\npublic class Top {\n    public int four() {\n        \
+             return new Middle().two() * 2;\n    }\n}\n",
+        ),
+        ("chain/src/p/Other.java", "package p;\n\nclass Other {}\n"),
+    ] {
+        scratch.write(path, text);
+    }
+    scratch.join("chain")
+}
+
+#[test]
+fn an_added_method_stops_at_the_callers_whose_api_did_not_change() {
+    let toolchain = require_jdk!();
+    let scratch = Scratch::new("build-rounds");
+    let root = chain(&scratch);
+    let base = root.join("src/p/Base.java");
+    let text = std::fs::read_to_string(&base).unwrap();
+    assert_eq!(rebuild(&toolchain, &root).unwrap(), 4);
+
+    // A new method: Base, then Middle, which calls it; Middle's own API is
+    // the same, so Top is not compiled.
+    let added = text.replace(
+        "    public int unused()",
+        "    public int three() {\n        return 3;\n    }\n\n    public int unused()",
+    );
+    std::fs::write(&base, &added).unwrap();
+    assert_eq!(rebuild(&toolchain, &root).unwrap(), 2, "Base and Middle");
+    assert_matches_a_whole_build(&toolchain, &root);
+
+    // Taking a method away is more than an addition: the walk goes all the
+    // way, as it did before rounds.
+    std::fs::write(
+        &base,
+        added.replace("    public int unused() {\n        return 0;\n    }\n", ""),
+    )
+    .unwrap();
+    assert_eq!(
+        rebuild(&toolchain, &root).unwrap(),
+        3,
+        "Base, Middle and Top"
+    );
+    assert_matches_a_whole_build(&toolchain, &root);
 }
 
 #[test]

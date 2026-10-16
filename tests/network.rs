@@ -142,6 +142,7 @@ fn a_project_with_dependencies_compiles_tests_and_runs_them() {
         share_dir: None,
         build_cache: None,
         worker: None,
+        tracked: Vec::new(),
     };
 
     compile::compile(
