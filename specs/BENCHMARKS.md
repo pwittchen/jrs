@@ -6,7 +6,8 @@ projects, checked to be the same build before anything is timed, with the
 results written up in a report anyone can regenerate.
 
 Status: **the harness is implemented**; the first published report, and
-the links of §9 to it, are not. It needs no SPEC.md change and adds no
+the links of §9 to it, are not. The Kotlin projects of §2.1 are planned,
+not implemented. It needs no SPEC.md change and adds no
 crate: the harness is `benches/compare.rs`, a `cargo bench` target beside
 the others, and drives Maven and Gradle as subprocesses. Where the
 implementation settles something this plan left open, or departs from it,
@@ -51,11 +52,45 @@ Gradle's `shadow`, `jrs package --fat`). Its sources are shared with
 | `gen-300` | generated: 300 classes in 20 packages, 30 dependencies | throughput |
 | `gen-2000` | generated: 2000 classes, 60 dependencies | where the JVM work dominates |
 | `gen-ws` | generated: a 6-member workspace (Maven reactor, Gradle `include`) | multi-module, and §3.1 of GRADLE_GAPS |
+| `orders` | `examples/orders`, Kotlin with a Java class, coroutines | `kotlinc`'s start-up cost |
+| `gen-kt` | generated: `gen-300`'s shape in Kotlin | Kotlin throughput, and §3.1 of GRADLE_GAPS |
 
 The generator is part of the harness (§3), seeded and deterministic: each
 class has a body, a few calls into its package's neighbours and one into a
 dependency, and a test class per ten classes. It writes all three build files
 from one description, so they cannot drift.
+
+### 2.1 Kotlin
+
+The first five projects are Java only, so the comparison says nothing about
+the cost GRADLE_GAPS §3.1 asks about: a cold `kotlinc` per build in jrs
+against the Kotlin daemon Gradle keeps warm. `orders` and `gen-kt` add it to
+the parity set.
+
+- **`orders`** is the example as it is: Kotlin main and test sources, one
+  Java class compiled after them in the same unit, `kotlinx-coroutines-core`
+  (a multiplatform library, reached through its `-jvm` artifact) and
+  `kotlin-test-junit5`. Its Maven build uses `kotlin-maven-plugin` with
+  the `compile` goal bound before `maven-compiler-plugin`'s; its Gradle
+  build uses `kotlin("jvm")`. Both use `[kotlin] version` and its
+  `kotlinc-args`, and `jvmTarget` at `[java] source`.
+- **`gen-kt`** is `gen-300` written as Kotlin by the same generator: 300
+  classes in 20 packages, the same 30 dependencies, a Kotlin test class per
+  ten classes on `kotlin-test-junit5`. It has no Java source, so its
+  `incremental` and `abi` cells time `kotlinc`, not `javac`.
+- **The stdlib** is an explicit dependency in the Maven build only. The
+  Kotlin Gradle plugin adds it, and jrs implies it (the `[kotlin]` runtime
+  library). §5.1's classpath check holds all three to one `kotlin-stdlib`
+  version.
+- **The corpus set's Kotlin projects** (`petclinic-kotlin`, `ktor-serialization`,
+  `ktor-h2`) join the benchmark like any other, once their corpus row passes
+  every step (§11). They are what §3.1 of GRADLE_GAPS names. A run limited to
+  the parity set, as both passes in BENCHMARKS_SUMMARY.md were, leaves them
+  out. The next full run should not.
+
+`orders` is a command-line project. Its `run` cell is timed to a fixed line
+of the receipt `Main.kt` prints (a `Probe::Stdout` in `benches/compare.rs`,
+as `wordstats` has), and §5.1 checks that every tool prints it.
 
 **The corpus set** — real projects, each against its own build. The projects
 of CORPUS.md whose `jrs migrate` output passes every step there, each
@@ -180,7 +215,10 @@ Notes on the rows that need them:
   the source with the most and the fewest dependents by a grep for its simple
   name — and restore it before the next run, so every run makes the same
   edit. They are where `compile/incremental.rs` and Gradle's incremental Java
-  compilation meet.
+  compilation meet. In a Kotlin project the edit is always in a `.kt` source,
+  so the cell times the Kotlin compiler on every tool. There jrs compiles the
+  unit whole (SPEC §7.2), Gradle runs Kotlin's incremental compilation in
+  its daemon, and Maven uses `kotlin-maven-plugin` as configured.
 - **`test`** runs the whole suite on every tool. jrs's `--all` and Gradle's
   `--rerun` turn off the selection and up-to-date checks that would
   otherwise run nothing.
@@ -229,6 +267,16 @@ them:
   the report's "Workspace members at once" section sets it beside the
   critical path through jrs's members. `gradle --stop` runs between columns
   and between projects, so no daemon outlives its column.
+- **The Kotlin daemon as Gradle ships it.** By default Gradle compiles
+  Kotlin in a Kotlin daemon (`KotlinCompileDaemon`), a process of its own
+  that `gradle --stop` does not end and that outlives `--no-daemon`. The
+  daemon columns keep it, since that is what a developer gets. The harness
+  stops every Kotlin daemon (found by its main class) between columns and
+  projects, and before each run of `gradle (no daemon)` and of every `cold`
+  cell. Otherwise a warm compiler left over from another column would be
+  timed as a cold one. jrs runs `kotlinc` as it always does, one forked
+  compiler per build, since its `--watch` worker is not a build mode.
+  Maven runs `kotlin-maven-plugin` in its own JVM, as shipped.
 - **Maven as shipped.** `mvn` with no `-T`, unless the project's
   `.mvn/maven.config` sets one. `mvnd` is not a column (open question 1).
 - **Interleaved runs.** The measured runs go round-robin over the tools —
@@ -297,6 +345,13 @@ and the jrs phase that took the time.
 `--timings` row, so a slow jrs cell is explained by its phases — resolution,
 `compile main: javac`, the test JVM — rather than by one total.
 
+**Kotlin.** For each Kotlin project and each of `clean`, `incremental` and
+`abi`, a table with jrs's `compile main: kotlinc` median, its share of jrs's
+total, and Gradle's daemon column beside it. This is the number
+GRADLE_GAPS §3.1 decides on. `benches/kotlinc.rs` (the compiler's floor and
+a warm second compile) splits it further; the report links that bench's
+command and does not run it.
+
 **The test JVM.** TEST_JVM_BENCHMARK.md §4 sends its results to "a section
 of the ROADMAP §2 benchmark report"; that section is a copy of its latest
 §7 table, kept here so the two reports do not need reading together.
@@ -326,6 +381,13 @@ regression between two jrs commits, not for the Why page.
   by both.
 - `benchmarks/projects/` (new): the parity set's hand-written build files;
   `benchmarks/REPORT.md` and `benchmarks/raw/` once a report is published.
+- For Kotlin (§2.1): `benchmarks/projects/orders/` with `pom.xml`,
+  `build.gradle.kts` and `settings.gradle.kts`. In `benches/compare.rs`, the
+  generator gains a language, so `gen-kt` writes `.kt` sources, a `[kotlin]`
+  table, `kotlin-maven-plugin` and `kotlin("jvm")`; the Kotlin daemon stop
+  of §5; and the report section of §6. The Kotlin Gradle plugin and the
+  compiler's artifacts reach the mirror by recording, like everything else,
+  so the recorded mirror and CI's `actions/cache` key change once.
 - `Cargo.toml`: one `[[bench]]` entry. No dependency.
 - No change to `src/`. If the harness needs something jrs does not print
   (a coordinate list for `jrs classpath`, say), that is a finding with its
@@ -366,6 +428,14 @@ regression between two jrs commits, not for the Why page.
    (daemon, CC)` become one column, and the report says which Gradle did so.
 6. **Windows.** Process start-up costs differ most there, and jrs ships a
    Windows binary. The harness is portable; the reference report is not.
+7. **A Spring Boot project in Kotlin in the parity set.** `bookmarks`
+   written in Kotlin (with `allopen`/`spring` as `[kotlin] plugins`) would
+   test compiler plugins under control. `petclinic-kotlin` in the corpus set
+   covers the same ground against a real build. Is one enough?
+8. **A `kotlinc` worker column.** If GRADLE_GAPS §3.3's worker is built, it
+   runs under `--watch` only, which no scenario here times. A
+   `jrs build --watch` column that times one edit to its rebuild would be
+   the fair answer to the Kotlin daemon, but a new kind of measurement.
 
 ## 11. As implemented
 
