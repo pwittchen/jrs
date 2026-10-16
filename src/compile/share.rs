@@ -20,6 +20,13 @@
 //! without its own base archive, or a user who passes CDS flags of their own,
 //! gets no archive from jrs at all.
 //!
+//! From JDK 25, `javac` gets JEP 483's AOT cache instead
+//! (`specs/todo/BEATING_THE_DAEMON.md` §6): its classes kept loaded and
+//! linked, and the method profiles of the run that trained it (JEP 515), in
+//! `<cache>/cds/javac-jdk<n>-<key>.aot`, one per JDK and JVM flags. It is
+//! made in the two steps the test JVM's is, below; what it holds is no
+//! project's, and it changes how fast `javac` starts, never what it writes.
+//!
 //! The test JVM gets an archive too, when `test.share-classes` asks for one
 //! (SPEC §10.2). CDS refuses to dump a classpath holding a non-empty class
 //! directory, and lets a run append to the classpath it was dumped with, so
@@ -69,6 +76,21 @@ const AOT_QUIET: &str = "-Xlog:aot*=off";
 /// The first JDK with the AOT cache (JEP 483).
 pub const AOT_SINCE: u32 = 24;
 
+/// The first JDK whose `javac` gets an AOT cache rather than a dynamic
+/// archive: from JDK 25 the cache also keeps the method profiles of the run
+/// that trained it (JEP 515), so `javac` starts with its hot code known.
+pub const JAVAC_AOT_SINCE: u32 = 25;
+
+/// What the `javac` launcher runs, which the run that assembles its AOT
+/// cache has to name as the training run did: a cache assembled for
+/// another main module maps no module classes.
+const JAVAC_MAIN: &[&str] = &[
+    "--add-modules",
+    "ALL-DEFAULT",
+    "-m",
+    "jdk.compiler/com.sun.tools.javac.Main",
+];
+
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// One JVM run's use of its archive.
@@ -92,9 +114,13 @@ pub struct Share {
 #[derive(Debug)]
 struct Assemble {
     java: PathBuf,
-    classpath: Vec<PathBuf>,
+    /// The run's `-cp`; `None` for a run without one, which names its main
+    /// module in `main` instead.
+    classpath: Option<Vec<PathBuf>>,
     /// The run's own flags that change what is cached.
     flags: Vec<String>,
+    /// What the run ran, after its classpath.
+    main: Vec<String>,
 }
 
 impl Share {
@@ -117,6 +143,68 @@ impl Share {
             key(&home, toolchain, tool, classpath)
         ));
         Share::at(dir, archive, true, None)
+    }
+
+    /// `javac`'s archive under `dir`, or `None` when it gets none: from
+    /// JDK 25 an AOT cache (`specs/todo/BEATING_THE_DAEMON.md` §6), keyed
+    /// by the JDK and by `jvm_flags`, the flags its JVM starts with; before,
+    /// the dynamic archive [`Share::new`] gives any compiler. Like the test
+    /// JVM's, the cache is made in two steps: the first run records, and jrs
+    /// assembles the cache from that record once it succeeded.
+    pub(crate) fn for_javac(
+        dir: &Path,
+        toolchain: &Toolchain,
+        jvm_flags: &[&str],
+    ) -> Option<Share> {
+        if toolchain.version < JAVAC_AOT_SINCE {
+            return Share::new(dir, toolchain, "jdk.compiler", &[], &[]);
+        }
+        let home = usable(dir, toolchain, &[], false)?;
+        let tool = format!("javac-aot\u{1}{}", jvm_flags.join("\u{1}"));
+        let archive = dir.join(format!(
+            "javac-jdk{}-{}.aot",
+            toolchain.version,
+            key(&home, toolchain, &tool, &[])
+        ));
+        if archive.is_file() {
+            return Some(Share {
+                flags: vec![
+                    format!("-XX:AOTCache={}", archive.display()),
+                    AOT_QUIET.to_string(),
+                    QUIET.to_string(),
+                ],
+                dump: None,
+                replaces: None,
+                assemble: None,
+            });
+        }
+        let temp = temporary(dir, &archive)?;
+        Some(Share {
+            flags: Share::recording(&temp),
+            dump: Some((temp, archive)),
+            replaces: None,
+            assemble: Some(Assemble {
+                java: toolchain.java.clone(),
+                classpath: None,
+                flags: jvm_flags.iter().map(|f| (*f).to_string()).collect(),
+                main: JAVAC_MAIN.iter().map(|f| (*f).to_string()).collect(),
+            }),
+        })
+    }
+
+    /// The flags of a run that records which classes it used into `temp`,
+    /// for an AOT cache, and says nothing of it.
+    fn recording(temp: &Path) -> Vec<String> {
+        vec![
+            "-XX:AOTMode=record".to_string(),
+            format!("-XX:AOTConfiguration={}", temp.display()),
+            // The recording run says that it recorded, on stdout, between
+            // the tool's own lines, whatever its logging is set to.
+            "-XX:+UnlockDiagnosticVMOptions".to_string(),
+            "-XX:-DisplayVMOutput".to_string(),
+            AOT_QUIET.to_string(),
+            QUIET.to_string(),
+        ]
     }
 
     /// The test JVM's archive under `dir`, or `None` when it gets none.
@@ -170,22 +258,14 @@ impl Share {
         }
         let temp = temporary(dir, &archive)?;
         Some(Share {
-            flags: vec![
-                "-XX:AOTMode=record".to_string(),
-                format!("-XX:AOTConfiguration={}", temp.display()),
-                // The recording run says that it recorded, on stdout, between
-                // the tests' own lines, whatever its logging is set to.
-                "-XX:+UnlockDiagnosticVMOptions".to_string(),
-                "-XX:-DisplayVMOutput".to_string(),
-                AOT_QUIET.to_string(),
-                QUIET.to_string(),
-            ],
+            flags: Share::recording(&temp),
             dump: Some((temp, archive)),
             replaces: Some(prefix),
             assemble: Some(Assemble {
                 java: toolchain.java.clone(),
-                classpath: classpath.to_vec(),
+                classpath: Some(classpath.to_vec()),
                 flags: archived,
+                main: Vec::new(),
             }),
         })
     }
@@ -295,14 +375,18 @@ impl Assemble {
         let Some(temp) = temporary(dir, archive) else {
             return false;
         };
-        let assembled = std::process::Command::new(&self.java)
+        let mut command = std::process::Command::new(&self.java);
+        command
             .arg("-XX:AOTMode=create")
             .arg(format!("-XX:AOTConfiguration={}", recorded.display()))
             .arg(format!("-XX:AOTCache={}", temp.display()))
             .args([AOT_QUIET, QUIET])
-            .args(&self.flags)
-            .arg("-cp")
-            .arg(Toolchain::classpath(&self.classpath))
+            .args(&self.flags);
+        if let Some(classpath) = &self.classpath {
+            command.arg("-cp").arg(Toolchain::classpath(classpath));
+        }
+        let assembled = command
+            .args(&self.main)
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
@@ -736,6 +820,55 @@ mod tests {
 
         std::fs::write(&archive, "cache").unwrap();
         let share = for_tests(&jdk).unwrap();
+        assert!(share.is_aot() && !share.dumps());
+        assert_eq!(
+            share.flags[0],
+            format!("-XX:AOTCache={}", archive.display())
+        );
+    }
+
+    #[test]
+    fn javac_gets_an_aot_cache_from_jdk_25_keyed_by_its_flags() {
+        let tree = Tree::new("javac-aot");
+        let dir = tree.root.join("cds");
+        let mut jdk = tree.jdk(true);
+        let before = Share::for_javac(&dir, &jdk, &[]).unwrap();
+        assert!(!before.is_aot(), "JDK 21 maps a dynamic archive");
+        before.finish(false);
+
+        jdk.version = JAVAC_AOT_SINCE;
+        let share = Share::for_javac(&dir, &jdk, &[]).unwrap();
+        assert!(share.is_aot() && share.dumps());
+        assert!(share.flags.contains(&"-XX:-DisplayVMOutput".to_string()));
+        let archive = share.archive().unwrap().to_path_buf();
+        assert!(
+            archive
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with("javac-jdk25-")
+        );
+        let assemble = share.assemble.as_ref().unwrap();
+        assert_eq!(
+            assemble.classpath, None,
+            "javac runs its module, not a classpath"
+        );
+        assert_eq!(
+            assemble.main.last().unwrap(),
+            "jdk.compiler/com.sun.tools.javac.Main"
+        );
+        share.finish(false);
+
+        let quick = Share::for_javac(&dir, &jdk, &["-XX:TieredStopAtLevel=1"]).unwrap();
+        assert_ne!(
+            quick.archive(),
+            Some(archive.as_path()),
+            "other flags, another cache"
+        );
+        quick.finish(false);
+
+        std::fs::write(&archive, "cache").unwrap();
+        let share = Share::for_javac(&dir, &jdk, &[]).unwrap();
         assert!(share.is_aot() && !share.dumps());
         assert_eq!(
             share.flags[0],

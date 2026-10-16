@@ -4654,7 +4654,13 @@ fn an_aot_cache_is_recorded_assembled_and_mapped_quietly() {
     let caches: Vec<PathBuf> = std::fs::read_dir(p.cache.join("cds"))
         .unwrap()
         .map(|e| e.unwrap().path())
-        .filter(|p| p.extension().is_some_and(|e| e == "aot"))
+        .filter(|p| {
+            p.extension().is_some_and(|e| e == "aot")
+                && p.file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .starts_with("test-")
+        })
         .collect();
     assert_eq!(caches.len(), 1, "assembled after the run");
 

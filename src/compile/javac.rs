@@ -118,7 +118,7 @@ fn fork(
     let share = unit
         .share_dir
         .as_deref()
-        .and_then(|dir| Share::new(dir, toolchain, "jdk.compiler", &[], &[]));
+        .and_then(|dir| Share::for_javac(dir, toolchain, quick));
     share::run(share, CapturedOutput::ok, |shared| {
         let mut args: Vec<String> = quick
             .iter()
