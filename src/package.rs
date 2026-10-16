@@ -753,6 +753,17 @@ fn no_archives() -> Vec<zip::ZipArchive<std::fs::File>> {
     Vec::new()
 }
 
+/// How one planned entry reaches the jar.
+enum Prepared {
+    /// A dependency's entry copied as it is stored there, deflated bytes,
+    /// CRC and sizes alike (`archive`, `index`): it would only be inflated
+    /// to be deflated again into the same bytes' equal.
+    Raw(usize, usize),
+    /// An entry jrs writes itself, deflated already: a zip of that one
+    /// entry, to be copied from.
+    Deflated(Vec<u8>),
+}
+
 fn write_jar<R: Read + Seek>(
     output: &Path,
     manifest: &JarManifest,
@@ -761,17 +772,55 @@ fn write_jar<R: Read + Seek>(
     warnings: Vec<String>,
     relocator: &Relocator,
 ) -> Result<PackageOutcome> {
+    let build_error =
+        |e: zip::result::ZipError| JrsError::build(format!("{}: {e}", output.display()));
+
+    // What can be copied as it is, and the bytes of everything else, read
+    // in order; then those are deflated at once, on every core, and the
+    // jar is written in order from both.
+    let mut prepared: Vec<Option<Prepared>> = Vec::with_capacity(plan.len());
+    let mut pending: Vec<(usize, &str, Vec<u8>)> = Vec::new();
+    for (k, (name, entry)) in plan.iter().enumerate() {
+        if let Entry::Jar(archive, index) = entry
+            && (relocator.is_empty() || !is_class(name))
+        {
+            let source = archives[*archive]
+                .by_index_raw(*index)
+                .map_err(build_error)?;
+            if source.name() == name.as_str()
+                && source.compression() == zip::CompressionMethod::Deflated
+                && !source.encrypted()
+            {
+                prepared.push(Some(Prepared::Raw(*archive, *index)));
+                continue;
+            }
+        }
+        let mut bytes = Vec::new();
+        write_entry(&mut bytes, name, entry, &mut archives, relocator, output)?;
+        pending.push((k, name, bytes));
+        prepared.push(None);
+    }
+    let deflated: Vec<(usize, Result<Vec<u8>>)> = {
+        use rayon::prelude::*;
+        pending
+            .into_par_iter()
+            .map(|(k, name, bytes)| (k, deflate(name, &bytes, output)))
+            .collect()
+    };
+    for (k, zip) in deflated {
+        prepared[k] = Some(Prepared::Deflated(zip?));
+    }
+
     if let Some(parent) = output.parent() {
         std::fs::create_dir_all(parent).path(parent)?;
     }
     let file = std::fs::File::create(output).path(output)?;
     let mut writer = zip::ZipWriter::new(std::io::BufWriter::new(file));
-    let options = entry_options();
 
     // The manifest goes first, as every jar reader expects.
     writer
-        .start_file("META-INF/MANIFEST.MF", options)
-        .map_err(|e| JrsError::build(format!("{}: {e}", output.display())))?;
+        .start_file("META-INF/MANIFEST.MF", entry_options())
+        .map_err(build_error)?;
     writer
         .write_all(manifest.render().as_bytes())
         .path(output)?;
@@ -794,24 +843,34 @@ fn write_jar<R: Read + Seek>(
                 let dir = directories.next().expect("peeked");
                 writer
                     .add_directory(dir.as_str(), directory_options())
-                    .map_err(|e| JrsError::build(format!("{}: {e}", output.display())))?;
+                    .map_err(build_error)?;
             }
             Ok(())
         };
 
-    for (name, entry) in plan {
+    for (name, prepared) in plan.keys().zip(prepared) {
         write_directories_before(&mut writer, Some(name.as_str()))?;
-        writer
-            .start_file(name.as_str(), options)
-            .map_err(|e| JrsError::build(format!("{}: {e}", output.display())))?;
-        write_entry(&mut writer, name, entry, &mut archives, relocator, output)?;
+        match prepared.expect("every entry is prepared") {
+            Prepared::Raw(archive, index) => {
+                let source = archives[archive].by_index_raw(index).map_err(build_error)?;
+                writer
+                    .raw_copy_file_touch(source, fixed_timestamp(), Some(0o644))
+                    .map_err(build_error)?;
+            }
+            Prepared::Deflated(zip) => {
+                let mut one =
+                    zip::ZipArchive::new(std::io::Cursor::new(zip)).map_err(build_error)?;
+                let source = one.by_index_raw(0).map_err(build_error)?;
+                writer
+                    .raw_copy_file_touch(source, fixed_timestamp(), Some(0o644))
+                    .map_err(build_error)?;
+            }
+        }
         entries += 1;
     }
     write_directories_before(&mut writer, None)?;
 
-    let inner = writer
-        .finish()
-        .map_err(|e| JrsError::build(format!("{}: {e}", output.display())))?;
+    let inner = writer.finish().map_err(build_error)?;
     inner
         .into_inner()
         .map_err(|e| JrsError::build(format!("{}: {}", output.display(), e.error())))?;
@@ -825,9 +884,22 @@ fn write_jar<R: Read + Seek>(
     })
 }
 
-/// Write the bytes of one planned entry, whose header is already written.
+/// A zip of the one entry `name`, holding `bytes` deflated as every entry
+/// jrs writes is.
+fn deflate(name: &str, bytes: &[u8], output: &Path) -> Result<Vec<u8>> {
+    let build_error =
+        |e: zip::result::ZipError| JrsError::build(format!("{}: {e}", output.display()));
+    let mut writer = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+    writer
+        .start_file(name, entry_options())
+        .map_err(build_error)?;
+    writer.write_all(bytes).path(output)?;
+    Ok(writer.finish().map_err(build_error)?.into_inner())
+}
+
+/// Write the bytes of one planned entry to `out`.
 fn write_entry<R: Read + Seek>(
-    writer: &mut zip::ZipWriter<std::io::BufWriter<std::fs::File>>,
+    out: &mut impl Write,
     name: &str,
     entry: &Entry,
     archives: &mut [zip::ZipArchive<R>],
@@ -842,21 +914,21 @@ fn write_entry<R: Read + Seek>(
                     JrsError::build(format!("{}: cannot relocate: {why}", path.display()))
                 })?;
             }
-            writer.write_all(&bytes).path(output)?;
+            out.write_all(&bytes).path(output)?;
         }
         Entry::Jar(archive, index) => {
             let mut source = archives[*archive]
                 .by_index(*index)
                 .map_err(|e| JrsError::build(format!("{}: {e}", output.display())))?;
             if relocator.is_empty() || !is_class(name) {
-                std::io::copy(&mut source, writer).path(output)?;
+                std::io::copy(&mut source, out).path(output)?;
             } else {
                 let mut bytes = Vec::new();
                 source.read_to_end(&mut bytes).path(output)?;
                 let bytes = relocator
                     .class_file(bytes)
                     .map_err(|why| JrsError::build(format!("{name}: cannot relocate: {why}")))?;
-                writer.write_all(&bytes).path(output)?;
+                out.write_all(&bytes).path(output)?;
             }
         }
         Entry::Merged(kind, sources) => {
@@ -874,8 +946,7 @@ fn write_entry<R: Read + Seek>(
                     }
                 });
             }
-            writer
-                .write_all(&relocator.text(merge(*kind, &copies)))
+            out.write_all(&relocator.text(merge(*kind, &copies)))
                 .path(output)?;
         }
         Entry::ExtensionModules(files, sources) => {
@@ -892,8 +963,7 @@ fn write_entry<R: Read + Seek>(
                 source.read_to_end(&mut bytes).path(output)?;
                 merged.add(&String::from_utf8_lossy(&bytes));
             }
-            writer
-                .write_all(&relocator.text(merged.render().into_bytes()))
+            out.write_all(&relocator.text(merged.render().into_bytes()))
                 .path(output)?;
         }
     }
@@ -1144,6 +1214,61 @@ mod tests {
             manifest.contains("Main-Class: com.example.Main"),
             "the dependency's manifest must not have overwritten ours"
         );
+    }
+
+    #[test]
+    fn a_dependencys_deflated_entry_is_copied_as_it_is_stored() {
+        let tree = Tree::new("raw-copy");
+        std::fs::create_dir_all(tree.root.join("classes")).unwrap();
+        let text = "a line a deflater squeezes well\n".repeat(200);
+        // Deflated at another level, and stamped with another time, than
+        // jrs would: the copy keeps the bytes and takes jrs's stamp.
+        let dep = tree.root.join("dep.jar");
+        let mut w = zip::ZipWriter::new(std::fs::File::create(&dep).unwrap());
+        let options = SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Deflated)
+            .compression_level(Some(1))
+            .last_modified_time(zip::DateTime::from_date_and_time(2020, 5, 6, 7, 8, 10).unwrap())
+            .unix_permissions(0o600);
+        w.start_file("org/dep/data.txt", options).unwrap();
+        w.write_all(text.as_bytes()).unwrap();
+        let stored = options
+            .compression_method(zip::CompressionMethod::Stored)
+            .compression_level(None);
+        w.start_file("org/dep/stored.txt", stored).unwrap();
+        w.write_all(text.as_bytes()).unwrap();
+        w.finish().unwrap();
+        let stored_size = |jar: &Path, name: &str| {
+            let mut archive = zip::ZipArchive::new(std::fs::File::open(jar).unwrap()).unwrap();
+            let entry = archive.by_name(name).unwrap();
+            (
+                entry.compressed_size(),
+                entry.compression(),
+                entry.last_modified(),
+                entry.unix_mode(),
+            )
+        };
+
+        let out = tree.root.join("fat.jar");
+        fat_jar(&tree, std::slice::from_ref(&dep), &out);
+        let (size, method, _, _) = stored_size(&dep, "org/dep/data.txt");
+        let (copied, copied_method, stamp, mode) = stored_size(&out, "org/dep/data.txt");
+        assert_eq!(
+            (copied, copied_method),
+            (size, method),
+            "the deflated bytes as they were"
+        );
+        assert_eq!(stamp, Some(fixed_timestamp()));
+        assert_eq!(mode.map(|m| m & 0o777), Some(0o644));
+        let (_, method, _, _) = stored_size(&out, "org/dep/stored.txt");
+        assert_eq!(
+            method,
+            zip::CompressionMethod::Deflated,
+            "a stored entry is deflated"
+        );
+        let contents = read_jar(&out);
+        assert_eq!(contents["org/dep/data.txt"], text.as_bytes());
+        assert_eq!(contents["org/dep/stored.txt"], text.as_bytes());
     }
 
     #[test]
