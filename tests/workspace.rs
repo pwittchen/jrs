@@ -659,6 +659,115 @@ fn a_member_that_fails_at_once_with_others_is_reported_in_build_order() {
     assert!(!err.contains("Compiling c v1.0.0"), "c needs b: {err}");
 }
 
+/// A workspace of three whose members `a` and `b` have tests, tested with
+/// the fake console launcher, with `workspace.parallel-tests` on. With
+/// `RENDEZVOUS` set to a directory, each test waits there for the other
+/// member's: they pass only when both run at once.
+fn tested_workspace(
+    scratch: &Scratch,
+    toolchain: &jrs::toolchain::Toolchain,
+) -> std::path::PathBuf {
+    let repo = FixtureRepo::new(scratch);
+    repo.publish_fake_launcher(scratch, toolchain);
+    scratch.write(
+        "ws/jrs.toml",
+        &format!(
+            "[workspace]\nmembers = [\"a\", \"b\", \"c\"]\nparallel-tests = true\n\n\
+             [java]\nsource = 17\n\n{}",
+            repo.manifest_section()
+        ),
+    );
+    for (name, other) in [("a", "b"), ("b", "a"), ("c", "")] {
+        let dependencies = if name == "c" {
+            "[dependencies]\na = { path = \"../a\" }\n".to_string()
+        } else {
+            format!(
+                "[dev-dependencies]\n\"org.junit.platform:junit-platform-console-standalone\" \
+                 = \"{}\"\n",
+                common::FAKE_LAUNCHER_6
+            )
+        };
+        scratch.write(
+            &format!("ws/{name}/jrs.toml"),
+            &format!("[project]\nname = \"{name}\"\nversion = \"1.0.0\"\n\n{dependencies}"),
+        );
+        scratch.write(
+            &format!("ws/{name}/src/main/java/demo/{name}/Lib.java"),
+            &format!("package demo.{name};\n\npublic class Lib {{\n    public static int one() {{ return 1; }}\n}}\n"),
+        );
+        if other.is_empty() {
+            continue;
+        }
+        scratch.write(
+            &format!("ws/{name}/src/test/java/demo/{name}/LibTest.java"),
+            &format!(
+                "package demo.{name};\n\nimport org.junit.jupiter.api.Test;\n\n\
+                 class LibTest {{\n    @Test\n    void meets() throws Exception {{\n        \
+                 String dir = System.getenv(\"RENDEZVOUS\");\n        \
+                 if (dir == null) return;\n        \
+                 java.nio.file.Files.writeString(java.nio.file.Path.of(dir, \"{name}\"), \"\");\n        \
+                 long deadline = System.currentTimeMillis() + 60_000;\n        \
+                 while (!java.nio.file.Files.exists(java.nio.file.Path.of(dir, \"{other}\"))) {{\n            \
+                 if (System.currentTimeMillis() > deadline) throw new AssertionError(\"alone\");\n            \
+                 Thread.sleep(20);\n        }}\n    }}\n}}\n"
+            ),
+        );
+    }
+    scratch.join("ws")
+}
+
+/// `workspace.parallel-tests`: the members' test JVMs run at once, and the
+/// transcript is still the one tests run member by member print.
+#[test]
+fn members_tested_at_once_print_what_one_at_a_time_does() {
+    let toolchain = require_jdk!();
+    let scratch = Scratch::new("ws-parallel-tests");
+    let root = tested_workspace(&scratch, &toolchain);
+    let manifest = root.join("jrs.toml");
+    let text = std::fs::read_to_string(&manifest).unwrap();
+
+    std::fs::write(&manifest, text.replace("parallel-tests = true\n", "")).unwrap();
+    let (code, _, err) = jrs(&scratch, &root, &["--jobs", "4", "test", "--all"]);
+    assert_eq!(code, 0, "{err}");
+    let (code, _, in_turn) = jrs(&scratch, &root, &["--jobs", "4", "test", "--all"]);
+    assert_eq!(code, 0, "{in_turn}");
+    std::fs::write(&manifest, &text).unwrap();
+    let (code, _, at_once) = jrs(&scratch, &root, &["--jobs", "4", "test", "--all"]);
+    assert_eq!(code, 0, "{at_once}");
+    assert_eq!(
+        untimed(&at_once),
+        untimed(&in_turn),
+        "--jobs 4:\n{at_once}\n--jobs 1:\n{in_turn}"
+    );
+    assert!(at_once.contains("2 passed"), "{at_once}");
+
+    let rendezvous = scratch.join("rendezvous");
+    std::fs::create_dir_all(&rendezvous).unwrap();
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_jrs"))
+        .arg("--manifest-path")
+        .arg(&root)
+        .args([
+            "--progress",
+            "never",
+            "--color",
+            "never",
+            "--charset",
+            "ascii",
+        ])
+        .args(["--jobs", "4", "test", "--all"])
+        .env("JRS_CACHE_DIR", scratch.join("jrs-cache"))
+        .env("JRS_CONFIG", scratch.join("no-config.toml"))
+        .env("RENDEZVOUS", &rendezvous)
+        .output()
+        .unwrap();
+    let err = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "the tests ran one at a time:\n{err}"
+    );
+}
+
 /// An API change upstream compiles the sources of a dependent that use the
 /// class that changed, not the whole member; a removal compiles what reaches
 /// it, and a member none of whose sources uses it is only re-indexed.

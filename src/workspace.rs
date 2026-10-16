@@ -25,7 +25,7 @@ const SHARED: &[&str] = &["java", "repositories", "managed"];
 /// The language tables, whose keys a member inherits only when it turns the
 /// language on itself: whether a member is Kotlin is its own business.
 const SHARED_LANGUAGES: &[&str] = &["kotlin", "scala", "groovy"];
-const WORKSPACE_KEYS: &[&str] = &["members"];
+const WORKSPACE_KEYS: &[&str] = &["members", "parallel-tests"];
 
 /// A loaded workspace: the root and every member's manifest.
 #[derive(Debug)]
@@ -44,6 +44,10 @@ pub struct Workspace {
     pub order: Vec<usize>,
     /// What the root's own tables raised, beside each member's.
     pub warnings: Vec<String>,
+    /// `workspace.parallel-tests`: whether members' test JVMs may run at
+    /// once, up to `--jobs` (`specs/WORKSPACES.md` §6.2). Off by default,
+    /// since suites that share a port or a database would race.
+    pub parallel_tests: bool,
 }
 
 /// One member: its manifest, as inherited, and the members it depends on.
@@ -167,6 +171,12 @@ impl Workspace {
             })?
             .as_array()
             .ok_or_else(|| JrsError::manifest("`workspace.members` must be an array"))?;
+        let parallel_tests = match section.get("parallel-tests") {
+            None => false,
+            Some(value) => value.as_bool().ok_or_else(|| {
+                JrsError::manifest("`workspace.parallel-tests` must be `true` or `false`")
+            })?,
+        };
 
         let shared: toml::Table = table
             .iter()
@@ -280,6 +290,7 @@ impl Workspace {
             members,
             order,
             warnings,
+            parallel_tests,
         })
     }
 

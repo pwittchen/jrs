@@ -451,14 +451,31 @@ impl<'a> Driver<'a> {
     /// (`specs/WORKSPACES.md` §6.2). When one fails, no other starts, the
     /// running ones finish, and the first failure in build order is the
     /// command's.
-    #[allow(
-        clippy::too_many_lines,
-        reason = "the schedule, the release in build order and the results, one loop's state"
-    )]
     fn at_once<T: Send>(
         &self,
         todo: &[usize],
         work: &(dyn Fn(&Session<'a>) -> Result<T> + Sync),
+    ) -> Result<Vec<T>> {
+        self.at_once_until(todo, "Compiling", false, work, &|_| false)
+    }
+
+    /// [`Driver::at_once`], with `verb` for the live region, where a result
+    /// `stop` holds for also starts no other member, as a failure does:
+    /// `jrs test --fail-fast`'s failing suite. With `independent`, a member
+    /// does not wait for its upstream members' work, which is for work over
+    /// members that have all built: their tests. A member whose session has
+    /// built already keeps it.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the schedule, the release in build order and the results, one loop's state"
+    )]
+    fn at_once_until<T: Send>(
+        &self,
+        todo: &[usize],
+        verb: &str,
+        independent: bool,
+        work: &(dyn Fn(&Session<'a>) -> Result<T> + Sync),
+        stop: &(dyn Fn(&T) -> bool + Sync),
     ) -> Result<Vec<T>> {
         let jobs = if todo.len() > 1 {
             self.parallel_jobs()
@@ -468,7 +485,12 @@ impl<'a> Driver<'a> {
         if jobs <= 1 {
             let mut out = Vec::new();
             for i in todo {
-                out.push(work(&*self.prepared(*i, None)?)?);
+                let value = work(&*self.prepared(*i, None)?)?;
+                let stopping = stop(&value);
+                out.push(value);
+                if stopping {
+                    break;
+                }
             }
             return Ok(out);
         }
@@ -485,7 +507,20 @@ impl<'a> Driver<'a> {
         }
         let mut waiting: Vec<Option<Session<'a>>> = Vec::new();
         for i in todo {
-            let session = match self.new_session(*i) {
+            let kept = self
+                .sessions
+                .borrow_mut()
+                .remove(i)
+                .map(Rc::try_unwrap)
+                .and_then(|kept| match kept {
+                    Ok(session) => Some(session),
+                    Err(shared) => {
+                        // Still in use: it stays, and a new one does the work.
+                        self.sessions.borrow_mut().insert(*i, shared);
+                        None
+                    }
+                });
+            let session = match kept.map_or_else(|| self.new_session(*i), Ok) {
                 Ok(session) => session,
                 Err(e) => {
                     for i in todo {
@@ -504,6 +539,9 @@ impl<'a> Driver<'a> {
         let upstream: Vec<Vec<usize>> = todo
             .iter()
             .map(|i| {
+                if independent {
+                    return Vec::new();
+                }
                 self.workspace
                     .upstream(*i)
                     .into_iter()
@@ -519,7 +557,7 @@ impl<'a> Driver<'a> {
                 .collect::<Vec<_>>()
                 .join(", ")
         };
-        let fan = self.ui.fan_out("Compiling", "");
+        let fan = self.ui.fan_out(verb, "");
         let mut finished: Vec<Option<(Session<'a>, Result<T>, Duration)>> =
             todo.iter().map(|_| None).collect();
         std::thread::scope(|scope| {
@@ -563,7 +601,7 @@ impl<'a> Driver<'a> {
                 };
                 running.retain(|r| *r != k);
                 done.insert(k);
-                failed |= result.is_err();
+                failed |= result.as_ref().map_or(true, stop);
                 finished[k] = Some((session, result, took));
                 // The earliest unfinished member in build order writes to
                 // the terminal from now on, after what it held back.
@@ -643,19 +681,55 @@ impl<'a> Driver<'a> {
         let mut shortfalls: Vec<String> = Vec::new();
         let mut tested = 0;
         // The build part first, members at once; the tests then run member
-        // by member, since a test JVM already takes the cores it is given.
-        if self.parallel_jobs() > 1 {
+        // by member, since a test JVM already takes the cores it is given —
+        // or at once too, when `workspace.parallel-tests` says the suites
+        // share nothing.
+        let parallel = self.parallel_jobs() > 1;
+        if parallel {
             self.build_all(&self.workspace.with_upstream(&selected))?;
         }
-        for i in self.workspace.with_upstream(&selected) {
-            let session = self.prepared(i, None)?;
-            if !selected.contains(&i) {
-                session.build()?;
-                continue;
-            }
-            let Some(outcome) = session.test(args)? else {
-                continue;
+        let outcomes: Vec<(String, junit::TestOutcome)> =
+            if parallel && self.workspace.parallel_tests {
+                let todo: Vec<usize> = self
+                    .workspace
+                    .with_upstream(&selected)
+                    .into_iter()
+                    .filter(|i| selected.contains(i))
+                    .collect();
+                self.at_once_until(
+                    &todo,
+                    "Testing",
+                    true,
+                    &|session| {
+                        Ok(session
+                            .test(args)?
+                            .map(|outcome| (session.manifest.name.clone(), outcome)))
+                    },
+                    &|tested| args.fail_fast && tested.as_ref().is_some_and(|(_, o)| !o.ok()),
+                )?
+                .into_iter()
+                .flatten()
+                .collect()
+            } else {
+                let mut outcomes = Vec::new();
+                for i in self.workspace.with_upstream(&selected) {
+                    let session = self.prepared(i, None)?;
+                    if !selected.contains(&i) {
+                        session.build()?;
+                        continue;
+                    }
+                    let Some(outcome) = session.test(args)? else {
+                        continue;
+                    };
+                    let ok = outcome.ok();
+                    outcomes.push((session.manifest.name.clone(), outcome));
+                    if args.fail_fast && !ok {
+                        break;
+                    }
+                }
+                outcomes
             };
+        for (name, outcome) in outcomes {
             tested += 1;
             total.found += outcome.found;
             total.passed += outcome.passed;
@@ -667,14 +741,11 @@ impl<'a> Driver<'a> {
                 if total.exit_code == 0 {
                     total.exit_code = outcome.exit_code;
                 }
-                failed.push(session.manifest.name.clone());
+                failed.push(name);
             } else if !outcome.coverage_shortfalls.is_empty() {
                 for s in &outcome.coverage_shortfalls {
-                    shortfalls.push(format!("    {}: {s}", session.manifest.name));
+                    shortfalls.push(format!("    {name}: {s}"));
                 }
-            }
-            if args.fail_fast && !outcome.ok() {
-                break;
             }
         }
         self.report_timings("test", &self.workspace.with_upstream(&selected))?;
