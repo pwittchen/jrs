@@ -1,9 +1,14 @@
 //! Warm compilers for `--watch` (SPEC §7.5): a `javac` worker, and a
-//! `kotlinc` one.
+//! `kotlinc` one; and `javac` workers for a workspace command, which
+//! compiles member after member (`specs/todo/BEATING_THE_DAEMON.md` §6).
 //!
 //! A `--watch` session keeps one jrs process alive across rebuilds, and in
-//! it, one worker JVM per compiler: started the first time that compiler's
-//! step runs, and sent every later one. The `javac` worker is
+//! it, worker JVMs per compiler: started the first time that compiler's
+//! step runs, and sent every later one. Each kind is a pool, so members
+//! compiling at once get a JVM each, and a member compiling after another
+//! reuses one, with the JIT the first one warmed. A workspace command that
+//! is not `--watch` holds a pool of `javac` workers the same way, for as
+//! long as it runs. The `javac` worker is
 //! `JavacWorker.java`, embedded here and compiled on first use with the
 //! project's own `javac` into `<cache>/worker/<jrs version>-jdk<n>/`, so jrs
 //! ships no binary and downloads nothing. It runs `javac` in process,
@@ -19,7 +24,7 @@
 //! `@argfile` too. A third kind would be a Java file and a main class.
 //!
 //! A worker is not a compiler daemon (SPEC §1.2). It is a child of the
-//! jrs process and nothing else can reach it: it reads its requests from a
+//! jrs command and nothing else can reach it: it reads its requests from a
 //! pipe jrs holds and exits when that pipe closes, which happens however jrs
 //! exits. jrs starts a new one after a number of compilations of its kind
 //! ([`RESTART_AFTER`], [`KOTLINC_RESTART_AFTER`]), to bound what leaked class
@@ -113,12 +118,25 @@ struct Launch<'a> {
     key: String,
 }
 
-/// The warm compilers of one `--watch` session.
+/// The warm compilers of one `--watch` session, or of one command that
+/// compiles more than once.
+///
+/// Each kind is a pool: a request takes an idle worker JVM, or starts one
+/// when none is idle, and gives it back once answered, so members built at
+/// once each compile in a JVM of their own, and one built after another
+/// reuses the JVM — and the JIT — the first one warmed.
 pub struct Worker {
     /// `<cache>/worker`.
     dir: PathBuf,
-    running: Mutex<Option<Running>>,
-    kotlinc: Mutex<Option<Running>>,
+    /// Idle `javac` workers.
+    running: Mutex<Vec<Running>>,
+    /// Idle `kotlinc` workers.
+    kotlinc: Mutex<Vec<Running>>,
+    /// Whether `kotlinc` steps are served too, or always forked.
+    serves_kotlinc: bool,
+    /// Held while a worker's program is compiled: workers start outside
+    /// the pools' locks, and two must not build it in one directory.
+    building: Mutex<()>,
 }
 
 impl std::fmt::Debug for Worker {
@@ -149,9 +167,21 @@ impl Worker {
     pub fn new(dir: PathBuf) -> Worker {
         Worker {
             dir,
-            running: Mutex::new(None),
-            kotlinc: Mutex::new(None),
+            running: Mutex::new(Vec::new()),
+            kotlinc: Mutex::new(Vec::new()),
+            serves_kotlinc: true,
+            building: Mutex::new(()),
         }
+    }
+
+    /// Workers for one command, not a `--watch` session: `javac` alone, since
+    /// `kotlinc` keeps static state from one compile to the next that only
+    /// a session that rebuilds one project should carry.
+    #[must_use]
+    pub fn javac_only(dir: PathBuf) -> Worker {
+        let mut worker = Worker::new(dir);
+        worker.serves_kotlinc = false;
+        worker
     }
 
     /// Compile with the argfile at `argfile`, as `javac @argfile` would.
@@ -186,6 +216,9 @@ impl Worker {
         argfile: &Path,
         ui: &Ui,
     ) -> Option<CapturedOutput> {
+        if !self.serves_kotlinc {
+            return None;
+        }
         let key = format!(
             "{}\n{}\n{}\n{main_class}",
             toolchain.javac.display(),
@@ -205,70 +238,80 @@ impl Worker {
     fn serve(
         &self,
         kind: Kind,
-        slot: &Mutex<Option<Running>>,
+        slot: &Mutex<Vec<Running>>,
         launch: &Launch<'_>,
         argfile: &Path,
         ui: &Ui,
     ) -> Option<CapturedOutput> {
         let name = kind.name();
-        let mut running = slot.lock().unwrap();
-        let stale = running
-            .as_ref()
-            .is_some_and(|r| r.key != launch.key || r.compilations >= kind.restart_after());
-        if stale && let Some(old) = running.take() {
+        let (idle, stale) = {
+            let mut pool = slot.lock().unwrap();
+            let mut stale = Vec::new();
+            let mut idle = None;
+            while let Some(running) = pool.pop() {
+                if running.key == launch.key && running.compilations < kind.restart_after() {
+                    idle = Some(running);
+                    break;
+                }
+                stale.push(running);
+            }
+            (idle, stale)
+        };
+        for old in stale {
             old.stop();
         }
-        if running.is_none() {
-            match self.start(kind, launch, ui) {
-                Ok(started) => *running = Some(started),
+        let mut worker = match idle {
+            Some(worker) => worker,
+            None => match self.start(kind, launch, ui) {
+                Ok(started) => started,
                 Err(why) => {
                     ui.verbose(format!("{name} worker: not started: {why}"));
                     return None;
                 }
-            }
-        }
-        let worker = running.as_mut()?;
+            },
+        };
         ui.verbose(format!(
             "{name} worker (pid {}): @{}",
             worker.child.id(),
             argfile.display()
         ));
         match worker.request(argfile) {
-            Ok(output) => Some(output),
+            Ok(output) => {
+                slot.lock().unwrap().push(worker);
+                Some(output)
+            }
             Err(why) => {
                 ui.verbose(format!(
                     "{name} worker: {why}; it is stopped, and {name} runs on its own"
                 ));
-                if let Some(mut failed) = running.take() {
-                    let _ = failed.child.kill();
-                    let _ = failed.child.wait();
-                    if let Some(share) = failed.share.take() {
-                        share.finish(false);
-                    }
+                let _ = worker.child.kill();
+                let _ = worker.child.wait();
+                if let Some(share) = worker.share.take() {
+                    share.finish(false);
                 }
                 None
             }
         }
     }
 
-    /// The `javac` worker's process id, while one runs.
+    /// An idle `javac` worker's process id, while one runs.
     ///
     /// # Panics
     ///
     /// If a thread panicked while holding the lock on the worker.
     #[must_use]
     pub fn pid(&self) -> Option<u32> {
-        self.running.lock().unwrap().as_ref().map(|r| r.child.id())
+        self.running.lock().unwrap().last().map(|r| r.child.id())
     }
 
-    /// The `kotlinc` worker's process id, while one runs.
+    /// An idle `kotlinc` worker's process id, while one runs.
     ///
     /// # Panics
     ///
     /// If a thread panicked while holding the lock on the worker.
     #[must_use]
     pub fn kotlinc_pid(&self) -> Option<u32> {
-        self.kotlinc.lock().unwrap().as_ref().map(|r| r.child.id())
+        self.kotlinc.lock().unwrap().last().map(|r| r.child.id())
     }
 
     /// Start a worker JVM of `kind` on `launch`'s JDK, compiling its program
@@ -327,6 +370,7 @@ impl Worker {
     /// mapped from a class-data-sharing archive — compiled with
     /// `toolchain`'s `javac` once per jrs version and JDK.
     fn program(&self, kind: Kind, toolchain: &Toolchain) -> Result<PathBuf, String> {
+        let _building = self.building.lock().unwrap();
         let home = self.dir.join(kind.program_dir(toolchain.version));
         let jar = home.join("worker.jar");
         if jar.is_file() {
@@ -416,10 +460,10 @@ impl Running {
 impl Drop for Worker {
     fn drop(&mut self) {
         for slot in [&self.running, &self.kotlinc] {
-            if let Ok(mut running) = slot.lock()
-                && let Some(running) = running.take()
-            {
-                running.stop();
+            if let Ok(mut pool) = slot.lock() {
+                for running in pool.drain(..) {
+                    running.stop();
+                }
             }
         }
     }
@@ -579,7 +623,7 @@ mod tests {
             .running
             .lock()
             .unwrap()
-            .as_mut()
+            .last_mut()
             .unwrap()
             .child
             .kill()

@@ -79,6 +79,22 @@ pub(super) fn dispatch(
         ui.warn(warning);
     }
     let member_uis: Vec<Ui> = workspace.members.iter().map(|_| ui.deferred()).collect();
+    // A command that compiles member after member compiles in warm `javac`
+    // JVMs it holds until it exits (`specs/todo/BEATING_THE_DAEMON.md` §6):
+    // the JIT the first member warmed serves the rest.
+    let compiles = matches!(
+        cli.command,
+        Command::Build { .. }
+            | Command::Test(_)
+            | Command::Run { .. }
+            | Command::Package(_)
+            | Command::Doc
+            | Command::Task(_)
+    );
+    let worker = (compiles && workspace.members.len() > 1)
+        .then(crate::resolve::cache::Cache::discover)
+        .and_then(std::result::Result::ok)
+        .map(|cache| Arc::new(Worker::javac_only(cache.root().join("worker"))));
     let driver = Driver {
         cli,
         ui,
@@ -87,7 +103,7 @@ pub(super) fn dispatch(
         location,
         config,
         started: Instant::now(),
-        worker: None,
+        worker,
         aggregate: OnceCell::new(),
         graph: OnceCell::new(),
         sessions: RefCell::new(HashMap::new()),
@@ -380,15 +396,14 @@ impl<'a> Driver<'a> {
     }
 
     /// How many members may build at once: `--jobs`, or one when a member's
-    /// task runs in another member's session, which lives on one thread,
-    /// or under `--watch`, whose one `javac` worker would queue them.
+    /// task runs in another member's session, which lives on one thread.
     fn parallel_jobs(&self) -> usize {
         *self.parallel.get_or_init(|| self.work_out_parallel_jobs())
     }
 
     fn work_out_parallel_jobs(&self) -> usize {
         let jobs = super::effective_jobs(self.cli.global.jobs, self.config.jobs);
-        if jobs <= 1 || self.worker.is_some() {
+        if jobs <= 1 {
             return 1;
         }
         let crossing = (0..self.workspace.members.len()).find(|i| {
