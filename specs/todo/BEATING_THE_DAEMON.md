@@ -8,11 +8,21 @@ decision first. The numbers are the second pass of
 [BENCHMARKS_SUMMARY.md](../BENCHMARKS_SUMMARY.md) (jrs 0.12.0, 2026-10-15, one
 run per cell).
 
-Status: **proposed**. Nothing here has code, and §9 also needs a SPEC.md
-decision first. Every expected gain below is an estimate from the phase
-timings, not a measurement. Each part names the cells that would measure
-it, and per BENCHMARKS.md §1 it gets code only once a full run (seven
-measured runs, two warm-ups) confirms that its gap is outside the noise.
+Status: **§2–§7 built, not yet measured in a full run; §9 proposed.** §9
+needs a SPEC.md decision first, and its gate (§9.1) reads the numbers of a
+full run (seven measured runs, two warm-ups) over what §2–§6 built. Every
+expected gain below is still an estimate from the phase timings until that
+run; each part names the cells that measure it, and each says under
+**Built** what the code does where it differs from the proposal.
+
+A first jrs-only pass (five runs, two warm-ups, JDK 25, M4 Max; not the
+full run §1 asks for) against the commit before: `abi` 856 ms → 501 ms on
+`gen-300`, 1.80 s → 827 ms on `gen-2000`, 1.78 s → 676 ms on `gen-ws`;
+`clean` 661 → 527 ms, 1.49 → 1.29 s, 1.66 → 1.03 s. `gen-ws`
+`incremental` went from 276 to 305 ms: a one-file compile in the
+workspace's worker JVM costs more than a forked `javac` with the quick
+flags. `test` did not move, since `parallel-tests` is off in the
+benchmark's projects.
 
 ---
 
@@ -69,6 +79,17 @@ of rounds and fall back to the transitive set.
 
 **Measured by.** `abi` on `gen-300` and `gen-2000`.
 
+**Built.** `compile/incremental.rs`, index format 2. Each class's API is
+recorded as a header digest (flags, supertypes, signature, annotations,
+nesting) and a digest per visible member (`abi::ClassInfo::header`,
+`members`), with its supertypes, which is what tells an addition from the
+rest. An addition takes rounds: the next round compiles the sources that
+refer to the class or to a subtype of it, since a subtype inherits what was
+added and a new overload can change what its callers pick. A removal, a
+changed member or header, or a fifth round compiles the transitive set in
+one more run, as before. The rounds use the command's worker when it has
+one (§6); a single-module build forks each.
+
 ## 3. Compile avoidance across workspace members
 
 **Now.** A member's main unit fingerprints its upstream members'
@@ -96,6 +117,17 @@ rather than 300 classes. Plausibly under 0.8 s, against the daemon's
 
 **Measured by.** `abi` and `test-edit` on `gen-ws`.
 
+**Built.** `CompileUnit::tracked`: a member's main unit tracks its upstream
+members' class directories, and the test unit tracks `target/classes` and
+the upstream ones too, so a main API change no longer compiles the tests
+whole either. `main_api` stays in the fingerprint, which makes the unit
+stale, but not in the settings the index is taken under. The index records
+each tracked class the sources refer to and its supertypes there (`seen`),
+and a digest of the tracked directories' top-level classes: one appearing or
+going away compiles the unit whole, as does a changed constant there or a
+processor or Groovy AST transformation among them. A missing or older index
+compiles whole, since it holds no `seen` entries to compare.
+
 ## 4. Members' test JVMs at once
 
 **Now.** `cli/members.rs` builds every member at once, then tests member by
@@ -118,6 +150,11 @@ to sequential and make it opt-in. The second is the safer first step.
 ahead of every Gradle column.
 
 **Measured by.** `test` on `gen-ws`.
+
+**Built** as the opt-in: `[workspace] parallel-tests = true`, off by
+default (`cli/members.rs`, `Driver::at_once_until`). The builds still go
+first, at once; the tests then run at once through the same gates, so the
+transcript is the one member-by-member testing prints.
 
 ## 5. Spring Boot's fat jar
 
@@ -146,6 +183,12 @@ project, where jrs already wins.
 
 **Measured by.** `package` on all five projects; the `reproducible` CI job
 must still pass.
+
+**Built**: 1 and 2 (`package.rs`, `write_jar`). A dependency's entry that
+is deflated, not relocated and not renamed is copied raw, with jrs's
+timestamp and permissions. Every other entry is read in plan order, deflated
+on `rayon` into a one-entry zip, and copied raw from that in sorted order,
+which is the thin jar's path too. A stored entry is deflated as before.
 
 ## 6. A warmer `javac` without a daemon
 
@@ -181,6 +224,18 @@ that has been warm for a whole working day.
 **Measured by.** `clean` on `gen-2000` and `gen-ws`; `cargo bench --bench
 incremental` for `javac`'s share.
 
+**Built.** 1: `Worker` is a pool of JVMs per compiler, and a workspace
+command that builds more than one member holds a `Worker::javac_only` for
+its members' sessions; members built at once no longer wait on one JVM, so
+`--watch` builds them at once too. `kotlinc` keeps its worker for `--watch`
+alone. 2: `Share::for_javac`, from JDK 25, records on the first forked run
+and assembles `cds/javac-jdk<n>-<key>.aot` after it, keyed by the JDK and
+the JVM flags (the quick flags of a small file-by-file run make another
+cache). The assembling JVM names `javac`'s main module
+(`--add-modules ALL-DEFAULT -m jdk.compiler/…`), without which the cache
+maps no module classes. On a 60-file compile on JDK 25 it took a forked
+`javac` from 0.28 s to 0.17 s.
+
 ## 7. The test JVM on large suites
 
 **Now.** `gen-2000`'s `test` is 901 ms, 713 ms of it the test JVM, against
@@ -194,6 +249,12 @@ runs never write an archive) is what would make them reach a suite of this
 size.
 
 **Measured by.** `test` and `test-edit` on `gen-2000`.
+
+**Built**: finding 3's fix. When the tests fork and there is no archive
+yet, the first fork dumps it while the others map nothing, and it is put in
+place once that fork has run; a fork that never got to the launcher runs
+the forks again without it. `share-classes` itself stays off by default,
+for findings 1 and 2.
 
 ## 8. What stays out of scope
 

@@ -214,9 +214,13 @@ regression, not a style nit.
   bytes: a spurious recompile costs seconds, a stale test class costs a wrong result.
   The same rule governs file-by-file compilation inside a Java-only unit
   (`compile/incremental.rs`, `target/.jrs/<unit>.index`): a body change compiles
-  its own source, an API change also compiles everything that transitively
-  refers to it, and anything the index cannot account for — a new or deleted
+  its own source, an addition to a class's API compiles its users and its
+  subtypes' users round by round until a round changes no API, any other API
+  change also compiles everything that transitively refers to it, and anything
+  the index cannot account for — a new or deleted
   source, a changed constant, a processor, another language — compiles the unit whole.
+  The tests and a workspace member follow the class directories they compile
+  against (`CompileUnit::tracked`) the same way, class by class.
   Test selection follows it too (`compile/impact.rs`, `target/.jrs/test.tested`):
   `jrs test` runs the test classes a changed class reaches through the constant
   pools, and anything it cannot vouch for — a resource, an added class, a class
@@ -246,9 +250,10 @@ regression, not a style nit.
   left out of it serves wrong classes. A unit that cannot be keyed compiles,
   and no cache failure fails a build. The in-process `jrs()` test helper
   passes `--no-build-cache`, since it shares the user's cache.
-- **The `--watch` `javac` and `kotlinc` workers never outlive the command**
-  (`compile/worker.rs`): each is a child reading a pipe jrs holds, and any
-  failure of one falls back to a forked compiler. A process that outlives the
+- **The `javac` and `kotlinc` workers never outlive the command**
+  (`compile/worker.rs`) — a `--watch` session's, or the `javac` pool a
+  workspace command holds for its members: each is a child reading a pipe jrs
+  holds, and any failure of one falls back to a forked compiler. A process that outlives the
   command is the compiler daemon SPEC §1.2 rules out.
 - **Members built at once print what one at a time prints**
   (`cli/members.rs`, `Ui::deferred`): each member writes through a `Ui` of its

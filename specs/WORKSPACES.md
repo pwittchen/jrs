@@ -77,6 +77,9 @@ internal = "https://nexus.example.com/repository/maven-public/"
   `/`-separated. A member may sit deeper (`libs/core`); it may not be outside
   the root, and the root is never listed. The order is the declaration order
   used for ties (§5.1, §6.1); the build order comes from the dependencies.
+- **`parallel-tests`**, `false` by default, lets `jrs test` run the members'
+  test JVMs at once, up to `--jobs` (§6.2). It is off unless asked for: two
+  suites that share a port, a database or a fixed file would race.
 - **A root without `[project]` is a pure aggregator**: it has no sources and
   builds nothing itself. A root with `[project]` is a member too, the first
   one, and its own `[dependencies]`, `[tasks]` and the rest apply to it as to
@@ -251,7 +254,13 @@ member is built at most once per command, however many others depend on it.
 fingerprint holds `compile::api_digest` of every upstream member's classes it
 compiles against, beside its jars, the way the test unit already holds the
 main classes'. A body change in `core` recompiles `core` alone; a change to
-what another unit's `javac` can see recompiles the members that see it.
+what another unit's `javac` can see makes the members that see it stale, and
+each compiles only its sources that refer to a class whose API changed —
+following the change in rounds from there, as inside one unit — rather than
+compiling whole (SPEC §7.2): its index records which of the upstream classes
+its sources refer to, as they were. A member none of whose sources refers to
+one is only re-indexed, and its own API, so its downstream members, stay as
+they were.
 `jrs test`'s selection (`compile/impact.rs`) hashes every class directory on
 the test classpath, upstream members' included, so it follows a change into
 the tests that reach it. The build cache keys paths against the workspace's
@@ -283,14 +292,24 @@ finish, every member that finished is released in build order, and the
 command fails with the first failure in build order. `--timings` gains a
 `member <name>` row per member built at once.
 
-What stays one member at a time: `run` (one member), `--watch` (its one
-`javac` worker would queue them), `--jobs 1`, and any workspace where a
+What stays one member at a time: `run` (one member), `--jobs 1`, and any
+workspace where a
 member's hook or task depends on another member's task (§6.3), since that
 task runs in the other member's session, which lives on another thread —
-`-v` says why. Tests run member by member too: a test JVM already forks per
-core (`test.forks`), and two suites at once would fight over cores and
-ports. `jrs test` builds every member first, at once, then tests them in
-build order; at `--jobs 1` each member builds and tests in turn, as before.
+`-v` says why. Tests run member by member too, unless `workspace.parallel-tests`
+says otherwise: a test JVM already forks per core (`test.forks`), and two
+suites at once would fight over cores and ports. `jrs test` builds every
+member first, at once, then tests them in build order; at `--jobs 1` each
+member builds and tests in turn, as before. With `parallel-tests = true` the
+tests run at once too, up to `--jobs`, through the same gates as the builds,
+so the transcript is the one member-by-member testing prints; `--fail-fast`
+starts no member's tests once one has failed.
+
+A command that builds more than one member compiles in warm `javac`
+workers it holds for its own lifetime (SPEC §7.5), a pool of them: a member
+compiling at once with others gets one of its own, and one compiling after
+another reuses a JVM whose JIT the earlier ones warmed. Any failure of one
+falls back to a forked `javac`.
 
 ### 6.3 Tasks and hooks
 
@@ -421,11 +440,10 @@ nested aggregator, a BOM module, a profile's module, plugin inheritance) and
 - **Per-module lockfiles.** One lockfile is what makes the versions agree.
 - **Composite builds across repositories** (Gradle's `includeBuild`): a
   workspace's members live under its root.
-- **Members tested in parallel.** Members build at once (§6.2), but their
-  tests run one member at a time: two suites at once would need a fork
-  budget shared across members, and would still fight over the ports and
-  databases both use. To measure with the `test JVM` rows per member first
-  ([GRADLE_GAPS.md §7](GRADLE_GAPS.md#7-open-questions)).
+- **Members tested in parallel by default.** `workspace.parallel-tests`
+  turns it on (§6.2), but it stays off unless asked for: two suites at once
+  would need a fork budget shared across members, and would still fight over
+  the ports and databases both use.
 
 ## 10. SPEC.md edits
 

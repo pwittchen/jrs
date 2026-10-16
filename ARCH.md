@@ -96,10 +96,11 @@ src/
 ├── compile/
 │   ├── mod.rs         CompileUnit: steps, fingerprint, staleness, argfiles
 │   ├── abi.rs         class-file API digests: compile avoidance, per-class reads
-│   ├── incremental.rs file-by-file compilation of a Java unit: <unit>.index
+│   ├── incremental.rs file-by-file compilation of a Java unit, in rounds: <unit>.index
 │   ├── share.rs       class-data-sharing archives for the compilers, the test JVM
 │   │                  and the javac worker: <cache>/cds
-│   ├── worker.rs      the warm javac and kotlinc of a --watch session, and their protocol
+│   ├── worker.rs      pools of warm javac and kotlinc for --watch, of javac for a
+│   │                  workspace command, and their protocol
 │   ├── JavacWorker.java  the javac worker's program, embedded with include_str!
 │   ├── KotlincWorker.java  the kotlinc worker's, reaching the compiler by reflection
 │   ├── impact.rs      which test classes a change reaches: <suite>.tested
@@ -290,7 +291,8 @@ it, it runs **at most once per invocation**.
  ├── build_cache: OnceCell<Option<Arc<BuildCache>>>
  │                                          the build cache, once every jar is in
  ├── cache_use  : CacheUse                  On, Off (--no-build-cache), Verify
- ├── worker     : Option<Arc<Worker>>       the --watch session's warm javac
+ ├── worker     : Option<Arc<Worker>>       the --watch session's warm compilers, or
+ │                                          a workspace command's javac pool
  ├── member     : Option<MemberContext>     a workspace member's preset graph and
  │                                          upstream members (§11)
  └── workspace_members : Vec<String>        the aggregate session's: makes its
@@ -298,7 +300,10 @@ it, it runs **at most once per invocation**.
 ```
 
 `watch()` creates the `Worker` once and hands it to each `Session` it opens,
-so the worker outlives every build of the session but not the command.
+so the worker outlives every build of the session but not the command. A
+workspace command that builds (`cli/members.rs`, `dispatch`) creates a
+`Worker::javac_only` the same way for its members' sessions when the
+workspace has more than one member.
 `run_watch()` does the same for `jrs run --watch`, with one difference: the
 program is spawned (`toolchain::spawn_inherited_in`) rather than waited for,
 `wait_for_change` polls it between looks at the tree, and a change stops it
@@ -607,15 +612,21 @@ otherwise.
 `compile/incremental.rs` keeps `target/.jrs/<unit>.index`, written after every
 successful Java-only build. It records each source's size, mtime and hash, the
 classes it compiled to (tied to it by their `SourceFile` attribute), each
-class's API and constants digests (`abi::class_info`), and the unit's classes
-it refers to. With unchanged settings the next build works from it:
+class's API, header, member and constants digests and its supertypes
+(`abi::class_info`), and the unit's classes it refers to. A unit with
+`tracked` class directories — the tests' `target/classes`, a member's
+upstream members' — also records each class there its sources refer to, with
+its supertypes there, as `seen` entries, and a digest of the top-level
+classes there. With unchanged settings the next build works from it:
 
 ```
- changed sources (by hash)   none ─► refresh the mtimes, done
-      │ a source added or deleted ─► whole unit
+ changed sources (by hash), and the users of a seen class whose API changed
+      │ (all that reach them, for a break)       none ─► refresh the mtimes, done
+      │ a source added or deleted, a tracked top-level class came or went,
+      │ a seen constant changed ─► whole unit
       ▼
  delete every class no unchanged source owns
- javac @javac-main.args  changed sources, target/classes first on -cp
+ javac @javac-main.args  those sources, target/classes first on -cp
       │
       ▼
  compare with the index   a top-level class came or went,
@@ -623,8 +634,13 @@ it refers to. With unchanged settings the next build works from it:
       │                   no single source
       │ API unchanged ─► write index, done
       ▼
+ only added members ──► next round: the sources that refer to a changed class
+      │                 or a subtype of one, less this round's; compare again
+      │                 (at most 4 rounds)
+ anything else, or past the rounds
+      ▼
  every source that refers to a changed class, transitively
- (a subclass passes inherited changes on), less those compiled
+ (a subclass passes inherited changes on), less this round's
       │
  delete their classes; javac over them; write index, done
 
@@ -657,7 +673,10 @@ flags on its command line, since an argfile may not hold them; the other
 compilers in their argfile. The first run dumps to a temporary file, renamed
 into place only after a successful run; every failure mode costs the archive,
 never the build. A file-by-file `javac` run over at most 100 sources also
-starts with C1 and the serial collector.
+starts with C1 and the serial collector. From JDK 25, `Share::for_javac`
+gives `javac` an AOT cache instead, `javac-jdk<n>-<key>.aot` keyed by the
+JDK and those JVM flags, recorded and assembled as the test JVM's is (§10),
+the assembling JVM naming `javac`'s main module as the launcher does.
 
 ```
  Share::new  no base archive, CDS flags of the user's, cds/ unwritable ─► none
@@ -697,16 +716,19 @@ the JDK's `release` file.
        otherwise ─► save locally (temp + rename), PUT to the remote if push
 ```
 
-Under `--watch`, `javac::run` hands its argfile to the session's
-`compile/worker.rs` first: one `java -cp worker.jar JavacWorker` child, with
+Under `--watch`, and in a workspace command that builds several members,
+`javac::run` hands its argfile to the `compile/worker.rs` pool first: an idle
+`java -cp worker.jar JavacWorker` child, or a new one, with
 a CDS archive of its own, compiled from the embedded `JavacWorker.java` on
 first use. A request is `<id> <argfile>` on its stdin; the answer is
 `jrs-worker <id> <exit> <stdout bytes> <stderr bytes>` and the bytes, read
 on a helper thread so that a hung worker can be given up on. Any failure —
 an exit, garbage, no answer within two minutes or ten times the slowest one
 — kills the worker and returns `None`, and `javac::run` forks `javac` as it
-always did. The worker is replaced after 50 compilations or a new JDK, and
-stops when its stdin closes; its archive is put in place only then.
+always did. A worker that answered goes back to the pool, so members built at
+once each get one and a member built after another reuses a warm one. The
+worker is replaced after 50 compilations or a new JDK, and stops when its
+stdin closes; its archive is put in place only then.
 
 A Kotlin unit's first step writes `kotlinc`'s own arguments and sources to an
 argfile of their own, `kotlinc-<unit>.compiler.args`, which the launcher's
@@ -848,7 +870,9 @@ file in them shares a name with a jar's entry (outside `META-INF/`; the jars'
 entry lists are cached in `<cache>/cds/entries/`), and `Share::for_tests`
 picks `cds/test-<project>-<deps>.jsa`: read if there, dumped otherwise by a
 run in one JVM (`test::run_sharing`, which retries without the flags a JVM
-that never got to the launcher), only read by forks. `--debug`, `--coverage`
+that never got to the launcher); forks read it, and when there is none the
+first fork alone dumps it (`launch_tests` puts it in place, or runs the forks
+again without it if that fork never got to the launcher). `--debug`, `--coverage`
 and `test.java-agents` keep the usual layout. With `share-classes = "aot"` on
 JDK 24+, the file is `….aot`, an AOT cache: the run records into a temporary
 configuration (`-XX:AOTMode=record`, VM output off), and `Share::finish`
@@ -1263,6 +1287,7 @@ poisoning, which is documented under each function's `# Panics`.
  │     (and guava-33.0.0-jre-sources.jar, once `jrs fetch --sources` ran)
  ├── cds/                         <compiler>-jdk<n>-<key>.jsa: CDS archives for
  │                                the compiler JVMs, rewritten when pruned
+ │   ├── javac-jdk<n>-<key>.aot   javac's AOT cache, from JDK 25, per JVM flags
  │   ├── test-<project>-<deps>.jsa  the test JVM's, one per project and suite
  │   │                              (test.share-classes)
  │   └── entries/                 each jar's entry list, for the overlap check
@@ -1362,7 +1387,7 @@ design regression, not a style nit.
 | Nearest-wins, breadth-first by level, ties on declaration order; no ranges | `resolve/mod.rs`, `manifest.rs` |
 | Atomic, checksum-verified cache writes | `resolve/cache.rs`, `resolve/repo.rs` |
 | A build-cache key holds no absolute path and no mtime; what cannot be keyed is compiled; no cache failure fails a build | `build_cache.rs`, `compile/mod.rs` |
-| The `javac` and `kotlinc` workers live no longer than their `--watch` command, and any failure of one falls back to a forked compiler | `compile/worker.rs` |
+| The `javac` and `kotlinc` workers live no longer than their command — a `--watch` session, or a workspace command's `javac` pool — and any failure of one falls back to a forked compiler | `compile/worker.rs` |
 | Members built at once print what one member at a time prints | `cli/members.rs` (`at_once`), `Ui::deferred` |
 | Fat-jar merge rules: `META-INF/services/*`, Groovy extension modules and Spring's registries merged, never overwritten; the project's copy first | `package.rs` |
 | Relocation rewrites only a class's `CONSTANT_Utf8` entries, never their number or order; a class it cannot read fails the jar | `relocate.rs` |

@@ -46,8 +46,9 @@ in [§12.1](#121-where-the-implementation-diverges), and the decisions taken on
   anything off the JVM (Multiplatform, JS, Native, Android), compiler
   plugins, kapt/KSP, incremental compilation and compiler daemons (§7.7).
   A compiler daemon is a process that outlives the jrs command that started
-  it; a `--watch` session may keep one worker per compiler — `javac`, and
-  `kotlinc` — for its own lifetime (§7.5), which no later command can reach.
+  it; a `--watch` session may keep workers per compiler — `javac`, and
+  `kotlinc` — for its own lifetime, and a workspace command `javac` workers
+  for its own (§7.5), which no later command can reach.
 - Installing programs nobody asked for. A JDK is downloaded only for a
   version a project pins, only when the user's config allows it or
   `jrs jdk install` asks, and only from the vendor's API (§7.1). jrs itself
@@ -896,11 +897,28 @@ own.
   its constants, and the unit's classes it refers to. With the settings
   unchanged, the next build deletes the changed sources' classes and runs
   `javac` over those sources alone, with `target/classes` first on `-cp`. If
-  the API of a class they compile to changed, a second run compiles every
-  source that refers to one of those classes, and every source that refers
-  to one of theirs, transitively, since a subclass passes an inherited change
-  on to its own users. A change that stays inside method bodies compiles one
-  source. The classes are the ones a whole build would write, byte for byte.
+  the API of a class they compile to changed, the change is followed in
+  rounds. A class that only gained members — the same header (flags,
+  supertypes, signature, annotations, nesting), and every member it had —
+  compiles, in the next run, the sources that refer to it or to one of its
+  subtypes, which inherit what it gained; those whose own API is then
+  unchanged end the walk, and those whose API changed start the next round.
+  Any other API change — a member removed or changed, a new header, a nested
+  class gone — and a walk past four rounds compile every source that refers
+  to a changed class, and every source that refers to one of theirs,
+  transitively, since a subclass passes an inherited change on to its own
+  users. A change that stays inside method bodies compiles one source. The
+  classes are the ones a whole build would write, byte for byte.
+- The tests, and a workspace member, follow the class directories they
+  compile against the same way: `target/classes` for the tests, the
+  upstream members' for a member. Their index also records each class there
+  the sources refer to, with its supertypes there, as it was when they were
+  compiled against it. When that API changes, the unit compiles the sources
+  that refer to a changed class — and what reaches those, for a change more
+  than an addition — and goes on in rounds, instead of compiling whole; a
+  top-level class appearing in or going from those directories, a changed
+  constant there, or a processor or Groovy AST transformation among their
+  classes compiles it whole, as before.
 - The whole unit is compiled instead, into an emptied `target/classes/`, when
   file by file cannot be sure. That means changed settings or no index; a
   source added or deleted, or a top-level class that appeared or went away,
@@ -949,7 +967,13 @@ own.
   does not start. No archive is used on a JDK without its default CDS
   archive, or when `compiler-jvm-args` hold CDS flags of their own. The
   archive changes nothing a compiler writes, so it is not in the
-  fingerprint. The test JVM gets one only with `test.share-classes`, which
+  fingerprint. From JDK 25 `javac` maps a JEP 483 AOT cache instead,
+  `cds/javac-jdk<n>-<key>.aot`, keyed by the JDK and the JVM flags it starts
+  with: its classes kept linked, and the method profiles of the run that
+  recorded it (JEP 515). It is made as the test JVM's is below: the first
+  run records (`-XX:AOTMode=record`, quietly), and jrs assembles the cache
+  from that record once the run succeeded, naming `javac`'s main module as
+  the launcher did. The test JVM gets one only with `test.share-classes`, which
   moves the class directories off its `-cp` (§10.2): CDS refuses to dump a
   classpath with a non-empty class directory, and `target/classes` is one.
   A temporary dump a minute old that was never put in place — a `--watch`
@@ -1067,9 +1091,15 @@ processor's leaked class loaders cost, and whenever the JDK changes. A
 worker that dies, answers garbage or takes far longer than a forked `javac`
 would (two minutes, or ten times its slowest answer) is killed, and that
 step runs as a forked `javac`, whose output alone reaches the terminal.
-Outside `--watch` nothing changes: a single build would pay the worker's
-start-up for one compile. This is not a compiler daemon (§1.2): a daemon
-outlives the command that started it and is found again by later ones.
+Each kind of worker is a pool: a request takes an idle JVM or starts one,
+and gives it back once answered, so members compiling at once get a JVM
+each. Outside `--watch`, a workspace command that builds more than one
+member holds a pool of `javac` workers for its own lifetime, so the JIT the
+first member warmed serves the members after it; a single-module build
+forks `javac`, since it would pay the worker's start-up for one compile, and
+no command but a `--watch` session gets a `kotlinc` worker. This is not a
+compiler daemon (§1.2): a daemon outlives the command that started it and is
+found again by later ones.
 
 **A warm `kotlinc`.** The same session keeps a second worker for a Kotlin
 unit's first step, under the same rules. Its program,
@@ -2247,8 +2277,9 @@ serial number, so the same inputs write the same bytes (§9.2's determinism).
   one JVM without an archive dumps one into a temporary file, renamed into
   place once the JVM has run, whether the tests passed or not; a JVM that
   did not get as far as the launcher while dumping runs again without the
-  flags. Forks only read an archive, so a suite that always forks gets one
-  from its first single-JVM run (`--forks 1`). `-Xlog:cds*=off` keeps the
+  flags. Forks read an archive; when there is none yet, the first fork
+  dumps it while the others map nothing, and it goes in place once that
+  fork has run, so a suite that always forks still gets one. `-Xlog:cds*=off` keeps the
   JVM quiet about an archive it cannot map. A class whose bytes changed
   since the dump is loaded from its file, never from the archive. A
   `--debug` or `--coverage` run, a run with `test.java-agents`, and one whose
@@ -2724,6 +2755,18 @@ produces something runnable.
   workspace's members in the comparison
 - The design and its gates are in
   [GRADLE_GAPS.md](specs/GRADLE_GAPS.md).
+- ☑ API changes followed in rounds, and the tests and workspace members
+  following the class directories they compile against class by class
+  (§7.2)
+- ☑ a workspace command's pool of warm `javac` workers (§7.5), and `javac`'s
+  AOT cache on JDK 25 (§7.2)
+- ☑ members' tests at once with `workspace.parallel-tests`
+  ([WORKSPACES.md](specs/WORKSPACES.md) §6.2), and the first fork dumping
+  the test JVM's archive (§10.2)
+- ☑ jars that copy a dependency's deflated entries as they are, and deflate
+  the rest on every core
+- The plan, and the opt-in daemon it keeps for last, are in
+  [BEATING_THE_DAEMON.md](specs/todo/BEATING_THE_DAEMON.md).
 
 Tick the corresponding README boxes as each lands — the README is the
 user-facing progress tracker, this document is the design behind it.

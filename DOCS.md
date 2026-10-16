@@ -391,8 +391,9 @@ reads `java.class.path` itself no longer sees the class directories — hence
 opt-in. Nor does a library in a jar that loads a project class by name
 through its own class loader: Spring's `SerializationUtils` deserialising a
 project class fails with `ClassNotFoundException`. `--debug`, `--coverage`
-and `test.java-agents` turn it off for the run, and forked JVMs only read an
-archive a single-JVM run wrote.
+and `test.java-agents` turn it off for the run. When the tests fork and there
+is no archive yet, the first fork writes it and the others run without one;
+from then on every fork maps it.
 
 `share-classes = "aot"` uses the JDK's AOT cache instead (JDK 24 and later;
 an older JDK gets the archive). Besides the classes it keeps them linked,
@@ -1491,8 +1492,9 @@ workspace's one graph. `jrs tree` prints each member's graph, its member
 dependencies first, marked `(module)`.
 
 A change to a member recompiles the members that depend on it only when it
-changes what they can see — a method's body leaves them fresh — and
-`jrs test` runs the tests a change reaches, across members. Phase lines name
+changes what they can see — a method's body leaves them fresh — and then only
+their sources that use a class whose API changed; `jrs test` runs the tests
+a change reaches, across members. Phase lines name
 the member: `Compiling core v1.0.0`, `Compiling app: 4 test sources`.
 
 Members that do not depend on each other build at once, up to `--jobs` of
@@ -1501,9 +1503,12 @@ member's lines come out in build order, and the member at the front streams
 as it goes while the others wait their turn; the live line names the members
 compiling. `jrs package` writes each member's jar as part of the same work.
 `jrs test` builds every member first and then runs each member's tests in
-turn, since a test JVM already uses the cores it is given. `--jobs 1` builds
-one member at a time, as do `--watch` and a workspace whose tasks depend on
-another member's. `--timings` adds a `member <name>` row for each member
+turn, since a test JVM already uses the cores it is given — or at once, up to
+`--jobs`, with `parallel-tests = true` under `[workspace]`, for suites that
+share no port, database or file. `--jobs 1` builds one member at a time, as
+does a workspace whose tasks depend on another member's. A command that
+builds several members compiles them in warm `javac` JVMs it keeps until it
+exits, so the later members compile in a JVM the earlier ones warmed. `--timings` adds a `member <name>` row for each member
 built at once. When a member fails, no other starts; what already ran is
 printed, then the error.
 

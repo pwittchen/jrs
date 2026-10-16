@@ -1928,7 +1928,8 @@ jrs tree --why org.checkerframework:checker-qual   # who brings this in?</pre>
 </p>
 <ul>
   <li>A change inside method bodies compiles <strong>that one source</strong>.</li>
-  <li>A change to a class's API also compiles every source that refers to it, transitively, since a subclass passes an inherited change on to its own users.</li>
+  <li>A class that only <strong>gained members</strong> also compiles the sources that refer to it or to a subclass of it; those whose own API stays the same end it there, and the others go on to their own users, round by round.</li>
+  <li>Any other change to a class's API — a member removed or changed, a new supertype or annotation — compiles every source that refers to it, transitively, since a subclass passes an inherited change on to its own users.</li>
   <li>The classes are the ones a whole build would have written, byte for byte.</li>
 </ul>
 <p>The whole unit is compiled instead, into an emptied output directory, when file by file cannot be sure:</p>
@@ -1949,6 +1950,12 @@ jrs tree --why org.checkerframework:checker-qual   # who brings this in?</pre>
   and Scala classes count by their bytes (inline functions and macros carry bodies across), and so
   does every class once the main code registers an annotation processor or Groovy AST
   transformation.
+</p>
+<p>
+  When that API does change, the tests that use a class whose API changed compile, not the whole
+  test unit, and the same holds for a <a href="#workspaces">workspace</a> member when a member it
+  depends on changes. A class appearing in or leaving the main classes, or a changed constant
+  there, still compiles the tests whole.
 </p>
 
 <h3>Resources</h3>
@@ -2191,7 +2198,8 @@ steps:
   <code>SerializationUtils</code> deserialising a project class fails with
   <code>ClassNotFoundException</code>.
   <code>--debug</code>, <code>--coverage</code> and <code>test.java-agents</code> turn it off for
-  the run, and forked JVMs only read an archive a single-JVM run wrote.
+  the run. When the tests fork and there is no archive yet, the first fork writes it while the
+  others run without one; from then on every fork maps it.
 </p>
 <p>
   <code>share-classes = "aot"</code> uses the JDK's AOT cache instead (JDK 24 and later; an older
@@ -2818,8 +2826,9 @@ api = { path = "../api" }
   needed) or <code>[dev-dependencies]</code>. Its classes go where its jar would, and its own
   dependencies come with it, as a jar's transitive ones do. Members that depend on each other in a
   cycle are an error that names the cycle. A change to a member recompiles the members that depend
-  on it only when it changes what they can see — a method's body leaves them fresh — and
-  <code>jrs test</code> runs the tests a change reaches, across members.
+  on it only when it changes what they can see — a method's body leaves them fresh — and then
+  only their sources that use a class whose API changed; <code>jrs test</code> runs the tests a
+  change reaches, across members.
 </p>
 
 <h3>Commands in a workspace</h3>
@@ -2861,8 +2870,9 @@ jrs -p core add com.google.guava:guava</pre>
 </p>
 <ul>
   <li><code>jrs package</code> writes each member's jar as part of the same work.</li>
-  <li><code>jrs test</code> builds every member first and then runs each member's tests in turn, since a test JVM already uses the cores it is given.</li>
-  <li><code>--jobs 1</code> builds one member at a time, as do <code>--watch</code> and a workspace whose tasks depend on another member's.</li>
+  <li><code>jrs test</code> builds every member first and then runs each member's tests in turn, since a test JVM already uses the cores it is given. With <code>parallel-tests = true</code> under <code>[workspace]</code> the tests run at once too, up to <code>--jobs</code>, with the same output; leave it off for suites that share a port, a database or a file.</li>
+  <li><code>--jobs 1</code> builds one member at a time, as does a workspace whose tasks depend on another member's.</li>
+  <li>The members compile in warm <code>javac</code> JVMs the command keeps until it exits, so a member compiling after another does so in a JVM the first one warmed. Nothing outlives the command.</li>
   <li><code>--timings</code> adds a <code>member &lt;name&gt;</code> row for each member built at once.</li>
   <li>When a member fails, no other starts; what already ran is printed, then the error.</li>
 </ul>
@@ -3005,8 +3015,9 @@ jrs cache prune --unused-for 30       # drop what no build has used in 30 days</
   It also drops parent POMs, BOMs, test launchers and JaCoCo jars, which only a fresh resolution or
   a <code>--coverage</code> run needs and which are downloaded again when wanted.
   The cache also holds <code>cds/</code>: a class-data-sharing archive per compiler and JDK, which
-  makes <code>javac</code>, kotlinc, scalac and groovyc start faster, and the test JVM's with
-  <code>share-classes</code>. The first compile after a new JDK or compiler writes it;
+  makes <code>javac</code>, kotlinc, scalac and groovyc start faster (on JDK 25 and later,
+  <code>javac</code> gets an AOT cache, which also keeps its method profiles), and the test JVM's
+  with <code>share-classes</code>. The first compile after a new JDK or compiler writes it;
   <code>prune</code> drops it like anything else. The <a href="#build-cache">build cache</a> lives
   under <code>build/</code>: a plain <code>prune</code> drops all of it, <code>--unused-for</code>
   the entries no build has hit. The JDKs <code>jrs jdk install</code> downloaded, under
