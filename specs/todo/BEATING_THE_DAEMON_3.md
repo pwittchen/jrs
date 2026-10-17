@@ -94,8 +94,7 @@ than close them. With §2 in, `clean` should return to the third pass's
 250–604 ms on the small projects, and the daemon would keep about 5–6
 cells, all on `gen-ws`, `gen-2000` and `gen-300`.
 
-## 2. Make the caches where no build waits on them
-
+## 2. Make the caches where no build waits on them ✅
 **Now.** The command that writes the `javac` AOT cache pays for it twice,
 in series (`compile/share.rs`):
 
@@ -187,8 +186,7 @@ not move; the "workspace members at once" table's distance from the
 critical path. Also one CI-shaped run outside the benchmark: `build` then
 `test` on an empty `JRS_CACHE_DIR`.
 
-## 3. Warm the workspace's first members
-
+## 3. Warm the workspace's first members ✅
 **Now.** BEATING_THE_DAEMON_2.md §3 gave the worker an AOT cache of its own
 and starts the first worker while the graph is read. In this pass `core`
 and `model` still take 383 ms and 439 ms of `gen-ws`'s clean build, about
@@ -221,8 +219,7 @@ about 0.7–0.8 s, level with the daemon, and `abi` ahead of it.
 **Measured by.** `clean` and `abi` on `gen-ws`; the "workspace members at
 once" table.
 
-## 4. The first round of an API change
-
+## 4. The first round of an API change ✅
 **Now.** `abi` on `gen-2000` is 810 ms (`javac` 580 ms) against 576–634 ms,
 and on `gen-300` 493 ms (`javac` 389 ms) against 421–434 ms.
 BEATING_THE_DAEMON_2.md §5 sends a single-module unit's rounds after the
@@ -254,8 +251,7 @@ third pass, before §2's cost moved into `clean`, `gen-2000`'s was 1.45 s
 against the daemon's 1.24 s, and `gen-300`'s 604 ms against 588 ms with the
 configuration cache. Re-read both after §2 before starting on it.
 
-## 6. The test JVM on large suites
-
+## 6. The test JVM on large suites ✅
 **Now.** `gen-2000`'s `test` is 893 ms (699 ms of it the test JVM) against
 804–842 ms, and `test-edit` 1.19 s (721 ms) against 1.07–1.12 s: 6–11%
 behind. `test.share-classes = true` is the AOT cache from JDK 25

@@ -258,7 +258,7 @@ them:
   once, and `--parallel` — already run the members' `test` tasks at once,
   so leaving it off would time jrs's suites one after another against
   Gradle's run together
-  ([BEATING_THE_DAEMON_2.md §4](todo/BEATING_THE_DAEMON_2.md#4-parallel-tests-in-the-benchmarks-workspace)).
+  ([BEATING_THE_DAEMON_2.md §4](todo/BEATING_THE_DAEMON_2.md#4-parallel-tests-in-the-benchmarks-workspace-)).
 - **The test JVM's class-data cache in the generated projects.** Their
   generated `jrs.toml`s set `[test] share-classes = true`, which jrs leaves
   off by default until the corpus has been run under it. A warm daemon's
@@ -266,7 +266,7 @@ them:
   already; `share-classes` is jrs's counterpart, the same classes mapped
   from an AOT cache the first `jrs test` writes, and leaving it off would
   time a test JVM that loads them all again against one that does not
-  ([BEATING_THE_DAEMON_3.md §6](todo/BEATING_THE_DAEMON_3.md#6-the-test-jvm-on-large-suites)).
+  ([BEATING_THE_DAEMON_3.md §6](todo/BEATING_THE_DAEMON_3.md#6-the-test-jvm-on-large-suites-)).
   The hand-written projects (`wordstats`, `bookmarks`) keep their own
   manifests.
 - **No build cache on either side.** jrs runs with `--no-build-cache`; Gradle

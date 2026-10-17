@@ -81,8 +81,7 @@ then §3 and §4, then §5. §6 and §7 narrow gaps rather than close them. With
 §2–§4 in, the daemon would keep about 5–7 cells, all compile- or test-bound
 work on `gen-2000` and `gen-300`.
 
-## 2. Make the `javac` AOT cache off the edit's critical path
-
+## 2. Make the `javac` AOT cache off the edit's critical path ✅
 **Now.** In the second pass `incremental` was 245–394 ms and ahead of the
 daemon on every project; in the third it is 844 ms–1.11 s on the four
 single-module projects. The extra time is all in one forked `javac`
@@ -137,8 +136,7 @@ projects, ahead of every Gradle column; `cold` back to the second pass's
 **Measured by.** `incremental` and `cold` on `wordstats`, `bookmarks`,
 `gen-300` and `gen-2000`; `cargo bench --bench incremental`.
 
-## 3. Warm the workspace's first members
-
+## 3. Warm the workspace's first members ✅
 **Now.** With the `javac` worker pool (BEATING_THE_DAEMON.md §6), the
 members after the first two take 123–147 ms each in `gen-ws`'s clean
 build, but `core` (285 ms) and `model` (316 ms) are still the pool's first
@@ -173,8 +171,7 @@ longest phase is `core` at 240 ms) towards the daemon's 449–492 ms.
 **Measured by.** `clean`, `abi` and `incremental` on `gen-ws`; the
 "workspace members at once" table.
 
-## 4. `parallel-tests` in the benchmark's workspace
-
+## 4. `parallel-tests` in the benchmark's workspace ✅
 **Now.** `[workspace] parallel-tests = true` is built
 (BEATING_THE_DAEMON.md §4) but off by default, and `gen-ws` does not set
 it, so `test` is still six test JVMs of 273–283 ms each in sequence: 1.81 s,
@@ -193,8 +190,7 @@ every Gradle column.
 
 **Measured by.** `test` on `gen-ws`.
 
-## 5. One worker for the rounds of a single-module build
-
+## 5. One worker for the rounds of a single-module build ✅
 **Now.** An API change compiles in rounds (BEATING_THE_DAEMON.md §2), which
 took `abi` from 1.87 s to 822 ms on `gen-2000` and from 852 to 501 ms on
 `gen-300`. But a single-module build forks a `javac` per round; only a
@@ -236,8 +232,7 @@ packages are.
 
 **Measured by.** `clean` on `gen-300` and `gen-2000`.
 
-## 7. The test JVM on large suites
-
+## 7. The test JVM on large suites ✅
 **Now.** `gen-2000`'s `test` is 856 ms (643 ms test JVM) against 802 ms,
 and `test-edit` 1.17 s (703 ms test JVM) against 1.06 s: 2–10% behind.
 
