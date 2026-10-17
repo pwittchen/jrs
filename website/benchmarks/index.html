@@ -83,19 +83,19 @@
           jrs is one native binary that starts in milliseconds and keeps nothing running between
           builds. On the same projects, built the same way, it finishes a no-op build in about
           60&nbsp;ms, five times faster than a warm Gradle daemon and more than ten times faster
-          than Maven. It is slower where a warm compiler pays off: an API change, and a clean
-          build of a large project or a workspace, where a warm Gradle daemon finishes up to one
-          and a half times sooner. Here are all the numbers, the losses included.
+          than Maven. It is slower where a warm compiler pays off: an API change or a clean
+          build in a large project or a workspace, where a warm Gradle daemon is up to a third
+          faster. Here are all the numbers, the losses included.
         </p>
         <p class="caveat">
-          <strong>The fifth pass, not the final report.</strong> These numbers are from jrs
-          0.14.1 on 2026-10-17; the four earlier passes, from 2026-10-14, 2026-10-15,
-          2026-10-16 and earlier on 2026-10-17, are kept beside them in
+          <strong>The sixth pass, not the final report.</strong> These numbers are from jrs
+          0.14.2 on 2026-10-17; the five earlier passes, from 2026-10-14, 2026-10-15,
+          2026-10-16 and twice earlier on 2026-10-17, are kept beside them in
           <a href="https://github.com/pwittchen/jrs/blob/master/specs/BENCHMARKS_SUMMARY.md">specs/BENCHMARKS_SUMMARY.md</a>.
           Every cell below is a single run with no warm-up, on one machine. The harness that
           produced it runs seven measured runs and two warm-ups per cell by default; those
           numbers, with their spread, replace these once they are published. Expect individual
-          cells to move; the pattern held across all five projects, and across all five passes.
+          cells to move; the pattern held across all five projects, and across all six passes.
         </p>
       </section>
 
@@ -109,38 +109,38 @@
         <dl class="stats">
           <div>
             <dt>No-op build</dt>
-            <dd><span class="value">64 ms</span><span class="versus">Gradle daemon 373&nbsp;ms</span><span class="versus">Maven 1.05&nbsp;s</span></dd>
+            <dd><span class="value">61 ms</span><span class="versus">Gradle daemon 358&nbsp;ms</span><span class="versus">Maven 1.05&nbsp;s</span></dd>
           </div>
           <div>
             <dt>Run, to first output</dt>
-            <dd><span class="value">126 ms</span><span class="versus">Gradle daemon 426&nbsp;ms</span><span class="versus">Maven 1.14&nbsp;s</span></dd>
+            <dd><span class="value">127 ms</span><span class="versus">Gradle daemon 429&nbsp;ms</span><span class="versus">Maven 1.04&nbsp;s</span></dd>
           </div>
           <div>
             <dt>Cold build, Spring Boot</dt>
-            <dd><span class="value">1.03 s</span><span class="versus">Maven 2.08&nbsp;s</span><span class="versus">Gradle 13.4&nbsp;s</span></dd>
+            <dd><span class="value">1.34 s</span><span class="versus">Maven 1.94&nbsp;s</span><span class="versus">Gradle 12.4&nbsp;s</span></dd>
           </div>
           <div>
             <dt>Spring Boot fat jar</dt>
-            <dd><span class="value">211 ms</span><span class="versus">Gradle daemon 514&nbsp;ms</span><span class="versus">Maven 1.66&nbsp;s</span></dd>
+            <dd><span class="value">184 ms</span><span class="versus">Gradle daemon 521&nbsp;ms</span><span class="versus">Maven 1.55&nbsp;s</span></dd>
           </div>
           <div>
             <dt>Edit, 2000 classes</dt>
-            <dd><span class="value">380 ms</span><span class="versus">Gradle daemon 578&nbsp;ms</span><span class="versus">Maven 2.74&nbsp;s</span></dd>
+            <dd><span class="value">382 ms</span><span class="versus">Gradle daemon 583&nbsp;ms</span><span class="versus">Maven 2.63&nbsp;s</span></dd>
           </div>
         </dl>
         <h3>Where jrs is slower</h3>
         <dl class="stats slower">
           <div>
             <dt>API change, 2000 classes</dt>
-            <dd><span class="value">895 ms</span><span class="versus">Gradle daemon 638&nbsp;ms</span><span class="versus">Maven 2.68&nbsp;s</span></dd>
+            <dd><span class="value">817 ms</span><span class="versus">Gradle daemon 622&nbsp;ms</span><span class="versus">Maven 2.57&nbsp;s</span></dd>
           </div>
           <div>
             <dt>Clean build, 6 modules</dt>
-            <dd><span class="value">817 ms</span><span class="versus">Gradle daemon 746&nbsp;ms</span><span class="versus">Maven 1.73&nbsp;s</span></dd>
+            <dd><span class="value">826 ms</span><span class="versus">Gradle daemon 780&nbsp;ms</span><span class="versus">Maven 1.64&nbsp;s</span></dd>
           </div>
           <div>
             <dt>Clean build, 2000 classes</dt>
-            <dd><span class="value">1.54 s</span><span class="versus">Gradle daemon 1.27&nbsp;s</span><span class="versus">Maven 2.59&nbsp;s</span></dd>
+            <dd><span class="value">1.48 s</span><span class="versus">Gradle daemon 1.25&nbsp;s</span><span class="versus">Maven 2.44&nbsp;s</span></dd>
           </div>
         </dl>
         <p class="note">
@@ -201,20 +201,21 @@
           <article class="wins">
             <h3>Faster</h3>
             <ul>
-              <li><strong>Anything start-up bound.</strong> No-op builds in 64–84&nbsp;ms on every project: 4–7× a warm Gradle daemon, 14–17× Maven, 26–35× Gradle without a daemon.</li>
-              <li><strong>One-file edits.</strong> 210–380&nbsp;ms on every project, 1.5–1.8× ahead of a warm daemon and 5–7× ahead of Maven.</li>
-              <li><strong>Tests and test selection.</strong> Faster than a warm daemon on every project, now that the test JVM maps the JDK's and JUnit's classes: 763&nbsp;ms against 0.80–0.88&nbsp;s on 2000 classes, 419&nbsp;ms against 0.67–1.79&nbsp;s in a workspace. <code>jrs test</code> runs only the tests a change reaches: 424&nbsp;ms against 2.8&nbsp;s for Maven in the workspace.</li>
-              <li><strong>Clean builds of small projects.</strong> 340–588&nbsp;ms, ahead of the daemon again now that <code>javac</code>'s cache is made where no build waits on it: 346&nbsp;ms against 0.66–0.68&nbsp;s on Spring Boot.</li>
-              <li><strong>Fat jars, Spring Boot's included.</strong> 5.7–7.5× faster than <code>shadowJar</code> on a warm daemon, and 211&nbsp;ms against <code>bootJar</code>'s 514&nbsp;ms.</li>
-              <li><strong>Cold builds.</strong> 0.98–1.8&nbsp;s with empty caches, against 1.6–3.3&nbsp;s for Maven and 11.5–15&nbsp;s for Gradle, which sets up its whole home first.</li>
+              <li><strong>Anything start-up bound.</strong> No-op builds in 61–83&nbsp;ms on every project: 4–7× a warm Gradle daemon, 12–17× Maven, 26–36× Gradle without a daemon.</li>
+              <li><strong>One-file edits.</strong> 205–382&nbsp;ms on every project, 1.4–1.7× ahead of a warm daemon and 5–7× ahead of Maven.</li>
+              <li><strong>Tests and test selection.</strong> Faster than a warm daemon on every project, with the test JVM mapping the JDK's and JUnit's classes: 720&nbsp;ms against 0.80&nbsp;s on 2000 classes, 438&nbsp;ms against 0.67–1.78&nbsp;s in a workspace. <code>jrs test</code> runs only the tests a change reaches: 411&nbsp;ms against 2.6&nbsp;s for Maven in the workspace.</li>
+              <li><strong>An API change in a small project.</strong> 304&nbsp;ms against the daemon's 369–388&nbsp;ms, and 338&nbsp;ms against 373–447&nbsp;ms on Spring Boot, now that <code>javac</code>'s worker gets its cache beside the build.</li>
+              <li><strong>Clean builds of small projects.</strong> 282–584&nbsp;ms, ahead of the daemon now that <code>javac</code>'s cache is made where no build waits on it: 282&nbsp;ms against 0.57–0.60&nbsp;s on Spring Boot.</li>
+              <li><strong>Fat jars, Spring Boot's included.</strong> 2.8–8.1× faster than <code>shadowJar</code> on a warm daemon, and 184&nbsp;ms against <code>bootJar</code>'s 521&nbsp;ms.</li>
+              <li><strong>Cold builds.</strong> 1.3–1.8&nbsp;s with empty caches, against 1.6–3.2&nbsp;s for Maven and 11–14&nbsp;s for Gradle, which sets up its whole home first.</li>
               <li><strong>On CI.</strong> Against Gradle without a daemon and against Maven, jrs is faster in every cell.</li>
             </ul>
           </article>
           <article class="gaps">
             <h3>Gradle's daemon still wins</h3>
             <ul>
-              <li><strong>An API change.</strong> jrs follows an API change in rounds and stops when a round changes no API, but Gradle still compiles in a warm compiler: 895&nbsp;ms against 0.60–0.64&nbsp;s on 2000 classes, 512&nbsp;ms against 0.42–0.50&nbsp;s in a workspace, and by 2–7% on the small projects too.</li>
-              <li><strong>Clean builds of a big project or a workspace.</strong> 1.54&nbsp;s against the daemon's 1.21–1.27&nbsp;s on 2000 classes, nearly all of it <code>javac</code>. Six members build at once in 817&nbsp;ms, 77&nbsp;ms above their critical path, against the daemon's 0.66–0.75&nbsp;s (<a href="https://github.com/pwittchen/jrs/blob/master/specs/GRADLE_GAPS.md">GRADLE_GAPS</a>).</li>
+              <li><strong>An API change.</strong> jrs follows an API change in rounds and stops when a round changes no API, but Gradle still compiles in a warm compiler: 817&nbsp;ms against 0.61–0.62&nbsp;s on 2000 classes, 516&nbsp;ms against 0.43–0.49&nbsp;s in a workspace, and 424&nbsp;ms against 399&nbsp;ms with the configuration cache on 300 classes.</li>
+              <li><strong>Clean builds of a big project or a workspace.</strong> 1.48&nbsp;s against the daemon's 1.21–1.25&nbsp;s on 2000 classes, nearly all of it <code>javac</code>. Six members build at once in 826&nbsp;ms, 72&nbsp;ms above their critical path, against the daemon's 0.66–0.78&nbsp;s (<a href="https://github.com/pwittchen/jrs/blob/master/specs/GRADLE_GAPS.md">GRADLE_GAPS</a>).</li>
             </ul>
           </article>
         </div>
@@ -255,7 +256,7 @@
           <li><strong>Checked before timed.</strong> No project is timed until every tool resolves the same runtime classpath, runs the same tests with no failures, prints the same output and builds a jar that starts.</li>
           <li><strong>No network, no build cache.</strong> Every tool reads one local mirror of Maven Central and the Gradle Plugin Portal; jrs, Maven and Gradle all run with their build caches off.</li>
           <li><strong>Default configuration.</strong> No tuning flag jrs has no counterpart for. Output goes to a file, never a terminal. Runs go round-robin over the tools.</li>
-          <li><strong>The setup.</strong> jrs 0.14.1, Maven 3.9.16 and Gradle 9.1.0 on Corretto 25.0.2, the machine below, on 2026-10-17. The four earlier passes, jrs 0.11.0 on 2026-10-14, jrs 0.12.0 on 2026-10-15, jrs 0.13.0 on 2026-10-16 and jrs 0.14.0 earlier on 2026-10-17, used the same machine and tool versions.</li>
+          <li><strong>The setup.</strong> jrs 0.14.2, Maven 3.9.16 and Gradle 9.1.0 on Corretto 25.0.2, the machine below, on 2026-10-17. The five earlier passes, jrs 0.11.0 on 2026-10-14, jrs 0.12.0 on 2026-10-15, jrs 0.13.0 on 2026-10-16, and jrs 0.14.0 and 0.14.1 earlier on 2026-10-17, used the same machine and tool versions.</li>
         </ol>
         <h3>The machine</h3>
         <dl class="phases">

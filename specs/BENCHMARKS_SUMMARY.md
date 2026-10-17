@@ -1,12 +1,14 @@
 # Benchmarks against Maven and Gradle: first results
 
-Five passes are recorded here, oldest first: jrs 0.11.0 on 2026-10-14
+Six passes are recorded here, oldest first: jrs 0.11.0 on 2026-10-14
 (below), jrs 0.12.0 on 2026-10-15 at 22:10 CEST
 ([Second pass](#second-pass-jrs-0120-2026-10-15)), jrs 0.13.0 on
 2026-10-16 at 22:38 CEST ([Third pass](#third-pass-jrs-0130-2026-10-16)),
 jrs 0.14.0 on 2026-10-17 at 13:05 CEST
-([Fourth pass](#fourth-pass-jrs-0140-2026-10-17)), and jrs 0.14.1 on
-2026-10-17 at 17:18 CEST ([Fifth pass](#fifth-pass-jrs-0141-2026-10-17)).
+([Fourth pass](#fourth-pass-jrs-0140-2026-10-17)), jrs 0.14.1 on
+2026-10-17 at 17:18 CEST ([Fifth pass](#fifth-pass-jrs-0141-2026-10-17)),
+and jrs 0.14.2 on 2026-10-17 at 19:03 CEST
+([Sixth pass](#sixth-pass-jrs-0142-2026-10-17)).
 
 Run on 2026-10-14 with jrs 0.11.0 (`4f40e18`, `benches/compare.rs`), on an
 Apple M4 Max (14 cores, 36 GiB) under macOS 27.0.1, with Corretto 25.0.2,
@@ -1047,6 +1049,223 @@ Columns as in the second pass. **Bold** marks a tool that beat jrs.
   422–504 ms. On `wordstats` (381 ms against 374 ms) and `bookmarks`
   (431 ms against 403 ms) Gradle CC wins it again, by 2% and 7%, where the
   fourth pass led.
+
+A full run (seven measured runs and two warm-ups per cell) is still what
+BENCHMARKS.md §7 asks for before these become the published report.
+
+---
+
+## Sixth pass: jrs 0.14.2 (2026-10-17)
+
+Run on **2026-10-17 at 19:03 CEST** (finished 19:17) with **jrs 0.14.2**
+(`6f57634`, `benches/compare.rs`), on the same machine as the earlier
+passes: Apple M4 Max (14 cores: 10 performance and 4 efficiency, 36 GiB),
+macOS 27.0.1 (26A434), Corretto 25.0.2, Maven 3.9.16 and Gradle 9.1.0,
+every tool from a freshly recorded local mirror (8,146 requests, none
+unanswered). Every project passed the checks of BENCHMARKS.md §5.1 on all
+three tools again.
+
+The settings are the earlier passes', so the six can be compared: **one
+run per cell with no warm-up** (`JRS_BENCH_RUNS=1 JRS_BENCH_WARMUP=0`), the
+five parity projects only
+(`JRS_BENCH_PROJECTS=wordstats,bookmarks,gen-300,gen-2000,gen-ws`). The same
+caveat holds: this is still not the report of BENCHMARKS.md §6, and a cell
+may move by tens of percent in a full run.
+
+What changed since `56c0d97` that can move a number:
+
+- `7d24fb5` trains the `javac` worker's AOT cache beside a single-module
+  build, on a thread the command joins at its end, where before only
+  `jrs fetch` and `jrs jdk install` made it in a single-module project. A
+  unit sends its later rounds of `javac` to a worker only once that cache
+  exists, so it is aimed at `abi`, which is two rounds. The trade-off it
+  names is `cold`, where the command waits for the worker's training.
+
+`c79ceb3` and `6f57634` change only the version.
+
+### jrs, fifth pass against sixth
+
+| Project | Scenario | Fifth pass | Sixth pass | Change |
+| --- | --- | --- | --- | --- |
+| `wordstats` | cold | 980 ms | 1.30 s | +33% |
+| `wordstats` | clean | 340 ms | 287 ms | −16% |
+| `wordstats` | incremental | 229 ms | 245 ms | +7% |
+| `wordstats` | abi | 381 ms | 304 ms | −20% |
+| `wordstats` | test-edit | 556 ms | 524 ms | −6% |
+| `wordstats` | package | 108 ms | 219 ms | +103% |
+| `bookmarks` | cold | 1.03 s | 1.34 s | +30% |
+| `bookmarks` | clean | 346 ms | 282 ms | −18% |
+| `bookmarks` | noop | 68 ms | 62 ms | −9% |
+| `bookmarks` | abi | 431 ms | 338 ms | −22% |
+| `bookmarks` | run | 802 ms | 740 ms | −8% |
+| `bookmarks` | package | 211 ms | 184 ms | −13% |
+| `gen-300` | cold | 1.05 s | 1.34 s | +28% |
+| `gen-300` | noop | 71 ms | 64 ms | −10% |
+| `gen-300` | abi | 517 ms | 424 ms | −18% |
+| `gen-300` | package | 207 ms | 182 ms | −12% |
+| `gen-2000` | abi | 895 ms | 817 ms | −9% |
+| `gen-2000` | test | 763 ms | 720 ms | −6% |
+
+Every other jrs cell is within ±5% of the fifth pass, `gen-ws`'s all of
+them. The machine was a little faster for the others: Maven by about 7% at
+the median and Gradle's columns by 1–2%, within −20% and +6% at the
+extremes, with `bookmarks`'s `clean` the fastest move in Maven's column
+(−20%) and Gradle's (−14%) as in jrs's. The smaller jrs moves above, in
+`clean`, `noop` and `run`, are as much the machine's as jrs's.
+
+Two groups stand out:
+
+- **`abi` is 9–22% faster on the four single-module projects**, the aim
+  of `7d24fb5`. `javac` takes 232, 255, 322 and 571 ms in it, against 312,
+  347, 411 and 659 ms in the fifth pass. jrs now leads every Gradle column
+  in `abi` on `wordstats` and `bookmarks`, and the warm daemon without the
+  configuration cache on `gen-300`. `gen-ws`, whose workspace pool already
+  had a worker, did not move (516 ms).
+- **`cold` is 28–33% slower on the three small projects**, the trade-off
+  `7d24fb5` names. Their `--timings` totals are 468, 569 and 855 ms,
+  against 451, 544 and 840 ms in the fifth pass, but the commands take
+  1.30, 1.34 and 1.34 s: 275–303 ms more than in the fifth pass falls after
+  the build, where the command waits for the worker's training. On
+  `gen-2000` and `gen-ws` `cold` did not move (1.76 s and 1.49 s).
+
+`package` is 103% slower on `wordstats`, its packaging phase 157 ms
+against 45 ms, while it is 12–13% faster on `bookmarks` and `gen-300`
+(120 and 117 ms against 147 and 135 ms). No commit in the log above
+touches packaging, and this pass does not explain either move.
+
+### Workspace members at once (`gen-ws`)
+
+GRADLE_GAPS.md §2.1: each member's wall time in jrs's clean build.
+
+| Members | Sequential (sum) | Critical path | jrs clean | Gradle --parallel | Gate |
+| --- | --- | --- | --- | --- | --- |
+| 6 | 845 ms | 754 ms (11% less) | 826 ms | 727 ms | does not hold |
+
+The members took `core 211 · model 231 · store 91 · service 108 · web 103 ·
+app 101` ms, much as in the fifth pass, and jrs's clean build is 72 ms
+above the critical path. The gate still does not hold: Gradle `--parallel`
+beats jrs by 12%, not by more than 20%.
+
+### All cells
+
+Columns as in the second pass. **Bold** marks a tool that beat jrs.
+
+### wordstats (a few classes, Guava, JUnit)
+
+| Scenario | jrs | Maven | Gradle | Gradle CC | Gradle no daemon |
+| --- | --- | --- | --- | --- | --- |
+| cold | 1.30 s | 1.56 s | 11.2 s | 11.5 s | 11.0 s |
+| clean | 287 ms | 1.19 s | 433 ms | 417 ms | 2.33 s |
+| noop | 61 ms | 1.05 s | 358 ms | 312 ms | 2.12 s |
+| incremental | 245 ms | 1.17 s | 392 ms | 369 ms | 2.30 s |
+| abi | 304 ms | 1.26 s | 388 ms | 369 ms | 2.32 s |
+| test | 354 ms | 1.24 s | 595 ms | 577 ms | 2.38 s |
+| test-edit | 524 ms | 1.53 s | 645 ms | 689 ms | 2.61 s |
+| run | 127 ms | 1.04 s | 429 ms | 443 ms | 2.10 s |
+| package | 219 ms | 1.55 s | 606 ms | 646 ms | 2.37 s |
+
+### bookmarks (Spring Boot 4.1)
+
+| Scenario | jrs | Maven | Gradle | Gradle CC | Gradle no daemon |
+| --- | --- | --- | --- | --- | --- |
+| cold | 1.34 s | 1.94 s | 12.4 s | 12.6 s | 12.1 s |
+| clean | 282 ms | 1.27 s | 565 ms | 601 ms | 2.58 s |
+| noop | 62 ms | 1.02 s | 445 ms | 325 ms | 2.24 s |
+| incremental | 256 ms | 1.26 s | 490 ms | 388 ms | 2.55 s |
+| abi | 338 ms | 1.27 s | 447 ms | 373 ms | 2.53 s |
+| test | 1.05 s | 2.29 s | 1.60 s | 1.53 s | 3.59 s |
+| test-edit | 1.25 s | 2.64 s | 1.66 s | 1.72 s | 3.89 s |
+| run (to HTTP 200) | 740 ms | 2.08 s | 1.00 s | 1.06 s | 2.92 s |
+| package | 184 ms | 1.55 s | 521 ms | 536 ms | 2.43 s |
+
+### gen-300 (300 classes, 30 dependencies)
+
+| Scenario | jrs | Maven | Gradle | Gradle CC | Gradle no daemon |
+| --- | --- | --- | --- | --- | --- |
+| cold | 1.34 s | 1.98 s | 12.2 s | 12.6 s | 12.0 s |
+| clean | 584 ms | 1.53 s | 605 ms | 598 ms | 2.70 s |
+| noop | 64 ms | 964 ms | 356 ms | 311 ms | 2.05 s |
+| incremental | 253 ms | 1.54 s | 413 ms | 386 ms | 2.34 s |
+| abi | 424 ms | 1.54 s | 450 ms | **399 ms** | 2.43 s |
+| test | 320 ms | 1.32 s | 640 ms | 609 ms | 2.42 s |
+| test-edit | 505 ms | 2.00 s | 709 ms | 756 ms | 2.81 s |
+| run | 127 ms | 1.08 s | 406 ms | 432 ms | 2.10 s |
+| package | 182 ms | 2.32 s | 1.48 s | 1.52 s | 3.29 s |
+
+### gen-2000 (2000 classes, 60 dependencies)
+
+| Scenario | jrs | Maven | Gradle | Gradle CC | Gradle no daemon |
+| --- | --- | --- | --- | --- | --- |
+| cold | 1.76 s | 3.23 s | 14.4 s | 14.3 s | 13.8 s |
+| clean | 1.48 s | 2.44 s | **1.25 s** | **1.21 s** | 3.81 s |
+| noop | 82 ms | 1.09 s | 354 ms | 315 ms | 2.16 s |
+| incremental | 382 ms | 2.63 s | 583 ms | 519 ms | 2.82 s |
+| abi | 817 ms | 2.57 s | **622 ms** | **613 ms** | 2.94 s |
+| test | 720 ms | 1.75 s | 804 ms | 802 ms | 2.79 s |
+| test-edit | 1.03 s | 3.35 s | 1.05 s | 1.08 s | 3.43 s |
+| run | 234 ms | 1.18 s | 501 ms | 520 ms | 2.29 s |
+| package | 340 ms | 3.45 s | 2.53 s | 2.61 s | 4.44 s |
+
+### gen-ws (a six-member workspace, 300 classes)
+
+| Scenario | jrs | Maven | Gradle | Gradle CC | Gradle no daemon | Gradle --parallel |
+| --- | --- | --- | --- | --- | --- | --- |
+| cold | 1.49 s | 2.17 s | 13.9 s | 14.1 s | 13.7 s | 13.6 s |
+| clean | 826 ms | 1.64 s | **780 ms** | **664 ms** | 2.98 s | **727 ms** |
+| noop | 83 ms | 995 ms | 393 ms | 322 ms | 2.15 s | 389 ms |
+| incremental | 205 ms | 1.30 s | 414 ms | 356 ms | 2.42 s | 407 ms |
+| abi | 516 ms | 1.65 s | **488 ms** | **431 ms** | 2.59 s | **473 ms** |
+| test | 438 ms | 2.29 s | 1.78 s | 673 ms | 3.72 s | 732 ms |
+| test-edit | 411 ms | 2.64 s | 669 ms | 743 ms | 2.81 s | 647 ms |
+| run | not timed (BENCHMARKS.md §11) | | | | | |
+| package | 239 ms | 3.44 s | 1.50 s | 1.54 s | 3.42 s | 1.50 s |
+
+### Where jrs is better (0.14.2)
+
+- **Start-up bound work.** No-op builds are 61–83 ms on every project,
+  against 311–445 ms for a warm Gradle daemon (4–7×), 964 ms–1.09 s for
+  Maven (12–17×) and 2.05–2.24 s for Gradle without a daemon (26–36×).
+  `run` takes 127–234 ms to first output, and 740 ms to Spring Boot's first
+  HTTP answer.
+- **One-file edits.** `incremental` is 205–382 ms on all five projects,
+  1.4–1.7× ahead of the faster warm-daemon column (356–519 ms) and 5–7×
+  ahead of Maven.
+- **Tests, on every project.** `test` beats every warm-daemon column on
+  all five: by 1.5–2.0× on `wordstats`, `bookmarks` and `gen-300`, on
+  `gen-2000` with 720 ms against 802–804 ms, and on `gen-ws` with 438 ms
+  against 673 ms for Gradle CC and 732 ms for `--parallel`. `test-edit` on
+  `gen-2000` is 1.03 s against 1.05–1.08 s, and in the workspace 411 ms
+  against 2.64 s for Maven.
+- **An API change in a small project (new).** `abi` is 304 ms on
+  `wordstats` against 369–388 ms for the daemon and 338 ms on `bookmarks`
+  against 373–447 ms, where Gradle CC won both in the fifth pass.
+- **Clean builds of small projects.** `clean` is 287 ms on `wordstats`
+  against 417–433 ms for the daemon, 282 ms on `bookmarks` against
+  565–601 ms (2.0–2.1×), and 584 ms on `gen-300` against 598–605 ms.
+- **Fat jars, Spring Boot's included.** 182–340 ms, 2.8–8.1× ahead of
+  `shadowJar` on a warm daemon (`wordstats` the low end, at 219 ms against
+  606 ms), and 184 ms against `bootJar`'s 521 ms on `bookmarks` (2.8×).
+- **Cold builds**, by less again: 1.30–1.76 s against 1.56–3.23 s for
+  Maven (1.2–1.8×) and 11.0–14.4 s for Gradle.
+- **Against what CI sees.** Against `gradle --no-daemon` and against Maven
+  jrs wins every cell.
+
+### Where jrs can improve (0.14.2)
+
+- **Cold builds of small projects.** `cold` is 1.30–1.34 s on
+  `wordstats`, `bookmarks` and `gen-300`, 28–33% slower than in the fifth
+  pass, since the first command on an empty cache now waits for the
+  worker's training as well as `javac`'s after its own build. Its lead over
+  Maven there is down to 1.2–1.5× (1.56–1.98 s); a training that finished
+  with the build, or one the command did not wait for, would give it back.
+- **Clean builds of a large project or a workspace.** `clean` on
+  `gen-2000` is 1.48 s against 1.21–1.25 s for the daemon, 1,280 ms of it
+  `javac`, and on `gen-ws` 826 ms against 664–780 ms, 72 ms above its
+  members' critical path.
+- **An API change in a large project or a workspace.** `abi` on
+  `gen-2000` is 817 ms against 613–622 ms, on `gen-ws` 516 ms against
+  431–488 ms, and on `gen-300` 424 ms against Gradle CC's 399 ms (6%),
+  though it now beats the daemon's 450 ms there.
 
 A full run (seven measured runs and two warm-ups per cell) is still what
 BENCHMARKS.md §7 asks for before these become the published report.
