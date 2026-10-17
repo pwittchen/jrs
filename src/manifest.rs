@@ -376,7 +376,11 @@ pub enum ShareClasses {
     /// `false`, the default: the usual layout, no archive.
     #[default]
     Off,
-    /// `true`: a dynamic class-data-sharing archive, on every JDK jrs
+    /// `true`: the AOT cache from JDK 25, where it keeps method profiles
+    /// too, falling back to the archive for a classpath it cannot be
+    /// assembled from; the dynamic archive on an older JDK.
+    On,
+    /// `"archive"`: a dynamic class-data-sharing archive, on every JDK jrs
     /// supports.
     Archive,
     /// `"aot"`: the AOT cache of JEP 483 on JDK 24 and later, which also
@@ -1865,8 +1869,11 @@ impl Manifest {
             }
             match self.test.share_classes {
                 ShareClasses::Off => {}
-                ShareClasses::Archive => {
+                ShareClasses::On => {
                     let _ = writeln!(s, "share-classes = true");
+                }
+                ShareClasses::Archive => {
+                    let _ = writeln!(s, "share-classes = \"archive\"");
                 }
                 ShareClasses::Aot => {
                     let _ = writeln!(s, "share-classes = \"aot\"");
@@ -3654,14 +3661,15 @@ fn optional_count(t: &toml::Table, key: &str, section: &str) -> Result<u32> {
     }
 }
 
-/// `test.share-classes`: `true`, `false` or `"aot"`.
+/// `test.share-classes`: `true`, `false`, `"archive"` or `"aot"`.
 fn share_classes(t: &toml::Table) -> Result<ShareClasses> {
     match t.get("share-classes") {
         None | Some(toml::Value::Boolean(false)) => Ok(ShareClasses::Off),
-        Some(toml::Value::Boolean(true)) => Ok(ShareClasses::Archive),
+        Some(toml::Value::Boolean(true)) => Ok(ShareClasses::On),
+        Some(toml::Value::String(s)) if s == "archive" => Ok(ShareClasses::Archive),
         Some(toml::Value::String(s)) if s == "aot" => Ok(ShareClasses::Aot),
         Some(_) => Err(JrsError::manifest(
-            "`test.share-classes` must be `true`, `false` or `\"aot\"`".to_string(),
+            "`test.share-classes` must be `true`, `false`, `\"archive\"` or `\"aot\"`".to_string(),
         )),
     }
 }
@@ -5023,10 +5031,20 @@ version = "1"
     fn share_classes_is_off_unless_asked_for() {
         let m = parse("[project]\nname='a'\nversion='1'\n[test]\nshare-classes = true\n").unwrap();
         assert!(m.warnings.is_empty(), "{:?}", m.warnings);
-        assert_eq!(m.test.share_classes, ShareClasses::Archive);
+        assert_eq!(m.test.share_classes, ShareClasses::On);
         let rendered = m.render(None);
         assert!(rendered.contains("share-classes = true\n"), "{rendered}");
         assert_eq!(parse(&rendered).unwrap().test, m.test);
+
+        let archive =
+            parse("[project]\nname='a'\nversion='1'\n[test]\nshare-classes = 'archive'\n").unwrap();
+        assert_eq!(archive.test.share_classes, ShareClasses::Archive);
+        let rendered = archive.render(None);
+        assert!(
+            rendered.contains("share-classes = \"archive\"\n"),
+            "{rendered}"
+        );
+        assert_eq!(parse(&rendered).unwrap().test, archive.test);
 
         let aot =
             parse("[project]\nname='a'\nversion='1'\n[test]\nshare-classes = 'aot'\n").unwrap();
@@ -5041,7 +5059,9 @@ version = "1"
             .unwrap_err()
             .to_string();
         assert!(
-            err.contains("`test.share-classes` must be `true`, `false` or `\"aot\"`"),
+            err.contains(
+                "`test.share-classes` must be `true`, `false`, `\"archive\"` or `\"aot\"`"
+            ),
             "{err}"
         );
     }

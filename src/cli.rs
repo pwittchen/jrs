@@ -2564,7 +2564,7 @@ impl<'a> Session<'a> {
             &run.classpath,
             &run.jvm_args,
             true,
-            self.manifest.test.share_classes == ShareClasses::Aot,
+            aot_tests(self.manifest.test.share_classes, toolchain),
         )?;
         if let Some(archive) = share.archive() {
             let what = match (share.is_aot(), share.dumps()) {
@@ -6865,6 +6865,17 @@ fn print_block(ui: &Ui, title: &str, entries: &[String]) {
         }
     }
     ui.println_out("");
+}
+
+/// Whether the test JVM's archive is an AOT cache: asked for as `"aot"`,
+/// or `true` on a JDK whose AOT cache keeps method profiles too, where it
+/// starts a suite 17–20% faster than the dynamic archive
+/// (`specs/TEST_JVM_BENCHMARK.md` §7.2). Where it cannot be assembled,
+/// `Share::for_tests` falls back to the archive, so `true` cannot lose by
+/// it (`specs/todo/BEATING_THE_DAEMON_2.md` §7).
+fn aot_tests(share: ShareClasses, toolchain: &Toolchain) -> bool {
+    share == ShareClasses::Aot
+        || (share == ShareClasses::On && toolchain.version >= share::JAVAC_AOT_SINCE)
 }
 
 #[cfg(test)]

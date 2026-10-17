@@ -4570,7 +4570,7 @@ fn a_test_suite_runs_apart_from_the_tests_on_top_of_them() {
     );
 }
 
-/// `test.share-classes`: the first run dumps the test JVM's archive, the
+/// `test.share-classes = "archive"`: the first run dumps the test JVM's archive, the
 /// next maps the launcher's classes from it, a changed class still runs its
 /// new code, and a class directory shadowing a jar keeps the usual layout.
 #[test]
@@ -4581,7 +4581,7 @@ fn shared_test_classes_map_an_archive_and_still_run_new_code() {
         &scratch,
         &toolchain,
         FAKE_LAUNCHER_6,
-        "share-classes = true\nforks = 1",
+        "share-classes = \"archive\"\nforks = 1",
         &[("AddTest.java", ADD_TEST)],
     );
     let log = scratch.join("class-load.log");
@@ -4687,7 +4687,7 @@ fn the_first_fork_dumps_the_test_archive_the_others_map() {
         &scratch,
         &toolchain,
         FAKE_LAUNCHER_6,
-        "share-classes = true\nforks = 2",
+        "share-classes = \"archive\"\nforks = 2",
         &[("AddTest.java", ADD_TEST), ("AgainTest.java", &other)],
     );
     let (code, stdout, stderr) = p.jrs(&["-v", "test"]);
@@ -4714,6 +4714,33 @@ fn the_first_fork_dumps_the_test_archive_the_others_map() {
         .filter(|l| l.starts_with("+ ") && l.contains("-XX:SharedArchiveFile="))
         .count();
     assert_eq!(mapping, 2, "both forks map it:\n{stderr}");
+}
+
+/// `test.share-classes = true` is the AOT cache from JDK 25, and the
+/// dynamic archive before.
+#[test]
+fn shared_test_classes_take_the_aot_cache_from_jdk_25() {
+    let toolchain = require_jdk!();
+    let scratch = Scratch::new("tests-share-on");
+    let p = junit_project(
+        &scratch,
+        &toolchain,
+        FAKE_LAUNCHER_6,
+        "share-classes = true\nforks = 1",
+        &[("AddTest.java", ADD_TEST)],
+    );
+    let (code, stdout, stderr) = p.jrs(&["-v", "test"]);
+    assert_eq!(code, 0, "{stdout}\n{stderr}");
+    let expected = if toolchain.version >= jrs::compile::share::JAVAC_AOT_SINCE {
+        "test JVM: recording for the AOT cache"
+    } else {
+        "test JVM: dumping the class-data archive"
+    };
+    if !stderr.contains("test JVM: ") {
+        eprintln!("SKIPPED: this JDK cannot share the test JVM's classes\n{stderr}");
+        return;
+    }
+    assert!(stderr.contains(expected), "{stderr}");
 }
 
 /// `test.share-classes = "aot"`: on JDK 24 and later the first run records,
