@@ -7,9 +7,10 @@ The numbers are the fourth pass of
 [BENCHMARKS_SUMMARY.md](../BENCHMARKS_SUMMARY.md) (jrs 0.14.0, `cf0d36d`,
 2026-10-17, one run per cell, no warm-up).
 
-Status: **§2–§4 and §6 are built, and not yet measured**; §5 waits for
-the next pass. The measurement §2 asks for first was not taken: the
-fourth pass's `javac` phase is about 600 ms longer in `clean` than in
+Status: **§2–§4 and §6 are built, and the fifth pass read them**
+(BENCHMARKS_SUMMARY.md); what is left, §5 included, continues in
+[BEATING_THE_DAEMON_4.md](BEATING_THE_DAEMON_4.md). The measurement §2
+asks for first was not taken: the fourth pass's `javac` phase is about 600 ms longer in `clean` than in
 `cold` on every project, whatever its size, which points at the assembly,
 and the order of the benchmark's scenarios settled the rest:
 
