@@ -2896,7 +2896,9 @@ fn jrs_manifest(module: &Module, workspace: bool, header: &str) -> String {
     }
     let _ = write!(
         out,
-        "\n[dev-dependencies]\n\"org.junit.jupiter:junit-jupiter\" = \"{JUNIT}\"\n"
+        "\n[dev-dependencies]\n\"org.junit.jupiter:junit-jupiter\" = \"{JUNIT}\"\n\n\
+         # As a warm daemon keeps its classes loaded (specs/BENCHMARKS.md §5).\n\
+         [test]\nshare-classes = true\n"
     );
     out
 }
