@@ -172,14 +172,19 @@ Don't edit an earlier pass.
 
 ## 6. The website
 
-The page shows the latest pass only. `website/src/benchmarks.ts` says to keep
-`RESULTS` in step with the summary.
+The page shows the latest pass in full, and every pass's jrs and Gradle
+daemon columns in the "Release by release" charts. `website/src/benchmarks.ts`
+says to keep `RESULTS` and `HISTORY` in step with the summary.
 
 **`website/src/benchmarks.ts`**: replace each project's `rows` with the
 `tables.py` output. A project new to this pass gets an entry like its
 neighbours (`id`, `name`, `what`); a column only some projects have
 (`gradleParallel`) stays last in a row and is left out where it was not
-timed. Change nothing else.
+timed. Append the new pass's jrs version to `RELEASES`, and to every
+`HISTORY` trend its jrs and Gradle (daemon) milliseconds, in the same
+order. A project new to this pass has no earlier cells: leave it out of
+`HISTORY`, which keeps it out of the charts' tabs.
+Change nothing else.
 
 **`website/benchmarks/index.html`**, every place a number, version or date
 appears:
@@ -193,6 +198,9 @@ appears:
 - the `verdicts` lists, from the summary's "better" and "improve" sections;
 - "Five projects, nine scenarios each" and the `bars` lede, if the project
   count or the Gradle columns changed;
+- the "Release by release" lede ("the six recorded passes, from 0.11.0 to
+  0.14.2") and the note under its charts, if this pass adds a one-off to
+  explain;
 - the setup item of "How it was measured", and the machine `dl`, from
   `system_profiler` and `sw_vers` (computer, model identifier, chip and its
   cores, memory, macOS and its build, the JDK);

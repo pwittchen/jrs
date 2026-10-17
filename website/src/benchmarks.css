@@ -277,6 +277,139 @@
   filter: brightness(1.2);
 }
 
+/* ---- release by release ----------------------------------------------- */
+
+.trend {
+  display: flex;
+  flex-direction: column;
+}
+
+.trend figcaption {
+  margin-bottom: 0.5rem;
+}
+
+.trend-plot {
+  position: relative;
+  outline: none;
+}
+
+.trend-plot:focus-visible {
+  border-radius: 4px;
+  box-shadow: 0 0 0 1px var(--line);
+}
+
+.trend svg {
+  display: block;
+  width: 100%;
+  height: auto;
+  overflow: visible;
+}
+
+.trend .grid {
+  stroke: var(--line);
+  stroke-width: 1;
+}
+
+.trend .axis {
+  fill: var(--muted);
+  font-size: 11.5px;
+  font-variant-numeric: tabular-nums;
+}
+
+.trend .axis.release {
+  font-size: 10px;
+}
+
+.trend .line {
+  fill: none;
+  stroke-width: 2;
+  stroke-linejoin: round;
+  stroke-linecap: round;
+}
+
+.trend .line.jrs {
+  stroke: var(--accent);
+}
+
+/* The reference, recessive: dashed and muted, never in jrs's colour. */
+.trend .line.ref {
+  stroke: color-mix(in srgb, var(--muted) 75%, var(--raised));
+  stroke-width: 1.5;
+  stroke-dasharray: 4 3;
+}
+
+.trend .dot {
+  fill: var(--accent);
+  stroke: var(--raised);
+  stroke-width: 2;
+}
+
+.trend .dot.on {
+  r: 5;
+}
+
+.trend .end {
+  fill: var(--text);
+  font-size: 12px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.trend .cross {
+  stroke: var(--muted);
+  stroke-width: 1;
+  opacity: 0;
+}
+
+.trend-plot.hover .cross {
+  opacity: 0.6;
+}
+
+.trend-tip {
+  bottom: calc(100% + 0.2rem);
+  display: flex;
+  flex-direction: column;
+  gap: 0.05rem;
+  font-size: 0.78rem;
+  font-variant-numeric: tabular-nums;
+  transform: translateX(-50%);
+}
+
+.trend-tip span {
+  color: var(--muted);
+}
+
+.trend-plot.hover .trend-tip {
+  opacity: 1;
+}
+
+.trend-off,
+.trend-empty {
+  margin: 0.4rem 0 0;
+  color: var(--muted);
+  font-size: 0.76rem;
+}
+
+.trend-empty {
+  margin-block: auto;
+  padding-block: 2rem;
+  text-align: center;
+}
+
+.legend .key {
+  display: inline-block;
+  width: 1.1rem;
+  height: 0;
+  margin-right: 0.4rem;
+  vertical-align: 0.25rem;
+  border-top: 2px solid var(--accent);
+}
+
+.legend .key.ref {
+  margin-left: 0.2rem;
+  border-top: 2px dashed color-mix(in srgb, var(--muted) 75%, var(--raised));
+}
+
 /* ---- where it wins, where it does not --------------------------------- */
 
 .verdicts {

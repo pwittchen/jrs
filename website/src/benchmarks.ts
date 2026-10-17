@@ -119,6 +119,73 @@ const RESULTS: Project[] = [
   },
 ];
 
+/** The releases every pass in specs/BENCHMARKS_SUMMARY.md was run with, oldest first. */
+const RELEASES = ["0.11.0", "0.12.0", "0.13.0", "0.14.0", "0.14.1", "0.14.2"];
+
+/**
+ * jrs's milliseconds and the warm Gradle daemon's, one per release in
+ * RELEASES order. The daemon did not change between passes, so its line is
+ * how far the machine moved; jrs's last column is RESULTS's.
+ */
+type Trend = [scenario: string, jrs: number[], gradle: number[]];
+
+const HISTORY: Record<string, Trend[]> = {
+  wordstats: [
+    ["cold", [557, 554, 973, 424, 980, 1300], [11300, 11200, 11200, 11700, 11500, 11200]],
+    ["clean", [325, 322, 250, 1010, 340, 287], [454, 444, 450, 455, 480, 433]],
+    ["noop", [63, 63, 62, 63, 64, 61], [357, 342, 350, 347, 373, 358]],
+    ["incremental", [245, 245, 849, 215, 229, 245], [392, 392, 387, 389, 416, 392]],
+    ["abi", [426, 417, 367, 364, 381, 304], [382, 389, 391, 389, 401, 388]],
+    ["test", [369, 358, 354, 360, 361, 354], [604, 609, 614, 611, 598, 595]],
+    ["test-edit", [543, 546, 501, 515, 556, 524], [652, 635, 643, 650, 662, 645]],
+    ["run", [126, 126, 123, 132, 126, 127], [439, 415, 421, 433, 426, 429]],
+    ["package", [207, 206, 88, 89, 108, 219], [600, 604, 607, 589, 614, 606]],
+  ],
+  bookmarks: [
+    ["cold", [632, 643, 1060, 513, 1030, 1340], [12300, 12300, 12100, 13000, 13400, 12400]],
+    ["clean", [336, 342, 329, 1030, 346, 282], [558, 574, 578, 569, 656, 565]],
+    ["noop", [63, 62, 62, 63, 68, 62], [450, 453, 426, 448, 453, 445]],
+    ["incremental", [285, 296, 880, 252, 261, 256], [489, 483, 492, 498, 493, 490]],
+    ["abi", [475, 471, 404, 406, 431, 338], [453, 457, 453, 461, 464, 447]],
+    ["test", [1080, 1080, 1060, 1090, 1080, 1050], [1630, 1650, 1600, 1630, 1630, 1600]],
+    ["test-edit", [1300, 1270, 1280, 1290, 1300, 1250], [1650, 1610, 1640, 1650, 1670, 1660]],
+    ["run", [762, 738, 758, 756, 802, 740], [1010, 1010, 1010, 1000, 1010, 1000]],
+    ["package", [719, 753, 201, 173, 211, 184], [513, 515, 494, 512, 514, 521]],
+  ],
+  "gen-300": [
+    ["cold", [891, 906, 1360, 767, 1050, 1340], [12300, 12100, 12000, 12500, 12700, 12200]],
+    ["clean", [673, 684, 604, 1350, 588, 584], [640, 613, 651, 668, 616, 605]],
+    ["noop", [66, 65, 65, 66, 71, 64], [370, 356, 357, 373, 372, 356]],
+    ["incremental", [271, 264, 844, 242, 253, 253], [432, 421, 433, 435, 440, 413]],
+    ["abi", [843, 852, 501, 493, 517, 424], [461, 466, 432, 434, 434, 450]],
+    ["test", [474, 450, 446, 452, 315, 320], [654, 655, 642, 715, 722, 640]],
+    ["test-edit", [671, 655, 593, 687, 486, 505], [709, 704, 688, 706, 698, 709]],
+    ["run", [132, 131, 126, 126, 132, 127], [438, 398, 396, 416, 415, 406]],
+    ["package", [758, 731, 242, 190, 207, 182], [1500, 1480, 1460, 1480, 1560, 1480]],
+  ],
+  "gen-2000": [
+    ["cold", [1850, 1910, 2280, 1670, 1760, 1760], [14200, 14300, 14000, 14800, 14700, 14400]],
+    ["clean", [1550, 1530, 1450, 2180, 1540, 1480], [1260, 1280, 1240, 1230, 1270, 1250]],
+    ["noop", [85, 83, 85, 89, 84, 82], [388, 377, 364, 362, 363, 354]],
+    ["incremental", [386, 394, 1110, 349, 380, 382], [593, 583, 575, 600, 578, 583]],
+    ["abi", [1840, 1870, 822, 810, 895, 817], [641, 654, 623, 634, 638, 622]],
+    ["test", [910, 901, 856, 893, 763, 720], [851, 831, 837, 842, 879, 804]],
+    ["test-edit", [1200, 1190, 1170, 1190, 1030, 1030], [1060, 1030, 1060, 1070, 1070, 1050]],
+    ["run", [237, 218, 237, 232, 226, 234], [507, 496, 495, 497, 494, 501]],
+    ["package", [1410, 1400, 486, 362, 356, 340], [2580, 2560, 2550, 2540, 2530, 2530]],
+  ],
+  "gen-ws": [
+    ["cold", [2220, 1900, 1820, 1380, 1490, 1490], [13900, 13700, 13800, 14100, 14200, 13900]],
+    ["clean", [1980, 1700, 1130, 2350, 817, 826], [791, 803, 800, 768, 746, 780]],
+    ["noop", [81, 83, 81, 86, 82, 83], [395, 400, 391, 388, 394, 393]],
+    ["incremental", [287, 278, 303, 207, 210, 205], [443, 439, 434, 435, 433, 414]],
+    ["abi", [2090, 1770, 667, 511, 512, 516], [519, 505, 492, 506, 504, 488]],
+    ["test", [1890, 1800, 1810, 574, 419, 438], [1830, 1850, 1920, 1810, 1790, 1780]],
+    ["test-edit", [626, 620, 642, 540, 424, 411], [681, 670, 692, 703, 658, 669]],
+    ["package", [803, 818, 309, 258, 246, 239], [1490, 1490, 1540, 1490, 1480, 1500]],
+  ],
+};
+
 // The Maven and Gradle marks, from Simple Icons (simpleicons.org, CC0), on a
 // 24-unit square. jrs's own is the logo the top bar already loads.
 const MARKS: Partial<Record<Tool, string>> = {
@@ -282,8 +349,184 @@ function renderTables(host: HTMLElement): void {
   }
 }
 
+function svgEl<K extends keyof SVGElementTagNameMap>(tag: K, attrs: Record<string, string | number> = {}): SVGElementTagNameMap[K] {
+  const node = document.createElementNS(SVG, tag);
+  for (const [k, v] of Object.entries(attrs)) node.setAttribute(k, String(v));
+  return node;
+}
+
+/** A round axis step that splits `max` into about three gridlines. */
+function tickStep(max: number): number {
+  const raw = max / 3;
+  const pow = 10 ** Math.floor(Math.log10(raw));
+  return [1, 2, 2.5, 5, 10].map((m) => m * pow).find((s) => s >= raw)!;
+}
+
+function change(now: number, before: number): string {
+  const pct = Math.round((now / before - 1) * 100);
+  return `${pct > 0 ? "+" : pct < 0 ? "−" : "±"}${Math.abs(pct)}% on ${format(before)}`;
+}
+
+/** The plot's own units: the SVG scales as a whole, text with it. */
+const W = 340;
+const H = 176;
+const PAD = { top: 12, right: 44, bottom: 26, left: 48 };
+
+/**
+ * jrs's time in one scenario release by release, on a linear scale from zero,
+ * with the warm Gradle daemon's as a reference line — left out, and said so,
+ * where it would flatten jrs's against the floor.
+ */
+function trendChart(project: string, trend: Trend | undefined, scenario: string): HTMLElement {
+  const figure = el("figure", "chart trend");
+  const caption = el("figcaption");
+  caption.append(el("strong", undefined, scenario), document.createTextNode(SCENARIOS[scenario] ?? ""));
+  figure.append(caption);
+  if (!trend) {
+    figure.append(el("p", "trend-empty", "Not timed on a workspace."));
+    return figure;
+  }
+  const [, jrs, gradle] = trend;
+  const jrsMax = Math.max(...jrs);
+  const showRef = Math.max(...gradle) <= jrsMax * 2.5;
+  const step = tickStep(Math.max(jrsMax, ...(showRef ? gradle : [])));
+  const top = Math.ceil(Math.max(jrsMax, ...(showRef ? gradle : [])) / step) * step;
+  const x = (i: number) => PAD.left + (i * (W - PAD.left - PAD.right)) / (RELEASES.length - 1);
+  const y = (v: number) => PAD.top + (1 - v / top) * (H - PAD.top - PAD.bottom);
+
+  const svg = svgEl("svg", { viewBox: `0 0 ${W} ${H}`, role: "img" });
+  svg.setAttribute(
+    "aria-label",
+    `jrs, ${scenario} on ${project}, by release: ` + RELEASES.map((r, i) => `${r} ${format(jrs[i]!)}`).join(", "),
+  );
+  for (let v = 0; v <= top; v += step) {
+    svg.append(svgEl("line", { class: "grid", x1: PAD.left, x2: W - PAD.right + 8, y1: y(v), y2: y(v) }));
+    const label = svgEl("text", { class: "axis", x: PAD.left - 8, y: y(v), "text-anchor": "end", "dominant-baseline": "middle" });
+    label.textContent = v === 0 ? "0" : v < 1000 ? `${v} ms` : `${+(v / 1000).toFixed(2)} s`;
+    svg.append(label);
+  }
+  RELEASES.forEach((r, i) => {
+    const label = svgEl("text", { class: "axis release", x: x(i), y: H - 5, "text-anchor": "middle" });
+    label.textContent = r;
+    svg.append(label);
+  });
+  const path = (vs: number[]) => vs.map((v, i) => `${i ? "L" : "M"}${x(i).toFixed(1)},${y(v).toFixed(1)}`).join("");
+  if (showRef) svg.append(svgEl("path", { class: "line ref", d: path(gradle) }));
+  svg.append(svgEl("path", { class: "line jrs", d: path(jrs) }));
+  const cross = svgEl("line", { class: "cross", y1: PAD.top, y2: H - PAD.bottom });
+  svg.append(cross);
+  const dots = jrs.map((v, i) => {
+    const dot = svgEl("circle", { class: "dot", cx: x(i), cy: y(v), r: 4 });
+    svg.append(dot);
+    return dot;
+  });
+  // The latest release, labelled in place; the rest are a hover away.
+  const last = jrs.length - 1;
+  const end = svgEl("text", { class: "end", x: x(last) + 8, y: y(jrs[last]!), "dominant-baseline": "middle" });
+  end.textContent = format(jrs[last]!);
+  svg.append(end);
+
+  const plot = el("div", "trend-plot");
+  plot.tabIndex = 0;
+  const tip = el("span", "bar-tip trend-tip");
+  plot.append(svg, tip);
+  figure.append(plot);
+  if (!showRef) {
+    figure.append(el("p", "trend-off", `Gradle daemon ${format(Math.min(...gradle))}–${format(Math.max(...gradle))}, off this scale`));
+  }
+
+  let shown = -1;
+  const show = (i: number) => {
+    shown = i;
+    cross.setAttribute("x1", String(x(i)));
+    cross.setAttribute("x2", String(x(i)));
+    plot.classList.add("hover");
+    dots.forEach((d, j) => d.classList.toggle("on", j === i));
+    tip.replaceChildren();
+    tip.append(el("strong", undefined, `jrs ${RELEASES[i]} · ${format(jrs[i]!)}`));
+    if (i > 0) tip.append(el("span", undefined, change(jrs[i]!, jrs[i - 1]!)));
+    tip.append(el("span", undefined, `Gradle daemon ${format(gradle[i]!)}`));
+    const frac = x(i) / W;
+    tip.style.left = `${frac * 100}%`;
+    tip.style.transform = `translateX(${frac < 0.3 ? -15 : frac > 0.7 ? -85 : -50}%)`;
+  };
+  const hide = () => {
+    shown = -1;
+    plot.classList.remove("hover");
+    dots.forEach((d) => d.classList.remove("on"));
+  };
+  plot.addEventListener("pointermove", (e) => {
+    const box = svg.getBoundingClientRect();
+    const at = ((e.clientX - box.left) / box.width) * W;
+    let nearest = 0;
+    RELEASES.forEach((_, i) => {
+      if (Math.abs(x(i) - at) < Math.abs(x(nearest) - at)) nearest = i;
+    });
+    show(nearest);
+  });
+  plot.addEventListener("pointerleave", hide);
+  plot.addEventListener("focus", () => show(last));
+  plot.addEventListener("blur", hide);
+  plot.addEventListener("keydown", (e) => {
+    const move = e.key === "ArrowRight" ? 1 : e.key === "ArrowLeft" ? -1 : 0;
+    if (!move) return;
+    e.preventDefault();
+    show(Math.min(Math.max((shown < 0 ? last : shown) + move, 0), last));
+  });
+  return figure;
+}
+
+/** A tab per project above one chart per scenario, redrawn on a switch. */
+function renderTrends(host: HTMLElement): void {
+  const tabs = el("div", "tabs");
+  tabs.setAttribute("role", "tablist");
+  tabs.setAttribute("aria-label", "Project");
+  const panel = el("div", "charts trends");
+  panel.id = "trend-panel";
+  panel.setAttribute("role", "tabpanel");
+  // Only projects with a cell in every release; one new to the last pass has none.
+  const projects = RESULTS.filter((p) => HISTORY[p.id]);
+  const buttons = projects.map((p) => {
+    const b = el("button", undefined, p.name);
+    b.type = "button";
+    b.id = `trend-${p.id}`;
+    b.setAttribute("role", "tab");
+    b.setAttribute("aria-controls", panel.id);
+    b.title = p.what;
+    return b;
+  });
+  const select = (i: number) => {
+    const project = projects[i]!;
+    buttons.forEach((b, j) => {
+      b.setAttribute("aria-selected", String(i === j));
+      b.tabIndex = i === j ? 0 : -1;
+    });
+    panel.setAttribute("aria-labelledby", buttons[i]!.id);
+    const trends = HISTORY[project.id]!;
+    panel.replaceChildren(
+      ...Object.keys(SCENARIOS).map((s) => trendChart(project.name, trends.find((t) => t[0] === s), s)),
+    );
+  };
+  buttons.forEach((b, i) => {
+    b.addEventListener("click", () => select(i));
+    b.addEventListener("keydown", (e) => {
+      const step = e.key === "ArrowRight" ? 1 : e.key === "ArrowLeft" ? -1 : 0;
+      if (!step) return;
+      const next = (i + step + buttons.length) % buttons.length;
+      select(next);
+      buttons[next]!.focus();
+    });
+  });
+  tabs.append(...buttons);
+  host.append(tabs, panel);
+  // gen-2000 by default: the project where most of the moves are largest.
+  select(Math.max(projects.findIndex((p) => p.id === "gen-2000"), 0));
+}
+
 stampVersion();
 setupCopy();
 for (const host of $$<HTMLElement>("[data-bars]")) renderBars(host);
+const trends = $<HTMLElement>("[data-trends]");
+if (trends) renderTrends(trends);
 const tables = $<HTMLElement>("[data-tables]");
 if (tables) renderTables(tables);

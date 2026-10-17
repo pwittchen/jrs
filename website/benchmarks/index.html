@@ -221,6 +221,32 @@
         </div>
       </section>
 
+      <section class="wrap section" aria-labelledby="releases">
+        <h2 id="releases">Release by release</h2>
+        <p class="section-lede">
+          jrs's time in every scenario across the six recorded passes, from 0.11.0 to 0.14.2,
+          on the same machine and the same Maven and Gradle. The warm Gradle daemon did not
+          change between them, so its line shows how much the machine moved; what jrs's line
+          does beyond that is jrs's.
+        </p>
+        <p class="legend"><span class="key jrs"></span>jrs · <span class="key ref"></span>Gradle (daemon), for reference</p>
+        <div data-trends></div>
+        <noscript>
+          <p class="note">
+            The charts need JavaScript; every pass is in
+            <a href="https://github.com/pwittchen/jrs/blob/master/specs/BENCHMARKS_SUMMARY.md">specs/BENCHMARKS_SUMMARY.md</a>.
+          </p>
+        </noscript>
+        <p class="note">
+          Each point is one run with no warm-up, so a one-off lands on a single release: the
+          <code>incremental</code> spike in 0.13.0 and the <code>clean</code> one in 0.14.0 are
+          <code>javac</code>'s AOT cache being written in that cell, and <code>cold</code> in
+          0.14.2 waits for the <code>javac</code> worker's cache to be trained, which is what
+          makes <code>abi</code> faster in the same release. What each release changed, and why,
+          is in <a href="https://github.com/pwittchen/jrs/blob/master/specs/BENCHMARKS_SUMMARY.md">specs/BENCHMARKS_SUMMARY.md</a>.
+        </p>
+      </section>
+
       <section class="wrap section" aria-labelledby="all">
         <h2 id="all">Every number</h2>
         <p class="section-lede">
