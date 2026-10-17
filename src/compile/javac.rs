@@ -7,6 +7,7 @@
 use std::path::{Path, PathBuf};
 
 use super::share::{self, Share};
+use super::worker::Worker;
 use super::{CompileUnit, render_argfile};
 use crate::error::{IoResultExt, JrsError, Result};
 use crate::toolchain::{CapturedOutput, Toolchain, run_captured};
@@ -56,18 +57,26 @@ impl CompileUnit {
 /// this short never gets to use.
 pub(super) const QUICK_JVM_FLAGS: &[&str] = &["-XX:TieredStopAtLevel=1", "-XX:+UseSerialGC"];
 
-/// Run `javac` over `sources`, one step of `unit`. `quick` starts its JVM
+/// Run `javac` over `sources`, one step of `unit`, in `worker` when it can
+/// answer — the unit's own, or one for the later rounds of its compile. `quick` starts its JVM
 /// with [`QUICK_JVM_FLAGS`], for a run over a handful of files; with
-/// `unit.share_dir`, it maps its classes from an archive there.
+/// `unit.share_dir`, it maps its classes from an archive there, which only
+/// a run that is not `quick` writes. On JDK 25 the quick flags still save a
+/// one-file compile about a tenth over the full JIT with the same cache.
 ///
 /// # Errors
 ///
 /// `JrsError::Build` if `javac` cannot be started or reports a failure, with
 /// `what` saying which sources those were; `JrsError::Io` if the argfile
 /// cannot be written.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "one javac step: its unit, its sources and how to run them"
+)]
 pub(super) fn run(
     toolchain: &Toolchain,
     unit: &CompileUnit,
+    worker: Option<&Worker>,
     sources: &[PathBuf],
     output_first: bool,
     quick: bool,
@@ -82,10 +91,17 @@ pub(super) fn run(
     .path(&argfile)?;
 
     // Under `--watch`, the session's warm `javac` first; a worker that
-    // cannot answer hands the step back to a forked one.
-    let warm = unit
-        .worker
-        .as_ref()
+    // cannot answer hands the step back to a forked one. A few files go to
+    // a forked `javac` instead when it maps its AOT cache and the command's
+    // worker would start cold, which costs a one-file compile twice what
+    // the fork does (`specs/todo/BEATING_THE_DAEMON_2.md` §3).
+    let forked_is_faster = quick
+        && unit
+            .share_dir
+            .as_deref()
+            .is_some_and(|dir| Share::javac_ready(dir, toolchain));
+    let warm = worker
+        .filter(|worker| !(forked_is_faster && worker.starts_cold(toolchain)))
         .and_then(|worker| worker.compile(toolchain, &argfile, ui));
     let output = match warm {
         Some(output) => output,
@@ -114,11 +130,11 @@ fn fork(
     quick: bool,
     ui: &Ui,
 ) -> Result<CapturedOutput> {
-    let quick: &[&str] = if quick { QUICK_JVM_FLAGS } else { &[] };
     let share = unit
         .share_dir
         .as_deref()
         .and_then(|dir| Share::for_javac(dir, toolchain, quick));
+    let quick: &[&str] = if quick { QUICK_JVM_FLAGS } else { &[] };
     share::run(share, CapturedOutput::ok, |shared| {
         let mut args: Vec<String> = quick
             .iter()

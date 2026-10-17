@@ -57,6 +57,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, UNIX_EPOCH};
 
 use super::abi::{self, ClassInfo, Kind};
+use super::worker::Worker;
 use super::{CompileUnit, count, javac};
 use crate::error::{IoResultExt, Result};
 use crate::project;
@@ -71,6 +72,19 @@ const HEADER: &str = "jrs compile index 2";
 /// collector beat the full JIT up to a few hundred small sources; a
 /// whole-unit compile keeps the full JIT whatever its size.
 pub(super) const QUICK_SOURCES: usize = 100;
+
+/// A `javac` worker for the rounds after the first of a unit's compile
+/// (`specs/todo/BEATING_THE_DAEMON_2.md` §5), when the unit holds none of
+/// its own and the worker would start warm: one that starts cold costs
+/// its first round twice what a forked `javac` does. It lives in the
+/// shared cache beside the archives, as every other `javac` worker does.
+fn worker_for_rounds(unit: &CompileUnit, toolchain: &Toolchain) -> Option<Worker> {
+    if unit.worker.is_some() {
+        return None;
+    }
+    let worker = Worker::for_rounds(unit.share_dir.as_deref()?.parent()?.join("worker"));
+    worker.starts_warm(toolchain).then_some(worker)
+}
 
 /// How many rounds of direct dependents an API change may take, each a
 /// `javac` run, before whatever else it reaches compiles in one more.
@@ -601,7 +615,9 @@ impl Tracker {
         let mut compiled = first.clone();
         sweep(unit, previous, &compiled)?;
         let mut round: Vec<usize> = first.into_iter().collect();
-        self.javac(toolchain, unit, ui, steps, &round, previous, &compiled)?;
+        self.javac(
+            toolchain, unit, ui, steps, &round, previous, &compiled, None,
+        )?;
         let Some(mut after) = self.record(unit)? else {
             return Ok(None);
         };
@@ -623,6 +639,9 @@ impl Tracker {
         changes.added.extend(added);
         changes.broken.extend(broken);
 
+        // The later rounds go to a warm `javac` worker held for the rest of
+        // this compile, when the unit has none of its own.
+        let mut later: Option<Option<Worker>> = None;
         let mut rounds = 1;
         while !changes.is_empty() {
             let just: BTreeSet<usize> = round.iter().copied().collect();
@@ -633,7 +652,12 @@ impl Tracker {
                 if !rest.is_empty() {
                     remove_classes(unit, &after, &rest)?;
                     compiled.extend(&rest);
-                    self.javac(toolchain, unit, ui, steps, &rest, previous, &compiled)?;
+                    let worker = later
+                        .get_or_insert_with(|| worker_for_rounds(unit, toolchain))
+                        .as_ref();
+                    self.javac(
+                        toolchain, unit, ui, steps, &rest, previous, &compiled, worker,
+                    )?;
                     let Some(next) = self.record(unit)? else {
                         return Ok(None);
                     };
@@ -652,7 +676,12 @@ impl Tracker {
             }
             remove_classes(unit, &after, &next)?;
             compiled.extend(&next);
-            self.javac(toolchain, unit, ui, steps, &next, previous, &compiled)?;
+            let worker = later
+                .get_or_insert_with(|| worker_for_rounds(unit, toolchain))
+                .as_ref();
+            self.javac(
+                toolchain, unit, ui, steps, &next, previous, &compiled, worker,
+            )?;
             let Some(recorded) = self.record(unit)? else {
                 return Ok(None);
             };
@@ -757,6 +786,7 @@ impl Tracker {
         sources: &[usize],
         previous: &Index,
         compiled: &BTreeSet<usize>,
+        worker: Option<&Worker>,
     ) -> Result<()> {
         let paths: Vec<PathBuf> = sources
             .iter()
@@ -767,6 +797,7 @@ impl Tracker {
         let result = javac::run(
             toolchain,
             unit,
+            worker.or(unit.worker.as_deref()),
             &paths,
             true,
             quick,

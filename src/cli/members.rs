@@ -290,6 +290,7 @@ impl<'a> Driver<'a> {
         if let Some(graph) = self.graph.get() {
             return Ok(graph);
         }
+        self.warm_up();
         let aggregate = self.aggregate()?;
         let resolution = aggregate.dependencies(false)?;
         let graph = (
@@ -300,6 +301,27 @@ impl<'a> Driver<'a> {
             aggregate.agents.get().cloned().unwrap_or_default(),
         );
         Ok(self.graph.get_or_init(|| graph))
+    }
+
+    /// Start the command's first `javac` worker, so that its JVM starts
+    /// while the lockfile is read and the classpath assembled rather than
+    /// on the first member's compile (`specs/todo/BEATING_THE_DAEMON_2.md`
+    /// §3). On the first member's JDK, and only one already installed:
+    /// one still to be downloaded is the member's own build's to report.
+    fn warm_up(&self) {
+        let Some(worker) = &self.worker else {
+            return;
+        };
+        let manifest = &self.workspace.members[self.workspace.order[0]].manifest;
+        let toolchain = match toolchain::project_pin(manifest.java.jdk, &manifest.root) {
+            None => toolchain::Toolchain::discover().ok(),
+            Some(pin) => toolchain::Toolchain::select_installed(&pin, &self.config.jdks)
+                .ok()
+                .flatten(),
+        };
+        if let Some(toolchain) = toolchain {
+            worker.prestart(&toolchain, self.ui);
+        }
     }
 
     /// Member `i`'s session: its share of the graph, its tools, and the

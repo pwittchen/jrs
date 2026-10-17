@@ -596,7 +596,16 @@ fn run_steps(
         count(java.len(), None)
     };
     let started = Instant::now();
-    let result = javac::run(toolchain, unit, &java, after_foreign, false, &what, ui);
+    let result = javac::run(
+        toolchain,
+        unit,
+        unit.worker.as_deref(),
+        &java,
+        after_foreign,
+        false,
+        &what,
+        ui,
+    );
     steps.push(("javac", started.elapsed()));
     result
 }

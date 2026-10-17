@@ -23,6 +23,16 @@
 //! holds the compiler's own arguments — the file a forked `kotlinc` reads as
 //! `@argfile` too. A third kind would be a Java file and a main class.
 //!
+//! The `javac` worker's JVM maps an archive of its own: from JDK 25 an AOT
+//! cache, which takes its first compile from twice a forked `javac`'s time
+//! to about a forked one's (`specs/todo/BEATING_THE_DAEMON_2.md` §3). It is
+//! recorded over a worker's whole life and assembled once it has exited, by
+//! the second command that finds none, as `share.rs` says. A workspace
+//! command starts its first worker as the command starts, so that its JVM
+//! is up by the first member's compile; and a single-module build whose API
+//! change takes more than one round of `javac` sends the later rounds to a
+//! worker of its own, once that cache is there to start it warm.
+//!
 //! A worker is not a compiler daemon (SPEC §1.2). It is a child of the
 //! jrs command and nothing else can reach it: it reads its requests from a
 //! pipe jrs holds and exits when that pipe closes, which happens however jrs
@@ -134,6 +144,13 @@ pub struct Worker {
     kotlinc: Mutex<Vec<Running>>,
     /// Whether `kotlinc` steps are served too, or always forked.
     serves_kotlinc: bool,
+    /// Whether these workers serve one command rather than a `--watch`
+    /// session: a step a forked compiler does faster than a cold worker is
+    /// then forked, since no later rebuild repays the worker's warming.
+    one_command: bool,
+    /// Whether a worker may record its JVM's archive: not one whose exit,
+    /// and the archive's assembly, would hold up an edit's build.
+    records: bool,
     /// Held while a worker's program is compiled: workers start outside
     /// the pools' locks, and two must not build it in one directory.
     building: Mutex<()>,
@@ -170,6 +187,8 @@ impl Worker {
             running: Mutex::new(Vec::new()),
             kotlinc: Mutex::new(Vec::new()),
             serves_kotlinc: true,
+            one_command: false,
+            records: true,
             building: Mutex::new(()),
         }
     }
@@ -181,7 +200,71 @@ impl Worker {
     pub fn javac_only(dir: PathBuf) -> Worker {
         let mut worker = Worker::new(dir);
         worker.serves_kotlinc = false;
+        worker.one_command = true;
         worker
+    }
+
+    /// A `javac` worker for the later rounds of one unit's compile, which
+    /// maps its archive but never records it: its exit is on the build's
+    /// critical path.
+    #[must_use]
+    pub fn for_rounds(dir: PathBuf) -> Worker {
+        let mut worker = Worker::javac_only(dir);
+        worker.records = false;
+        worker
+    }
+
+    /// Whether a `javac` worker on `toolchain` would start warm: from an
+    /// AOT cache or archive, or as an idle JVM already there.
+    ///
+    /// # Panics
+    ///
+    /// If a thread panicked while holding the lock on the worker.
+    #[must_use]
+    pub fn starts_warm(&self, toolchain: &Toolchain) -> bool {
+        let key = toolchain.javac.display().to_string();
+        if self.running.lock().unwrap().iter().any(|r| r.key == key) {
+            return true;
+        }
+        let jar = self.program_jar(Kind::Javac, toolchain);
+        jar.is_file()
+            && Share::worker_ready(
+                &self.dir.join("cds"),
+                toolchain,
+                Kind::Javac.main_class(),
+                &jar,
+            )
+    }
+
+    /// Whether a step a forked `javac` could do should be forked instead:
+    /// these workers serve one command, and the next one would start cold.
+    #[must_use]
+    pub fn starts_cold(&self, toolchain: &Toolchain) -> bool {
+        self.one_command && !self.starts_warm(toolchain)
+    }
+
+    /// Start a `javac` worker on `toolchain` now, idle until the first
+    /// compile takes it, unless one is idle already: its JVM starts while
+    /// the command does the rest of its work.
+    ///
+    /// # Panics
+    ///
+    /// If a thread panicked while holding the lock on the worker.
+    pub fn prestart(&self, toolchain: &Toolchain, ui: &Ui) {
+        if !self.running.lock().unwrap().is_empty() {
+            return;
+        }
+        let launch = Launch {
+            toolchain,
+            classpath: &[],
+            jvm_args: &[],
+            args: &[],
+            key: toolchain.javac.display().to_string(),
+        };
+        match self.start(Kind::Javac, &launch, ui) {
+            Ok(started) => self.running.lock().unwrap().push(started),
+            Err(why) => ui.verbose(format!("javac worker: not started: {why}")),
+        }
     }
 
     /// Compile with the argfile at `argfile`, as `javac @argfile` would.
@@ -323,12 +406,12 @@ impl Worker {
         // compiler's own archive already maps for forked runs.
         let share = (kind == Kind::Javac)
             .then(|| {
-                Share::new(
+                Share::for_worker(
                     &self.dir.join("cds"),
                     toolchain,
                     kind.main_class(),
-                    std::slice::from_ref(&jar),
-                    &[],
+                    &jar,
+                    self.records,
                 )
             })
             .flatten();
@@ -371,11 +454,11 @@ impl Worker {
     /// `toolchain`'s `javac` once per jrs version and JDK.
     fn program(&self, kind: Kind, toolchain: &Toolchain) -> Result<PathBuf, String> {
         let _building = self.building.lock().unwrap();
-        let home = self.dir.join(kind.program_dir(toolchain.version));
-        let jar = home.join("worker.jar");
+        let jar = self.program_jar(kind, toolchain);
         if jar.is_file() {
             return Ok(jar);
         }
+        let home = self.dir.join(kind.program_dir(toolchain.version));
         let work = home.join(format!(".build-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&work);
         let classes = work.join("classes");
@@ -407,6 +490,15 @@ impl Worker {
     }
 }
 
+impl Worker {
+    /// Where [`Worker::program`] puts a worker's program.
+    fn program_jar(&self, kind: Kind, toolchain: &Toolchain) -> PathBuf {
+        self.dir
+            .join(kind.program_dir(toolchain.version))
+            .join("worker.jar")
+    }
+}
+
 impl Running {
     /// Send one request and read its answer, within the worker's patience.
     fn request(&mut self, argfile: &Path) -> Result<CapturedOutput, String> {
@@ -434,8 +526,20 @@ impl Running {
     }
 
     /// Close the worker's stdin, which ends it, and put its archive in
-    /// place once it has exited on its own.
+    /// place once it has exited on its own. A worker that writes no archive
+    /// is killed instead, since it has nothing left to do and its exit
+    /// would only be waited for; so is one that compiled nothing — started
+    /// early by a command that found every member up to date — whose
+    /// archive would hold no compiler.
     fn stop(mut self) {
+        if self.compilations == 0 || !self.share.as_ref().is_some_and(Share::dumps) {
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+            if let Some(share) = self.share.take() {
+                share.finish(false);
+            }
+            return;
+        }
         drop(self.stdin.take());
         let deadline = Instant::now() + Duration::from_secs(10);
         let exited = loop {
@@ -635,5 +739,74 @@ mod tests {
         assert!(worker.pid().is_none());
         assert!(worker.compile(&toolchain, &argfile, &ui).unwrap().ok());
         assert_ne!(worker.pid(), Some(pid), "a new worker");
+    }
+
+    #[test]
+    fn a_prestarted_worker_serves_the_first_compile() {
+        let Ok(toolchain) = Toolchain::discover() else {
+            eprintln!("SKIPPED: no usable JDK");
+            return;
+        };
+        let tree = Tree::new("prestart");
+        let worker = Worker::javac_only(tree.root.join("cache/worker"));
+        let ui = ui();
+        worker.prestart(&toolchain, &ui);
+        let pid = worker.pid().unwrap();
+        worker.prestart(&toolchain, &ui);
+        assert_eq!(worker.pid(), Some(pid), "one is enough");
+        assert!(worker.starts_warm(&toolchain), "an idle JVM is warm enough");
+        let argfile = tree.argfile("First", "class First {}\n");
+        assert!(worker.compile(&toolchain, &argfile, &ui).unwrap().ok());
+        assert_eq!(worker.pid(), Some(pid));
+
+        let unused = Worker::javac_only(tree.root.join("cache/worker"));
+        unused.prestart(&toolchain, &ui);
+        let started = Instant::now();
+        drop(unused);
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "a worker that compiled nothing is killed, not waited for"
+        );
+    }
+
+    #[test]
+    fn the_second_command_records_the_workers_aot_cache_and_the_third_maps_it() {
+        let Ok(toolchain) = Toolchain::discover() else {
+            eprintln!("SKIPPED: no usable JDK");
+            return;
+        };
+        if toolchain.version < super::super::share::JAVAC_AOT_SINCE {
+            eprintln!("SKIPPED: the worker's AOT cache needs JDK 25");
+            return;
+        }
+        let tree = Tree::new("worker-aot");
+        let dir = tree.root.join("cache/worker");
+        let ui = ui();
+        let argfile = tree.argfile("Cached", "class Cached {}\n");
+        let command = |seen_before: bool| {
+            let worker = Worker::javac_only(dir.clone());
+            if seen_before {
+                // As another command would have left it.
+                let cds = dir.join("cds");
+                for entry in std::fs::read_dir(&cds).unwrap().flatten() {
+                    if entry.path().extension().is_some_and(|e| e == "seen") {
+                        std::fs::write(entry.path(), "0").unwrap();
+                    }
+                }
+            }
+            assert!(worker.compile(&toolchain, &argfile, &ui).unwrap().ok());
+        };
+        command(false);
+        assert!(
+            !Worker::javac_only(dir.clone()).starts_warm(&toolchain),
+            "a first command writes no cache"
+        );
+        command(true);
+        let worker = Worker::for_rounds(dir.clone());
+        assert!(
+            worker.starts_warm(&toolchain),
+            "the cache is assembled once the second command's worker exited"
+        );
+        assert!(worker.compile(&toolchain, &argfile, &ui).unwrap().ok());
     }
 }

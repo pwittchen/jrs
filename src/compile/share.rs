@@ -23,9 +23,19 @@
 //! From JDK 25, `javac` gets JEP 483's AOT cache instead
 //! (`specs/todo/BEATING_THE_DAEMON.md` §6): its classes kept loaded and
 //! linked, and the method profiles of the run that trained it (JEP 515), in
-//! `<cache>/cds/javac-jdk<n>-<key>.aot`, one per JDK and JVM flags. It is
-//! made in the two steps the test JVM's is, below; what it holds is no
-//! project's, and it changes how fast `javac` starts, never what it writes.
+//! `<cache>/cds/javac-jdk<n>-<key>.aot`, one per JDK. It is made in the two
+//! steps the test JVM's is, below; what it holds is no project's, and it
+//! changes how fast `javac` starts, never what it writes. The `javac`
+//! worker's JVM gets one of its own the same way, keyed by its program too.
+//!
+//! Neither is made inside an edit (`specs/todo/BEATING_THE_DAEMON_2.md` §2).
+//! `javac`'s archive is written by a whole-unit compile alone: a run over a
+//! few files maps it, with its own quick JVM flags, and never records one,
+//! since that would cost the edit several times what it saves. And neither
+//! is written by the first command that finds none: that one leaves a
+//! marker beside where it goes, `<archive>.seen`, and the next command
+//! that finds the marker writes it. A one-off build, and a CI run on an
+//! empty cache, pay nothing for an archive they would never read.
 //!
 //! The test JVM gets an archive too, when `test.share-classes` asks for one
 //! (SPEC §10.2). CDS refuses to dump a classpath holding a non-empty class
@@ -37,8 +47,14 @@
 //! cache with archives a hundred megabytes each.
 //!
 //! `test.share-classes = "aot"` asks for JEP 483's AOT cache instead, on a
-//! JDK 24 or later: the same classpath rule, but classes kept linked, and
-//! from JDK 25 method profiles too. It is made in two steps, both jrs's: the
+//! JDK 24 or later, and `true` does from JDK 25 (`"archive"` keeps the
+//! dynamic archive everywhere). An AOT cache that cannot be assembled for a
+//! classpath and its flags — Mockito's inline mock maker appends to the boot
+//! class path while the tests run — leaves `<cache>.unassembled` beside
+//! where it would go, and from then on that classpath gets the dynamic
+//! archive, rather than a recording run every time that comes to nothing.
+//! The AOT cache follows the same classpath rule, but keeps classes linked,
+//! and from JDK 25 method profiles too. It is made in two steps, both jrs's: the
 //! test run records which classes it used (`-XX:AOTMode=record`), and once it
 //! is over jrs assembles the cache from that record in a JVM of its own
 //! (`-XX:AOTMode=create`) whose output it keeps to itself. JDK 25's one-step
@@ -107,6 +123,9 @@ pub struct Share {
     /// For an AOT cache, how to assemble it from what the run recorded
     /// into the temporary file.
     assemble: Option<Assemble>,
+    /// For a test JVM's AOT cache, the marker that says it could not be
+    /// assembled, written when a run that succeeded could not make it.
+    unassembled: Option<PathBuf>,
 }
 
 /// The `-XX:AOTMode=create` run that turns a recorded configuration into
@@ -136,60 +155,122 @@ impl Share {
         user_args: &[String],
     ) -> Option<Share> {
         let home = usable(dir, toolchain, user_args, true)?;
-        let archive = dir.join(format!(
-            "{}-jdk{}-{}.jsa",
-            file_safe(tool),
-            toolchain.version,
-            key(&home, toolchain, tool, classpath)
-        ));
+        let archive = dynamic_archive(dir, &home, toolchain, tool, classpath);
         Share::at(dir, archive, true, None)
     }
 
     /// `javac`'s archive under `dir`, or `None` when it gets none: from
     /// JDK 25 an AOT cache (`specs/todo/BEATING_THE_DAEMON.md` §6), keyed
-    /// by the JDK and by `jvm_flags`, the flags its JVM starts with; before,
-    /// the dynamic archive [`Share::new`] gives any compiler. Like the test
-    /// JVM's, the cache is made in two steps: the first run records, and jrs
-    /// assembles the cache from that record once it succeeded.
-    pub(crate) fn for_javac(
-        dir: &Path,
-        toolchain: &Toolchain,
-        jvm_flags: &[&str],
-    ) -> Option<Share> {
-        if toolchain.version < JAVAC_AOT_SINCE {
-            return Share::new(dir, toolchain, "jdk.compiler", &[], &[]);
-        }
-        let home = usable(dir, toolchain, &[], false)?;
-        let tool = format!("javac-aot\u{1}{}", jvm_flags.join("\u{1}"));
-        let archive = dir.join(format!(
-            "javac-jdk{}-{}.aot",
-            toolchain.version,
-            key(&home, toolchain, &tool, &[])
-        ));
+    /// by the JDK; before, the dynamic archive [`Share::new`] gives any
+    /// compiler. Like the test JVM's, the AOT cache is made in two steps:
+    /// the first run records, and jrs assembles the cache from that record
+    /// once it succeeded. A `quick` run — a few files, started with the
+    /// quick JVM flags — maps the archive when there is one and never
+    /// writes it; any other writes it once a command before this one found
+    /// none ([`seen_before`]).
+    pub(crate) fn for_javac(dir: &Path, toolchain: &Toolchain, quick: bool) -> Option<Share> {
+        let (archive, aot) = javac_archive(dir, toolchain)?;
         if archive.is_file() {
-            return Some(Share {
-                flags: vec![
-                    format!("-XX:AOTCache={}", archive.display()),
-                    AOT_QUIET.to_string(),
-                    QUIET.to_string(),
-                ],
-                dump: None,
-                replaces: None,
-                assemble: None,
-            });
+            return Some(Share::reading(&archive, aot));
+        }
+        if !seen_before(&archive) || quick {
+            return None;
+        }
+        if !aot {
+            return Share::at(dir, archive, true, None);
         }
         let temp = temporary(dir, &archive)?;
         Some(Share {
             flags: Share::recording(&temp),
             dump: Some((temp, archive)),
             replaces: None,
+            unassembled: None,
             assemble: Some(Assemble {
                 java: toolchain.java.clone(),
                 classpath: None,
-                flags: jvm_flags.iter().map(|f| (*f).to_string()).collect(),
+                flags: Vec::new(),
                 main: JAVAC_MAIN.iter().map(|f| (*f).to_string()).collect(),
             }),
         })
+    }
+
+    /// Whether a forked `javac` would map an archive under `dir` now.
+    pub(crate) fn javac_ready(dir: &Path, toolchain: &Toolchain) -> bool {
+        javac_archive(dir, toolchain).is_some_and(|(archive, _)| archive.is_file())
+    }
+
+    /// The archive under `dir` of a compiler worker's JVM, which runs
+    /// `main_class` from the jar `program`, or `None` when it gets none:
+    /// from JDK 25 an AOT cache keyed by the JDK and the program, before a
+    /// dynamic archive. It is written once a command before this one found
+    /// none ([`seen_before`]), and only when `record` allows; the worker
+    /// records it over its whole life, and the cache is assembled once it
+    /// has exited.
+    pub(crate) fn for_worker(
+        dir: &Path,
+        toolchain: &Toolchain,
+        main_class: &str,
+        program: &Path,
+        record: bool,
+    ) -> Option<Share> {
+        let (archive, aot) = worker_archive(dir, toolchain, main_class, program)?;
+        if archive.is_file() {
+            return Some(Share::reading(&archive, aot));
+        }
+        if !record || !seen_before(&archive) {
+            return None;
+        }
+        if !aot {
+            return Share::at(dir, archive, true, None);
+        }
+        let temp = temporary(dir, &archive)?;
+        Some(Share {
+            flags: Share::recording(&temp),
+            dump: Some((temp, archive)),
+            replaces: None,
+            unassembled: None,
+            assemble: Some(Assemble {
+                java: toolchain.java.clone(),
+                classpath: Some(vec![program.to_path_buf()]),
+                flags: Vec::new(),
+                main: Vec::new(),
+            }),
+        })
+    }
+
+    /// Whether a worker's JVM would map an archive under `dir` now.
+    pub(crate) fn worker_ready(
+        dir: &Path,
+        toolchain: &Toolchain,
+        main_class: &str,
+        program: &Path,
+    ) -> bool {
+        worker_archive(dir, toolchain, main_class, program)
+            .is_some_and(|(archive, _)| archive.is_file())
+    }
+
+    /// A run that maps `archive`, an AOT cache when `aot` holds and a
+    /// dynamic archive otherwise.
+    fn reading(archive: &Path, aot: bool) -> Share {
+        let flags = if aot {
+            vec![
+                format!("-XX:AOTCache={}", archive.display()),
+                AOT_QUIET.to_string(),
+                QUIET.to_string(),
+            ]
+        } else {
+            vec![
+                format!("-XX:SharedArchiveFile={}", archive.display()),
+                QUIET.to_string(),
+            ]
+        };
+        Share {
+            flags,
+            dump: None,
+            replaces: None,
+            assemble: None,
+            unassembled: None,
+        }
     }
 
     /// The flags of a run that records which classes it used into `temp`,
@@ -213,7 +294,10 @@ impl Share {
     /// `-javaagent` and `-XX:` ones change what is archived. Without `dump`
     /// it only reads an archive that is already there: forks read one,
     /// and none of them writes it. With `aot`, on a JDK that has it, the
-    /// archive is an AOT cache.
+    /// archive is an AOT cache — unless one could not be assembled for
+    /// these jars and flags before, as after Mockito appends to the boot
+    /// class path (`specs/TEST_JVM_BENCHMARK.md` §7.1, finding 2): then it
+    /// is the dynamic archive, so that no run records again in vain.
     #[must_use]
     pub fn for_tests(
         dir: &Path,
@@ -224,65 +308,54 @@ impl Share {
         dump: bool,
         aot: bool,
     ) -> Option<Share> {
-        let aot = aot && toolchain.version >= AOT_SINCE;
-        let home = usable(dir, toolchain, jvm_args, !aot)?;
         let archived: Vec<String> = jvm_args
             .iter()
             .filter(|a| a.starts_with("-javaagent") || a.starts_with("-XX:"))
             .cloned()
             .collect();
-        let kind = if aot { "aot" } else { "jsa" };
-        let tool = format!("junit-{kind}\u{1}{}", archived.join("\u{1}"));
         let prefix = format!("test-{}-", &sha256_hex(project.as_bytes())[..16]);
-        let archive = dir.join(format!(
-            "{prefix}{}.{kind}",
-            key(&home, toolchain, &tool, classpath)
-        ));
-        if !aot {
-            return Share::at(dir, archive, dump, Some(prefix));
+        let archive_of = |home: &Path, kind: &str| {
+            let tool = format!("junit-{kind}\u{1}{}", archived.join("\u{1}"));
+            dir.join(format!(
+                "{prefix}{}.{kind}",
+                key(home, toolchain, &tool, classpath)
+            ))
+        };
+        if aot && toolchain.version >= AOT_SINCE {
+            let home = usable(dir, toolchain, jvm_args, false)?;
+            let archive = archive_of(&home, "aot");
+            if archive.is_file() {
+                return Some(Share::reading(&archive, true));
+            }
+            let unassembled = unassembled(&archive);
+            if !unassembled.is_file() {
+                if !dump {
+                    return None;
+                }
+                let temp = temporary(dir, &archive)?;
+                return Some(Share {
+                    flags: Share::recording(&temp),
+                    dump: Some((temp, archive)),
+                    replaces: Some(prefix),
+                    assemble: Some(Assemble {
+                        java: toolchain.java.clone(),
+                        classpath: Some(classpath.to_vec()),
+                        flags: archived,
+                        main: Vec::new(),
+                    }),
+                    unassembled: Some(unassembled),
+                });
+            }
         }
-        if archive.is_file() {
-            return Some(Share {
-                flags: vec![
-                    format!("-XX:AOTCache={}", archive.display()),
-                    AOT_QUIET.to_string(),
-                    QUIET.to_string(),
-                ],
-                dump: None,
-                replaces: None,
-                assemble: None,
-            });
-        }
-        if !dump {
-            return None;
-        }
-        let temp = temporary(dir, &archive)?;
-        Some(Share {
-            flags: Share::recording(&temp),
-            dump: Some((temp, archive)),
-            replaces: Some(prefix),
-            assemble: Some(Assemble {
-                java: toolchain.java.clone(),
-                classpath: Some(classpath.to_vec()),
-                flags: archived,
-                main: Vec::new(),
-            }),
-        })
+        let home = usable(dir, toolchain, jvm_args, true)?;
+        Share::at(dir, archive_of(&home, "jsa"), dump, Some(prefix))
     }
 
     /// Read `archive` if it is there, or else dump into a temporary file
     /// beside it when `dump` allows.
     fn at(dir: &Path, archive: PathBuf, dump: bool, replaces: Option<String>) -> Option<Share> {
         if archive.is_file() {
-            return Some(Share {
-                flags: vec![
-                    format!("-XX:SharedArchiveFile={}", archive.display()),
-                    QUIET.to_string(),
-                ],
-                dump: None,
-                replaces: None,
-                assemble: None,
-            });
+            return Some(Share::reading(&archive, false));
         }
         if !dump {
             return None;
@@ -296,6 +369,7 @@ impl Share {
             dump: Some((temp, archive)),
             replaces,
             assemble: None,
+            unassembled: None,
         })
     }
 
@@ -343,21 +417,27 @@ impl Share {
         };
         if !placed {
             let _ = std::fs::remove_file(&temp);
+            if let Some(marker) = self.unassembled.filter(|_| ok && written) {
+                let _ = std::fs::write(marker, "");
+            }
             return;
         }
         if self.assemble.is_some() {
             let _ = std::fs::remove_file(&temp);
         }
+        let _ = std::fs::remove_file(marker(&archive));
         let (Some(prefix), Some(dir)) = (self.replaces, archive.parent()) else {
             return;
         };
         for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
             let path = entry.path();
             let name = entry.file_name().to_string_lossy().into_owned();
-            if path != archive
-                && name.starts_with(&prefix)
-                && path.extension().is_some_and(|e| e == "jsa" || e == "aot")
-            {
+            // A marker that an AOT cache could not be assembled goes once
+            // one has been; the archive that stands in for one keeps it.
+            let stale = |e: &std::ffi::OsStr| {
+                e == "jsa" || e == "aot" || (e == "unassembled" && self.assemble.is_some())
+            };
+            if path != archive && name.starts_with(&prefix) && path.extension().is_some_and(stale) {
                 let _ = std::fs::remove_file(path);
             }
         }
@@ -399,6 +479,94 @@ impl Assemble {
         let _ = std::fs::remove_file(&temp);
         false
     }
+}
+
+/// `javac`'s archive under `dir`, and whether it is an AOT cache, or `None`
+/// when it gets none.
+fn javac_archive(dir: &Path, toolchain: &Toolchain) -> Option<(PathBuf, bool)> {
+    if toolchain.version < JAVAC_AOT_SINCE {
+        let home = usable(dir, toolchain, &[], true)?;
+        let archive = dynamic_archive(dir, &home, toolchain, "jdk.compiler", &[]);
+        return Some((archive, false));
+    }
+    let home = usable(dir, toolchain, &[], false)?;
+    // The key an earlier jrs gave the cache of a `javac` started with the
+    // full JIT, so that cache stays in use.
+    let archive = dir.join(format!(
+        "javac-jdk{}-{}.aot",
+        toolchain.version,
+        key(&home, toolchain, "javac-aot\u{1}", &[])
+    ));
+    Some((archive, true))
+}
+
+/// A worker JVM's archive under `dir`, and whether it is an AOT cache, or
+/// `None` when it gets none.
+fn worker_archive(
+    dir: &Path,
+    toolchain: &Toolchain,
+    main_class: &str,
+    program: &Path,
+) -> Option<(PathBuf, bool)> {
+    let program = [program.to_path_buf()];
+    if toolchain.version < JAVAC_AOT_SINCE {
+        let home = usable(dir, toolchain, &[], true)?;
+        let archive = dynamic_archive(dir, &home, toolchain, main_class, &program);
+        return Some((archive, false));
+    }
+    let home = usable(dir, toolchain, &[], false)?;
+    let archive = dir.join(format!(
+        "{}-jdk{}-{}.aot",
+        file_safe(main_class),
+        toolchain.version,
+        key(&home, toolchain, &format!("{main_class}-aot"), &program)
+    ));
+    Some((archive, true))
+}
+
+/// The dynamic archive under `dir` of `tool`, loaded from `classpath`.
+fn dynamic_archive(
+    dir: &Path,
+    home: &Path,
+    toolchain: &Toolchain,
+    tool: &str,
+    classpath: &[PathBuf],
+) -> PathBuf {
+    dir.join(format!(
+        "{}-jdk{}-{}.jsa",
+        file_safe(tool),
+        toolchain.version,
+        key(home, toolchain, tool, classpath)
+    ))
+}
+
+/// Whether a command before this one looked for `archive` and found none,
+/// as the marker beside it says; if none did, this command leaves the
+/// marker. It holds the process id of the command that left it, so this
+/// command's second look — another member's compile, another worker — is
+/// still its first.
+fn seen_before(archive: &Path) -> bool {
+    let marker = marker(archive);
+    let me = std::process::id().to_string();
+    if let Ok(seen) = std::fs::read_to_string(&marker) {
+        return seen.trim() != me;
+    }
+    let _ = std::fs::write(&marker, me);
+    false
+}
+
+/// The marker that the AOT cache `archive` could not be assembled.
+fn unassembled(archive: &Path) -> PathBuf {
+    let mut name = archive.as_os_str().to_owned();
+    name.push(".unassembled");
+    PathBuf::from(name)
+}
+
+/// The marker [`seen_before`] leaves for `archive`.
+fn marker(archive: &Path) -> PathBuf {
+    let mut name = archive.as_os_str().to_owned();
+    name.push(".seen");
+    PathBuf::from(name)
 }
 
 /// A new temporary file beside `archive`, for a run to write it into, once
@@ -828,19 +996,59 @@ mod tests {
     }
 
     #[test]
-    fn javac_gets_an_aot_cache_from_jdk_25_keyed_by_its_flags() {
+    fn a_test_cache_that_cannot_be_assembled_falls_back_to_the_archive() {
+        let tree = Tree::new("unassembled");
+        let dir = tree.root.join("cds");
+        let mut jdk = tree.jdk(true);
+        jdk.version = JAVAC_AOT_SINCE;
+        let for_tests = |dump: bool| Share::for_tests(&dir, &jdk, "app", &[], &[], dump, true);
+        let share = for_tests(true).unwrap();
+        assert!(share.is_aot() && share.dumps());
+        let temp = PathBuf::from(flag(&share, "-XX:AOTConfiguration=").unwrap());
+        let cache = share.archive().unwrap().to_path_buf();
+        std::fs::write(&temp, "recorded").unwrap();
+        // The fake JDK's `java` cannot assemble anything.
+        share.finish(true);
+        assert!(!cache.exists());
+        assert!(unassembled(&cache).is_file());
+
+        let share = for_tests(true).unwrap();
+        assert!(
+            !share.is_aot() && share.dumps(),
+            "the dynamic archive instead"
+        );
+        let temp = PathBuf::from(flag(&share, "-XX:ArchiveClassesAtExit=").unwrap());
+        std::fs::write(&temp, "archive").unwrap();
+        share.finish(true);
+        assert!(unassembled(&cache).is_file(), "kept beside the archive");
+        let share = for_tests(false).unwrap();
+        assert!(!share.is_aot() && !share.dumps(), "forks map the archive");
+
+        let failed = Share::for_tests(&dir, &jdk, "other", &[], &[], true, true).unwrap();
+        let cache = failed.archive().unwrap().to_path_buf();
+        failed.finish(false);
+        assert!(
+            !unassembled(&cache).exists(),
+            "a failed run says nothing of the assembly"
+        );
+    }
+
+    /// Leave the marker [`seen_before`] reads as another command's, and
+    /// return it.
+    fn seen_by_another_command(archive: &Path) -> PathBuf {
+        let marker = marker(archive);
+        std::fs::write(&marker, "0").unwrap();
+        marker
+    }
+
+    #[test]
+    fn javac_gets_an_aot_cache_from_jdk_25_made_by_the_second_command() {
         let tree = Tree::new("javac-aot");
         let dir = tree.root.join("cds");
         let mut jdk = tree.jdk(true);
-        let before = Share::for_javac(&dir, &jdk, &[]).unwrap();
-        assert!(!before.is_aot(), "JDK 21 maps a dynamic archive");
-        before.finish(false);
-
         jdk.version = JAVAC_AOT_SINCE;
-        let share = Share::for_javac(&dir, &jdk, &[]).unwrap();
-        assert!(share.is_aot() && share.dumps());
-        assert!(share.flags.contains(&"-XX:-DisplayVMOutput".to_string()));
-        let archive = share.archive().unwrap().to_path_buf();
+        let (archive, aot) = javac_archive(&dir, &jdk).unwrap();
+        assert!(aot);
         assert!(
             archive
                 .file_name()
@@ -848,6 +1056,25 @@ mod tests {
                 .to_string_lossy()
                 .starts_with("javac-jdk25-")
         );
+        assert!(
+            Share::for_javac(&dir, &jdk, false).is_none(),
+            "the first command to find none records nothing"
+        );
+        assert!(marker(&archive).is_file());
+        assert!(
+            Share::for_javac(&dir, &jdk, false).is_none(),
+            "and neither does its second look"
+        );
+
+        let marker = seen_by_another_command(&archive);
+        assert!(
+            Share::for_javac(&dir, &jdk, true).is_none(),
+            "a few files never record"
+        );
+        let share = Share::for_javac(&dir, &jdk, false).unwrap();
+        assert!(share.is_aot() && share.dumps());
+        assert!(share.flags.contains(&"-XX:-DisplayVMOutput".to_string()));
+        assert_eq!(share.archive(), Some(archive.as_path()));
         let assemble = share.assemble.as_ref().unwrap();
         assert_eq!(
             assemble.classpath, None,
@@ -858,22 +1085,67 @@ mod tests {
             "jdk.compiler/com.sun.tools.javac.Main"
         );
         share.finish(false);
-
-        let quick = Share::for_javac(&dir, &jdk, &["-XX:TieredStopAtLevel=1"]).unwrap();
-        assert_ne!(
-            quick.archive(),
-            Some(archive.as_path()),
-            "other flags, another cache"
-        );
-        quick.finish(false);
+        assert!(marker.is_file(), "still to be written");
 
         std::fs::write(&archive, "cache").unwrap();
-        let share = Share::for_javac(&dir, &jdk, &[]).unwrap();
-        assert!(share.is_aot() && !share.dumps());
-        assert_eq!(
-            share.flags[0],
-            format!("-XX:AOTCache={}", archive.display())
+        assert!(Share::javac_ready(&dir, &jdk));
+        for quick in [false, true] {
+            let share = Share::for_javac(&dir, &jdk, quick).unwrap();
+            assert!(share.is_aot() && !share.dumps(), "one cache for both");
+            assert_eq!(
+                share.flags[0],
+                format!("-XX:AOTCache={}", archive.display())
+            );
+        }
+    }
+
+    #[test]
+    fn an_archive_in_place_takes_its_marker_away() {
+        let tree = Tree::new("marker");
+        let dir = tree.root.join("cds");
+        let jdk = tree.jdk(true);
+        let (archive, aot) = javac_archive(&dir, &jdk).unwrap();
+        assert!(!aot, "JDK 21 dumps a dynamic archive");
+        assert!(Share::for_javac(&dir, &jdk, false).is_none());
+        let marker = seen_by_another_command(&archive);
+        let share = Share::for_javac(&dir, &jdk, false).unwrap();
+        let temp = PathBuf::from(flag(&share, "-XX:ArchiveClassesAtExit=").unwrap());
+        std::fs::write(&temp, "archive").unwrap();
+        share.finish(true);
+        assert!(archive.is_file());
+        assert!(!marker.exists());
+    }
+
+    #[test]
+    fn the_worker_records_an_aot_cache_of_its_own_only_when_allowed() {
+        let tree = Tree::new("worker-aot");
+        let dir = tree.root.join("cds");
+        let mut jdk = tree.jdk(true);
+        jdk.version = JAVAC_AOT_SINCE;
+        let program = tree.root.join("worker.jar");
+        std::fs::write(&program, "jar").unwrap();
+        let (archive, _) = worker_archive(&dir, &jdk, "JavacWorker", &program).unwrap();
+        assert_ne!(
+            Some(archive.clone()),
+            javac_archive(&dir, &jdk).map(|a| a.0)
         );
+        assert!(Share::for_worker(&dir, &jdk, "JavacWorker", &program, true).is_none());
+        seen_by_another_command(&archive);
+        assert!(
+            Share::for_worker(&dir, &jdk, "JavacWorker", &program, false).is_none(),
+            "a worker that may not record"
+        );
+        let share = Share::for_worker(&dir, &jdk, "JavacWorker", &program, true).unwrap();
+        assert!(share.is_aot() && share.dumps());
+        let assemble = share.assemble.as_ref().unwrap();
+        assert_eq!(assemble.classpath, Some(vec![program.clone()]));
+        share.finish(false);
+
+        assert!(!Share::worker_ready(&dir, &jdk, "JavacWorker", &program));
+        std::fs::write(&archive, "cache").unwrap();
+        assert!(Share::worker_ready(&dir, &jdk, "JavacWorker", &program));
+        let share = Share::for_worker(&dir, &jdk, "JavacWorker", &program, false).unwrap();
+        assert!(share.is_aot() && !share.dumps(), "mapped by any worker");
     }
 
     #[test]
