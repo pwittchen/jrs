@@ -144,6 +144,11 @@
   gap: 1.25rem;
 }
 
+/* The four wins two to a row, across the full width. */
+.charts.pairs {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
 .chart {
   margin: 0;
   padding: 1.1rem 1.2rem 1.2rem;
@@ -481,7 +486,8 @@
 /* ---- narrow screens --------------------------------------------------- */
 
 @media (max-width: 64rem) {
-  .charts {
+  .charts,
+  .charts.pairs {
     grid-template-columns: minmax(0, 1fr);
   }
 
