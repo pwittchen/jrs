@@ -8,9 +8,9 @@ process outlives the command. The numbers are the fifth pass of
 2026-10-17, one run per cell, no warm-up), and the measurements below,
 taken the same evening on the same machine.
 
-Status: **§2 and §3 built, not yet benchmarked; §4 and §6 proposed; §5's
-split dropped on its measurements, its training proposed.** What §2's and
-§3's code does and what it measured are in each, under **Built**.
+Status: **§2, §3 and §4 built, not yet benchmarked; §6 proposed; §5's
+split dropped on its measurements, its training proposed.** What §2's,
+§3's and §4's code does and what it measured are in each, under **Built**.
 
 Every "measured" figure but §2's **Built** ones was taken outside the
 benchmark, with the jrs release binary of `56c0d97`, on the generated
@@ -36,8 +36,8 @@ fastest of those columns.
 | | `bookmarks` abi | 431 ms | 403 ms (CC) | §2 (built) |
 | | `gen-300` abi | 517 ms | 415 ms (CC) | §2 (built), §3 |
 | | `gen-2000` abi | 895 ms | 595 ms (CC) | §2 (built), §3, §5 |
-| A worker's first compile | `gen-ws` abi | 512 ms | 422 ms (CC) | §4 |
-| | `gen-ws` clean | 817 ms | 664 ms (CC) | §4 |
+| A worker's first compile | `gen-ws` abi | 512 ms | 422 ms (CC) | §4 (built) |
+| | `gen-ws` clean | 817 ms | 664 ms (CC) | §4 (built) |
 | A large compile in a cold JIT | `gen-2000` clean | 1.54 s | 1.21 s (CC) | §3, §5 |
 
 BEATING_THE_DAEMON_3.md §2 took the cost of making the caches out of
@@ -211,7 +211,7 @@ still 47 ms in parallel, the walk and the parse of 2,000 classes. On
 `gen-300` the index is 2–8 ms in every scenario and nothing moves beyond
 the runs' spread. The benchmark has not read it yet.
 
-## 4. A worker's first compile
+## 4. A worker's first compile ✅
 
 **Now.** `gen-ws`'s members are 50 sources each, but in every clean build
 the first two take twice as long as the rest. The same on three clean
@@ -260,6 +260,50 @@ during resolution) puts it ahead. `abi` follows `core`.
 
 **Measured by.** `clean` and `abi` on `gen-ws`; the members' times in the
 report's "workspace members at once" table.
+
+**Built.** All three points, with point 2's training on every worker but
+the first.
+
+1. `Driver::warm_up` (`cli/members.rs`) asks `Worker::prestart` for as
+   many workers as `Workspace::widest_level` finds in the members the
+   command builds — two on `gen-ws` — up to `--jobs`, and all of them
+   start as the graph is read. Starting the others beside the first
+   member's compile instead, as the first try did, left `model` at
+   186–197 ms: their training was not done by the time it was ready.
+2. The first worker is primed with `PRIME`, since the first member takes
+   it at once; the others with the embedded training workload
+   (`share::write_training`). Measured with `-v`, the training takes
+   230–250 ms in a fresh JVM, after which that worker compiles a member in
+   about 85 ms, as fast as a worker's second compile. The first member
+   still waits about 90 ms for its JVM to start and answer the prime:
+   with the lockfile read, there is no resolution to hide it behind.
+3. The pool hands a compile the idle worker with the most compiles
+   answered, then the one running longest (`Running::warmth`,
+   `compile/worker.rs`): the first member gets the worker primed with one
+   class, not one still training, and a worker that has compiled a member
+   before takes the next. `Driver::at_once_until` starts the ready member
+   with the most members still to build after it first
+   (`remaining_paths`), ties in build order. On `gen-ws` `model` and
+   `store` tie (four each), so the race between them decides which gets
+   which worker; the trained one is warm enough that it does not matter.
+
+Measured with the benchmark's jrs column alone (`JRS_BENCH_TOOLS=jrs`,
+`JRS_BENCH_PROJECTS=gen-ws`, five runs, one warm-up), the baseline the
+commit before, the same session. Medians:
+
+| `gen-ws` | Before | After | Gradle's best |
+| --- | --- | --- | --- |
+| `clean` | 880 ms (863–910) | 728 ms (719–759) | 664 ms (CC) |
+| `abi` | 541 ms (533–544) | 473 ms (468–490) | 422 ms (CC) |
+| `noop` | 93 ms | 93 ms | |
+| `cold` | 1.53 s | 1.51 s | |
+
+In `clean`, `model` went from 249 to 122 ms and the chain is now `core`
+(231 ms, of which about 90 ms waiting for its JVM) and four members of
+96–122 ms. `abi`'s `core` is the first compile on the one-class worker,
+198 ms; `model` 140 → 75 ms. `clean` is within the daemon's 664–746 ms
+range but not ahead of its best; what is left is `core`'s first compile.
+The benchmark has not read it yet.
 
 ## 5. A large compile in a cold JIT
 

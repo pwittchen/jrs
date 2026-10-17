@@ -37,7 +37,11 @@
 //! starts its first worker as the command starts, so that its JVM is up by
 //! the first member's compile, and primes it with a one-class compile of its
 //! own, so that the compiler's classes are initialised and its hot code
-//! compiled before the first member arrives (§3). Once the last member has
+//! compiled before the first member arrives (§3). Beside it, it starts one
+//! more for each member that can compile at the same time, primed with the
+//! training workload, which warms the compiler's hot paths while the first
+//! member compiles (`specs/todo/BEATING_THE_DAEMON_4.md` §4); a compile
+//! takes the warmest idle worker. Once the last member has
 //! compiled, `jrs build` and `jrs run` stop the workers at once, rather than
 //! one after another as the command ends. A single-module build whose API
 //! change takes more than one round of `javac` sends the later rounds to a
@@ -197,6 +201,8 @@ struct Running {
     /// A prime sent and not answered yet: its request id and the scratch
     /// directory it compiles in.
     primed: Option<(u32, PathBuf)>,
+    /// When its JVM started.
+    started: Instant,
 }
 
 impl Worker {
@@ -267,12 +273,17 @@ impl Worker {
 
     /// Start a `javac` worker on `toolchain` now, idle until the first
     /// compile takes it, unless one is idle already: its JVM starts while
-    /// the command does the rest of its work.
+    /// the command does the rest of its work. With `workers` over one, as
+    /// many as the members that can compile at once, the first is primed
+    /// with one class, since the first member needs it at once, and the
+    /// rest with the training workload, which they compile while the first
+    /// member does (`specs/todo/BEATING_THE_DAEMON_4.md` §4): no member
+    /// then waits for a JVM to start, or pays its first compile in full.
     ///
     /// # Panics
     ///
     /// If a thread panicked while holding the lock on the worker.
-    pub fn prestart(&self, toolchain: &Toolchain, ui: &Ui) {
+    pub fn prestart(&self, toolchain: &Toolchain, ui: &Ui, workers: usize) {
         if !self.running.lock().unwrap().is_empty() {
             return;
         }
@@ -283,44 +294,68 @@ impl Worker {
             args: &[],
             key: toolchain.javac.display().to_string(),
         };
-        match self.start(Kind::Javac, &launch, ui) {
-            Ok(mut started) => {
-                self.prime(&mut started, ui);
-                self.running.lock().unwrap().push(started);
+        for n in 0..workers.max(1) {
+            match self.start(Kind::Javac, &launch, ui) {
+                Ok(mut started) => {
+                    self.prime(&mut started, ui, n > 0);
+                    self.running.lock().unwrap().push(started);
+                }
+                Err(why) => {
+                    ui.verbose(format!("javac worker: not started: {why}"));
+                    return;
+                }
             }
-            Err(why) => ui.verbose(format!("javac worker: not started: {why}")),
         }
     }
 
-    /// Send a worker a one-class compile it answers while nothing waits on
-    /// it (`specs/todo/BEATING_THE_DAEMON_3.md` §3), read before its first
-    /// real request. A prime that cannot be written is not sent.
-    fn prime(&self, worker: &mut Running, ui: &Ui) {
+    /// Send a worker a compile it answers while nothing waits on it, read
+    /// before its first real request: one class
+    /// (`specs/todo/BEATING_THE_DAEMON_3.md` §3), or with `training` the
+    /// training workload, which warms the compiler's hot paths as well as
+    /// its classes (`specs/todo/BEATING_THE_DAEMON_4.md` §4). A prime that
+    /// cannot be written is not sent.
+    fn prime(&self, worker: &mut Running, ui: &Ui, training: bool) {
         let scratch = self.dir.join(format!(
             ".prime-{}-{}",
             std::process::id(),
             worker.child.id()
         ));
-        let source = scratch.join("Prime.java");
         let argfile = scratch.join("prime.args");
-        let written = std::fs::create_dir_all(&scratch).is_ok()
-            && std::fs::write(&source, PRIME).is_ok()
-            && std::fs::write(
+        let sources = if training {
+            share::write_training(&scratch.join("src"))
+        } else {
+            let source = scratch.join("Prime.java");
+            (std::fs::create_dir_all(&scratch).is_ok() && std::fs::write(&source, PRIME).is_ok())
+                .then(|| vec![source])
+        };
+        let written = sources.is_some_and(|sources| {
+            std::fs::write(
                 &argfile,
                 super::render_argfile(
                     &[
                         "--release".to_string(),
                         share::TRAINING_RELEASE.to_string(),
+                        "-encoding".to_string(),
+                        "UTF-8".to_string(),
                         "-d".to_string(),
                         scratch.join("classes").display().to_string(),
                     ],
-                    &[source],
+                    &sources,
                 ),
             )
-            .is_ok();
+            .is_ok()
+        });
         let sent = written && worker.send(&argfile).is_ok();
         if sent {
-            ui.verbose(format!("javac worker (pid {}): primed", worker.child.id()));
+            let what = if training {
+                "the training workload"
+            } else {
+                "one class"
+            };
+            ui.verbose(format!(
+                "javac worker (pid {}): primed with {what}",
+                worker.child.id()
+            ));
             worker.primed = Some((worker.requests, scratch));
         } else {
             let _ = std::fs::remove_dir_all(&scratch);
@@ -494,16 +529,15 @@ impl Worker {
         let name = kind.name();
         let (idle, stale) = {
             let mut pool = slot.lock().unwrap();
-            let mut stale = Vec::new();
-            let mut idle = None;
-            while let Some(running) = pool.pop() {
-                if running.key == launch.key && running.compilations < kind.restart_after() {
-                    idle = Some(running);
-                    break;
-                }
-                stale.push(running);
-            }
-            (idle, stale)
+            let (fresh, stale): (Vec<Running>, Vec<Running>) = pool
+                .drain(..)
+                .partition(|r| r.key == launch.key && r.compilations < kind.restart_after());
+            *pool = fresh;
+            // The warmest idle worker (`specs/todo/BEATING_THE_DAEMON_4.md`
+            // §4): members start longest remaining path first, so the
+            // member on the critical path gets it.
+            let warmest = (0..pool.len()).max_by_key(|i| pool[*i].warmth());
+            (warmest.map(|i| pool.swap_remove(i)), stale)
         };
         for old in stale {
             old.stop();
@@ -630,6 +664,7 @@ impl Worker {
             slowest: Duration::ZERO,
             share,
             primed: None,
+            started: Instant::now(),
         })
     }
 
@@ -695,6 +730,15 @@ impl Running {
         self.compilations += 1;
         self.send(argfile)?;
         self.receive(self.requests)
+    }
+
+    /// How warm its JIT is, to choose between idle workers: by the compiles
+    /// it has answered, then the longest running. Of the workers
+    /// [`Worker::prestart`] starts, that is the one primed with one class,
+    /// which the first member takes rather than wait for the training
+    /// workload; then those that have trained while it compiled.
+    fn warmth(&self) -> (u32, std::cmp::Reverse<Instant>) {
+        (self.compilations, std::cmp::Reverse(self.started))
     }
 
     /// Send a request without waiting for its answer.
@@ -968,9 +1012,9 @@ mod tests {
         // A worker that records its cache is replaced after one compile.
         let worker = Worker::for_rounds(tree.root.join("cache/worker"));
         let ui = ui();
-        worker.prestart(&toolchain, &ui);
+        worker.prestart(&toolchain, &ui, 1);
         let pid = worker.pid().unwrap();
-        worker.prestart(&toolchain, &ui);
+        worker.prestart(&toolchain, &ui, 1);
         assert_eq!(worker.pid(), Some(pid), "one is enough");
         assert!(worker.starts_warm(&toolchain), "an idle JVM is warm enough");
         let argfile = tree.argfile("First", "class First {}\n");
@@ -985,12 +1029,69 @@ mod tests {
         );
 
         let unused = Worker::javac_only(tree.root.join("cache/worker"));
-        unused.prestart(&toolchain, &ui);
+        unused.prestart(&toolchain, &ui, 1);
         let started = Instant::now();
         drop(unused);
         assert!(
             started.elapsed() < Duration::from_secs(5),
             "a worker that compiled nothing is killed, not waited for"
+        );
+    }
+
+    #[test]
+    fn workers_prestarted_together_hand_the_first_compile_to_the_first() {
+        let Ok(toolchain) = Toolchain::discover() else {
+            eprintln!("SKIPPED: no usable JDK");
+            return;
+        };
+        let tree = Tree::new("prestart-many");
+        let worker = Worker::for_rounds(tree.root.join("cache/worker"));
+        let ui = ui();
+        worker.prestart(&toolchain, &ui, 2);
+        let pids: Vec<u32> = worker
+            .running
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|r| r.child.id())
+            .collect();
+        assert_eq!(pids.len(), 2, "one JVM per member that can compile at once");
+        let first = tree.argfile("First", "class First {}\n");
+        assert!(worker.compile(&toolchain, &first, &ui).unwrap().ok());
+        let warm = pids[0];
+        assert_eq!(
+            worker.pid(),
+            Some(warm),
+            "the first compile takes the worker primed with one class, not \
+             the one training"
+        );
+        let second = tree.argfile("Second", "class Second {}\n");
+        assert!(worker.compile(&toolchain, &second, &ui).unwrap().ok());
+        assert_eq!(
+            worker.pid(),
+            Some(warm),
+            "the next takes the worker that has compiled before"
+        );
+        let trained = pids[1];
+        let third = tree.argfile("Third", "class Third {}\n");
+        let pool = worker.running.lock().unwrap().drain(..).collect::<Vec<_>>();
+        let (taken, kept): (Vec<_>, Vec<_>) = pool.into_iter().partition(|r| r.child.id() == warm);
+        *worker.running.lock().unwrap() = kept;
+        assert!(worker.compile(&toolchain, &third, &ui).unwrap().ok());
+        assert_eq!(
+            worker.pid(),
+            Some(trained),
+            "the trained worker answers too"
+        );
+        assert!(tree.root.join("out/Third.class").is_file());
+        taken.into_iter().for_each(Running::stop);
+        drop(worker);
+        assert!(
+            !std::fs::read_dir(tree.root.join("cache/worker"))
+                .unwrap()
+                .flatten()
+                .any(|e| e.file_name().to_string_lossy().starts_with(".prime-")),
+            "every prime's scratch directory is gone"
         );
     }
 
@@ -1010,7 +1111,7 @@ mod tests {
         let first = tree.argfile("Cached", "class Cached {}\n");
         let second = tree.argfile("Again", "class Again {}\n");
         let worker = Worker::javac_only(dir.clone());
-        worker.prestart(&toolchain, &ui);
+        worker.prestart(&toolchain, &ui, 1);
         let recorder = worker.pid().unwrap();
         assert!(worker.compile(&toolchain, &first, &ui).unwrap().ok());
         assert_ne!(

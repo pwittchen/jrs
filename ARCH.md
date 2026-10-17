@@ -706,8 +706,14 @@ its own, a single-module build's, trains it beside the build instead,
 when `Session::train_javac` trains `javac`'s (`Worker::train_beside`,
 gated by `share::worker_training_due`;
 `specs/todo/BEATING_THE_DAEMON_4.md` §2). A workspace command starts its
-first worker as it reads the graph (`Driver::warm_up`, `Worker::prestart`)
-and primes it with a one-class compile; `jrs build` and `jrs run` retire
+workers as it reads the graph (`Driver::warm_up`, `Worker::prestart`), as
+many as the member graph's widest level up to `--jobs`
+(`Workspace::widest_level`): the first primed with a one-class compile,
+the rest with the training workload, which they compile while the first
+member does. The pool hands a compile its warmest idle worker
+(`Running::warmth`: compiles answered, then age), and `Driver::at_once_until`
+starts the ready member with the most members after it first
+(`remaining_paths`; `specs/todo/BEATING_THE_DAEMON_4.md` §4). `jrs build` and `jrs run` retire
 the workers once the last member has compiled (`Worker::retire`), and
 `Drop for Worker` stops the rest at once. `jrs fetch` and `jrs jdk install`
 train both caches (`warm_compilers`, `Worker::train`). A quick `javac` run

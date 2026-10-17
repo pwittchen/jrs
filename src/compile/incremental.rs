@@ -668,7 +668,7 @@ impl Tracker {
         if unit.worker.is_none() && is_named(previous, &first) {
             let worker = worker_for_rounds(unit, toolchain);
             if let Some(worker) = &worker {
-                worker.prestart(toolchain, ui);
+                worker.prestart(toolchain, ui, 1);
             }
             later = Some(worker);
         }

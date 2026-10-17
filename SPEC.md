@@ -996,9 +996,14 @@ own.
   Outside `--watch` it records its first compile alone and is then
   stopped, its exit, dump and assembly beside the rest of the command,
   while a new worker takes its place; under `--watch` it records over its
-  whole life. A workspace command starts its first worker while the
+  whole life. A workspace command starts its workers while the
   workspace's graph is read, on the first member's JDK when it is
-  installed, and primes it with a one-class compile of its own; one that
+  installed: as many as the most members that can compile at once, up to
+  `--jobs`. The first is primed with a one-class compile of its own, the
+  others with the training workload, which they compile while the first
+  member does; a compile takes the idle worker that has answered the most,
+  then the longest running, and of the members ready at once, the one
+  with the most members still to build after it starts first. One that
   compiled nothing is killed at the end. `jrs build` and `jrs run` stop the
   workers at once as soon as the last member has compiled. A single-module
   build, which starts no worker to record it, trains it on a thread of its

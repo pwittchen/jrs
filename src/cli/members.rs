@@ -306,10 +306,13 @@ impl<'a> Driver<'a> {
     /// Start the command's first `javac` worker, so that its JVM starts
     /// while the lockfile is read and the classpath assembled rather than
     /// on the first member's compile (`specs/todo/BEATING_THE_DAEMON_2.md`
-    /// §3), and, when this JDK has no `javac` cache, train one beside the
-    /// build (`specs/todo/BEATING_THE_DAEMON_3.md` §2). On the first
-    /// member's JDK, and only one already installed: one still to be
-    /// downloaded is the member's own build's to report.
+    /// §3), and ask for as many as the members that can compile at once,
+    /// up to `--jobs`, the rest to start beside the first member's compile
+    /// (`specs/todo/BEATING_THE_DAEMON_4.md` §4); and, when this JDK has no
+    /// `javac` cache, train one beside the build
+    /// (`specs/todo/BEATING_THE_DAEMON_3.md` §2). On the first member's
+    /// JDK, and only one already installed: one still to be downloaded is
+    /// the member's own build's to report.
     fn warm_up(&self) {
         let Some(worker) = &self.worker else {
             return;
@@ -322,7 +325,15 @@ impl<'a> Driver<'a> {
                 .flatten(),
         };
         if let Some(toolchain) = toolchain {
-            worker.prestart(&toolchain, self.ui);
+            let members = self.selected().map_or_else(
+                |_| self.workspace.order.clone(),
+                |selected| self.workspace.with_upstream(&selected),
+            );
+            let workers = self
+                .workspace
+                .widest_level(&members)
+                .min(self.parallel_jobs());
+            worker.prestart(&toolchain, self.ui, workers);
             if let Ok(cache) = crate::resolve::cache::Cache::discover()
                 && crate::compile::share::train_javac(&cache.root().join("cds"), &toolchain, false)
             {
@@ -487,7 +498,8 @@ impl<'a> Driver<'a> {
     /// once it is built — over `members`, which are in build order with what
     /// they depend on among them or built already, and return what it gave
     /// for each, in that order. Up to [`Driver::parallel_jobs`] run at once,
-    /// each as soon as its upstream members' work is done; their output
+    /// each as soon as its upstream members' work is done, the one with the
+    /// most members still to build after it first; their output
     /// comes out in build order, as if one had run after the other
     /// (`specs/WORKSPACES.md` §6.2). When one fails, no other starts, the
     /// running ones finish, and the first failure in build order is the
@@ -590,6 +602,7 @@ impl<'a> Driver<'a> {
                     .collect()
             })
             .collect();
+        let remaining = remaining_paths(&upstream);
 
         let names = |running: &[usize]| {
             running
@@ -609,13 +622,15 @@ impl<'a> Driver<'a> {
             let mut head = 0;
             loop {
                 while !failed && running.len() < jobs {
-                    let ready = (0..todo.len()).find(|k| {
-                        waiting[*k].is_some()
-                            && upstream[*k].iter().all(|u| {
-                                done.contains(u)
-                                    && finished[*u].as_ref().is_some_and(|f| f.1.is_ok())
-                            })
-                    });
+                    let ready = (0..todo.len())
+                        .filter(|k| {
+                            waiting[*k].is_some()
+                                && upstream[*k].iter().all(|u| {
+                                    done.contains(u)
+                                        && finished[*u].as_ref().is_some_and(|f| f.1.is_ok())
+                                })
+                        })
+                        .max_by_key(|k| (remaining[*k], std::cmp::Reverse(*k)));
                     let Some(k) = ready else { break };
                     let Some(session) = waiting[k].take() else {
                         break;
@@ -1251,6 +1266,23 @@ impl<'a> Driver<'a> {
 
 /// The workspace at `path` again, after a change, with the member the
 /// command was first run from inside.
+/// For each of the members `upstream` lists the upstream members of, by
+/// position, in build order: the most members still to build on a path
+/// from it, itself counted. A ready member with more after it starts
+/// first, and so takes the warmest worker
+/// (`specs/todo/BEATING_THE_DAEMON_4.md` §4).
+fn remaining_paths(upstream: &[Vec<usize>]) -> Vec<usize> {
+    let mut remaining = vec![1; upstream.len()];
+    for k in (0..upstream.len()).rev() {
+        for (d, ups) in upstream.iter().enumerate() {
+            if ups.contains(&k) {
+                remaining[k] = remaining[k].max(remaining[d] + 1);
+            }
+        }
+    }
+    remaining
+}
+
 fn reload(cli: &Cli, _ui: &Ui, path: &Path) -> Result<(Workspace, Option<usize>)> {
     let found = Workspace::find(&super::manifest_path(cli)?)?;
     match found {
@@ -1292,5 +1324,29 @@ fn reopen<'a>(
             report(ui, &e);
             None
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::remaining_paths;
+
+    #[test]
+    fn a_member_with_more_to_build_after_it_starts_first() {
+        // `gen-ws`: core; model and store on core; service on both; web on
+        // service; app on web and service. Upstream lists are transitive.
+        let upstream = vec![
+            vec![],
+            vec![0],
+            vec![0],
+            vec![1, 2, 0],
+            vec![3, 1, 2, 0],
+            vec![4, 3, 1, 2, 0],
+        ];
+        assert_eq!(remaining_paths(&upstream), [5, 4, 4, 3, 2, 1]);
+        // A leaf beside a chain: the chain's head goes first.
+        let upstream = vec![vec![], vec![], vec![1], vec![2, 1]];
+        assert_eq!(remaining_paths(&upstream), [1, 3, 2, 1]);
+        assert!(remaining_paths(&[]).is_empty());
     }
 }

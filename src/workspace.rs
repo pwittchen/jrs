@@ -358,6 +358,27 @@ impl Workspace {
             .collect()
     }
 
+    /// How many of `members`, which are in build order with what they
+    /// depend on among them, can compile at once at most: the most members
+    /// at one depth of the graph, a member's depth being one more than its
+    /// deepest upstream member's (`specs/todo/BEATING_THE_DAEMON_4.md` §4).
+    #[must_use]
+    pub fn widest_level(&self, members: &[usize]) -> usize {
+        let mut depth: HashMap<usize, usize> = HashMap::new();
+        let mut width: HashMap<usize, usize> = HashMap::new();
+        for i in members {
+            let d = self.members[*i]
+                .modules
+                .iter()
+                .filter_map(|(up, _)| depth.get(up).map(|d| d + 1))
+                .max()
+                .unwrap_or(0);
+            depth.insert(*i, d);
+            *width.entry(d).or_default() += 1;
+        }
+        width.into_values().max().unwrap_or(0)
+    }
+
     /// Every member `member` depends on, directly or through another, with
     /// the classpath its classes go on there: nearest first, then in
     /// declaration order.
@@ -1243,6 +1264,9 @@ mod tests {
             ]
         );
         assert_eq!(ws.with_upstream(&[1]), vec![2, 1]);
+        assert_eq!(ws.widest_level(&ws.order), 2, "api and testing");
+        assert_eq!(ws.widest_level(&ws.with_upstream(&[1])), 1);
+        assert_eq!(ws.widest_level(&[]), 0);
     }
 
     #[test]
