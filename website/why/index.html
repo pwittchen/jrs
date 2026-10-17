@@ -78,12 +78,31 @@
     <main>
       <section class="wrap intro">
         <p class="eyebrow">Why jrs</p>
-        <h1>The same build, in a file you can read.</h1>
+        <h1>The same build, faster, in a file you can read.</h1>
         <p class="lede">
           Maven and Gradle can build anything, and an ordinary project pays for that: a
           wrapper, a DSL or a plugin block for every job, and a JVM that starts before any work
           is done. jrs covers a narrower set of projects and makes the safe choices the default
           ones.
+        </p>
+      </section>
+
+      <section class="wrap section" aria-labelledby="fast">
+        <h2 id="fast">Fast, as of 0.14.2</h2>
+        <p class="section-lede">
+          jrs is one native binary that keeps nothing running between builds, and the newest
+          release is faster than Maven and a warm Gradle daemon wherever a working day spends
+          most of its time: a no-op build in 61&nbsp;ms against the daemon's 358&nbsp;ms and
+          Maven's 1.05&nbsp;s, a one-file edit in 2000 classes in 382&nbsp;ms against 583&nbsp;ms
+          and 2.63&nbsp;s, and a Spring Boot fat jar in 184&nbsp;ms against 521&nbsp;ms and
+          1.55&nbsp;s. Against Gradle without a daemon and against Maven, which is what CI sees,
+          it is faster in every case measured.
+        </p>
+        <p class="note">
+          It is not faster everywhere: an API change or a clean build in a large project or a
+          workspace is still a little quicker on a warm Gradle daemon. The
+          <a href="../benchmarks/">benchmarks</a> have every number, release by release, the
+          losses included.
         </p>
       </section>
 
