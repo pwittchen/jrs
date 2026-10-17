@@ -64,7 +64,8 @@
 
 .stats {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  /* The five wins on one line, hence the smaller type than the losses'. */
+  grid-template-columns: repeat(5, minmax(0, 1fr));
   gap: 1px;
   margin: 0;
   background: var(--line);
@@ -81,7 +82,7 @@
 .stats dt {
   color: var(--muted);
   font-size: 0.82rem;
-  /* One line in every tile, so the four values below sit on one line. */
+  /* One line in every tile, so the values below sit on one line. */
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -103,9 +104,25 @@
 }
 
 /* The losses, as prominent as the wins, told apart by more than colour:
-   their own heading, and three tiles to the wins' four. */
+   their own heading, and three tiles to the wins' five. */
 .stats.slower {
   grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.stats:not(.slower) > div {
+  padding: 1.1rem 0.9rem 1.2rem;
+}
+
+.stats:not(.slower) dt {
+  font-size: 0.74rem;
+}
+
+.stats:not(.slower) .value {
+  font-size: 1.6rem;
+}
+
+.stats:not(.slower) .versus {
+  font-size: 0.76rem;
 }
 
 .stats.slower .value {
