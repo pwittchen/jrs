@@ -6,8 +6,50 @@ stays within SPEC §1.2: no process outlives the command. The numbers are
 the third pass of [BENCHMARKS_SUMMARY.md](../BENCHMARKS_SUMMARY.md) (jrs
 0.13.0, `f52f4d6`, 2026-10-16, one run per cell, no warm-up).
 
-Status: **proposed.** §2 has its cause reproduced (below); the others are
-estimates from the phase timings until they are built and measured.
+Status: **§2–§5 and §7 built, not yet benchmarked; §6 not built.** The
+expected figures below are still estimates until a benchmark pass reads
+them. What was built, and what was measured on the way (JDK 25, macOS,
+one-file compiles, five runs each, outside the benchmark):
+
+- **§2.** Quick flags against the full JIT, both with a cache: 74–78 ms
+  against 83–87 ms for one file, 99–101 ms against 105–111 ms for 20. The
+  quick flags still pay, so they stay; but the cache the full flags
+  recorded maps under the quick flags too (76–77 ms, its heap region
+  loaded), so there is one cache, keyed by the JDK alone (the key the
+  full-flags cache already had). Only a whole-unit compile writes it, and
+  only on the second command that finds none: the first leaves
+  `<archive>.seen` (option 3). Before JDK 25 the dynamic archive follows
+  the same two rules.
+- **§3.** A worker with no cache answers its first one-file request
+  176 ms after it is spawned and later ones in 13–16 ms; with an AOT cache
+  of its own, 80 ms and 11–14 ms; the forked `javac`'s cache does nothing
+  for it (200 ms), since the worker runs another main. So the worker gets
+  its own AOT cache (`Share::for_worker`), recorded over its life by the
+  second command that finds none and assembled when it exits. A workspace
+  command starts its first worker when it reads the graph
+  (`Driver::warm_up`); one that compiled nothing is killed at the end, and
+  so is one with no archive to write, rather than waited for. A few files
+  go to a forked `javac` instead of a one-command worker that would start
+  cold, when the fork maps its cache (proposal 3).
+- **§4.** `gen-ws`'s generated `jrs.toml` sets `parallel-tests = true`;
+  BENCHMARKS.md §5 records why.
+- **§5.** A unit without a worker of its own sends its rounds after the
+  first to one (`Worker::for_rounds`), but only when that worker's AOT
+  cache is already there: a cold one costs its first round about twice a
+  forked `javac`. It never records, since its exit is on the edit's path,
+  so a single-module project gets it once any workspace command, or a
+  `--watch` session, has made the worker's cache in the shared cache.
+  The number of rounds `abi` takes on `gen-300` and `gen-2000` is still to
+  be counted (`-v` prints it).
+- **§6.** Not built: whether splitting pays depends on how independent
+  `gen-2000`'s packages are, which nothing has measured yet.
+- **§7.** `test.share-classes = true` is now the AOT cache from JDK 25, and
+  a passing run whose record cannot be assembled leaves
+  `<cache>.unassembled`, after which that key gets the dynamic archive.
+  `"archive"` is new and keeps the dynamic archive on every JDK. The
+  benchmark's generated projects do not set `share-classes`, so the
+  `gen-2000` cells only move if they do, which is a §5 fairness decision
+  of its own (BENCHMARKS.md), like §4's.
 
 ---
 

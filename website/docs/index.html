@@ -981,7 +981,7 @@ cwd = "work"</pre>
     <tr><td><code>forks</code></td><td>one per 8 test classes, up to half the cores</td><td>Test JVMs the classes are split among, run at once. <code>1</code> keeps one JVM; <code>--forks</code> overrides it.</td></tr>
     <tr><td><code>jacoco-version</code></td><td>jrs's default</td><td>The JaCoCo release for <code>--coverage</code>.</td></tr>
     <tr><td><code>coverage-minimum</code></td><td><code>{}</code></td><td>Ratios from 0 to 1 that <code>--coverage</code> must reach, per JaCoCo counter: <code>line</code>, <code>branch</code>, <code>instruction</code>, <code>method</code>, <code>class</code>, <code>complexity</code>.</td></tr>
-    <tr><td><code>share-classes</code></td><td><code>false</code></td><td>Start the test JVM from a class-data-sharing archive of the dependency jars; <code>"aot"</code> uses the AOT cache on JDK 24+. See <a href="#testing-share-classes">Starting the test JVM faster</a>.</td></tr>
+    <tr><td><code>share-classes</code></td><td><code>false</code></td><td>Start the test JVM from a class-data-sharing archive of the dependency jars, or from JDK 25 the AOT cache; <code>"archive"</code> always the archive, <code>"aot"</code> the AOT cache on JDK 24+. See <a href="#testing-share-classes">Starting the test JVM faster</a>.</td></tr>
   </tbody>
 </table>
 <pre data-lang="toml">[test]
@@ -2180,8 +2180,9 @@ steps:
 
 <h3 id="testing-share-classes">Starting the test JVM faster</h3>
 <p>
-  <code>[test] share-classes = true</code> starts the test JVM from a class-data-sharing archive of
-  the dependency jars, as jrs already does for the compilers. A Spring Boot suite, which loads
+  <code>[test] share-classes = "archive"</code> starts the test JVM from a class-data-sharing archive of
+  the dependency jars, as jrs already does for the compilers, and so does <code>true</code> on a JDK
+  older than 25. A Spring Boot suite, which loads
   thousands of library classes before its first test, starts noticeably sooner. The first
   <code>jrs test</code> writes the archive into the cache (one per project, replaced when the
   dependencies change); later runs map it. A class you change is always loaded from its file.
@@ -2203,11 +2204,12 @@ steps:
 </p>
 <p>
   <code>share-classes = "aot"</code> uses the JDK's AOT cache instead (JDK 24 and later; an older
-  JDK gets the archive). It also keeps the classes linked and, from JDK 25, method profiles, which
+  JDK gets the archive), and so does <code>true</code> from JDK 25. It also keeps the classes linked and, from JDK 25, method profiles, which
   helps a large test context most. The first run records what it loaded and jrs then builds the
   cache in a JVM of its own, so that run is slower; later runs map it. When the tests attach an
   agent at run time — Mockito's inline mock maker does, unless it is in
-  <code>test.java-agents</code> — the cache cannot be built, and every run records again. To see
+  <code>test.java-agents</code> — the cache cannot be built; jrs remembers that and gives those
+  jars the archive from then on. To see
   what either mode buys
   on your project, and whether its tests still pass, run
   <code>JRS_BENCH_PROJECT=&lt;path&gt; cargo bench --bench test_jvm</code> from a jrs checkout.
@@ -2872,7 +2874,7 @@ jrs -p core add com.google.guava:guava</pre>
   <li><code>jrs package</code> writes each member's jar as part of the same work.</li>
   <li><code>jrs test</code> builds every member first and then runs each member's tests in turn, since a test JVM already uses the cores it is given. With <code>parallel-tests = true</code> under <code>[workspace]</code> the tests run at once too, up to <code>--jobs</code>, with the same output; leave it off for suites that share a port, a database or a file.</li>
   <li><code>--jobs 1</code> builds one member at a time, as does a workspace whose tasks depend on another member's.</li>
-  <li>The members compile in warm <code>javac</code> JVMs the command keeps until it exits, so a member compiling after another does so in a JVM the first one warmed. Nothing outlives the command.</li>
+  <li>The members compile in warm <code>javac</code> JVMs the command keeps until it exits, so a member compiling after another does so in a JVM the first one warmed. The first starts with the command, while the lockfile is read, and from JDK 25 maps an AOT cache of its own. Nothing outlives the command.</li>
   <li><code>--timings</code> adds a <code>member &lt;name&gt;</code> row for each member built at once.</li>
   <li>When a member fails, no other starts; what already ran is printed, then the error.</li>
 </ul>
@@ -3017,7 +3019,9 @@ jrs cache prune --unused-for 30       # drop what no build has used in 30 days</
   The cache also holds <code>cds/</code>: a class-data-sharing archive per compiler and JDK, which
   makes <code>javac</code>, kotlinc, scalac and groovyc start faster (on JDK 25 and later,
   <code>javac</code> gets an AOT cache, which also keeps its method profiles), and the test JVM's
-  with <code>share-classes</code>. The first compile after a new JDK or compiler writes it;
+  with <code>share-classes</code>. The first compile after a new JDK or compiler writes it — for
+  <code>javac</code>, the first whole compile of the second command that finds none, so a one-off
+  build or a CI run on an empty cache does not pay for it, and an edit's few files never do;
   <code>prune</code> drops it like anything else. The <a href="#build-cache">build cache</a> lives
   under <code>build/</code>: a plain <code>prune</code> drops all of it, <code>--unused-for</code>
   the entries no build has hit. The JDKs <code>jrs jdk install</code> downloaded, under

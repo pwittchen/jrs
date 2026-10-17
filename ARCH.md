@@ -675,8 +675,19 @@ into place only after a successful run; every failure mode costs the archive,
 never the build. A file-by-file `javac` run over at most 100 sources also
 starts with C1 and the serial collector. From JDK 25, `Share::for_javac`
 gives `javac` an AOT cache instead, `javac-jdk<n>-<key>.aot` keyed by the
-JDK and those JVM flags, recorded and assembled as the test JVM's is (§10),
-the assembling JVM naming `javac`'s main module as the launcher does.
+JDK, recorded and assembled as the test JVM's is (§10), the assembling JVM
+naming `javac`'s main module as the launcher does. One archive serves both
+kinds of run, and only a whole-unit compile writes it, so no edit records
+one; and only once a command before has looked for it and left
+`<archive>.seen`, so a one-off build writes none. `Share::for_worker` gives
+the `javac` worker an AOT cache of its own the same way, keyed by its
+program; the worker records it over its life and `Running::stop` assembles
+it. A workspace command starts its first worker as it reads the graph
+(`Driver::warm_up`, `Worker::prestart`), a quick `javac` run forks rather
+than wait on a one-command worker that would start cold
+(`Worker::starts_cold`), and a single-module unit's later rounds go to a
+worker of their own once that cache is there (`worker_for_rounds` in
+`compile/incremental.rs`, which never records).
 
 ```
  Share::new  no base archive, CDS flags of the user's, cds/ unwritable ─► none
@@ -874,10 +885,12 @@ that never got to the launcher); forks read it, and when there is none the
 first fork alone dumps it (`launch_tests` puts it in place, or runs the forks
 again without it if that fork never got to the launcher). `--debug`, `--coverage`
 and `test.java-agents` keep the usual layout. With `share-classes = "aot"` on
-JDK 24+, the file is `….aot`, an AOT cache: the run records into a temporary
+JDK 24+, or `true` on JDK 25+, the file is `….aot`, an AOT cache: the run records into a temporary
 configuration (`-XX:AOTMode=record`, VM output off), and `Share::finish`
 assembles the cache from it in a `-XX:AOTMode=create` JVM whose output is
-dropped, then renames it into place.
+dropped, then renames it into place. A passing run whose record cannot be
+assembled leaves `….aot.unassembled`, and that key gets the `.jsa` from then
+on.
 
 `--fail-fast` is the launcher's own from JUnit 6 on (`TestRun::fail_fast_mode`).
 A 1.x launcher has none, and prints its tree only once the run is over, so
@@ -1287,7 +1300,8 @@ poisoning, which is documented under each function's `# Panics`.
  │     (and guava-33.0.0-jre-sources.jar, once `jrs fetch --sources` ran)
  ├── cds/                         <compiler>-jdk<n>-<key>.jsa: CDS archives for
  │                                the compiler JVMs, rewritten when pruned
- │   ├── javac-jdk<n>-<key>.aot   javac's AOT cache, from JDK 25, per JVM flags
+ │   ├── javac-jdk<n>-<key>.aot   javac's AOT cache, from JDK 25 (and a .seen
+ │   │                            marker until the second command writes it)
  │   ├── test-<project>-<deps>.jsa  the test JVM's, one per project and suite
  │   │                              (test.share-classes)
  │   └── entries/                 each jar's entry list, for the overlap check
@@ -1295,7 +1309,8 @@ poisoning, which is documented under each function's `# Panics`.
  │                                passing test runs' reports, pruned one by one
  ├── worker/<version>-jdk<n>/worker.jar   the --watch javac worker's program
  │   ├── kotlinc-<version>-jdk<n>/worker.jar  the --watch kotlinc worker's
- │   └── (worker/cds/)            and the javac worker's CDS archive
+ │   └── (worker/cds/)            and the javac worker's CDS archive, or from
+ │                                JDK 25 its JavacWorker-jdk<n>-<key>.aot
  ├── jdks/temurin-<version>-<os>-<arch>/   JDKs `jrs jdk install` downloaded,
  │                                which `jrs cache prune` keeps unless --jdks
  ├── dist/<version>/jrs           the release a project's jrsw runs

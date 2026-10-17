@@ -321,7 +321,7 @@ env = { TZ = "UTC" }
 retries = 2                                  # run failed tests again; optional
 forks = 4                                    # test JVMs to split the classes among; jrs picks unless set
 coverage-minimum = { line = 0.80, branch = 0.70 }   # for `jrs test --coverage`; optional
-share-classes = true                         # start the test JVM from a CDS archive ("aot": the AOT cache); off by default
+share-classes = true                         # start the test JVM from a CDS archive or AOT cache ("archive", "aot"); off by default
 
 [package]
 add-modules = ["jdk.crypto.ec"]              # for --jlink / --jpackage images
@@ -375,8 +375,9 @@ and the URL built from it agree (`PORT = "{free-port.web}"`,
 JVM runs where jrs does. `env` and `cwd` belong to `jrs run` and `jrs test`,
 so an image's launchers do not take them.
 
-`share-classes = true` starts the test JVM from a class-data-sharing archive
-of the dependency jars, as jrs already does for the compilers: a Spring Boot
+`share-classes = "archive"` starts the test JVM from a class-data-sharing
+archive of the dependency jars, as jrs already does for the compilers, and so
+does `true` on a JDK older than 25: a Spring Boot
 suite that loads thousands of library classes before its first test starts
 noticeably sooner. The first `jrs test` writes the archive into the cache
 (`cds/test-*.jsa`, one per project, replaced when the dependencies change),
@@ -396,13 +397,15 @@ is no archive yet, the first fork writes it and the others run without one;
 from then on every fork maps it.
 
 `share-classes = "aot"` uses the JDK's AOT cache instead (JDK 24 and later;
-an older JDK gets the archive). Besides the classes it keeps them linked,
+an older JDK gets the archive), and so does `true` from JDK 25. Besides the classes it keeps them linked,
 and from JDK 25 it keeps method profiles too, which helps a large test
 context most. The first run records what it loaded and jrs then builds the
 cache (`cds/test-*.aot`) in a JVM of its own, which makes that first run
 slower; later runs map it. When the tests attach an agent at run time —
 Mockito's inline mock maker does, unless it is in `test.java-agents` — the
-cache cannot be built, and every run records again. To see what either mode
+cache cannot be built; jrs remembers that (`cds/test-*.aot.unassembled`) and
+gives those jars the archive from then on, so `true` is never slower than
+`"archive"` for long. To see what either mode
 buys on your project,
 and whether its tests still pass, run `JRS_BENCH_PROJECT=<path> cargo bench
 --bench test_jvm` from a jrs checkout.
@@ -841,8 +844,12 @@ a fresh resolution or a `--coverage` run needs; those are downloaded again
 when they are next wanted.
 The cache also holds `cds/`, where jrs keeps a class-data-sharing archive
 for each compiler on each JDK: `javac`, kotlinc, scalac and groovyc start
-faster from one. The first compile after a new JDK or compiler writes it, and
-`prune` drops the directory like any other; the next compile writes it again.
+faster from one (from JDK 25, `javac` and its worker get an AOT cache, which
+keeps method profiles too). The first compile after a new JDK or compiler
+writes it — for `javac`, the first whole compile of the second command that
+finds none, so a one-off build or a CI run on an empty cache does not pay for
+it, and an edit's few files never do — and `prune` drops the directory like
+any other; the next compile writes it again.
 The JDKs `jrs jdk install` downloaded, under `jdks/`, are kept unless
 `--jdks` is given, since one takes a while to download again.
 `--unused-for` goes by when each artifact was last used. jrs records that in
@@ -1508,7 +1515,9 @@ turn, since a test JVM already uses the cores it is given — or at once, up to
 share no port, database or file. `--jobs 1` builds one member at a time, as
 does a workspace whose tasks depend on another member's. A command that
 builds several members compiles them in warm `javac` JVMs it keeps until it
-exits, so the later members compile in a JVM the earlier ones warmed. `--timings` adds a `member <name>` row for each member
+exits, so the later members compile in a JVM the earlier ones warmed; the
+first one starts with the command, while the lockfile is read, and from JDK 25
+maps an AOT cache of its own. `--timings` adds a `member <name>` row for each member
 built at once. When a member fails, no other starts; what already ran is
 printed, then the error.
 

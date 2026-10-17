@@ -230,7 +230,7 @@ post-package = ["checksum"]
 | `test.env` | no | `{}` | As `run.env`, for the test JVM. |
 | `test.retries` | no | `0` | Run a failed test again up to this many times (§10.2). One that passes on a retry is reported as flaky, not as passed. `jrs test --retries <n>` overrides it. |
 | `test.forks` | no | one per 8 test classes, up to half the cores | Test JVMs a run's classes are split among, run at once (§10.2): Gradle's `maxParallelForks`, surefire's `<forkCount>`. `jrs test --forks <n>` overrides it; `1` keeps one JVM. |
-| `test.share-classes` | no | `false` | Map the dependency jars' classes into the test JVM from an archive (§10.2): `true` a dynamic class-data-sharing archive, `"aot"` the AOT cache on JDK 24 and later (the archive on an older JDK). The class directories then load through the launcher's own class loader, which is why it is opt-in. |
+| `test.share-classes` | no | `false` | Map the dependency jars' classes into the test JVM from an archive (§10.2): `true` the AOT cache on JDK 25 and later and a dynamic class-data-sharing archive before, or where the AOT cache cannot be assembled; `"archive"` the dynamic archive on every JDK; `"aot"` the AOT cache on JDK 24 and later (the archive on an older JDK). The class directories then load through the launcher's own class loader, which is why it is opt-in. |
 | `test.suites.<name>.*` | no | — | A test suite (§10.2): `test-dir` (required), `test-resource-dir` (beside `test-dir`), `jvm-args`, `env`, `forks`, `retries`. Compiled against the main and default test classes and the test classpath into `target/suites/<name>/classes`, and run by `jrs test --suite <name>` only. |
 | `test.coverage-minimum` | no | `{}` | Ratios from 0 to 1 that `jrs test --coverage` must reach, per JaCoCo counter: `instruction`, `branch`, `line`, `complexity`, `method`, `class` — e.g. `{ line = 0.80, branch = 0.70 }` (§10.2). Ignored without `--coverage`. |
 | `package.add-modules` | no | `[]` | Modules a runtime image needs beyond what `jdeps` finds (§9.4). |
@@ -954,7 +954,8 @@ own.
 - A `javac` run over at most 100 sources of a file-by-file compile starts its
   JVM with `-J-XX:TieredStopAtLevel=1 -J-XX:+UseSerialGC`: a JVM that lives a
   second never gets to use C2 or G1, and pays for starting them. A
-  whole-unit compile keeps the JVM's defaults.
+  whole-unit compile keeps the JVM's defaults. Either maps the one `javac`
+  archive below, which only a whole-unit compile writes.
 - Every compiler JVM — `javac`, kotlinc, scalac, groovyc — maps the classes
   it loads from a class-data-sharing archive of its own, in the shared cache
   under `cds/`, keyed by the JDK (its home and module image) and the
@@ -968,12 +969,30 @@ own.
   archive, or when `compiler-jvm-args` hold CDS flags of their own. The
   archive changes nothing a compiler writes, so it is not in the
   fingerprint. From JDK 25 `javac` maps a JEP 483 AOT cache instead,
-  `cds/javac-jdk<n>-<key>.aot`, keyed by the JDK and the JVM flags it starts
-  with: its classes kept linked, and the method profiles of the run that
-  recorded it (JEP 515). It is made as the test JVM's is below: the first
-  run records (`-XX:AOTMode=record`, quietly), and jrs assembles the cache
-  from that record once the run succeeded, naming `javac`'s main module as
-  the launcher did. The test JVM gets one only with `test.share-classes`, which
+  `cds/javac-jdk<n>-<key>.aot`, keyed by the JDK: its classes kept linked,
+  and the method profiles of the run that recorded it (JEP 515). It is made
+  as the test JVM's is below: a run records (`-XX:AOTMode=record`, quietly),
+  and jrs assembles the cache from that record once the run succeeded,
+  naming `javac`'s main module as the launcher did.
+- `javac`'s archive is never made inside an edit. Only a whole-unit compile
+  writes it; a file-by-file run maps it with its quick flags, which still
+  save a one-file compile about a tenth over the full JIT with the same
+  cache, and never records. Nor does the first command that finds no
+  archive write one: it leaves `<archive>.seen`, holding its process id,
+  and the next command that finds that marker writes the archive. A
+  one-off build, and a CI run on an empty cache, pay nothing for it.
+- The `javac` worker (§7.5) maps an archive of its own, from JDK 25 an AOT
+  cache keyed by the JDK and the worker's program, written by the second
+  command that finds none, as `javac`'s is. The worker records it over its
+  whole life, and jrs assembles it once the worker exited. A workspace
+  command starts its first worker while the workspace's graph is read, on
+  the first member's JDK when it is installed; one that compiled nothing is
+  killed at the end. A run over a few files is forked rather than sent to a
+  one-command worker that would start without its archive, when the forked
+  `javac` maps its own. A single-module compile that follows an API change
+  into a second round sends the later rounds to a worker of its own, when
+  that worker's archive is there; that worker never records one, since its
+  exit is on the build's path. The test JVM gets one only with `test.share-classes`, which
   moves the class directories off its `-cp` (§10.2): CDS refuses to dump a
   classpath with a non-empty class directory, and `target/classes` is one.
   A temporary dump a minute old that was never put in place — a `--watch`
@@ -2242,8 +2261,9 @@ serial number, so the same inputs write the same bytes (§9.2's determinism).
 - A whole run that passed may stand for a later one through the build cache
   (§7.8): when the class directories hash the same as a stored run's, with
   the same settings, its reports are put back and the JVM is not started.
-- `test.share-classes = true` maps the dependency jars' classes into the test
-  JVM from a class-data-sharing archive, as the compilers' are (§7.2). CDS
+- `test.share-classes = "archive"` maps the dependency jars' classes into the
+  test JVM from a class-data-sharing archive, as the compilers' are (§7.2),
+  and `true` does before JDK 25. CDS
   refuses to dump a classpath holding a non-empty class directory, and lets
   a run append to the classpath it was dumped with but not change what
   comes first, so the JVM's own `-cp` holds the jars alone — dependencies,
@@ -2287,7 +2307,9 @@ serial number, so the same inputs write the same bytes (§9.2's determinism).
   usual layout.
 - `test.share-classes = "aot"` uses JEP 483's AOT cache instead, on JDK 24
   and later (`<cache>/cds/test-<project>-<deps>.aot`; an older JDK gets the
-  dynamic archive). It has the same classpath rule, and also keeps classes
+  dynamic archive), and so does `true` from JDK 25, where the cache keeps
+  method profiles too and starts a suite 17–20% faster than the archive
+  (`specs/TEST_JVM_BENCHMARK.md` §7.2). It has the same classpath rule, and also keeps classes
   linked and, from JDK 25, method profiles. It is made in two steps, both
   jrs's: the test run records what it loaded (`-XX:AOTMode=record`, with the
   VM's own output turned off by `-XX:-DisplayVMOutput`, since the recording
@@ -2295,8 +2317,13 @@ serial number, so the same inputs write the same bytes (§9.2's determinism).
   jrs assembles the cache from that record (`-XX:AOTMode=create`) in a JVM
   whose output it drops. JDK 25's one-step `-XX:AOTCacheOutput` is not used:
   it prints its progress into the test output whatever the logging. A run
-  that cannot map the cache runs without it, silently. Whether either mode
-  becomes the default is decided by measurement on the corpus
+  that cannot map the cache runs without it, silently. A run that passed
+  and whose record cannot be assembled into a cache — Mockito's inline mock
+  maker appends to the boot class path as the tests run — leaves
+  `<cache>.unassembled` beside where the cache would go, and from then on
+  that key gets the dynamic archive instead, rather than recording again on
+  every run. Whether sharing becomes the default is decided by measurement
+  on the corpus
   (`specs/TEST_JVM_BENCHMARK.md`, `cargo bench --bench test_jvm`).
 - `jrs test --shard <i>/<n>` runs the `i`-th of `n` slices of the test
   classes, so CI can spread one suite over `n` machines. The slices are dealt
@@ -2767,6 +2794,13 @@ produces something runnable.
   the rest on every core
 - The plan, and the opt-in daemon it keeps for last, are in
   [BEATING_THE_DAEMON.md](specs/todo/BEATING_THE_DAEMON.md).
+- ☑ `javac`'s archive made outside an edit and by the second command that
+  finds none, the worker's own AOT cache, its first JVM started with the
+  command, a worker for a single-module build's later rounds (§7.2, §7.5),
+  and `test.share-classes = true` as the AOT cache on JDK 25 with a
+  remembered fallback to the archive (§10.2)
+- Its second step is in
+  [BEATING_THE_DAEMON_2.md](specs/todo/BEATING_THE_DAEMON_2.md).
 
 Tick the corresponding README boxes as each lands — the README is the
 user-facing progress tracker, this document is the design behind it.
