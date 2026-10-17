@@ -677,17 +677,30 @@ starts with C1 and the serial collector. From JDK 25, `Share::for_javac`
 gives `javac` an AOT cache instead, `javac-jdk<n>-<key>.aot` keyed by the
 JDK, recorded and assembled as the test JVM's is (§10), the assembling JVM
 naming `javac`'s main module as the launcher does. One archive serves both
-kinds of run, and only a whole-unit compile writes it, so no edit records
-one; and only once a command before has looked for it and left
-`<archive>.seen`, so a one-off build writes none. `Share::for_worker` gives
-the `javac` worker an AOT cache of its own the same way, keyed by its
-program; the worker records it over its life and `Running::stop` assembles
-it. A workspace command starts its first worker as it reads the graph
-(`Driver::warm_up`, `Worker::prestart`), a quick `javac` run forks rather
-than wait on a one-command worker that would start cold
+kinds of run, and no edit records one. No build waits for it either
+(`specs/todo/BEATING_THE_DAEMON_3.md` §2): the first command that finds
+none trains it with `share::train_javac`, a `javac` over the workload
+embedded as `compile/Training.java` and the two workers' sources, on a
+thread started by `Session::build` (before the resolution, on a clean tree)
+or `Driver::warm_up`. Should that come to nothing, the next command, which
+finds `<archive>.seen`, records it in a whole-unit compile. `share::claim`
+gives each archive one recorder per command, and `Share::finish` assembles
+an AOT cache on a thread of `share::background`; `cli::main` calls
+`share::join_background` last, so none outlives the command.
+`Share::for_worker` gives the `javac` worker an AOT cache of its own,
+keyed by its program, recorded by the first command's first worker: a
+one-command pool stops it after its first compile and starts another in
+its place, and `Running::stop` assembles it. A workspace command starts its
+first worker as it reads the graph (`Driver::warm_up`, `Worker::prestart`)
+and primes it with a one-class compile; `jrs build` and `jrs run` retire
+the workers once the last member has compiled (`Worker::retire`), and
+`Drop for Worker` stops the rest at once. `jrs fetch` and `jrs jdk install`
+train both caches (`warm_compilers`, `Worker::train`). A quick `javac` run
+forks rather than wait on a one-command worker that would start cold
 (`Worker::starts_cold`), and a single-module unit's later rounds go to a
 worker of their own once that cache is there (`worker_for_rounds` in
-`compile/incremental.rs`, which never records).
+`compile/incremental.rs`, which never records), started beside the first
+round when other sources name what it compiles.
 
 ```
  Share::new  no base archive, CDS flags of the user's, cds/ unwritable ─► none
@@ -1301,7 +1314,7 @@ poisoning, which is documented under each function's `# Panics`.
  ├── cds/                         <compiler>-jdk<n>-<key>.jsa: CDS archives for
  │                                the compiler JVMs, rewritten when pruned
  │   ├── javac-jdk<n>-<key>.aot   javac's AOT cache, from JDK 25 (and a .seen
- │   │                            marker until the second command writes it)
+ │   │                            marker, left by the command that trained it)
  │   ├── test-<project>-<deps>.jsa  the test JVM's, one per project and suite
  │   │                              (test.share-classes)
  │   └── entries/                 each jar's entry list, for the overlap check

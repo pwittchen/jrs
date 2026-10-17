@@ -26,12 +26,22 @@
 //! The `javac` worker's JVM maps an archive of its own: from JDK 25 an AOT
 //! cache, which takes its first compile from twice a forked `javac`'s time
 //! to about a forked one's (`specs/todo/BEATING_THE_DAEMON_2.md` §3). It is
-//! recorded over a worker's whole life and assembled once it has exited, by
-//! the second command that finds none, as `share.rs` says. A workspace
-//! command starts its first worker as the command starts, so that its JVM
-//! is up by the first member's compile; and a single-module build whose API
+//! recorded by the first worker of the first command that finds none, and
+//! by no other worker in its pool (`specs/todo/BEATING_THE_DAEMON_3.md`
+//! §2). In a command that is not `--watch`, that worker records its first
+//! compile alone: it is then stopped, its JVM dumps and the cache is
+//! assembled on threads the command joins at its end, while a new worker
+//! takes its place for the members still to compile. A workspace command
+//! starts its first worker as the command starts, so that its JVM is up by
+//! the first member's compile, and primes it with a one-class compile of its
+//! own, so that the compiler's classes are initialised and its hot code
+//! compiled before the first member arrives (§3). Once the last member has
+//! compiled, `jrs build` and `jrs run` stop the workers at once, rather than
+//! one after another as the command ends. A single-module build whose API
 //! change takes more than one round of `javac` sends the later rounds to a
-//! worker of its own, once that cache is there to start it warm.
+//! worker of its own, once that cache is there to start it warm, and starts
+//! that worker beside the first round when the change is to a class others
+//! name (§4).
 //!
 //! A worker is not a compiler daemon (SPEC §1.2). It is a child of the
 //! jrs command and nothing else can reach it: it reads its requests from a
@@ -50,7 +60,7 @@ use std::sync::Mutex;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
-use super::share::Share;
+use super::share::{self, Share};
 use crate::toolchain::{CapturedOutput, Toolchain};
 use crate::ui::Ui;
 
@@ -156,6 +166,10 @@ pub struct Worker {
     building: Mutex<()>,
 }
 
+/// The one-class compile a prestarted worker is primed with.
+const PRIME: &str =
+    "final class Prime {\n    static String name() {\n        return \"prime\";\n    }\n}\n";
+
 impl std::fmt::Debug for Worker {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Worker")
@@ -171,10 +185,16 @@ struct Running {
     stdout: Option<BufReader<ChildStdout>>,
     /// [`Launch::key`] of the settings it was started with.
     key: String,
+    /// The compiles it has answered for the command, primes not counted.
     compilations: u32,
+    /// The id of the last request sent.
+    requests: u32,
     slowest: Duration,
     /// Its class-data-sharing archive, put in place once it exits.
     share: Option<Share>,
+    /// A prime sent and not answered yet: its request id and the scratch
+    /// directory it compiles in.
+    primed: Option<(u32, PathBuf)>,
 }
 
 impl Worker {
@@ -262,8 +282,111 @@ impl Worker {
             key: toolchain.javac.display().to_string(),
         };
         match self.start(Kind::Javac, &launch, ui) {
-            Ok(started) => self.running.lock().unwrap().push(started),
+            Ok(mut started) => {
+                self.prime(&mut started, ui);
+                self.running.lock().unwrap().push(started);
+            }
             Err(why) => ui.verbose(format!("javac worker: not started: {why}")),
+        }
+    }
+
+    /// Send a worker a one-class compile it answers while nothing waits on
+    /// it (`specs/todo/BEATING_THE_DAEMON_3.md` §3), read before its first
+    /// real request. A prime that cannot be written is not sent.
+    fn prime(&self, worker: &mut Running, ui: &Ui) {
+        let scratch = self.dir.join(format!(
+            ".prime-{}-{}",
+            std::process::id(),
+            worker.child.id()
+        ));
+        let source = scratch.join("Prime.java");
+        let argfile = scratch.join("prime.args");
+        let written = std::fs::create_dir_all(&scratch).is_ok()
+            && std::fs::write(&source, PRIME).is_ok()
+            && std::fs::write(
+                &argfile,
+                super::render_argfile(
+                    &[
+                        "--release".to_string(),
+                        share::TRAINING_RELEASE.to_string(),
+                        "-d".to_string(),
+                        scratch.join("classes").display().to_string(),
+                    ],
+                    &[source],
+                ),
+            )
+            .is_ok();
+        let sent = written && worker.send(&argfile).is_ok();
+        if sent {
+            ui.verbose(format!("javac worker (pid {}): primed", worker.child.id()));
+            worker.primed = Some((worker.requests, scratch));
+        } else {
+            let _ = std::fs::remove_dir_all(&scratch);
+        }
+    }
+
+    /// Compile the training workload (`share.rs`) in a `javac` worker of its
+    /// own, so that its JVM records its archive when there is none, and
+    /// stop it: `jrs fetch` and `jrs jdk install` make the worker's cache
+    /// this way, at a moment the user already waits. The cache is in place
+    /// once this returns.
+    pub fn train(&self, toolchain: &Toolchain, ui: &Ui) {
+        let launch = Launch {
+            toolchain,
+            classpath: &[],
+            jvm_args: &[],
+            args: &[],
+            key: toolchain.javac.display().to_string(),
+        };
+        let mut worker = match self.start(Kind::Javac, &launch, ui) {
+            Ok(worker) => worker,
+            Err(why) => {
+                ui.verbose(format!("javac worker: not started: {why}"));
+                return;
+            }
+        };
+        if !worker.share.as_ref().is_some_and(Share::dumps) {
+            // A cache there already, or another worker recording it.
+            worker.stop();
+            return;
+        }
+        let scratch = self.dir.join(format!(".train-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&scratch);
+        let argfile = scratch.join("train.args");
+        let written = share::write_training(&scratch.join("src")).is_some_and(|sources| {
+            let args = [
+                "--release".to_string(),
+                share::TRAINING_RELEASE.to_string(),
+                "-encoding".to_string(),
+                "UTF-8".to_string(),
+                "-d".to_string(),
+                scratch.join("classes").display().to_string(),
+            ];
+            std::fs::write(&argfile, super::render_argfile(&args, &sources)).is_ok()
+        });
+        if written && let Err(why) = worker.request(&argfile) {
+            ui.verbose(format!("javac worker: training: {why}"));
+            worker.compilations = 0;
+        }
+        worker.stop();
+        share::join_background();
+        let _ = std::fs::remove_dir_all(&scratch);
+    }
+
+    /// Stop every idle worker now, each on a thread of its own that the
+    /// command joins at its end: for a command with nothing left to
+    /// compile, whose workers' exits, dumps and assemblies then overlap
+    /// whatever it still does. A later compile starts a new worker.
+    ///
+    /// # Panics
+    ///
+    /// If a thread panicked while holding the lock on the worker.
+    pub fn retire(&self) {
+        for slot in [&self.running, &self.kotlinc] {
+            let idle: Vec<Running> = slot.lock().unwrap().drain(..).collect();
+            for running in idle {
+                share::background(move || running.stop());
+            }
         }
     }
 
@@ -360,7 +483,18 @@ impl Worker {
         ));
         match worker.request(argfile) {
             Ok(output) => {
-                slot.lock().unwrap().push(worker);
+                // A command's recording worker has compiled enough to train
+                // its cache: it stops now, beside the rest of the command,
+                // and a new one takes its place.
+                if self.one_command && worker.share.as_ref().is_some_and(Share::dumps) {
+                    share::background(move || worker.stop());
+                    match self.start(kind, launch, ui) {
+                        Ok(started) => slot.lock().unwrap().push(started),
+                        Err(why) => ui.verbose(format!("{name} worker: not started: {why}")),
+                    }
+                } else {
+                    slot.lock().unwrap().push(worker);
+                }
                 Some(output)
             }
             Err(why) => {
@@ -444,8 +578,10 @@ impl Worker {
             child,
             key: launch.key.clone(),
             compilations: 0,
+            requests: 0,
             slowest: Duration::ZERO,
             share,
+            primed: None,
         })
     }
 
@@ -500,14 +636,31 @@ impl Worker {
 }
 
 impl Running {
-    /// Send one request and read its answer, within the worker's patience.
+    /// Send one request and read its answer, within the worker's patience,
+    /// after the prime's when one is outstanding.
     fn request(&mut self, argfile: &Path) -> Result<CapturedOutput, String> {
+        if let Some((id, scratch)) = self.primed.take() {
+            let primed = self.receive(id);
+            let _ = std::fs::remove_dir_all(scratch);
+            primed?;
+        }
         self.compilations += 1;
-        let id = self.compilations;
+        self.send(argfile)?;
+        self.receive(self.requests)
+    }
+
+    /// Send a request without waiting for its answer.
+    fn send(&mut self, argfile: &Path) -> Result<(), String> {
+        self.requests += 1;
+        let id = self.requests;
         let stdin = self.stdin.as_mut().ok_or("its stdin is gone")?;
         writeln!(stdin, "{id} {}", argfile.display())
             .and_then(|()| stdin.flush())
-            .map_err(|e| format!("the request could not be sent ({e})"))?;
+            .map_err(|e| format!("the request could not be sent ({e})"))
+    }
+
+    /// Read the answer to request `id`, within the worker's patience.
+    fn receive(&mut self, id: u32) -> Result<CapturedOutput, String> {
         let mut stdout = self.stdout.take().ok_or("its stdout is gone")?;
         let started = Instant::now();
         let patience = PATIENCE.max(self.slowest * 10);
@@ -532,6 +685,9 @@ impl Running {
     /// early by a command that found every member up to date — whose
     /// archive would hold no compiler.
     fn stop(mut self) {
+        if let Some((_, scratch)) = self.primed.take() {
+            let _ = std::fs::remove_dir_all(scratch);
+        }
         if self.compilations == 0 || !self.share.as_ref().is_some_and(Share::dumps) {
             let _ = self.child.kill();
             let _ = self.child.wait();
@@ -562,14 +718,27 @@ impl Running {
 }
 
 impl Drop for Worker {
+    /// Stop every worker, all at once: each one that writes an archive is
+    /// waited for while it exits and dumps, and they would otherwise wait
+    /// one after another.
     fn drop(&mut self) {
+        let mut idle = Vec::new();
         for slot in [&self.running, &self.kotlinc] {
             if let Ok(mut pool) = slot.lock() {
-                for running in pool.drain(..) {
-                    running.stop();
-                }
+                idle.extend(pool.drain(..));
             }
         }
+        if idle.len() == 1 {
+            idle.into_iter().for_each(Running::stop);
+            return;
+        }
+        std::thread::scope(|scope| {
+            for running in idle {
+                // A thread that cannot be started drops its worker, whose
+                // closed stdin ends it all the same.
+                let _ = std::thread::Builder::new().spawn_scoped(scope, move || running.stop());
+            }
+        });
     }
 }
 
@@ -748,7 +917,8 @@ mod tests {
             return;
         };
         let tree = Tree::new("prestart");
-        let worker = Worker::javac_only(tree.root.join("cache/worker"));
+        // A worker that records its cache is replaced after one compile.
+        let worker = Worker::for_rounds(tree.root.join("cache/worker"));
         let ui = ui();
         worker.prestart(&toolchain, &ui);
         let pid = worker.pid().unwrap();
@@ -758,6 +928,13 @@ mod tests {
         let argfile = tree.argfile("First", "class First {}\n");
         assert!(worker.compile(&toolchain, &argfile, &ui).unwrap().ok());
         assert_eq!(worker.pid(), Some(pid));
+        assert!(
+            !std::fs::read_dir(tree.root.join("cache/worker"))
+                .unwrap()
+                .flatten()
+                .any(|e| e.file_name().to_string_lossy().starts_with(".prime-")),
+            "the prime was answered, and its scratch directory is gone"
+        );
 
         let unused = Worker::javac_only(tree.root.join("cache/worker"));
         unused.prestart(&toolchain, &ui);
@@ -770,7 +947,7 @@ mod tests {
     }
 
     #[test]
-    fn the_second_command_records_the_workers_aot_cache_and_the_third_maps_it() {
+    fn the_first_command_records_the_workers_aot_cache_and_the_next_maps_it() {
         let Ok(toolchain) = Toolchain::discover() else {
             eprintln!("SKIPPED: no usable JDK");
             return;
@@ -782,31 +959,53 @@ mod tests {
         let tree = Tree::new("worker-aot");
         let dir = tree.root.join("cache/worker");
         let ui = ui();
-        let argfile = tree.argfile("Cached", "class Cached {}\n");
-        let command = |seen_before: bool| {
-            let worker = Worker::javac_only(dir.clone());
-            if seen_before {
-                // As another command would have left it.
-                let cds = dir.join("cds");
-                for entry in std::fs::read_dir(&cds).unwrap().flatten() {
-                    if entry.path().extension().is_some_and(|e| e == "seen") {
-                        std::fs::write(entry.path(), "0").unwrap();
-                    }
-                }
-            }
-            assert!(worker.compile(&toolchain, &argfile, &ui).unwrap().ok());
-        };
-        command(false);
-        assert!(
-            !Worker::javac_only(dir.clone()).starts_warm(&toolchain),
-            "a first command writes no cache"
+        let first = tree.argfile("Cached", "class Cached {}\n");
+        let second = tree.argfile("Again", "class Again {}\n");
+        let worker = Worker::javac_only(dir.clone());
+        worker.prestart(&toolchain, &ui);
+        let recorder = worker.pid().unwrap();
+        assert!(worker.compile(&toolchain, &first, &ui).unwrap().ok());
+        assert_ne!(
+            worker.pid(),
+            Some(recorder),
+            "the recording worker stops after its first compile"
         );
-        command(true);
+        assert!(worker.compile(&toolchain, &second, &ui).unwrap().ok());
+        drop(worker);
+        share::join_background();
         let worker = Worker::for_rounds(dir.clone());
+        let listing: Vec<String> = std::fs::read_dir(dir.join("cds"))
+            .map(|d| {
+                d.flatten()
+                    .map(|e| e.file_name().to_string_lossy().into_owned())
+                    .collect()
+            })
+            .unwrap_or_default();
         assert!(
             worker.starts_warm(&toolchain),
-            "the cache is assembled once the second command's worker exited"
+            "the cache is assembled once the command's worker exited: {listing:?}"
         );
+        assert!(worker.compile(&toolchain, &first, &ui).unwrap().ok());
+    }
+
+    #[test]
+    fn retired_workers_stop_beside_the_command() {
+        let Ok(toolchain) = Toolchain::discover() else {
+            eprintln!("SKIPPED: no usable JDK");
+            return;
+        };
+        let tree = Tree::new("retire");
+        let worker = Worker::for_rounds(tree.root.join("cache/worker"));
+        let ui = ui();
+        let argfile = tree.argfile("Retired", "class Retired {}\n");
         assert!(worker.compile(&toolchain, &argfile, &ui).unwrap().ok());
+        assert!(worker.pid().is_some());
+        worker.retire();
+        assert!(worker.pid().is_none(), "no idle worker is left");
+        assert!(
+            worker.compile(&toolchain, &argfile, &ui).unwrap().ok(),
+            "a later compile starts a new one"
+        );
+        share::join_background();
     }
 }

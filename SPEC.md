@@ -378,7 +378,7 @@ jrs <command> [options]
 | `jrs add` / `jrs remove` | Edit `[dependencies]` / `[dev-dependencies]` in place, then re-resolve (§4.5). `jrs add` leaves the version out of what `[managed]` covers (§8.9). |
 | `jrs cache path` / `jrs cache prune` | Show or prune the shared cache (§8.6). |
 | `jrs jdk list` | Print every JDK jrs can see — the `[jdks]` table's, the one at `JAVA_HOME` or on `PATH`, the installed ones and those `jrs jdk install` downloaded — where each is, and which one the project here would build with (§7.1). |
-| `jrs jdk install <n>` | Download the newest GA build of JDK `n` into `<cache>/jdks`, whatever the config says (§7.1). |
+| `jrs jdk install <n>` | Download the newest GA build of JDK `n` into `<cache>/jdks`, whatever the config says (§7.1), and make its `javac` caches (§7.2). |
 | `jrs self check` / `jrs self update [--to <version>]` | Say whether this jrs is the latest release, or replace it with the latest — or with `--to`'s, older ones included — after checking it against the release's `SHA256SUMS`. |
 | `jrs wrapper [--version <v>]` | Write `jrsw` and `jrsw.cmd`, which run one pinned jrs release (§4.3). |
 | `jrs init [--lib] [--lang java\|kotlin\|scala\|groovy]` | Scaffold `jrs.toml`, a starter class and a starter test: JUnit 5 for Java and Kotlin, MUnit for Scala, and for Groovy Java code with Spock specs (§7.7). `--check` adds a `check` task running PMD's `quickstart` rules as a tool (§7.6), in the `post-compile` hook; it is refused for Kotlin and Scala, whose starters have no Java sources. `--format` adds a `format` task and a `format-check` task in the `post-compile` hook: google-java-format (AOSP style) for Java and Groovy, ktfmt (kotlinlang style) for Kotlin, as the starters are written; refused for Scala. |
@@ -391,7 +391,7 @@ jrs <command> [options]
 | `--no-build-cache` on `build`, `test`, `run`, `package`, `task` | Neither restore from nor store into the build cache (§7.8). |
 | `--timings` on `build`, `test`, `run`, `package` | Report the wall time of each phase after the summary, with a copy in `target/.jrs/timings.txt` (§5.3.9). |
 | `jrs metadata [--no-deps]` | Print the project model as versioned JSON on stdout, for editors and tools; resolves but never compiles (§5.4). |
-| `jrs fetch [--sources]` | Resolve and download the dependencies, the compilers, the tasks' tools and the test launcher into the cache without building; `--sources` adds each dependency's `-sources.jar` (§5.4). |
+| `jrs fetch [--sources]` | Resolve and download the dependencies, the compilers, the tasks' tools and the test launcher into the cache without building, and make the `javac` caches (§7.2); `--sources` adds each dependency's `-sources.jar` (§5.4). |
 
 In a workspace, every command acts on every member at the root, and on the
 members `-p` names or the member it is run from otherwise, building the
@@ -712,7 +712,9 @@ within a version.
 the dependencies, the compilers (§7.7), each task's own tools (§7.6) and the
 JUnit launcher when there is a JUnit to derive it from — without building, so
 a CI job can warm the cache and
-run `--offline` after it. `--sources` also downloads the `-sources.jar`
+run `--offline` after it. On the project's JDK, when it is installed, it also
+makes the compiler caches a build would otherwise make (§7.2): `javac`'s AOT
+cache or archive and its worker's, when there are none. `--sources` also downloads the `-sources.jar`
 (classifier `sources`) of every dependency, under the usual `Downloading` line
 and bars, which is what an editor needs for go-to-definition. They are cached
 in the Maven layout beside the jars, checked against the repository's
@@ -977,22 +979,36 @@ own.
 - `javac`'s archive is never made inside an edit. Only a whole-unit compile
   writes it; a file-by-file run maps it with its quick flags, which still
   save a one-file compile about a tenth over the full JIT with the same
-  cache, and never records. Nor does the first command that finds no
-  archive write one: it leaves `<archive>.seen`, holding its process id,
-  and the next command that finds that marker writes the archive. A
-  one-off build, and a CI run on an empty cache, pay nothing for it.
+  cache, and never records. Nor does any build wait for it
+  ([BEATING_THE_DAEMON_3.md](specs/todo/BEATING_THE_DAEMON_3.md) §2): the
+  first command that finds no archive trains one on a thread of its own,
+  started before the resolution when the tree is clean, by compiling a small
+  workload embedded in jrs (the cache holds no project's data), and joins
+  that thread before it exits. It leaves `<archive>.seen`, holding its
+  process id; a command that finds the marker and still no archive records
+  one in a whole-unit compile of its own instead. `jrs fetch` and
+  `jrs jdk install` train it too. An AOT cache is assembled on a thread the
+  command joins at its end, beside whatever the command still does, and
+  each archive has one recorder per command.
 - The `javac` worker (§7.5) maps an archive of its own, from JDK 25 an AOT
-  cache keyed by the JDK and the worker's program, written by the second
-  command that finds none, as `javac`'s is. The worker records it over its
-  whole life, and jrs assembles it once the worker exited. A workspace
-  command starts its first worker while the workspace's graph is read, on
-  the first member's JDK when it is installed; one that compiled nothing is
-  killed at the end. A run over a few files is forked rather than sent to a
+  cache keyed by the JDK and the worker's program, recorded by the first
+  worker of the first command that finds none and by no other in its pool.
+  Outside `--watch` it records its first compile alone and is then
+  stopped, its exit, dump and assembly beside the rest of the command,
+  while a new worker takes its place; under `--watch` it records over its
+  whole life. A workspace command starts its first worker while the
+  workspace's graph is read, on the first member's JDK when it is
+  installed, and primes it with a one-class compile of its own; one that
+  compiled nothing is killed at the end. `jrs build` and `jrs run` stop the
+  workers at once as soon as the last member has compiled. `jrs fetch` and
+  `jrs jdk install` train the worker's archive on the same embedded
+  workload as `javac`'s. A run over a few files is forked rather than sent to a
   one-command worker that would start without its archive, when the forked
   `javac` maps its own. A single-module compile that follows an API change
   into a second round sends the later rounds to a worker of its own, when
-  that worker's archive is there; that worker never records one, since its
-  exit is on the build's path. The test JVM gets one only with `test.share-classes`, which
+  that worker's archive is there, and starts it beside the first round when
+  other sources name a class that round compiles; that worker never records
+  one, since its exit is on the build's path. The test JVM gets one only with `test.share-classes`, which
   moves the class directories off its `-cp` (§10.2): CDS refuses to dump a
   classpath with a non-empty class directory, and `target/classes` is one.
   A temporary dump a minute old that was never put in place — a `--watch`
@@ -2799,6 +2815,11 @@ produces something runnable.
   command, a worker for a single-module build's later rounds (§7.2, §7.5),
   and `test.share-classes = true` as the AOT cache on JDK 25 with a
   remembered fallback to the archive (§10.2)
+- ☑ the caches made where no build waits on them: `javac`'s trained beside
+  the first command and by `jrs fetch` and `jrs jdk install`, one recorder
+  per archive, AOT caches assembled on threads joined at the command's end,
+  workers stopped at once and early, the first worker primed, and the
+  rounds' worker started beside the first round (§7.2, §7.5)
 - Its second step is in
   [BEATING_THE_DAEMON_2.md](specs/todo/BEATING_THE_DAEMON_2.md), and its
   third, the caches made where no build waits on them, in

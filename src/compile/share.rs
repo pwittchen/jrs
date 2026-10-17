@@ -28,14 +28,27 @@
 //! changes how fast `javac` starts, never what it writes. The `javac`
 //! worker's JVM gets one of its own the same way, keyed by its program too.
 //!
-//! Neither is made inside an edit (`specs/todo/BEATING_THE_DAEMON_2.md` §2).
-//! `javac`'s archive is written by a whole-unit compile alone: a run over a
-//! few files maps it, with its own quick JVM flags, and never records one,
-//! since that would cost the edit several times what it saves. And neither
-//! is written by the first command that finds none: that one leaves a
-//! marker beside where it goes, `<archive>.seen`, and the next command
-//! that finds the marker writes it. A one-off build, and a CI run on an
-//! empty cache, pay nothing for an archive they would never read.
+//! Neither is made inside an edit (`specs/todo/BEATING_THE_DAEMON_2.md` §2),
+//! nor where a build waits on it (`specs/todo/BEATING_THE_DAEMON_3.md` §2).
+//! The first command that finds no `javac` cache trains one on a thread of
+//! its own ([`train_javac`]): a `javac` over a small workload embedded in
+//! jrs, started as the command starts, so that it runs beside the
+//! resolution, the downloads and the compile rather than after them. The
+//! cache holds no project's data, so a synthetic compile trains it as well
+//! as a real one. That command leaves a marker beside where the cache goes,
+//! `<archive>.seen`; should its training come to nothing, the next command
+//! that finds the marker records the cache in a whole-unit compile of its
+//! own, as before. A run over a few files maps the cache, with its own
+//! quick JVM flags, and never records one, since that would cost the edit
+//! several times what it saves. `jrs fetch` and `jrs jdk install` train the
+//! caches too, at a moment the user already waits.
+//!
+//! Each archive has one recorder per command ([`claim`]): the pool of
+//! `javac` workers a workspace holds would otherwise record the same cache
+//! once per JVM. And assembling an AOT cache, a JVM of its own, runs on a
+//! thread the command joins before it returns ([`background`],
+//! [`join_background`]), beside whatever the command still has to do. No
+//! process outlives the command (SPEC §1.2).
 //!
 //! The test JVM gets an archive too, when `test.share-classes` asks for one
 //! (SPEC §10.2). CDS refuses to dump a classpath holding a non-empty class
@@ -62,9 +75,11 @@
 //! lines, and so would the recording run, unless the VM's own output is
 //! turned off for it (`-XX:-DisplayVMOutput`).
 
+use std::collections::BTreeSet;
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Condvar, Mutex};
 use std::time::UNIX_EPOCH;
 
 use crate::resolve::repo::sha256_hex;
@@ -108,6 +123,26 @@ const JAVAC_MAIN: &[&str] = &[
 ];
 
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+/// The archives a run of this command records, or has: one each.
+static CLAIMED: Mutex<BTreeSet<PathBuf>> = Mutex::new(BTreeSet::new());
+
+/// How many threads [`background`] started are still running, and the
+/// signal [`join_background`] waits on for that to reach none.
+static BACKGROUND: (Mutex<usize>, Condvar) = (Mutex::new(0), Condvar::new());
+
+/// The release the training workload is compiled for: the oldest JDK jrs
+/// supports, so that `javac` reads `ct.sym` as most projects' compiles do.
+pub(crate) const TRAINING_RELEASE: u32 = 17;
+
+/// The training workload: sources `javac` compiles with nothing on the
+/// classpath, between them generics, lambdas, records, enums, nested
+/// classes and annotations, so that most of the compiler runs.
+const TRAINING: &[(&str, &str)] = &[
+    ("Training.java", include_str!("Training.java")),
+    ("JavacWorker.java", include_str!("JavacWorker.java")),
+    ("KotlincWorker.java", include_str!("KotlincWorker.java")),
+];
 
 /// One JVM run's use of its archive.
 #[derive(Debug)]
@@ -173,9 +208,19 @@ impl Share {
         if archive.is_file() {
             return Some(Share::reading(&archive, aot));
         }
-        if !seen_before(&archive) || quick {
+        if !seen_before(&archive) || quick || !claim(&archive) {
             return None;
         }
+        Share::javac_recording(dir, toolchain, archive, aot)
+    }
+
+    /// A `javac` run that writes its archive, `archive`.
+    fn javac_recording(
+        dir: &Path,
+        toolchain: &Toolchain,
+        archive: PathBuf,
+        aot: bool,
+    ) -> Option<Share> {
         if !aot {
             return Share::at(dir, archive, true, None);
         }
@@ -202,10 +247,10 @@ impl Share {
     /// The archive under `dir` of a compiler worker's JVM, which runs
     /// `main_class` from the jar `program`, or `None` when it gets none:
     /// from JDK 25 an AOT cache keyed by the JDK and the program, before a
-    /// dynamic archive. It is written once a command before this one found
-    /// none ([`seen_before`]), and only when `record` allows; the worker
-    /// records it over its whole life, and the cache is assembled once it
-    /// has exited.
+    /// dynamic archive. The first worker of a command that finds none
+    /// writes it, when `record` allows; the others in its pool map nothing
+    /// ([`claim`]). The worker records it until it stops, and the cache is
+    /// assembled once it has exited.
     pub(crate) fn for_worker(
         dir: &Path,
         toolchain: &Toolchain,
@@ -217,7 +262,7 @@ impl Share {
         if archive.is_file() {
             return Some(Share::reading(&archive, aot));
         }
-        if !record || !seen_before(&archive) {
+        if !record || !claim(&archive) {
             return None;
         }
         if !aot {
@@ -405,8 +450,25 @@ impl Share {
 
     /// After the run: put a dumped archive in place if the run succeeded,
     /// and drop it otherwise. A failure here only costs the next run its
-    /// archive.
+    /// archive. An AOT cache to assemble is assembled on a thread the
+    /// command joins before it returns ([`join_background`]), so that what
+    /// the command does next does not wait for it.
     pub fn finish(self, ok: bool) {
+        let assembles = ok
+            && self.assemble.is_some()
+            && self
+                .dump
+                .as_ref()
+                .is_some_and(|(temp, _)| std::fs::metadata(temp).is_ok_and(|m| m.len() > 0));
+        if assembles {
+            background(move || self.settle(ok));
+        } else {
+            self.settle(ok);
+        }
+    }
+
+    /// [`Share::finish`], on this thread.
+    fn settle(self, ok: bool) {
         let Some((temp, archive)) = self.dump else {
             return;
         };
@@ -553,6 +615,131 @@ fn seen_before(archive: &Path) -> bool {
     }
     let _ = std::fs::write(&marker, me);
     false
+}
+
+/// Whether this command may record `archive`: no run of it has yet. A
+/// claim is never given back, so a recording that fails is tried again by
+/// the next command, not by the next run of this one.
+fn claim(archive: &Path) -> bool {
+    CLAIMED
+        .lock()
+        .is_ok_and(|mut claimed| claimed.insert(archive.to_path_buf()))
+}
+
+/// Run `work` on a thread of its own, which [`join_background`] waits for
+/// before the command returns. A thread that cannot be started costs only
+/// the archive it was to write: its temporary file is swept later.
+pub(crate) fn background(work: impl FnOnce() + Send + 'static) {
+    /// Counts its thread out however `work` ends.
+    struct Running;
+    impl Drop for Running {
+        fn drop(&mut self) {
+            let (count, done) = &BACKGROUND;
+            if let Ok(mut count) = count.lock() {
+                *count -= 1;
+                done.notify_all();
+            }
+        }
+    }
+    let Ok(mut count) = BACKGROUND.0.lock() else {
+        return;
+    };
+    *count += 1;
+    drop(count);
+    let running = Running;
+    let spawned = std::thread::Builder::new()
+        .name("jrs-cds".to_string())
+        .spawn(move || {
+            let _running = running;
+            work();
+        });
+    // A closure that never ran is dropped with its guard, which counts it
+    // out.
+    drop(spawned);
+}
+
+/// Wait for every thread [`background`] started, and every one those
+/// started in turn: the archives they write are in place, or given up on,
+/// once this returns. The command calls it last.
+pub fn join_background() {
+    let (count, done) = &BACKGROUND;
+    let Ok(mut count) = count.lock() else {
+        return;
+    };
+    while *count > 0 {
+        count = match done.wait(count) {
+            Ok(count) => count,
+            Err(_) => return,
+        };
+    }
+}
+
+/// Train `javac`'s archive under `dir` on a thread of its own, when there is
+/// none and, unless `always`, no command before this one looked for it
+/// (`specs/todo/BEATING_THE_DAEMON_3.md` §2): a `javac` over the embedded
+/// [`TRAINING`] workload records it, and the cache is assembled from that.
+/// Whether a training started.
+pub(crate) fn train_javac(dir: &Path, toolchain: &Toolchain, always: bool) -> bool {
+    let Some((archive, aot)) = javac_archive(dir, toolchain) else {
+        return false;
+    };
+    if archive.is_file() {
+        return false;
+    }
+    let looked = seen_before(&archive);
+    if (looked && !always) || !claim(&archive) {
+        return false;
+    }
+    let Some(share) = Share::javac_recording(dir, toolchain, archive, aot) else {
+        return false;
+    };
+    let javac = toolchain.javac.clone();
+    let dir = dir.to_path_buf();
+    background(move || {
+        let ok = run_training(&javac, &dir, &share.flags);
+        share.settle(ok);
+    });
+    true
+}
+
+/// `javac` over the training workload, in a scratch directory under `dir`
+/// that is gone once it returns, with `flags` for its JVM; whether it
+/// compiled. Nothing it says reaches the terminal.
+fn run_training(javac: &Path, dir: &Path, flags: &[String]) -> bool {
+    let work = dir.join(format!(
+        ".train-{}-{}",
+        std::process::id(),
+        TEMP_COUNTER.fetch_add(1, Ordering::Relaxed)
+    ));
+    let compiled = write_training(&work.join("src")).is_some_and(|sources| {
+        std::process::Command::new(javac)
+            .args(flags.iter().map(|f| format!("-J{f}")))
+            .arg("--release")
+            .arg(TRAINING_RELEASE.to_string())
+            .args(["-encoding", "UTF-8", "-d"])
+            .arg(work.join("classes"))
+            .args(&sources)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_ok_and(|s| s.success())
+    });
+    let _ = std::fs::remove_dir_all(&work);
+    compiled
+}
+
+/// Write the training workload's sources under `dir`, and return them.
+pub(crate) fn write_training(dir: &Path) -> Option<Vec<PathBuf>> {
+    std::fs::create_dir_all(dir).ok()?;
+    TRAINING
+        .iter()
+        .map(|(name, source)| {
+            let path = dir.join(name);
+            std::fs::write(&path, source).ok()?;
+            Some(path)
+        })
+        .collect()
 }
 
 /// The marker that the AOT cache `archive` could not be assembled.
@@ -1009,6 +1196,7 @@ mod tests {
         std::fs::write(&temp, "recorded").unwrap();
         // The fake JDK's `java` cannot assemble anything.
         share.finish(true);
+        join_background();
         assert!(!cache.exists());
         assert!(unassembled(&cache).is_file());
 
@@ -1117,7 +1305,7 @@ mod tests {
     }
 
     #[test]
-    fn the_worker_records_an_aot_cache_of_its_own_only_when_allowed() {
+    fn the_first_worker_records_an_aot_cache_of_its_own_only_when_allowed() {
         let tree = Tree::new("worker-aot");
         let dir = tree.root.join("cds");
         let mut jdk = tree.jdk(true);
@@ -1129,16 +1317,18 @@ mod tests {
             Some(archive.clone()),
             javac_archive(&dir, &jdk).map(|a| a.0)
         );
-        assert!(Share::for_worker(&dir, &jdk, "JavacWorker", &program, true).is_none());
-        seen_by_another_command(&archive);
         assert!(
             Share::for_worker(&dir, &jdk, "JavacWorker", &program, false).is_none(),
             "a worker that may not record"
         );
         let share = Share::for_worker(&dir, &jdk, "JavacWorker", &program, true).unwrap();
-        assert!(share.is_aot() && share.dumps());
+        assert!(share.is_aot() && share.dumps(), "the first command's first");
         let assemble = share.assemble.as_ref().unwrap();
         assert_eq!(assemble.classpath, Some(vec![program.clone()]));
+        assert!(
+            Share::for_worker(&dir, &jdk, "JavacWorker", &program, true).is_none(),
+            "and no other worker of the command"
+        );
         share.finish(false);
 
         assert!(!Share::worker_ready(&dir, &jdk, "JavacWorker", &program));
@@ -1146,6 +1336,83 @@ mod tests {
         assert!(Share::worker_ready(&dir, &jdk, "JavacWorker", &program));
         let share = Share::for_worker(&dir, &jdk, "JavacWorker", &program, false).unwrap();
         assert!(share.is_aot() && !share.dumps(), "mapped by any worker");
+    }
+
+    #[test]
+    fn the_first_command_trains_javacs_cache_beside_the_build_and_records_nothing_else() {
+        let tree = Tree::new("train");
+        let dir = tree.root.join("cds");
+        let mut jdk = tree.jdk(true);
+        jdk.version = JAVAC_AOT_SINCE;
+        let (archive, _) = javac_archive(&dir, &jdk).unwrap();
+        assert!(train_javac(&dir, &jdk, false), "the first command trains");
+        assert!(marker(&archive).is_file());
+        assert!(!train_javac(&dir, &jdk, true), "once");
+        assert!(
+            Share::for_javac(&dir, &jdk, false).is_none(),
+            "and its compile records nothing"
+        );
+        // The fake JDK's `javac` compiles nothing: the training comes to
+        // nothing, and leaves nothing behind but the marker.
+        join_background();
+        assert!(!archive.exists());
+        assert!(marker(&archive).is_file());
+        let left: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| !n.ends_with(".seen"))
+            .collect();
+        assert!(left.is_empty(), "{left:?}");
+
+        let other = tree.root.join("other");
+        seen_by_another_command(&javac_archive(&other, &jdk).unwrap().0);
+        assert!(
+            !train_javac(&other, &jdk, false),
+            "a command after a training that came to nothing does not train again"
+        );
+        let other_too = tree.root.join("other-too");
+        seen_by_another_command(&javac_archive(&other_too, &jdk).unwrap().0);
+        assert!(train_javac(&other_too, &jdk, true), "unless asked to");
+        join_background();
+
+        std::fs::write(&archive, "cache").unwrap();
+        assert!(
+            !train_javac(&tree.root.join("cds"), &jdk, true),
+            "nothing to train"
+        );
+    }
+
+    #[test]
+    fn the_training_workload_compiles() {
+        let Ok(toolchain) = Toolchain::discover() else {
+            eprintln!("SKIPPED: no usable JDK");
+            return;
+        };
+        let tree = Tree::new("workload");
+        assert!(run_training(&toolchain.javac, &tree.root, &[]));
+        assert_eq!(
+            std::fs::read_dir(&tree.root).unwrap().count(),
+            0,
+            "its scratch directory is gone"
+        );
+    }
+
+    #[test]
+    fn work_in_the_background_is_joined_with_what_it_starts() {
+        let done = std::sync::Arc::new(AtomicU64::new(0));
+        let outer = std::sync::Arc::clone(&done);
+        background(move || {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            let inner = std::sync::Arc::clone(&outer);
+            background(move || {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+                inner.fetch_add(1, Ordering::SeqCst);
+            });
+            outer.fetch_add(1, Ordering::SeqCst);
+        });
+        join_background();
+        assert_eq!(done.load(Ordering::SeqCst), 2);
     }
 
     #[test]

@@ -306,8 +306,10 @@ impl<'a> Driver<'a> {
     /// Start the command's first `javac` worker, so that its JVM starts
     /// while the lockfile is read and the classpath assembled rather than
     /// on the first member's compile (`specs/todo/BEATING_THE_DAEMON_2.md`
-    /// §3). On the first member's JDK, and only one already installed:
-    /// one still to be downloaded is the member's own build's to report.
+    /// §3), and, when this JDK has no `javac` cache, train one beside the
+    /// build (`specs/todo/BEATING_THE_DAEMON_3.md` §2). On the first
+    /// member's JDK, and only one already installed: one still to be
+    /// downloaded is the member's own build's to report.
     fn warm_up(&self) {
         let Some(worker) = &self.worker else {
             return;
@@ -321,6 +323,23 @@ impl<'a> Driver<'a> {
         };
         if let Some(toolchain) = toolchain {
             worker.prestart(&toolchain, self.ui);
+            if let Ok(cache) = crate::resolve::cache::Cache::discover()
+                && crate::compile::share::train_javac(&cache.root().join("cds"), &toolchain, false)
+            {
+                self.ui.verbose(format!(
+                    "training javac's class-data cache for JDK {} beside the build",
+                    toolchain.version
+                ));
+            }
+        }
+    }
+
+    /// Stop the command's `javac` workers now: it has nothing left for them
+    /// to compile, and their exits, dumps and assemblies overlap the rest
+    /// of it (`specs/todo/BEATING_THE_DAEMON_3.md` §2).
+    fn retire_workers(&self) {
+        if let Some(worker) = &self.worker {
+            worker.retire();
         }
     }
 
@@ -672,6 +691,7 @@ impl<'a> Driver<'a> {
     fn build(&self) -> Result<i32> {
         let members = self.workspace.with_upstream(&self.selected()?);
         self.build_all(&members)?;
+        self.retire_workers();
         let mut classes = 0;
         for i in &members {
             classes += self.prepared(*i, None)?.build()?.classes;
@@ -838,7 +858,11 @@ impl<'a> Driver<'a> {
     fn run(&self, args: &[String], debug: Option<&runner::DebugAddress>) -> Result<i32> {
         let target = self.runnable()?;
         self.build_upstream(&[target])?;
-        self.prepared(target, None)?.run_command(args, debug)
+        let session = self.prepared(target, None)?;
+        session.manifest.require_main_class("run")?;
+        session.build()?;
+        self.retire_workers();
+        session.run_command(args, debug)
     }
 
     /// `jrs package`: a jar for every chosen member and what it depends on.

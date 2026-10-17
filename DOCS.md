@@ -665,11 +665,11 @@ for any repository.
 | `jrs self check` / `jrs self update [--to <version>]` | Say whether jrs is the latest release, or update it to that release or the one `--to` names. See [Updating](#updating). |
 | `jrs wrapper [--version <v>]` | Write `jrsw` and `jrsw.cmd`, which run one pinned jrs release. See [Pinning jrs for a team](#pinning-jrs-for-a-team). |
 | `jrs jdk list` | Print every JDK jrs can see, where it found it, and which one the project here builds with. See [Choosing the JDK](#choosing-the-jdk). |
-| `jrs jdk install <version>` | Download the newest Temurin build of that Java version into jrs's cache, where a project that pins it finds it. |
+| `jrs jdk install <version>` | Download the newest Temurin build of that Java version into jrs's cache, where a project that pins it finds it, and make its `javac` caches. |
 | `jrs task <name> [--watch] [-- args...]` | Run a task from `jrs.toml`, and whatever it depends on. See [Tasks and hooks](#tasks-and-hooks). |
 | `jrs task --list` | List the tasks, their descriptions and the hooks that run them. |
 | `jrs metadata [--no-deps]` | Print the project model as JSON, for editors and tools. |
-| `jrs fetch [--sources]` | Download the dependencies into the cache without building, and with `--sources` their `-sources.jar`s. |
+| `jrs fetch [--sources]` | Download the dependencies into the cache without building, and make the `javac` caches for the project's JDK; with `--sources`, also their `-sources.jar`s. |
 
 `--no-build-cache` on `build`, `test`, `run`, `package` and `task` leaves the
 [build cache](#build-cache) alone for that command.
@@ -846,10 +846,11 @@ The cache also holds `cds/`, where jrs keeps a class-data-sharing archive
 for each compiler on each JDK: `javac`, kotlinc, scalac and groovyc start
 faster from one (from JDK 25, `javac` and its worker get an AOT cache, which
 keeps method profiles too). The first compile after a new JDK or compiler
-writes it — for `javac`, the first whole compile of the second command that
-finds none, so a one-off build or a CI run on an empty cache does not pay for
-it, and an edit's few files never do — and `prune` drops the directory like
-any other; the next compile writes it again.
+writes it. For `javac`, the first command that finds none trains it on a
+small workload of jrs's own, beside the build rather than after it, and an
+edit's few files never write it; `jrs fetch` and `jrs jdk install` make
+`javac`'s caches too, at a moment you are waiting anyway. `prune` drops the
+directory like any other; the next build writes it again.
 The JDKs `jrs jdk install` downloaded, under `jdks/`, are kept unless
 `--jdks` is given, since one takes a while to download again.
 `--unused-for` goes by when each artifact was last used. jrs records that in

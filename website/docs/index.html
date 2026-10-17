@@ -1661,7 +1661,9 @@ org.apache.logging.log4j:log4j-core:2.14.1  GHSA-jfh8-c2jp-5v3q (CVE-2021-44228)
 <p>
   Resolves and downloads everything a build and a test run need (the dependencies, the
   compilers, each task's tools and the JUnit launcher) into the cache without building. A CI job
-  can warm the cache this way and run <code>--offline</code> afterwards.
+  can warm the cache this way and run <code>--offline</code> afterwards. On the project's JDK it
+  also makes the class-data caches <code>javac</code> and its warm worker start from, so that the
+  first build does not.
 </p>
 <p>
   <code>--sources</code> also downloads each dependency's <code>-sources.jar</code>, which
@@ -1837,7 +1839,7 @@ jrs jdk install &lt;VERSION&gt;</pre>
   <thead><tr><th>Command</th><th>Effect</th></tr></thead>
   <tbody>
     <tr><td><code>jrs jdk list</code></td><td>Print every JDK jrs can see — the <code>[jdks]</code> table's, the one at <code>JAVA_HOME</code> or on <code>PATH</code>, the installed ones and those <code>jrs jdk install</code> downloaded — where each is, and which one the project here builds with.</td></tr>
-    <tr><td><code>jrs jdk install &lt;VERSION&gt;</code></td><td>Download the newest Temurin GA build of that Java feature version into jrs's cache, under <code>jdks/</code>, whatever the user configuration says.</td></tr>
+    <tr><td><code>jrs jdk install &lt;VERSION&gt;</code></td><td>Download the newest Temurin GA build of that Java feature version into jrs's cache, under <code>jdks/</code>, whatever the user configuration says, and make the class-data caches its <code>javac</code> starts from.</td></tr>
   </tbody>
 </table>
 <pre>jrs jdk list

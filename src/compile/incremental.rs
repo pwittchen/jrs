@@ -614,6 +614,19 @@ impl Tracker {
         // against.
         let mut compiled = first.clone();
         sweep(unit, previous, &compiled)?;
+        // The later rounds go to a warm `javac` worker held for the rest of
+        // this compile, when the unit has none of its own. It starts beside
+        // the first round when other sources name a class that round
+        // compiles, as an API change there would take a second
+        // (`specs/todo/BEATING_THE_DAEMON_3.md` §4).
+        let mut later: Option<Option<Worker>> = None;
+        if unit.worker.is_none() && is_named(previous, &first) {
+            let worker = worker_for_rounds(unit, toolchain);
+            if let Some(worker) = &worker {
+                worker.prestart(toolchain, ui);
+            }
+            later = Some(worker);
+        }
         let mut round: Vec<usize> = first.into_iter().collect();
         self.javac(
             toolchain, unit, ui, steps, &round, previous, &compiled, None,
@@ -639,9 +652,6 @@ impl Tracker {
         changes.added.extend(added);
         changes.broken.extend(broken);
 
-        // The later rounds go to a warm `javac` worker held for the rest of
-        // this compile, when the unit has none of its own.
-        let mut later: Option<Option<Worker>> = None;
         let mut rounds = 1;
         while !changes.is_empty() {
             let just: BTreeSet<usize> = round.iter().copied().collect();
@@ -1092,6 +1102,17 @@ fn subtypes(index: &Index, changed: &BTreeSet<String>) -> BTreeSet<String> {
     let mut all = inheriting(index.sources.iter().flat_map(|s| &s.classes), changed);
     all.extend(changed.iter().cloned());
     all
+}
+
+/// Whether a source outside `sources` refers to a class one of them holds.
+fn is_named(index: &Index, sources: &BTreeSet<usize>) -> bool {
+    let classes: BTreeSet<String> = sources
+        .iter()
+        .flat_map(|&i| index.sources[i].classes.iter().map(|c| c.name.clone()))
+        .collect();
+    direct_users(index, &classes)
+        .iter()
+        .any(|i| !sources.contains(i))
 }
 
 /// The sources that refer to a class in `changed`.

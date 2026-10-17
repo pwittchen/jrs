@@ -7,8 +7,50 @@ The numbers are the fourth pass of
 [BENCHMARKS_SUMMARY.md](../BENCHMARKS_SUMMARY.md) (jrs 0.14.0, `cf0d36d`,
 2026-10-17, one run per cell, no warm-up).
 
-Status: **not started.** §2 comes first, and its first step is a
-measurement that decides how much of the rest is needed.
+Status: **§2–§4 and §6 are built, and not yet measured**; §5 waits for
+the next pass. The measurement §2 asks for first was not taken: the
+fourth pass's `javac` phase is about 600 ms longer in `clean` than in
+`cold` on every project, whatever its size, which points at the assembly,
+and the order of the benchmark's scenarios settled the rest:
+
+- **§2.** Proposals 1–3 and 5 are built; proposal 4 is not, since the
+  benchmark's `incremental`, the fourth command and a cell jrs leads by
+  1.5–1.8×, would then run without the cache: no `test`, `run` or
+  `package` comes before it, and its own quick compile never records.
+  Proposal 5 is built as the main path rather than a fallback, and at a
+  moment the plan did not list: the first command that finds no `javac`
+  cache trains it on a thread of its own (`share::train_javac`), started
+  before the resolution on a clean tree, over an embedded workload
+  (`compile/Training.java` and the two workers' sources). The command
+  joins it before exiting, so `cold`, which leads Maven by 1.7–3.8× and Gradle
+  by 8–30×, pays up to the training's length beyond its own build,
+  instead of `clean` paying the assembly after its compile. `jrs fetch` and
+  `jrs jdk install` train both caches too, the moments §2.5 names; there is
+  no `jrs warm`. A training that comes to nothing leaves the marker, and
+  the next command records in a whole-unit compile, as before.
+- **§2, the workers.** The first worker of a command that finds no worker
+  cache records it, and no other worker in its pool (`share::claim`, one
+  recorder per archive per command, which also covers forked `javac`s).
+  Outside `--watch`, that worker stops after its first compile, its exit,
+  dump and assembly on a background thread, and a new worker takes its
+  place: in `gen-ws`'s `cold`, `core` trains the cache and the assembly
+  overlaps the members after it. `jrs build` and `jrs run` retire every
+  worker once the last member has compiled, and `Drop for Worker` stops
+  the rest at once rather than in turn. Every AOT cache, the test JVM's
+  included, is assembled on a thread that `cli::main` joins last.
+- **§3.** The prestarted worker is primed with a one-class compile it
+  answers while the graph is read, read back before its first real
+  request. With the worker's cache made in `cold`, `clean` is the first
+  command whose `core` and `model` compile in workers that map it.
+- **§4.** The rounds were not counted. The rounds' worker now starts
+  beside the first round when other sources name a class that round
+  compiles, but only where its cache exists, which in a single-module
+  project only `jrs fetch`, `jrs jdk install` or a workspace build on the
+  same JDK makes: the benchmark's `gen-300` and `gen-2000` `abi` cells are
+  unchanged by it.
+- **§6.** Decided for the benchmark rather than the default: the
+  generated projects set `share-classes = true`, recorded in BENCHMARKS.md
+  §5. The default waits for the corpus check §6 asks for.
 
 ---
 

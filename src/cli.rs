@@ -691,13 +691,17 @@ pub fn main() -> i32 {
     };
 
     let ui = Ui::new(cli.global.ui_options());
-    match dispatch(&cli, &ui) {
+    let code = match dispatch(&cli, &ui) {
         Ok(code) => code,
         Err(error) => {
             report(&ui, &error);
             error.exit_code()
         }
-    }
+    };
+    // The caches still being written are the command's, and so are the
+    // workers still stopping: neither outlives it (SPEC §1.2).
+    share::join_background();
+    code
 }
 
 /// Run one command line against a `Ui` the caller made, and return the exit
@@ -715,13 +719,15 @@ where
             return exit::USAGE;
         }
     };
-    match dispatch(&cli, ui) {
+    let code = match dispatch(&cli, ui) {
         Ok(code) => code,
         Err(error) => {
             report(ui, &error);
             error.exit_code()
         }
-    }
+    };
+    share::join_background();
+    code
 }
 
 /// The live region comes down before any diagnostic is printed.
@@ -1172,6 +1178,34 @@ impl<'a> Session<'a> {
         for (compiler, took) in steps {
             self.timings
                 .record(format!("compile {unit}: {compiler}"), *took);
+        }
+    }
+
+    /// Train `javac`'s AOT cache for `toolchain` on a thread of its own,
+    /// when there is none and, unless `always`, no command before this one
+    /// looked for it (`specs/todo/BEATING_THE_DAEMON_3.md` §2).
+    fn train_javac(&self, toolchain: &Toolchain, always: bool) {
+        if let Ok(cache) = Cache::discover()
+            && share::train_javac(&cache.root().join("cds"), toolchain, always)
+        {
+            self.ui.verbose(format!(
+                "training javac's class-data cache for JDK {} beside the build",
+                toolchain.version
+            ));
+        }
+    }
+
+    /// The JDK this project would build with, when it is installed: one
+    /// still to be downloaded is a build's to report.
+    fn installed_toolchain(&self) -> Option<Toolchain> {
+        if let Some(toolchain) = self.toolchain.get() {
+            return Some(toolchain.clone());
+        }
+        match toolchain::project_pin(self.manifest.java.jdk, &self.manifest.root) {
+            None => Toolchain::discover().ok(),
+            Some(pin) => Toolchain::select_installed(&pin, &self.config.jdks)
+                .ok()
+                .flatten(),
         }
     }
 
@@ -3794,6 +3828,12 @@ impl<'a> Session<'a> {
     /// the dependencies, the compilers, the test launcher — without building;
     /// with `--sources`, every dependency's `-sources.jar` as well.
     fn fetch_command(&self, sources: bool) -> Result<i32> {
+        // The compiler caches too, which a build would otherwise make: the
+        // `javac` one beside the downloads, the worker's after them.
+        let toolchain = self.installed_toolchain();
+        if let Some(toolchain) = &toolchain {
+            self.train_javac(toolchain, true);
+        }
         let resolution = self.dependencies(false)?;
         // The launcher `jrs test` would run, when there is a JUnit to derive
         // it from, so that `jrs test --offline` works after a fetch.
@@ -3819,6 +3859,9 @@ impl<'a> Session<'a> {
         if sources {
             let (found, wanted) = self.fetch_sources(&resolution)?;
             let _ = write!(fetched, " and {found} of {wanted} sources jars");
+        }
+        if let Some(toolchain) = &toolchain {
+            warm_compilers(self.ui, toolchain);
         }
         self.ui.phase(
             "Finished",
@@ -3941,6 +3984,11 @@ impl<'a> Session<'a> {
             return Ok(built.clone());
         }
         let toolchain = self.toolchain()?;
+        // A clean tree compiles whatever else holds: `javac`'s cache, when
+        // this JDK has none, trains beside the resolution and the downloads.
+        if !self.project().classes_dir().exists() {
+            self.train_javac(&toolchain, false);
+        }
         let resolution = self.compile_resolution()?;
         let project = self.project();
 
@@ -3986,6 +4034,9 @@ impl<'a> Session<'a> {
                     sources.describe("source files")
                 ),
             );
+            if unit.sources.iter().any(|s| is_java(s)) {
+                self.train_javac(&toolchain, false);
+            }
             let scope = self
                 .ui
                 .spinner("Compiling", sources.describe("source files"));
@@ -6104,7 +6155,13 @@ fn jdk_command(cli: &Cli, ui: &Ui, action: &JdkCommand) -> Result<i32> {
                     "`jrs jdk install` downloads a JDK, which --offline rules out",
                 ));
             }
-            install_jdk(ui, &config, *version)?;
+            let home = install_jdk(ui, &config, *version)?;
+            if let Ok(toolchain) = Toolchain::probe_home(&home) {
+                if let Ok(cache) = Cache::discover() {
+                    share::train_javac(&cache.root().join("cds"), &toolchain, true);
+                }
+                warm_compilers(ui, &toolchain);
+            }
             Ok(exit::SUCCESS)
         }
         JdkCommand::List => {
@@ -6145,6 +6202,25 @@ fn jdk_command(cli: &Cli, ui: &Ui, action: &JdkCommand) -> Result<i32> {
             Ok(exit::SUCCESS)
         }
     }
+}
+
+/// Whether `source` is one `javac` compiles.
+fn is_java(source: &Path) -> bool {
+    source.extension().is_some_and(|e| e == "java")
+}
+
+/// Make the `javac` worker's cache for `toolchain` when there is none, and
+/// wait for every cache still being made (`specs/todo/BEATING_THE_DAEMON_3.md`
+/// §2): for `jrs fetch` and `jrs jdk install`, where the user already waits,
+/// so that the next build finds them.
+fn warm_compilers(ui: &Ui, toolchain: &Toolchain) {
+    let Ok(cache) = Cache::discover() else {
+        return;
+    };
+    let scope = ui.spinner("Warming", format!("javac on JDK {}", toolchain.version));
+    Worker::javac_only(cache.root().join("worker")).train(toolchain, ui);
+    share::join_background();
+    scope.finish();
 }
 
 /// Download the newest GA build of JDK `feature` into `<cache>/jdks`, with
