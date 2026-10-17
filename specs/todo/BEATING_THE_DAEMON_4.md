@@ -52,6 +52,7 @@ in opposite directions. With §2–§5 in, the daemon should keep one cell,
 `gen-2000`'s `abi`, and lose it by less.
 
 ## 2. A worker cache for a single-module project ✅
+
 **Now.** BEATING_THE_DAEMON_3.md §4 asked for the rounds to be counted.
 Every `abi` cell is **two rounds**: the edited class alone, then the
 sources that name it. Both rounds fork a `javac`, since the rounds'

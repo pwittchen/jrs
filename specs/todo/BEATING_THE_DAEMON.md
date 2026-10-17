@@ -45,6 +45,7 @@ than close them. §9 comes last, and only if its gate (§9.1) holds once the
 rest are measured.
 
 ## 2. Stop the recompile walk at an unchanged API ✅
+
 **Now.** `compile/incremental.rs` compiles a changed source, and when its
 API changed, everything that transitively refers to it. On `gen-2000` a
 public method added to `C0000`, which every package reaches, recompiles
@@ -90,6 +91,7 @@ one more run, as before. The rounds use the command's worker when it has
 one (§6); a single-module build forks each.
 
 ## 3. Compile avoidance across workspace members ✅
+
 **Now.** A member's main unit fingerprints its upstream members'
 `api_digest`, so an API change in `core` recompiles every downstream member
 whole. The `gen-ws` `abi` phases show it: `core` 368 ms, then `model`,
@@ -127,6 +129,7 @@ processor or Groovy AST transformation among them. A missing or older index
 compiles whole, since it holds no `seen` entries to compare.
 
 ## 4. Members' test JVMs at once ✅
+
 **Now.** `cli/members.rs` builds every member at once, then tests member by
 member. On `gen-ws`, `test` is six test JVMs of about 280 ms each in
 sequence: 1.80 s, against 1.85 s for the daemon but 716 ms with its
@@ -154,6 +157,7 @@ first, at once; the tests then run at once through the same gates, so the
 transcript is the one member-by-member testing prints.
 
 ## 5. Spring Boot's fat jar ✅
+
 **Now.** `package` on `bookmarks` is 753 ms, 684 ms of it packaging:
 `package.rs` inflates and deflates every entry of every dependency jar.
 `bootJar` takes 515 ms because it stores the dependency jars nested, as
@@ -187,6 +191,7 @@ on `rayon` into a one-entry zip, and copied raw from that in sorted order,
 which is the thin jar's path too. A stored entry is deflated as before.
 
 ## 6. A warmer `javac` without a daemon ✅
+
 **Now.** Every `javac` starts cold: on `gen-2000`, `clean` spends 1331 ms
 in it against the daemon's 1.28 s total, and on `gen-ws` each member pays
 the start and the JIT warm-up again.
@@ -232,6 +237,7 @@ maps no module classes. On a 60-file compile on JDK 25 it took a forked
 `javac` from 0.28 s to 0.17 s.
 
 ## 7. The test JVM on large suites ✅
+
 **Now.** `gen-2000`'s `test` is 901 ms, 713 ms of it the test JVM, against
 831 ms for the daemon, which also starts a test JVM but has its test
 framework classes warm.
