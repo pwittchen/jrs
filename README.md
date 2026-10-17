@@ -174,6 +174,26 @@ cargo test
 See [DOCS.md](DOCS.md#development) for the network tests, the benchmarks and
 the release process.
 
+## Corpus
+
+The corpus checks jrs against real projects rather than ones written for it:
+a pinned list of open-source Spring Boot and Ktor projects
+([`specs/corpus/corpus.toml`](specs/corpus/corpus.toml)), each taken through
+`jrs migrate`, `build`, `test`, `run` and `package` and compared with the
+project's own Maven or Gradle build. It clones the projects, reaches Maven
+Central and keeps everything under `target/corpus/<run>/`:
+
+```
+JRS_CORPUS=all cargo bench --bench corpus                         # every project
+JRS_CORPUS=petclinic-maven,ktor-serialization cargo bench --bench corpus
+JRS_CORPUS=all JRS_CORPUS_STEPS=migrate,build cargo bench --bench corpus
+```
+
+Every failure it finds is recorded in
+[`specs/corpus/FINDINGS.md`](specs/corpus/FINDINGS.md); see
+[`specs/CORPUS.md`](specs/CORPUS.md) for the method. It also runs on demand in
+CI (`.github/workflows/corpus.yml`).
+
 ## Benchmarks
 
 ### Running them by hand
