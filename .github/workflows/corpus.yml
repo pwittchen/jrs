@@ -29,11 +29,18 @@ jobs:
     steps:
     - uses: actions/checkout@v7
 
-    - name: Set up the JDK
+    # A project's own toolchain pin needs that JDK installed beside the one the
+    # run is on: ktor-h2's `jvmToolchain(24)`, a release the runner image does
+    # not carry. Gradle finds it through the ~/.m2/toolchains.xml setup-java
+    # writes, jrs through JAVA_HOME_24_X64. The last version listed is the
+    # default, so the input stays the JDK on PATH and at JAVA_HOME.
+    - name: Set up the JDKs
       uses: actions/setup-java@v6
       with:
         distribution: temurin
-        java-version: ${{ inputs.jdk }}
+        java-version: |
+          24
+          ${{ inputs.jdk }}
 
     # For a project without a wrapper; every project in the first set has one.
     - name: Set up Maven

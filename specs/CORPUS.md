@@ -259,7 +259,9 @@ which has Docker for Testcontainers:
 
 - inputs: `projects` (default `all`) and `jdk` (default `25`);
 - installs that JDK with `actions/setup-java`, plus pinned Maven and Gradle
-  for projects without a wrapper;
+  for projects without a wrapper, and beside it every JDK a project's own
+  toolchain pins that the runner image lacks (today 24, for ktor-h2), so
+  neither its reference nor `jrs build` stops at a missing toolchain;
 - builds jrs in release mode and runs `cargo bench --bench corpus` with
   `JRS_CORPUS` from the input;
 - uploads `target/corpus/` as the run's artifact — the logs, the
