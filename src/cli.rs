@@ -2336,15 +2336,17 @@ impl<'a> Session<'a> {
             classpath.to_vec(),
             vec![project.classes_dir()],
         )?;
-        let checking = Instant::now();
         // Compile avoidance: the tests see the main classes' API, not their
         // bytes, so a changed method body leaves them fresh (SPEC §7.2).
+        let digesting = Instant::now();
         let mut api = compile::api_digest(&project.classes_dir())?;
         if let Some(upstream) = self.upstream_api(|_| true)? {
             api.push('\n');
             api.push_str(&upstream);
         }
         unit.main_api = Some(api);
+        self.timings.since("compile test: api digest", digesting);
+        let checking = Instant::now();
         // And when it changes, only the tests that use what changed compile.
         unit.tracked = vec![project.classes_dir()];
         unit.tracked.extend(self.upstream_dirs(|_| true));
@@ -2403,14 +2405,17 @@ impl<'a> Session<'a> {
             classpath.clone(),
             vec![project.classes_dir(), project.test_classes_dir()],
         )?;
-        let checking = Instant::now();
         // What the suite can see of the main and the default test classes.
+        let digesting = Instant::now();
         unit.main_api = Some(format!(
             "{}\n{}\n{}",
             compile::api_digest(&project.classes_dir())?,
             compile::api_digest(&project.test_classes_dir())?,
             self.upstream_api(|_| true)?.unwrap_or_default()
         ));
+        self.timings
+            .since(format!("compile {label}: api digest"), digesting);
+        let checking = Instant::now();
         let stale = compile::is_stale(&unit)?;
         if stale && compile::restore(&unit, self.ui)?.is_some() {
             self.ui.phase(
@@ -4119,7 +4124,11 @@ impl<'a> Session<'a> {
             classpath,
             Vec::new(),
         )?;
+        let digesting = Instant::now();
         unit.main_api = self.upstream_api(Classpath::compiles)?;
+        if unit.main_api.is_some() {
+            self.timings.since("compile main: api digest", digesting);
+        }
         // An upstream API change compiles what uses the classes that changed
         // (`specs/todo/BEATING_THE_DAEMON.md` §3).
         unit.tracked = self.upstream_dirs(Classpath::compiles);

@@ -32,7 +32,9 @@
 
 use std::cell::Cell;
 use std::collections::BTreeSet;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+
+use rayon::prelude::*;
 
 use crate::error::{IoResultExt, Result};
 use crate::project;
@@ -60,20 +62,32 @@ const COMPILER_SERVICES: [&str; 2] = [
     reason = "the compilers write and look up `.class` and `.tasty` exactly; `Foo.CLASS` is not a class"
 )]
 pub fn api_digest(dir: &Path) -> Result<String> {
-    let mut entries = Vec::new();
-    let mut compiler_code = false;
-    for path in project::find_all(dir)? {
-        let relative = relative(dir, &path);
-        let is_class = relative.ends_with(".class");
-        if !is_class && !relative.ends_with(".tasty") && !relative.starts_with("META-INF/services/")
-        {
-            continue;
-        }
-        let bytes = std::fs::read(&path).path(&path)?;
-        let api = if is_class { api(&bytes) } else { Api::Opaque };
-        compiler_code |= api == Api::CompilerCode || COMPILER_SERVICES.contains(&relative.as_str());
-        entries.push((relative, sha256_hex(&bytes), api));
-    }
+    let wanted: Vec<(String, PathBuf)> = project::find_all(dir)?
+        .into_iter()
+        .map(|path| (relative(dir, &path), path))
+        .filter(|(relative, _)| {
+            relative.ends_with(".class")
+                || relative.ends_with(".tasty")
+                || relative.starts_with("META-INF/services/")
+        })
+        .collect();
+    // Each file reads apart from every other, so they read in parallel, and
+    // come back in path order.
+    let entries: Vec<(String, String, Api)> = wanted
+        .into_par_iter()
+        .map(|(relative, path)| {
+            let bytes = std::fs::read(&path).path(&path)?;
+            let api = if relative.ends_with(".class") {
+                api(&bytes)
+            } else {
+                Api::Opaque
+            };
+            Ok((relative, sha256_hex(&bytes), api))
+        })
+        .collect::<Result<_>>()?;
+    let compiler_code = entries.iter().any(|(relative, _, api)| {
+        *api == Api::CompilerCode || COMPILER_SERVICES.contains(&relative.as_str())
+    });
 
     let mut text = Vec::new();
     for (relative, hash, api) in entries {

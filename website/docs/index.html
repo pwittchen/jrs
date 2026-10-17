@@ -3307,7 +3307,10 @@ jobs:
   <code>--timings</code> on <code>build</code>, <code>test</code>, <code>run</code> and
   <code>package</code> adds this table after the summary (before the program, for
   <code>jrs run</code>). The same numbers go to <code>target/.jrs/timings.txt</code> as
-  tab-separated <code>phase</code> and <code>ms</code> columns, even under <code>-q</code>. In a
+  tab-separated <code>phase</code> and <code>ms</code> columns, even under <code>-q</code>. A unit's
+  bookkeeping has rows of its own: <code>compile &lt;unit&gt;: index</code>, reading what was
+  compiled into the unit's incremental index, and <code>compile &lt;unit&gt;: api digest</code>,
+  reading the API of the classes it compiles against. In a
   <a href="#workspaces-members-built-at-once">workspace</a>, each member built at once with others
   adds a <code>member &lt;name&gt;</code> row.
 </p>

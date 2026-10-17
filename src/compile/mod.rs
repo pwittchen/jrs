@@ -553,7 +553,9 @@ pub fn compile_timed(
     }
     result?;
     if let Some(tracker) = &tracker {
+        let indexing = Instant::now();
         tracker.record_all(unit)?;
+        steps.push(("index", indexing.elapsed()));
     }
     let outcome = finish(unit, unit.sources.len())?;
     store(unit, ui)?;

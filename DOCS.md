@@ -789,7 +789,11 @@ the way it was.
 
 `--timings` on `build`, `test`, `run` and `package` prints the wall time of
 each phase after the summary. The phases are resolution, downloads, each
-compiler step, resources, each task, the test JVM and packaging. The same
+compiler step, resources, each task, the test JVM and packaging. A unit's
+bookkeeping has rows of its own: `compile <unit>: index`, the time spent
+reading what was compiled into the unit's incremental index, and
+`compile <unit>: api digest`, the time spent reading the API of the classes
+it compiles against (the main classes, for the tests). The same
 numbers go to `target/.jrs/timings.txt` as tab-separated columns, even under
 `-q`. `jrs run` prints the table before the program starts.
 

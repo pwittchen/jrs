@@ -448,6 +448,36 @@ fn assert_matches_a_whole_build(toolchain: &Toolchain, root: &Path) {
         tree_of(&whole.output_dir),
         "an incremental build differs from a whole one"
     );
+    // And so is its index, which the rounds kept in part from the last
+    // build's rather than read: all but its settings, which name the
+    // output directory.
+    let index = |out: &str| {
+        let text = std::fs::read_to_string(root.join(out).join(".jrs/main.index")).unwrap();
+        text.lines()
+            .filter(|line| !line.starts_with("settings "))
+            .map(str::to_string)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        index("target"),
+        index("whole"),
+        "an incremental index differs from a whole one"
+    );
+}
+
+/// Date every class file of `root`'s build an hour back, so that the next
+/// build's rounds take the classes they did not compile from the index, as
+/// they do for a build that is not seconds old.
+fn age_classes(root: &Path) {
+    let hour_ago = std::time::SystemTime::now() - std::time::Duration::from_secs(3600);
+    for file in project::find_by_extension(&root.join("target/classes"), "class").unwrap() {
+        std::fs::File::options()
+            .write(true)
+            .open(&file)
+            .unwrap()
+            .set_modified(hour_ago)
+            .unwrap();
+    }
 }
 
 const SHAPE: &str = "package geo;\n\npublic abstract class Shape {\n    \
@@ -493,6 +523,7 @@ fn a_changed_body_compiles_only_its_own_source() {
     assert_eq!(rebuild(&toolchain, &root).unwrap(), 6);
 
     std::fs::write(&square, SQUARE.replace("side * side", "Math.pow(side, 2)")).unwrap();
+    age_classes(&root);
     assert_eq!(rebuild(&toolchain, &root).unwrap(), 1, "only Square");
     assert_matches_a_whole_build(&toolchain, &root);
 
@@ -513,6 +544,7 @@ fn a_changed_body_compiles_only_its_own_source() {
     );
     assert_ne!(without, SQUARE);
     std::fs::write(&square, without).unwrap();
+    age_classes(&root);
     assert_eq!(rebuild(&toolchain, &root).unwrap(), 2, "Square and Report");
     assert!(!builder.exists(), "the removed class was left behind");
     assert_matches_a_whole_build(&toolchain, &root);
@@ -591,6 +623,7 @@ fn an_added_method_stops_at_the_callers_whose_api_did_not_change() {
         "    public int three() {\n        return 3;\n    }\n\n    public int unused()",
     );
     std::fs::write(&base, &added).unwrap();
+    age_classes(&root);
     assert_eq!(rebuild(&toolchain, &root).unwrap(), 2, "Base and Middle");
     assert_matches_a_whole_build(&toolchain, &root);
 
@@ -601,6 +634,7 @@ fn an_added_method_stops_at_the_callers_whose_api_did_not_change() {
         added.replace("    public int unused() {\n        return 0;\n    }\n", ""),
     )
     .unwrap();
+    age_classes(&root);
     assert_eq!(
         rebuild(&toolchain, &root).unwrap(),
         3,
@@ -3828,7 +3862,15 @@ fn build_timings_follow_the_summary_and_are_written_to_target() {
 
     let rows = timings_file(&root);
     let phases: Vec<&str> = rows.iter().map(|(p, _)| p.as_str()).collect();
-    assert_eq!(phases, ["compile main: javac", "resources main", "total"]);
+    assert_eq!(
+        phases,
+        [
+            "compile main: javac",
+            "compile main: index",
+            "resources main",
+            "total"
+        ]
+    );
     let (_, total) = rows.last().unwrap();
     let sum: u128 = rows[..rows.len() - 1].iter().map(|(_, ms)| ms).sum();
     assert!(sum <= *total, "the phases do not overlap: {rows:?}");
@@ -3908,6 +3950,7 @@ fn package_timings_include_the_task_hooks_and_packaging() {
         [
             "task build-info (pre-compile)",
             "compile main: javac",
+            "compile main: index",
             "resources main",
             "packaging",
             "total"

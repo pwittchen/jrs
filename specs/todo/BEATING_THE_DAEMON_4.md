@@ -8,9 +8,9 @@ process outlives the command. The numbers are the fifth pass of
 2026-10-17, one run per cell, no warm-up), and the measurements below,
 taken the same evening on the same machine.
 
-Status: **§2 built, not yet benchmarked; §3, §4 and §6 proposed; §5's
-split dropped on its measurements, its training proposed.** What §2's
-code does and what it measured are in §2, under **Built**.
+Status: **§2 and §3 built, not yet benchmarked; §4 and §6 proposed; §5's
+split dropped on its measurements, its training proposed.** What §2's and
+§3's code does and what it measured are in each, under **Built**.
 
 Every "measured" figure but §2's **Built** ones was taken outside the
 benchmark, with the jrs release binary of `56c0d97`, on the generated
@@ -124,7 +124,7 @@ samples of 3.2 s and 4.2 s did not come back in twelve more. The worker's
 training is probably the longer chain because it compiles the worker's
 program first; §6 takes that up. The benchmark has not read it yet.
 
-## 3. Bookkeeping that reads every class
+## 3. Bookkeeping that reads every class ✅
 
 **Now.** After each round, `Incremental::record` (`compile/incremental.rs`)
 walks the whole output directory and parses every `.class` file, one at a
@@ -162,6 +162,54 @@ reads the classes, are in it too. Nothing splits it yet.
 
 **Measured by.** The new timing rows first; then `incremental`, `abi` and
 `clean` on `gen-2000`.
+
+**Built.** Points 1–3; point 4 is left.
+
+1. `--timings` has a `compile <unit>: index` row for each pass of the
+   bookkeeping — the sweep, each round's record, the save; the whole-unit
+   compile's record — and a `compile <unit>: api digest` row for the
+   digests a unit's fingerprint takes: the main classes', for the tests and
+   the suites, and the upstream members', for a workspace member.
+   `compile test (fresh)` no longer holds the digest.
+2. `Tracker::record_round` (`compile/incremental.rs`) takes from the index
+   every class it records for a source the round did not compile, with the
+   classes that source referred to, when the class file was last written
+   before the round's `javac` started, less a slack for a file system that
+   stamps late: 100 ms, or 2 s for a time in whole seconds (HFS+, FAT). A
+   first try with 2 s for every file read most of `gen-2000` again in the
+   benchmark's `abi`, whose previous command, the revert, had just written
+   about a thousand classes: 47–72 ms a record. Everything else is read,
+   as before, and tied to its source by its `SourceFile`; so a class a
+   round overwrote is read. `tests/build.rs` checks that the index the
+   rounds leave equals a whole build's, line for line, with the classes
+   dated an hour back so that the rounds do take them from the index.
+3. The whole-unit record and `abi::api_digest` read and parse their files
+   on `rayon`'s pool, in path order.
+
+Point 4 has nothing left to share once point 2 is in: the index reads
+only what a round compiled, while the digest reads every class. Sharing
+would need the digest to keep a per-class record of its own, which is a
+change of its own; `compile test: api digest` (55–64 ms on `gen-2000`)
+is what it would take.
+
+Measured with the benchmark's jrs columns alone (`JRS_BENCH_TOOLS=jrs`,
+`JRS_BENCH_PROJECTS=gen-300,gen-2000`, three runs, one warm-up), the
+baseline from a worktree of the commit before, the same session. Medians;
+"outside" is the total less the `javac` rows:
+
+| `gen-2000` | Before | After | Outside before | Outside after | `index` after |
+| --- | --- | --- | --- | --- | --- |
+| `incremental` | 403 ms | 362 ms | 203 ms | 159 ms | 15 ms |
+| `abi` | 829 ms | 790 ms | 240 ms | 173 ms | 27 ms |
+| `clean` | 1.56 s | 1.61 s | 196 ms | 205 ms | 47 ms |
+| `test-edit` | 1.15 s | 1.08 s | | | 13 ms |
+
+`incremental` and `abi` lose 44 and 67 ms outside `javac`, short of the
+110–150 ms expected: the rest is not the index (a `noop` is 85–91 ms
+whatever this does). `clean` does not move beyond noise: its record is
+still 47 ms in parallel, the walk and the parse of 2,000 classes. On
+`gen-300` the index is 2–8 ms in every scenario and nothing moves beyond
+the runs' spread. The benchmark has not read it yet.
 
 ## 4. A worker's first compile
 

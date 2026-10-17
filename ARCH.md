@@ -654,7 +654,18 @@ classpath or in the output directory, which is on the classpath during a
 partial run. A compile-time constant is the one API change that leaves no
 reference behind, since `javac` inlines it, so it compiles the unit whole.
 `tests/build.rs` checks that the classes built file by file equal a whole
-build's, byte for byte.
+build's, byte for byte, and that the index they leave equals a whole build's.
+
+The index's bookkeeping grows with what a round compiled, not with the unit
+(`specs/todo/BEATING_THE_DAEMON_4.md` §3). After a round, `Tracker::record_round`
+takes every class the previous index holds for a source outside the round from
+that index, with the classes that source referred to, as long as its file was
+written before the round's `javac` started, less a slack for a file system
+that stamps late (100 ms, or 2 s for a time in whole seconds); it reads only
+the rest. A whole-unit compile reads
+every class, as `abi::api_digest` does: both read the files in parallel on
+`rayon`'s pool. `--timings` shows each as a `compile <unit>: index` row, and the
+digests a unit's fingerprint takes as `compile <unit>: api digest`.
 
 What jrs knows about each language — file extension, source roots, compiler
 coordinate and main class, implied runtime library, generated flags — is plain

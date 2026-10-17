@@ -54,7 +54,9 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::ffi::OsStr;
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+use rayon::prelude::*;
 
 use super::abi::{self, ClassInfo, Kind};
 use super::worker::Worker;
@@ -89,6 +91,17 @@ fn worker_for_rounds(unit: &CompileUnit, toolchain: &Toolchain) -> Option<Worker
 /// How many rounds of direct dependents an API change may take, each a
 /// `javac` run, before whatever else it reaches compiles in one more.
 const ROUNDS: usize = 4;
+
+/// How long before a `javac` run started a class file may have been written
+/// and still be read again after it, as one that run may have written: a
+/// file system's clock can lag the one jrs reads by a tick (Linux stamps
+/// files from a coarse clock), and exFAT keeps hundredths of a second.
+const MTIME_SLACK: Duration = Duration::from_millis(100);
+
+/// [`MTIME_SLACK`] for a file whose time has no fraction of a second, as on
+/// a file system that keeps whole seconds (HFS+, ext3) or two (FAT): one
+/// written just after the run started is stamped with a time before it.
+const MTIME_SLACK_WHOLE_SECONDS: Duration = Duration::from_secs(2);
 
 /// The service file through which `javac` finds annotation processors on
 /// its classpath.
@@ -379,6 +392,26 @@ pub(super) fn known_hashes(unit: &CompileUnit) -> HashMap<PathBuf, String> {
         .collect()
 }
 
+/// Whether `path` was last written before a run that started at `time`,
+/// allowing for a file system that stamps it late ([`MTIME_SLACK`]);
+/// `false` when that cannot be told.
+fn written_before(path: &Path, time: SystemTime) -> bool {
+    let Ok(modified) = std::fs::metadata(path).and_then(|meta| meta.modified()) else {
+        return false;
+    };
+    let whole_seconds = modified
+        .duration_since(UNIX_EPOCH)
+        .is_ok_and(|since_epoch| since_epoch.subsec_nanos() == 0);
+    let slack = if whole_seconds {
+        MTIME_SLACK_WHOLE_SECONDS
+    } else {
+        MTIME_SLACK
+    };
+    modified
+        .checked_add(slack)
+        .is_some_and(|stamped| stamped < time)
+}
+
 fn stat(path: &Path) -> Option<(u64, u128)> {
     let meta = std::fs::metadata(path).ok()?;
     let modified = meta.modified().ok()?.duration_since(UNIX_EPOCH).ok()?;
@@ -483,6 +516,14 @@ struct Current {
     size: u64,
     modified: u128,
     hash: String,
+}
+
+/// A class file in the output directory, for [`Tracker::record_over`].
+enum Entry<'a> {
+    /// One an index records for this source, which can be taken as it is.
+    Kept(usize, &'a Class),
+    /// One to read.
+    Read(PathBuf),
 }
 
 /// One compile of a unit that may go file by file.
@@ -602,10 +643,12 @@ impl Tracker {
         first.extend(reached_from_upstream(previous, &upstream));
         if first.is_empty() {
             // No source here uses what changed: only what was seen moves.
-            let Some(after) = self.record(unit)? else {
+            let indexing = Instant::now();
+            let Some(after) = self.record_round(unit, previous, &[], SystemTime::now())? else {
                 return Ok(None);
             };
             after.save(unit)?;
+            steps.push(("index", indexing.elapsed()));
             return Ok(Some(0));
         }
 
@@ -613,7 +656,9 @@ impl Tracker {
         // anything a failed build left behind; the rest stay, to be compiled
         // against.
         let mut compiled = first.clone();
+        let indexing = Instant::now();
         sweep(unit, previous, &compiled)?;
+        steps.push(("index", indexing.elapsed()));
         // The later rounds go to a warm `javac` worker held for the rest of
         // this compile, when the unit has none of its own. It starts beside
         // the first round when other sources name a class that round
@@ -628,10 +673,10 @@ impl Tracker {
             later = Some(worker);
         }
         let mut round: Vec<usize> = first.into_iter().collect();
-        self.javac(
+        let since = self.javac(
             toolchain, unit, ui, steps, &round, previous, &compiled, None,
         )?;
-        let Some(mut after) = self.record(unit)? else {
+        let Some(mut after) = self.indexed(unit, previous, &round, since, steps)? else {
             return Ok(None);
         };
         let mut changes = Changes::default();
@@ -665,10 +710,10 @@ impl Tracker {
                     let worker = later
                         .get_or_insert_with(|| worker_for_rounds(unit, toolchain))
                         .as_ref();
-                    self.javac(
+                    let since = self.javac(
                         toolchain, unit, ui, steps, &rest, previous, &compiled, worker,
                     )?;
-                    let Some(next) = self.record(unit)? else {
+                    let Some(next) = self.indexed(unit, &after, &rest, since, steps)? else {
                         return Ok(None);
                     };
                     after = next;
@@ -689,10 +734,10 @@ impl Tracker {
             let worker = later
                 .get_or_insert_with(|| worker_for_rounds(unit, toolchain))
                 .as_ref();
-            self.javac(
+            let since = self.javac(
                 toolchain, unit, ui, steps, &next, previous, &compiled, worker,
             )?;
-            let Some(recorded) = self.record(unit)? else {
+            let Some(recorded) = self.indexed(unit, &after, &next, since, steps)? else {
                 return Ok(None);
             };
             changes = Changes::default();
@@ -715,8 +760,26 @@ impl Tracker {
             count(compiled.len(), None),
             if rounds == 1 { "round" } else { "rounds" }
         ));
+        let indexing = Instant::now();
         after.save(unit)?;
+        steps.push(("index", indexing.elapsed()));
         Ok(Some(compiled.len()))
+    }
+
+    /// [`Tracker::record_round`] after a `javac` run over `round` that
+    /// started at `since`, timed as an `index` step.
+    fn indexed(
+        &self,
+        unit: &CompileUnit,
+        base: &Index,
+        round: &[usize],
+        since: SystemTime,
+        steps: &mut Vec<(&'static str, Duration)>,
+    ) -> Result<Option<Index>> {
+        let indexing = Instant::now();
+        let index = self.record_round(unit, base, round, since);
+        steps.push(("index", indexing.elapsed()));
+        index
     }
 
     /// After the whole unit compiled: index it, or drop the index if its
@@ -782,7 +845,9 @@ impl Tracker {
     }
 
     /// One `javac` run over some of the unit's sources, with the output
-    /// directory first on its classpath. If it fails, the index is left
+    /// directory first on its classpath; the time it started, which
+    /// [`Tracker::record_round`] reads the class files written since by. If
+    /// it fails, the index is left
     /// saying that every source in `compiled` — this run's and an earlier
     /// run's in the same build — has to be compiled again, since the output
     /// directory no longer holds what the index says it does.
@@ -797,7 +862,8 @@ impl Tracker {
         previous: &Index,
         compiled: &BTreeSet<usize>,
         worker: Option<&Worker>,
-    ) -> Result<()> {
+    ) -> Result<SystemTime> {
+        let since = SystemTime::now();
         let paths: Vec<PathBuf> = sources
             .iter()
             .map(|&i| self.current[i].path.clone())
@@ -825,7 +891,7 @@ impl Tracker {
             }
             let _ = std::fs::remove_file(unit.fingerprint_path());
         }
-        result
+        result.map(|()| since)
     }
 
     /// Index what the output directory holds now, and the tracked classes
@@ -833,45 +899,80 @@ impl Tracker {
     /// tied to exactly one source: by its `SourceFile` name, and when two
     /// sources share that name, by its package too.
     fn record(&self, unit: &CompileUnit) -> Result<Option<Index>> {
+        self.record_over(unit, None)
+    }
+
+    /// [`Tracker::record`] after a `javac` run over `round` that started at
+    /// `since`, reading only what that run may have written
+    /// (`specs/todo/BEATING_THE_DAEMON_4.md` §3): a class `base` records for
+    /// a source outside `round`, whose file was last written before the
+    /// run, is taken from `base` as it stands, with the classes that source
+    /// referred to then. Every other class file is read.
+    fn record_round(
+        &self,
+        unit: &CompileUnit,
+        base: &Index,
+        round: &[usize],
+        since: SystemTime,
+    ) -> Result<Option<Index>> {
+        self.record_over(unit, Some((base, round, since)))
+    }
+
+    /// [`Tracker::record`], taking from `kept` — an index, the sources just
+    /// compiled and the time their run started — every class it records for
+    /// another source whose file is older than that run, and reading the rest, in
+    /// parallel: one class file is parsed apart from every other.
+    fn record_over(
+        &self,
+        unit: &CompileUnit,
+        kept: Option<(&Index, &[usize], SystemTime)>,
+    ) -> Result<Option<Index>> {
         let mut named: HashMap<&OsStr, Vec<usize>> = HashMap::new();
         for (i, source) in self.current.iter().enumerate() {
             if let Some(name) = source.path.file_name() {
                 named.entry(name).or_default().push(i);
             }
         }
+        let files = self.entries(unit, kept)?;
+        let read: Vec<Result<Option<abi::ClassInfo>>> = files
+            .par_iter()
+            .filter_map(|entry| match entry {
+                Entry::Read(file) => Some(file),
+                Entry::Kept(..) => None,
+            })
+            .map(|file| Ok(abi::class_info(&std::fs::read(file).path(file)?)))
+            .collect();
+        let mut read = read.into_iter();
+
         let mut classes: Vec<Vec<Class>> = vec![Vec::new(); self.current.len()];
         let mut refs: Vec<BTreeSet<String>> = vec![BTreeSet::new(); self.current.len()];
         let mut unit_classes = HashSet::new();
-        for file in project::find_by_extension(&unit.output_dir, "class")? {
-            let bytes = std::fs::read(&file).path(&file)?;
-            let Some(info) = abi::class_info(&bytes) else {
+        let mut referring = HashSet::new();
+        for entry in &files {
+            let file = match entry {
+                Entry::Kept(owner, class) => {
+                    unit_classes.insert(class.name.clone());
+                    classes[*owner].push((*class).clone());
+                    if let Some((base, ..)) = kept
+                        && referring.insert(*owner)
+                    {
+                        let source = &base.sources[*owner];
+                        refs[*owner].extend(source.deps.iter().chain(&source.ext).cloned());
+                    }
+                    continue;
+                }
+                Entry::Read(file) => file,
+            };
+            let Some(info) = read.next().transpose()?.flatten() else {
                 return Ok(None);
             };
             // A name that does not map back to its own file (a lossy
             // non-UTF-8 name) could not be found again to delete.
-            if class_path(&unit.output_dir, &info.name) != file {
+            if class_path(&unit.output_dir, &info.name) != *file {
                 return Ok(None);
             }
-            let Some(source_file) = &info.source_file else {
+            let Some(owner) = self.owner(&named, &info) else {
                 return Ok(None);
-            };
-            let candidates = named
-                .get(OsStr::new(source_file))
-                .map_or(&[][..], Vec::as_slice);
-            let owner = if let [one] = candidates {
-                *one
-            } else {
-                let package = info.name.rsplit_once('/').map_or("", |(p, _)| p);
-                let expected = Path::new(package).join(source_file);
-                let matching: Vec<usize> = candidates
-                    .iter()
-                    .copied()
-                    .filter(|&i| self.current[i].path.ends_with(&expected))
-                    .collect();
-                match matching[..] {
-                    [one] => one,
-                    _ => return Ok(None),
-                }
             };
             unit_classes.insert(info.name.clone());
             classes[owner].push(Class::new(&info));
@@ -914,6 +1015,61 @@ impl Tracker {
             sources,
             seen: seen.into_values().collect(),
         }))
+    }
+
+    /// Each class file in the output directory, in path order: one `kept`
+    /// says can be taken from its index, or one to read.
+    fn entries<'a>(
+        &self,
+        unit: &CompileUnit,
+        kept: Option<(&'a Index, &[usize], SystemTime)>,
+    ) -> Result<Vec<Entry<'a>>> {
+        let mut reusable: HashMap<PathBuf, (usize, &Class)> = HashMap::new();
+        let mut before = UNIX_EPOCH;
+        if let Some((base, round, time)) = kept
+            && base.sources.len() == self.current.len()
+        {
+            before = time;
+            let round: HashSet<usize> = round.iter().copied().collect();
+            for (i, source) in base.sources.iter().enumerate() {
+                if !round.contains(&i) {
+                    for class in &source.classes {
+                        reusable.insert(class_path(&unit.output_dir, &class.name), (i, class));
+                    }
+                }
+            }
+        }
+        Ok(project::find_by_extension(&unit.output_dir, "class")?
+            .into_iter()
+            .map(|file| match reusable.get(&file) {
+                Some(&(owner, class)) if written_before(&file, before) => Entry::Kept(owner, class),
+                _ => Entry::Read(file),
+            })
+            .collect())
+    }
+
+    /// The source `info` was compiled from, by its `SourceFile` name, and
+    /// when two sources share that name, by its package too; `named` holds
+    /// the sources by file name.
+    fn owner(&self, named: &HashMap<&OsStr, Vec<usize>>, info: &abi::ClassInfo) -> Option<usize> {
+        let source_file = info.source_file.as_ref()?;
+        let candidates = named
+            .get(OsStr::new(source_file))
+            .map_or(&[][..], Vec::as_slice);
+        if let [one] = candidates {
+            return Some(*one);
+        }
+        let package = info.name.rsplit_once('/').map_or("", |(p, _)| p);
+        let expected = Path::new(package).join(source_file);
+        let matching: Vec<usize> = candidates
+            .iter()
+            .copied()
+            .filter(|&i| self.current[i].path.ends_with(&expected))
+            .collect();
+        match matching[..] {
+            [one] => Some(one),
+            _ => None,
+        }
     }
 
     /// The tracked classes the unit's classes refer to, and their
@@ -1458,6 +1614,24 @@ mod tests {
 
         let module = tree.write("src/module-info.java", b"");
         assert!(!allowed(&tree.unit(vec![module, main])));
+    }
+
+    #[test]
+    fn a_class_written_after_a_run_started_or_just_before_is_read_again() {
+        let tree = Tree::new("written");
+        let path = tree.write("target/classes/p/A.class", b"");
+        let now = SystemTime::now();
+        assert!(!written_before(&path, now), "written by the run");
+        assert!(written_before(&path, now + Duration::from_secs(1)));
+        let file = std::fs::File::options().write(true).open(&path).unwrap();
+        let whole = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        file.set_modified(whole).unwrap();
+        assert!(
+            !written_before(&path, whole + Duration::from_secs(1)),
+            "a whole-second time may be a second late"
+        );
+        assert!(written_before(&path, whole + Duration::from_secs(3)));
+        assert!(!written_before(&tree.0.join("gone.class"), now));
     }
 
     #[test]
