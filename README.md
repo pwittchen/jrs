@@ -174,6 +174,53 @@ cargo test
 See [DOCS.md](DOCS.md#development) for the network tests, the benchmarks and
 the release process.
 
+## Benchmarks
+
+### Running them by hand
+
+The comparison builds, tests, runs and packages the same projects with jrs,
+Maven and Gradle. It needs a JDK, `mvn` and `gradle` (9 or later) on `PATH`.
+No timed run touches the network: one recording run fills a local mirror of
+Maven Central and the Gradle Plugin Portal, and every later run reads it:
+
+```
+JRS_BENCH_RECORD=1 cargo bench --bench compare   # fill the mirror, once
+cargo bench --bench compare                      # measure, into benchmarks/REPORT.md
+JRS_BENCH_RUNS=1 JRS_BENCH_WARMUP=0 JRS_BENCH_PROJECTS=gen-300 \
+  cargo bench --bench compare                    # one quick run of one project
+```
+
+`JRS_BENCH_TOOLS`, `JRS_BENCH_PROJECTS`, `JRS_BENCH_SCENARIOS`,
+`JRS_BENCH_RUNS` (default 7), `JRS_BENCH_WARMUP` (2), `JRS_BENCH_MIRROR` and
+`JRS_BENCH_REPORT` narrow or redirect it; see
+[DOCS.md](DOCS.md#development) for the rest and
+[`specs/BENCHMARKS.md`](specs/BENCHMARKS.md) for the method.
+
+### Running them with Claude Code
+
+The comparison can also be run as a Claude Code skill:
+
+```
+/run-benchmarks              # one run per cell, the parity set
+/run-benchmarks full         # the harness's defaults: 7 measured runs, 2 warm-up
+/run-benchmarks projects=a,b # only the projects named
+```
+
+Under the hood the skill
+([`.claude/skills/run-benchmarks`](.claude/skills/run-benchmarks/SKILL.md))
+checks the tree is clean, the machine is plugged in and the JDK, Maven and
+Gradle match the last recorded pass. It then builds the benches, records a
+fresh local Maven mirror (the only step that reaches the network) and runs
+`cargo bench --bench compare` against it, keeping the report, the raw samples
+and the logs under `target/bench/<stamp>/`. From the raw samples it writes the
+result as a new pass in
+[`specs/BENCHMARKS_SUMMARY.md`](specs/BENCHMARKS_SUMMARY.md) — the machine,
+the tool versions, the commits since the previous pass and the cells that
+moved — and brings the website's benchmarks page up to the new numbers. It
+stops without editing anything if a project fails its checks, and it leaves
+the changes uncommitted. A run takes roughly 15–30 minutes on an otherwise
+idle machine.
+
 ## Licence
 
 Apache License 2.0. See [LICENSE](LICENSE).
