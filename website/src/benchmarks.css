@@ -219,6 +219,19 @@
   background: var(--accent);
 }
 
+/* The fastest tool of a chart marked data-best. Later than .jrs, so it wins. */
+.bar.best .bar-fill {
+  background: var(--best);
+}
+
+.bar.best .bar-name,
+.bar.best .bar-value,
+.bar.best .bar-value .x,
+.bar.best .bar-value .x.ahead {
+  color: var(--best);
+  font-weight: 600;
+}
+
 .bar-value {
   grid-area: value;
   color: var(--text);

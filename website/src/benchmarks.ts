@@ -202,15 +202,18 @@ function renderBars(host: HTMLElement): void {
   const values = row.slice(1) as (number | null)[];
   const max = Math.max(...values.map((v) => v ?? 0));
   const jrs = values[0];
+  // A chart marked data-best draws its fastest tool in yellow, as the tables do.
+  const best = host.dataset.best !== undefined ? Math.min(...values.filter((v): v is number => v != null)) : null;
   const list = el("ol", "bars");
   TOOLS.forEach((tool, i) => {
     const value = values[i];
     if (value === null || value === undefined) return;
     const item = el("li", tool.id === "jrs" ? "bar jrs" : "bar");
+    if (value === best) item.classList.add("best");
     const compared = jrs && tool.id !== "jrs" ? (value < jrs ? faster(value, jrs) : ratio(value, jrs)) : "";
     const versus = !compared ? "" : value < jrs! ? `, ${compared} than jrs` : `, ${compared} jrs's time`;
     item.tabIndex = 0;
-    item.setAttribute("aria-label", `${tool.name}: ${format(value)}${versus}`);
+    item.setAttribute("aria-label", `${tool.name}: ${format(value)}${versus}${value === best ? " (fastest)" : ""}`);
     item.append(el("span", "bar-name", tool.short));
     const track = el("span", "bar-track");
     const fill = el("span", "bar-fill");
