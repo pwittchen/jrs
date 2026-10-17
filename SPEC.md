@@ -2800,7 +2800,9 @@ produces something runnable.
   and `test.share-classes = true` as the AOT cache on JDK 25 with a
   remembered fallback to the archive (§10.2)
 - Its second step is in
-  [BEATING_THE_DAEMON_2.md](specs/todo/BEATING_THE_DAEMON_2.md).
+  [BEATING_THE_DAEMON_2.md](specs/todo/BEATING_THE_DAEMON_2.md), and its
+  third, the caches made where no build waits on them, in
+  [BEATING_THE_DAEMON_3.md](specs/todo/BEATING_THE_DAEMON_3.md).
 
 Tick the corresponding README boxes as each lands — the README is the
 user-facing progress tracker, this document is the design behind it.
