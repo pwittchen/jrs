@@ -39,7 +39,9 @@ against `master`. Its `reproducible` job packages every `examples/` project
 from two checkouts at different paths and compares what was written byte for
 byte: a compiler or writer that records a path or a time fails there. Changes that only touch `*.md`, `specs/`, `LICENSE` or `website/` are
 excluded via `paths-ignore` — they cannot break the build, so they do not run it;
-neither do changes under `plugins/`. `.github/workflows/intellij.yml` tests and
+neither do changes under `plugins/`. A branch push whose last commit message
+contains `#no-deploy` runs no job in `rust.yml`, `intellij.yml` or `website.yml`;
+a tag push ignores the marker. `.github/workflows/intellij.yml` tests and
 builds the IntelliJ plugin with Gradle on changes to it or to a `jrs.toml` under
 `examples/` or `tests/fixtures`, and `rust.yml` calls it on a release. A `v*` tag
 push runs the same checks, then `bump` writes the tag's version into `Cargo.toml`

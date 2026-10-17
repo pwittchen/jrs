@@ -39,6 +39,8 @@ on:
 
 jobs:
   plugin:
+    # `#no-deploy` in a branch push's last commit message skips it (rust.yml).
+    if: github.event_name != 'push' || startsWith(github.ref, 'refs/tags/') || !contains(github.event.head_commit.message, '#no-deploy')
     runs-on: ubuntu-24.04
 
     permissions:

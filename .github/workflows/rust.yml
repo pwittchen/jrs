@@ -8,6 +8,10 @@ on:
   # site and intellij.yml builds the IntelliJ plugin. Path filters are not
   # evaluated for tag pushes, so a version tag always runs the full pipeline
   # and then publishes a release (see `dist`).
+  #
+  # A branch push whose last commit message contains `#no-deploy` runs no job
+  # here, nor in intellij.yml or website.yml. A tag push ignores the marker:
+  # tagging is the explicit request for a release.
   push:
     branches: [ "master" ]
     tags: [ "v*" ]
@@ -31,6 +35,7 @@ env:
 
 jobs:
   build:
+    if: github.event_name != 'push' || startsWith(github.ref, 'refs/tags/') || !contains(github.event.head_commit.message, '#no-deploy')
 
     # Classpath separators, `.exe` suffixes, `%LOCALAPPDATA%` and drive-letter
     # paths are only exercised where they occur, so every platform jrs ships a
@@ -95,6 +100,7 @@ jobs:
   # writes is compared byte for byte: a compiler that records a path or a
   # time fails here.
   reproducible:
+    if: github.event_name != 'push' || startsWith(github.ref, 'refs/tags/') || !contains(github.event.head_commit.message, '#no-deploy')
     runs-on: ubuntu-24.04
 
     steps:
