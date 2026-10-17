@@ -250,6 +250,15 @@ them:
   flag jrs has no counterpart for. A project's own `gradle.properties`
   (`org.gradle.parallel`, `org.gradle.jvmargs`) and `.mvn/jvm.config` are
   kept, since its users get them.
+- **Members' tests at once in `gen-ws`.** Its generated `jrs.toml` sets
+  `[workspace] parallel-tests = true`, which jrs leaves off by default since
+  suites that share a port, a database or a fixed file would race. The
+  generated suites share nothing, and the Gradle columns that lead this
+  cell — the configuration cache, which runs tasks of different projects at
+  once, and `--parallel` — already run the members' `test` tasks at once,
+  so leaving it off would time jrs's suites one after another against
+  Gradle's run together
+  ([BEATING_THE_DAEMON_2.md §4](todo/BEATING_THE_DAEMON_2.md#4-parallel-tests-in-the-benchmarks-workspace)).
 - **No build cache on either side.** jrs runs with `--no-build-cache`; Gradle
   with `--no-build-cache` and `-Dorg.gradle.caching=false`, overriding a
   project that turns it on; Maven with `-Dmaven.build.cache.enabled=false`

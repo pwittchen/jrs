@@ -2836,7 +2836,9 @@ fn write_build_files(
         write(
             PathBuf::from("jrs.toml"),
             format!(
-                "# {header}.\n[workspace]\nmembers = [{}]\n\n[java]\nsource = {RELEASE}\n",
+                "# {header}.\n[workspace]\nmembers = [{}]\n\
+                 # As the Gradle columns run them (specs/BENCHMARKS.md §5).\n\
+                 parallel-tests = true\n\n[java]\nsource = {RELEASE}\n",
                 members.join(", ")
             ),
         )?;
