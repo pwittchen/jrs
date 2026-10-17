@@ -1573,6 +1573,19 @@ source <(jrs completions zsh)           # in ~/.zshrc, after compinit
 jrs completions fish | source           # in ~/.config/fish/config.fish
 ```
 
+In zsh the script can also be saved as `_jrs` in a directory on `$fpath`,
+which `compinit` then loads on its own:
+
+```
+mkdir -p ~/.zfunc
+jrs completions zsh > ~/.zfunc/_jrs
+# in ~/.zshrc, before compinit:
+fpath=(~/.zfunc $fpath)
+```
+
+Regenerate the file after upgrading jrs, so new commands and flags complete.
+Task names are not completed: nothing calls back into jrs at completion time.
+
 ## Editors and IntelliJ IDEA
 
 jrs generates no IDE project files. Instead it answers the questions a tool can

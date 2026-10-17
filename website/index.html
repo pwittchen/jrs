@@ -321,6 +321,14 @@ jrs test
 jrs migrate         <span class="c"># or start from an existing pom.xml / build.gradle</span></code></pre>
           <button class="copy" type="button">Copy</button>
         </div>
+
+        <h3>Shell completions</h3>
+        <div class="shell">
+<pre><code>source &lt;(jrs completions bash)   <span class="c"># bash: in ~/.bashrc</span>
+source &lt;(jrs completions zsh)    <span class="c"># zsh: in ~/.zshrc, after compinit</span></code></pre>
+          <button class="copy" type="button">Copy</button>
+        </div>
+        <p class="note">Tab completion for every command and flag. In zsh you can instead save the script as <code>_jrs</code> on your <code>$fpath</code>; that and fish are in <a href="docs/#cmd-completions">the docs</a>.</p>
       </section>
 
       <section class="wrap section" id="intellij">

@@ -106,6 +106,22 @@ on Linux, macOS and Windows runners and can cache its dependencies between runs:
 - run: jrs test
 ```
 
+For tab completion of commands and flags, load the script `jrs completions`
+prints from your shell's startup file:
+
+```sh
+# bash, in ~/.bashrc
+source <(jrs completions bash)
+
+# zsh, in ~/.zshrc, after compinit
+source <(jrs completions zsh)
+```
+
+In zsh you can instead save it as `_jrs` in a directory on `$fpath`, before
+`compinit` runs: `jrs completions zsh > ~/.zfunc/_jrs`, with
+`fpath=(~/.zfunc $fpath)` in `~/.zshrc`. Fish is covered in
+[DOCS.md](DOCS.md#shell-completions).
+
 Windows binaries, other versions, manual installation and the action's inputs
 are covered in [DOCS.md](DOCS.md#installation). A prebuilt jrs updates itself:
 `jrs self check` says whether a newer release is out, and `jrs self update`

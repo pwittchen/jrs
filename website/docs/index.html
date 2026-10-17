@@ -1780,6 +1780,15 @@ jrs init --check --format</pre>
 <pre>source &lt;(jrs completions bash)          # in ~/.bashrc
 source &lt;(jrs completions zsh)           # in ~/.zshrc, after compinit
 jrs completions fish | source           # in ~/.config/fish/config.fish</pre>
+<p>
+  In zsh the script can also be saved as <code>_jrs</code> in a directory on <code>$fpath</code>,
+  which <code>compinit</code> then loads on its own:
+</p>
+<pre>mkdir -p ~/.zfunc
+jrs completions zsh &gt; ~/.zfunc/_jrs
+# in ~/.zshrc, before compinit:
+fpath=(~/.zfunc $fpath)</pre>
+<p>Regenerate the file after upgrading jrs, so new commands and flags complete.</p>
 <p>Task names are not completed: nothing calls back into jrs at completion time.</p>
 </section>
 
