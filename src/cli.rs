@@ -1183,13 +1183,25 @@ impl<'a> Session<'a> {
 
     /// Train `javac`'s AOT cache for `toolchain` on a thread of its own,
     /// when there is none and, unless `always`, no command before this one
-    /// looked for it (`specs/todo/BEATING_THE_DAEMON_3.md` §2).
+    /// looked for it (`specs/todo/BEATING_THE_DAEMON_3.md` §2); and the
+    /// `javac` worker's the same way, unless this session holds workers of
+    /// its own, whose first one records it
+    /// (`specs/todo/BEATING_THE_DAEMON_4.md` §2).
     fn train_javac(&self, toolchain: &Toolchain, always: bool) {
-        if let Ok(cache) = Cache::discover()
-            && share::train_javac(&cache.root().join("cds"), toolchain, always)
-        {
+        let Ok(cache) = Cache::discover() else {
+            return;
+        };
+        if share::train_javac(&cache.root().join("cds"), toolchain, always) {
             self.ui.verbose(format!(
                 "training javac's class-data cache for JDK {} beside the build",
+                toolchain.version
+            ));
+        }
+        if self.worker.is_none()
+            && Worker::train_beside(cache.root().join("worker"), toolchain, always)
+        {
+            self.ui.verbose(format!(
+                "training the javac worker's class-data cache for JDK {} beside the build",
                 toolchain.version
             ));
         }
@@ -3828,8 +3840,8 @@ impl<'a> Session<'a> {
     /// the dependencies, the compilers, the test launcher — without building;
     /// with `--sources`, every dependency's `-sources.jar` as well.
     fn fetch_command(&self, sources: bool) -> Result<i32> {
-        // The compiler caches too, which a build would otherwise make: the
-        // `javac` one beside the downloads, the worker's after them.
+        // The compiler caches too, which a build would otherwise make, both
+        // beside the downloads.
         let toolchain = self.installed_toolchain();
         if let Some(toolchain) = &toolchain {
             self.train_javac(toolchain, true);

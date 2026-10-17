@@ -8,15 +8,18 @@ process outlives the command. The numbers are the fifth pass of
 2026-10-17, one run per cell, no warm-up), and the measurements below,
 taken the same evening on the same machine.
 
-Status: **proposed; nothing here is built.** Every "measured" figure was
-taken outside the benchmark, with the jrs release binary of `56c0d97`, on
-the generated projects the harness writes (copied from its `work/`
-directory) and on `examples/wordstats` and `examples/bookmarks`, each with
-an empty `JRS_CACHE_DIR` of its own, reading the fifth pass's recorded
-mirror, the commands in the benchmark's order (`cold`, `clean`, `noop`,
-the body edit and back, then `abi`), three samples of each `abi`. They
-measure what a change would bring before it is made; the benchmark still
-decides.
+Status: **§2 built, not yet benchmarked; §3, §4 and §6 proposed; §5's
+split dropped on its measurements, its training proposed.** What §2's
+code does and what it measured are in §2, under **Built**.
+
+Every "measured" figure but §2's **Built** ones was taken outside the
+benchmark, with the jrs release binary of `56c0d97`, on the generated
+projects the harness writes (copied from its `work/` directory) and on
+`examples/wordstats` and `examples/bookmarks`, each with an empty
+`JRS_CACHE_DIR` of its own, reading the fifth pass's recorded mirror, the
+commands in the benchmark's order (`cold`, `clean`, `noop`, the body edit
+and back, then `abi`), three samples of each `abi`. They measure what a
+change would bring before it is made; the benchmark still decides.
 
 ---
 
@@ -29,10 +32,10 @@ fastest of those columns.
 
 | Gap | Cell | jrs | Gradle | Part |
 | --- | --- | --- | --- | --- |
-| The rounds of an API change fork cold `javac`s | `wordstats` abi | 381 ms | 374 ms (CC) | §2 |
-| | `bookmarks` abi | 431 ms | 403 ms (CC) | §2 |
-| | `gen-300` abi | 517 ms | 415 ms (CC) | §2, §3 |
-| | `gen-2000` abi | 895 ms | 595 ms (CC) | §2, §3, §5 |
+| The rounds of an API change fork cold `javac`s | `wordstats` abi | 381 ms | 374 ms (CC) | §2 (built) |
+| | `bookmarks` abi | 431 ms | 403 ms (CC) | §2 (built) |
+| | `gen-300` abi | 517 ms | 415 ms (CC) | §2 (built), §3 |
+| | `gen-2000` abi | 895 ms | 595 ms (CC) | §2 (built), §3, §5 |
 | A worker's first compile | `gen-ws` abi | 512 ms | 422 ms (CC) | §4 |
 | | `gen-ws` clean | 817 ms | 664 ms (CC) | §4 |
 | A large compile in a cold JIT | `gen-2000` clean | 1.54 s | 1.21 s (CC) | §3, §5 |
@@ -94,6 +97,32 @@ worker's adds to `cold`, train it on its own thread, joined last, as the
 (428–434 ms against 415–434 ms), `gen-2000` 10% closer.
 
 **Measured by.** `abi` on every project; `cold` on the three small ones.
+
+**Built.** `Worker::train_beside` (`compile/worker.rs`) runs the training
+`Worker::train` does for `jrs fetch`, on a thread of `share::background`,
+which the command joins at its end; `Session::train_javac` starts it
+beside `javac`'s, in a session that holds no workers of its own (a
+workspace's pool and `--watch` still record theirs). It is gated by
+`share::worker_training_due`: no archive there, the `.seen` marker unless
+`always`, and once per command, though a clean build asks twice. Until
+the worker's program is built the archive's name holds none of its size
+and time, so that first marker stands for that look alone.
+
+Measured the same way as above, three samples each, before and after,
+with `cold` timed from a cache that holds the jars but no compiler cache:
+
+| | `abi` before | `abi` after | `cold` before | `cold` after |
+| --- | --- | --- | --- | --- |
+| `wordstats` | 371–375 ms | 300–301 ms | 1.01–1.03 s | 1.26–1.32 s |
+| `bookmarks` | 412–416 ms | 337–342 ms | 0.99–1.06 s | 1.25–1.32 s |
+| `gen-300` | 498–503 ms | 431–438 ms | 1.03–1.05 s | 1.28–1.35 s |
+| `gen-2000` | 871–877 ms | 779–787 ms | 1.58–1.60 s | 1.63–1.64 s |
+
+`abi` is what the experiment said; `clean` and `noop` do not move. The
+price is `cold`, by 0.25–0.3 s on the three small projects; two first
+samples of 3.2 s and 4.2 s did not come back in twelve more. The worker's
+training is probably the longer chain because it compiles the worker's
+program first; §6 takes that up. The benchmark has not read it yet.
 
 ## 3. Bookkeeping that reads every class
 
@@ -224,6 +253,7 @@ paths.
 **Proposal.**
 
 1. **Drop the split** (BEATING_THE_DAEMON_2.md §6) on these numbers.
+   Done: §7 lists it as out of scope.
 2. **Make the training workload a real compile's size**: a few hundred
    generated classes rather than one file and the workers' sources, the
    generator embedded in jrs as `Training.java` is. Measure the cache it

@@ -28,7 +28,9 @@
 //! to about a forked one's (`specs/todo/BEATING_THE_DAEMON_2.md` §3). It is
 //! recorded by the first worker of the first command that finds none, and
 //! by no other worker in its pool (`specs/todo/BEATING_THE_DAEMON_3.md`
-//! §2). In a command that is not `--watch`, that worker records its first
+//! §2); a single-module build, which starts no worker until an API change
+//! needs one, trains it beside the build instead ([`Worker::train_beside`],
+//! `specs/todo/BEATING_THE_DAEMON_4.md` §2). In a command that is not `--watch`, that worker records its first
 //! compile alone: it is then stopped, its JVM dumps and the cache is
 //! assembled on threads the command joins at its end, while a new worker
 //! takes its place for the members still to compile. A workspace command
@@ -331,6 +333,37 @@ impl Worker {
     /// this way, at a moment the user already waits. The cache is in place
     /// once this returns.
     pub fn train(&self, toolchain: &Toolchain, ui: &Ui) {
+        self.record(toolchain, Some(ui));
+        share::join_background();
+    }
+
+    /// Train the `javac` worker's cache under `dir` as [`Worker::train`]
+    /// does, on a thread of its own that the command joins at its end, when
+    /// there is none and, unless `always`, no command before this one looked
+    /// for it (`specs/todo/BEATING_THE_DAEMON_4.md` §2). A single-module
+    /// build starts no worker that would record it, and without it an API
+    /// change's later rounds fork a cold `javac`. Whether a training started.
+    #[must_use]
+    pub fn train_beside(dir: PathBuf, toolchain: &Toolchain, always: bool) -> bool {
+        let worker = Worker::javac_only(dir);
+        let jar = worker.program_jar(Kind::Javac, toolchain);
+        if !share::worker_training_due(
+            &worker.dir.join("cds"),
+            toolchain,
+            Kind::Javac.main_class(),
+            &jar,
+            always,
+        ) {
+            return false;
+        }
+        let toolchain = toolchain.clone();
+        share::background(move || worker.record(&toolchain, None));
+        true
+    }
+
+    /// The training both [`Worker::train`] and [`Worker::train_beside`]
+    /// run, saying what it does on `ui` when there is one.
+    fn record(&self, toolchain: &Toolchain, ui: Option<&Ui>) {
         let launch = Launch {
             toolchain,
             classpath: &[],
@@ -338,13 +371,21 @@ impl Worker {
             args: &[],
             key: toolchain.javac.display().to_string(),
         };
-        let mut worker = match self.start(Kind::Javac, &launch, ui) {
+        let mut worker = match self.spawn(Kind::Javac, &launch) {
             Ok(worker) => worker,
             Err(why) => {
-                ui.verbose(format!("javac worker: not started: {why}"));
+                if let Some(ui) = ui {
+                    ui.verbose(format!("javac worker: not started: {why}"));
+                }
                 return;
             }
         };
+        if let Some(ui) = ui {
+            ui.verbose(format!(
+                "started a javac worker (pid {})",
+                worker.child.id()
+            ));
+        }
         if !worker.share.as_ref().is_some_and(Share::dumps) {
             // A cache there already, or another worker recording it.
             worker.stop();
@@ -365,11 +406,12 @@ impl Worker {
             std::fs::write(&argfile, super::render_argfile(&args, &sources)).is_ok()
         });
         if written && let Err(why) = worker.request(&argfile) {
-            ui.verbose(format!("javac worker: training: {why}"));
+            if let Some(ui) = ui {
+                ui.verbose(format!("javac worker: training: {why}"));
+            }
             worker.compilations = 0;
         }
         worker.stop();
-        share::join_background();
         let _ = std::fs::remove_dir_all(&scratch);
     }
 
@@ -534,6 +576,17 @@ impl Worker {
     /// Start a worker JVM of `kind` on `launch`'s JDK, compiling its program
     /// first if this jrs and JDK have not.
     fn start(&self, kind: Kind, launch: &Launch<'_>, ui: &Ui) -> Result<Running, String> {
+        let running = self.spawn(kind, launch)?;
+        ui.verbose(format!(
+            "started a {} worker (pid {})",
+            kind.name(),
+            running.child.id()
+        ));
+        Ok(running)
+    }
+
+    /// [`Worker::start`], saying nothing.
+    fn spawn(&self, kind: Kind, launch: &Launch<'_>) -> Result<Running, String> {
         let toolchain = launch.toolchain;
         let jar = self.program(kind, toolchain)?;
         // The `kotlinc` worker loads the compiler's classes, which the
@@ -567,11 +620,6 @@ impl Worker {
             .stderr(Stdio::null())
             .spawn()
             .map_err(|e| format!("{}: {e}", toolchain.java.display()))?;
-        ui.verbose(format!(
-            "started a {} worker (pid {})",
-            kind.name(),
-            child.id()
-        ));
         Ok(Running {
             stdin: child.stdin.take(),
             stdout: child.stdout.take().map(BufReader::new),

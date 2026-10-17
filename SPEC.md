@@ -1000,11 +1000,13 @@ own.
   workspace's graph is read, on the first member's JDK when it is
   installed, and primes it with a one-class compile of its own; one that
   compiled nothing is killed at the end. `jrs build` and `jrs run` stop the
-  workers at once as soon as the last member has compiled. `jrs fetch` and
-  `jrs jdk install` train the worker's archive on the same embedded
-  workload as `javac`'s. A run over a few files is forked rather than sent to a
-  one-command worker that would start without its archive, when the forked
-  `javac` maps its own. A single-module compile that follows an API change
+  workers at once as soon as the last member has compiled. A single-module
+  build, which starts no worker to record it, trains it on a thread of its
+  own beside `javac`'s, on the same embedded workload, the first time a
+  command finds it missing, and joins that thread before it exits.
+  `jrs fetch` and `jrs jdk install` train it too. A run over a few files
+  is forked rather than sent to a one-command worker that would start
+  without its archive, when the forked `javac` maps its own. A single-module compile that follows an API change
   into a second round sends the later rounds to a worker of its own, when
   that worker's archive is there, and starts it beside the first round when
   other sources name a class that round compiles; that worker never records

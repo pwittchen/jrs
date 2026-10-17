@@ -40,8 +40,12 @@
 //! that finds the marker records the cache in a whole-unit compile of its
 //! own, as before. A run over a few files maps the cache, with its own
 //! quick JVM flags, and never records one, since that would cost the edit
-//! several times what it saves. `jrs fetch` and `jrs jdk install` train the
-//! caches too, at a moment the user already waits.
+//! several times what it saves. The `javac` worker's cache is trained
+//! beside `javac`'s by a command that holds no workers of its own to record
+//! it, a single-module build ([`worker_training_due`],
+//! `specs/todo/BEATING_THE_DAEMON_4.md` §2). `jrs fetch` and
+//! `jrs jdk install` train the caches too, at a moment the user already
+//! waits.
 //!
 //! Each archive has one recorder per command ([`claim`]): the pool of
 //! `javac` workers a workspace holds would otherwise record the same cache
@@ -126,6 +130,10 @@ static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// The archives a run of this command records, or has: one each.
 static CLAIMED: Mutex<BTreeSet<PathBuf>> = Mutex::new(BTreeSet::new());
+
+/// The worker archives this command started a training for
+/// ([`worker_training_due`]): once each, though a build asks twice.
+static WORKERS_TRAINING: Mutex<BTreeSet<PathBuf>> = Mutex::new(BTreeSet::new());
 
 /// How many threads [`background`] started are still running, and the
 /// signal [`join_background`] waits on for that to reach none.
@@ -700,6 +708,34 @@ pub(crate) fn train_javac(dir: &Path, toolchain: &Toolchain, always: bool) -> bo
         share.settle(ok);
     });
     true
+}
+
+/// Whether a worker's archive under `dir`, for `program` and its
+/// `main_class` on `toolchain`, is to be trained: there is none, and,
+/// unless `always`, no command before this one looked for it, nor this one
+/// started it already. A training that came to nothing is then not tried
+/// again by every build, only by `jrs fetch` and `jrs jdk install`.
+pub(crate) fn worker_training_due(
+    dir: &Path,
+    toolchain: &Toolchain,
+    main_class: &str,
+    program: &Path,
+    always: bool,
+) -> bool {
+    let Some((archive, _)) = worker_archive(dir, toolchain, main_class, program) else {
+        return false;
+    };
+    if archive.is_file() {
+        return false;
+    }
+    // Until the program is built, the name holds none of its size and
+    // time, so a first command's marker stands for that look alone: a training that
+    // built the program and then failed is tried once more, by a command
+    // that finds the program there.
+    (!seen_before(&archive) || always)
+        && WORKERS_TRAINING
+            .lock()
+            .is_ok_and(|mut started| started.insert(archive))
 }
 
 /// `javac` over the training workload, in a scratch directory under `dir`
@@ -1381,6 +1417,30 @@ mod tests {
             !train_javac(&tree.root.join("cds"), &jdk, true),
             "nothing to train"
         );
+    }
+
+    #[test]
+    fn a_workers_cache_is_trained_once_and_not_again_after_a_command_looked() {
+        let tree = Tree::new("train-worker");
+        let dir = tree.root.join("worker/cds");
+        let mut jdk = tree.jdk(true);
+        jdk.version = JAVAC_AOT_SINCE;
+        let program = tree.root.join("worker.jar");
+        let due =
+            |dir: &Path, always| worker_training_due(dir, &jdk, "JavacWorker", &program, always);
+        assert!(due(&dir, false), "the first command trains");
+        assert!(!due(&dir, true), "once, though a build asks twice");
+
+        let other = tree.root.join("other");
+        let (archive, _) = worker_archive(&other, &jdk, "JavacWorker", &program).unwrap();
+        seen_by_another_command(&archive);
+        assert!(!due(&other, false), "not after a command that looked");
+        assert!(due(&other, true), "unless asked to");
+
+        let made = tree.root.join("made");
+        let (archive, _) = worker_archive(&made, &jdk, "JavacWorker", &program).unwrap();
+        std::fs::write(&archive, "cache").unwrap();
+        assert!(!due(&made, true), "nothing to train");
     }
 
     #[test]

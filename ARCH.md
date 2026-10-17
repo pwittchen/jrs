@@ -690,7 +690,11 @@ an AOT cache on a thread of `share::background`; `cli::main` calls
 `Share::for_worker` gives the `javac` worker an AOT cache of its own,
 keyed by its program, recorded by the first command's first worker: a
 one-command pool stops it after its first compile and starts another in
-its place, and `Running::stop` assembles it. A workspace command starts its
+its place, and `Running::stop` assembles it. A session with no workers of
+its own, a single-module build's, trains it beside the build instead,
+when `Session::train_javac` trains `javac`'s (`Worker::train_beside`,
+gated by `share::worker_training_due`;
+`specs/todo/BEATING_THE_DAEMON_4.md` §2). A workspace command starts its
 first worker as it reads the graph (`Driver::warm_up`, `Worker::prestart`)
 and primes it with a one-class compile; `jrs build` and `jrs run` retire
 the workers once the last member has compiled (`Worker::retire`), and
