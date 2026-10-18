@@ -271,6 +271,20 @@
             <a href="https://github.com/pwittchen/jrs/blob/master/specs/BENCHMARKS_SUMMARY.md">specs/BENCHMARKS_SUMMARY.md</a>.
           </p>
         </noscript>
+        <h3>Where Gradle Daemon was faster</h3>
+        <p class="section-lede">
+          Every cell above where a Gradle mode beat jrs, and by how much: the gap in milliseconds,
+          and as a share of jrs's time.
+        </p>
+        <div data-losses></div>
+        <p class="caveat losses-note">
+          <strong>Small gaps, against a warm daemon.</strong> <strong class="figure">9 to 290&nbsp;ms, under a third of a second in every case</strong>, from
+          single runs with no warm-up, where a cell can move by tens of milliseconds between
+          passes. All of them are on the two largest projects, and every one is against a Gradle
+          daemon already warm from earlier builds. jrs keeps nothing running between builds, and
+          in these same cells Gradle without a daemon took 2.5–5.6× as long as jrs. In the other
+          cells on this page, jrs was faster than every Gradle mode.
+        </p>
         <dl class="phases">
           <div><dt>cold</dt><dd><code>build</code> with empty caches and no lockfile: resolution and every download, from a local mirror.</dd></div>
           <div><dt>clean</dt><dd><code>build</code> with warm caches and a clean tree.</dd></div>

@@ -349,6 +349,55 @@ function renderTables(host: HTMLElement): void {
   }
 }
 
+/**
+ * Every cell where another tool beat jrs, one row per tool: the gap in
+ * milliseconds and as a share of jrs's time, as the tables' "% faster" is.
+ */
+function renderLosses(host: HTMLElement): void {
+  const scroll = el("div", "table-scroll");
+  const table = el("table");
+  const head = el("tr");
+  for (const label of ["Project", "Scenario", "Faster tool", "Its time", "jrs", "Faster by", "Faster by (%)"]) {
+    head.append(el("th", label === "Project" || label === "Scenario" || label === "Faster tool" ? "scenario" : undefined, label));
+  }  const thead = el("thead");
+  thead.append(head);
+  table.append(thead);
+  const body = el("tbody");
+  for (const project of RESULTS) {
+    for (const [scenario, ...values] of project.rows) {
+      const jrs = values[0];
+      if (jrs === null || jrs === undefined) continue;
+      TOOLS.forEach((tool, i) => {
+        const value = values[i];
+        if (i === 0 || value === null || value === undefined || value >= jrs) return;
+        const tr = el("tr");
+        const name = el("th", "scenario");
+        name.append(el("code", undefined, project.name));
+        const what = el("th", "scenario");
+        what.append(el("code", undefined, scenario), el("span", "what", SCENARIOS[scenario] ?? ""));
+        tr.append(name, what, el("th", "scenario", tool.name), el("td", "ahead", format(value)), el("td", "jrs", format(jrs)));
+        // Under the share, jrs's time as the whole track and the faster
+        // tool's as the fill: what is left at the end is the gap, at its true
+        // size. The number above it already says this to a screen reader.
+        const share = el("td", "ahead", `${(((jrs - value) / jrs) * 100).toFixed(1)}%`);
+        const track = el("span", "gap-track");
+        track.setAttribute("aria-hidden", "true");
+        const fill = el("span", "gap-fill");
+        fill.style.width = `${(value / jrs) * 100}%`;
+        track.append(fill);
+        share.append(track);
+        tr.append(el("td", "ahead", `${jrs - value} ms`), share);
+        body.append(tr);
+      });
+    }
+  }
+  table.append(body);
+  scroll.append(table);
+  const figure = el("figure", "results");
+  figure.append(scroll);
+  host.append(figure);
+}
+
 function svgEl<K extends keyof SVGElementTagNameMap>(tag: K, attrs: Record<string, string | number> = {}): SVGElementTagNameMap[K] {
   const node = document.createElementNS(SVG, tag);
   for (const [k, v] of Object.entries(attrs)) node.setAttribute(k, String(v));
@@ -530,3 +579,5 @@ const trends = $<HTMLElement>("[data-trends]");
 if (trends) renderTrends(trends);
 const tables = $<HTMLElement>("[data-tables]");
 if (tables) renderTables(tables);
+const losses = $<HTMLElement>("[data-losses]");
+if (losses) renderLosses(losses);

@@ -60,6 +60,17 @@
   color: var(--text);
 }
 
+/* The reading of the Gradle-wins table: close under it, room before the glossary. */
+.caveat.losses-note {
+  margin: 0 0 2.5rem;
+  font-size: 0.95rem;
+}
+
+/* The size of the gaps, in the accent's orange. */
+.caveat .figure {
+  color: var(--accent);
+}
+
 /* ---- headline numbers ------------------------------------------------- */
 
 .stats {
@@ -581,6 +592,24 @@
 .results td.best .x {
   color: var(--best);
   font-weight: 600;
+}
+
+/* The Gradle-wins table's gap: jrs's time is the track, the faster tool's
+   the fill, and the latte end what it won by. */
+.gap-track {
+  display: block;
+  width: 7rem;
+  height: 5px;
+  margin: 0.35rem 0 0 auto;
+  border-radius: 3px;
+  background: var(--latte);
+  overflow: hidden;
+}
+
+.gap-fill {
+  display: block;
+  height: 100%;
+  background: color-mix(in srgb, var(--muted) 45%, var(--line));
 }
 
 /* Read out, never drawn. */
