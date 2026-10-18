@@ -3,8 +3,8 @@ name: Rust
 on:
   # Documentation-only (any Markdown file, anything under specs/), website-only
   # and plugin-only changes cannot break the build, so they do not run it;
-  # specs/corpus/corpus.toml is read only by the on-demand corpus and
-  # comparison benches, never by the checks here. website.yml publishes the
+  # specs/corpus/corpus.toml is read only by the on-demand corpus and the
+  # local comparison bench, never by the checks here. website.yml publishes the
   # site and intellij.yml builds the IntelliJ plugin. Path filters are not
   # evaluated for tag pushes, so a version tag always runs the full pipeline
   # and then publishes a release (see `dist`).

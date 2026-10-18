@@ -377,20 +377,12 @@ of the ROADMAP §2 benchmark report"; that section is a copy of its latest
 
 ## 7. Where it runs
 
-Not in `cargo test`, and not in the push CI of `rust.yml`: it needs Maven,
-Gradle, a JDK and minutes per project.
+Not in `cargo test`, and not in CI at all: it needs Maven, Gradle, a JDK
+and minutes per project, too much of GitHub Actions' time for what a noisy
+shared runner would tell.
 
 **Locally**, from the command in §3. The published report comes from one
 reference machine, named in its header, so successive reports compare.
-
-**In CI**, `.github/workflows/benchmarks.yml`, `workflow_dispatch` only, on
-`ubuntu-latest`: `actions/setup-java` with Temurin 21 and 25, a pinned
-Maven and Gradle (by version, in the workflow), the mirror restored with
-`actions/cache` keyed on the project list's hash and recorded on a miss
-(the only step that reaches the network), then `cargo bench --bench
-compare`. It uploads `REPORT.md` and the raw TSV as an artifact and commits
-nothing. A shared runner is noisy, so the CI report is for spotting a
-regression between two jrs commits, not for the Why page.
 
 ## 8. Implementation
 

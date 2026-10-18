@@ -64,11 +64,10 @@ slower. The Why page and the README link to it once it exists.
 
 The harness has landed (`cargo bench --bench compare`, the parity set's
 Maven and Gradle builds in [`benchmarks/projects/`](benchmarks/projects/),
-`.github/workflows/benchmarks.yml` on demand). What is left is the first
-report from the reference machine, and the links to it.
+run locally only). What is left is the first report from the reference
+machine, and the links to it.
 
-**Status: ✅ done.** The comparison harness, the parity set and the on-demand
-workflow are in place. The summary is in
+**Status: ✅ done.** The comparison harness and the parity set are in place. The summary is in
 [specs/BENCHMARKS_SUMMARY.md](specs/BENCHMARKS_SUMMARY.md), and the results are on the
 website at [getjrs.dev/benchmarks](https://getjrs.dev/benchmarks/).
 

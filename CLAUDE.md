@@ -104,8 +104,7 @@ tool from a local mirror (`benches/support/mirror.rs`, which `resolution.rs`
 shares) and refuses to time a project the tools do not build alike; the
 hand-written Maven and Gradle builds of its parity set are in
 `benchmarks/projects/`, and `benchmarks/REPORT.md` is generated, never edited.
-`.github/workflows/benchmarks.yml` runs it on demand only, on JDK 21 and 25,
-and commits nothing.
+It has no workflow: it takes too long for GitHub Actions, so it runs locally only.
 
 Driving jrs against a Java project:
 
