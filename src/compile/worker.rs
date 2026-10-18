@@ -28,9 +28,7 @@
 //! to about a forked one's (`specs/todo/BEATING_THE_DAEMON_2.md` §3). It is
 //! recorded by the first worker of the first command that finds none, and
 //! by no other worker in its pool (`specs/todo/BEATING_THE_DAEMON_3.md`
-//! §2); a single-module build, which starts no worker until an API change
-//! needs one, trains it beside the build instead ([`Worker::train_beside`],
-//! `specs/todo/BEATING_THE_DAEMON_4.md` §2). In a command that is not `--watch`, that worker records its first
+//! §2). In a command that is not `--watch`, that worker records its first
 //! compile alone: it is then stopped, its JVM dumps and the cache is
 //! assembled on threads the command joins at its end, while a new worker
 //! takes its place for the members still to compile. A workspace command
@@ -48,6 +46,16 @@
 //! worker of its own, once that cache is there to start it warm, and starts
 //! that worker beside the first round when the change is to a class others
 //! name (§4).
+//!
+//! A single-module build starts no worker to record that cache, so before
+//! JDK 25 it trains one beside the build ([`Worker::train_beside`],
+//! `specs/todo/BEATING_THE_DAEMON_4.md` §2). From JDK 25 it only compiles
+//! the worker's program beside the build, and its worker maps `javac`'s AOT
+//! cache instead, with its program after the class path that cache was
+//! trained on (§6): a second training held the first command up by a
+//! quarter of a second. A workspace's worker still records a cache of its
+//! own over the project's first member, which then compiles faster than on
+//! a cache trained on jrs's workload.
 //!
 //! A worker is not a compiler daemon (SPEC §1.2). It is a child of the
 //! jrs command and nothing else can reach it: it reads its requests from a
@@ -258,6 +266,7 @@ impl Worker {
         jar.is_file()
             && Share::worker_ready(
                 &self.dir.join("cds"),
+                &self.javac_cds(),
                 toolchain,
                 Kind::Javac.main_class(),
                 &jar,
@@ -377,7 +386,9 @@ impl Worker {
     /// there is none and, unless `always`, no command before this one looked
     /// for it (`specs/todo/BEATING_THE_DAEMON_4.md` §2). A single-module
     /// build starts no worker that would record it, and without it an API
-    /// change's later rounds fork a cold `javac`. Whether a training started.
+    /// change's later rounds fork a cold `javac`. From JDK 25 it builds only
+    /// the worker's program, whose JVM then maps `javac`'s cache, which
+    /// `javac`'s training makes (§6). Whether a training started.
     #[must_use]
     pub fn train_beside(dir: PathBuf, toolchain: &Toolchain, always: bool) -> bool {
         let worker = Worker::javac_only(dir);
@@ -392,7 +403,13 @@ impl Worker {
             return false;
         }
         let toolchain = toolchain.clone();
-        share::background(move || worker.record(&toolchain, None));
+        if toolchain.version >= share::JAVAC_AOT_SINCE {
+            share::background(move || {
+                let _ = worker.program(Kind::Javac, &toolchain);
+            });
+        } else {
+            share::background(move || worker.record(&toolchain, None));
+        }
         true
     }
 
@@ -629,6 +646,7 @@ impl Worker {
             .then(|| {
                 Share::for_worker(
                     &self.dir.join("cds"),
+                    &self.javac_cds(),
                     toolchain,
                     kind.main_class(),
                     &jar,
@@ -636,7 +654,14 @@ impl Worker {
                 )
             })
             .flatten();
-        let mut classpath = vec![jar];
+        // `javac`'s AOT cache maps for a class path that begins with its own.
+        let mut classpath: Vec<PathBuf> = share
+            .as_ref()
+            .and_then(Share::classpath)
+            .map(Path::to_path_buf)
+            .into_iter()
+            .collect();
+        classpath.push(jar);
         classpath.extend(launch.classpath.iter().cloned());
         let mut command = Command::new(&toolchain.java);
         if let Some(share) = &share {
@@ -710,6 +735,12 @@ impl Worker {
 }
 
 impl Worker {
+    /// Where `javac`'s own archive is, beside the workers' directory:
+    /// `<cache>/cds`, whose AOT cache a `javac` worker maps from JDK 25.
+    fn javac_cds(&self) -> PathBuf {
+        self.dir.with_file_name("cds")
+    }
+
     /// Where [`Worker::program`] puts a worker's program.
     fn program_jar(&self, kind: Kind, toolchain: &Toolchain) -> PathBuf {
         self.dir
@@ -1092,6 +1123,47 @@ mod tests {
                 .flatten()
                 .any(|e| e.file_name().to_string_lossy().starts_with(".prime-")),
             "every prime's scratch directory is gone"
+        );
+    }
+
+    #[test]
+    fn a_single_module_builds_worker_maps_javacs_cache_once_its_program_is_built() {
+        let Ok(toolchain) = Toolchain::discover() else {
+            eprintln!("SKIPPED: no usable JDK");
+            return;
+        };
+        if toolchain.version < super::super::share::JAVAC_AOT_SINCE {
+            eprintln!("SKIPPED: the worker maps javac's AOT cache from JDK 25");
+            return;
+        }
+        let tree = Tree::new("javacs-cache");
+        let dir = tree.root.join("cache/worker");
+        let ui = ui();
+        assert!(share::train_javac(
+            &tree.root.join("cache/cds"),
+            &toolchain,
+            true
+        ));
+        share::join_background();
+        let worker = Worker::for_rounds(dir.clone());
+        assert!(!worker.starts_warm(&toolchain), "its program is not built");
+        assert!(Worker::train_beside(dir.clone(), &toolchain, false));
+        share::join_background();
+        assert!(worker.starts_warm(&toolchain), "javac's cache is there");
+        let argfile = tree.argfile("Mapped", "class Mapped {}\n");
+        assert!(worker.compile(&toolchain, &argfile, &ui).unwrap().ok());
+        assert!(tree.root.join("out/Mapped.class").is_file());
+        drop(worker);
+        share::join_background();
+        let own: Vec<_> = std::fs::read_dir(dir.join("cds"))
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|e| e.file_name())
+            .collect();
+        assert!(
+            own.is_empty(),
+            "and no cache of its own was trained or recorded: {own:?}"
         );
     }
 

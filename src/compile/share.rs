@@ -25,8 +25,16 @@
 //! linked, and the method profiles of the run that trained it (JEP 515), in
 //! `<cache>/cds/javac-jdk<n>-<key>.aot`, one per JDK. It is made in the two
 //! steps the test JVM's is, below; what it holds is no project's, and it
-//! changes how fast `javac` starts, never what it writes. The `javac`
-//! worker's JVM gets one of its own the same way, keyed by its program too.
+//! changes how fast `javac` starts, never what it writes. A forked `javac`
+//! that maps it runs as `java -cp <empty directory>
+//! com.sun.tools.javac.Main` rather than through the `javac` launcher, so
+//! that the `javac` worker's JVM can map the same cache, with its program
+//! appended to that class path, which an AOT cache allows
+//! (`specs/todo/BEATING_THE_DAEMON_4.md` §6): a cache recorded by the
+//! launcher names a main module the worker's JVM does not, and one
+//! assembled without its classes linked, so that it could, costs a run
+//! about 95 ms. The worker's JVM also gets a cache of its own the same way,
+//! keyed by its program too, which it maps instead once there is one.
 //!
 //! Neither is made inside an edit (`specs/todo/BEATING_THE_DAEMON_2.md` §2),
 //! nor where a build waits on it (`specs/todo/BEATING_THE_DAEMON_3.md` §2).
@@ -40,11 +48,14 @@
 //! that finds the marker records the cache in a whole-unit compile of its
 //! own, as before. A run over a few files maps the cache, with its own
 //! quick JVM flags, and never records one, since that would cost the edit
-//! several times what it saves. The `javac` worker's cache is trained
-//! beside `javac`'s by a command that holds no workers of its own to record
-//! it, a single-module build ([`worker_training_due`],
-//! `specs/todo/BEATING_THE_DAEMON_4.md` §2). `jrs fetch` and
-//! `jrs jdk install` train the caches too, at a moment the user already
+//! several times what it saves. A command that holds `javac` workers, a
+//! workspace's or `--watch`, records the worker's own cache in its first
+//! one; a single-module build, which holds none, has its API changes' later
+//! rounds map `javac`'s cache from JDK 25, and before, trains the worker's
+//! archive beside `javac`'s ([`worker_training_due`],
+//! `specs/todo/BEATING_THE_DAEMON_4.md` §2): a second training would hold
+//! up the command it started in by a quarter of a second (§6). `jrs fetch`
+//! and `jrs jdk install` train the caches too, at a moment the user already
 //! waits.
 //!
 //! Each archive has one recorder per command ([`claim`]): the pool of
@@ -116,23 +127,30 @@ pub const AOT_SINCE: u32 = 24;
 /// that trained it (JEP 515), so `javac` starts with its hot code known.
 pub const JAVAC_AOT_SINCE: u32 = 25;
 
-/// What the `javac` launcher runs, which the run that assembles its AOT
-/// cache has to name as the training run did: a cache assembled for
-/// another main module maps no module classes.
-const JAVAC_MAIN: &[&str] = &[
-    "--add-modules",
-    "ALL-DEFAULT",
-    "-m",
-    "jdk.compiler/com.sun.tools.javac.Main",
-];
+/// `javac`'s main class, which a JVM that maps `javac`'s AOT cache runs
+/// from the class path rather than as the `javac` launcher's main module.
+const JAVAC_MAIN_CLASS: &str = "com.sun.tools.javac.Main";
+
+/// The empty directory under the cache directory that is the class path
+/// `javac`'s AOT cache is trained with. A JVM may map a cache whose class
+/// path its own begins with, so the `javac` worker's, with its program
+/// after it, maps the cache a forked `javac` does; and the training does
+/// not wait for the worker's program to be built.
+const JAVAC_CLASSPATH: &str = "javac-classpath";
+
+/// The variables the `javac` and `java` launchers each read options from:
+/// a `javac` run by `java` would ignore the first, and take and announce
+/// the second. With either set, `javac` keeps its launcher and no AOT cache.
+const LAUNCHER_OPTIONS: &[&str] = &["JDK_JAVAC_OPTIONS", "JDK_JAVA_OPTIONS"];
 
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// The archives a run of this command records, or has: one each.
 static CLAIMED: Mutex<BTreeSet<PathBuf>> = Mutex::new(BTreeSet::new());
 
-/// The worker archives this command started a training for
-/// ([`worker_training_due`]): once each, though a build asks twice.
+/// The worker archives, and from JDK 25 the worker programs, this command
+/// started a training for ([`worker_training_due`]): once each, though a
+/// build asks twice.
 static WORKERS_TRAINING: Mutex<BTreeSet<PathBuf>> = Mutex::new(BTreeSet::new());
 
 /// How many threads [`background`] started are still running, and the
@@ -169,6 +187,9 @@ pub struct Share {
     /// For a test JVM's AOT cache, the marker that says it could not be
     /// assembled, written when a run that succeeded could not make it.
     unassembled: Option<PathBuf>,
+    /// For `javac`'s AOT cache, the class path the JVM's own has to begin
+    /// with ([`JAVAC_CLASSPATH`]).
+    classpath: Option<PathBuf>,
 }
 
 /// The `-XX:AOTMode=create` run that turns a recorded configuration into
@@ -214,7 +235,7 @@ impl Share {
     pub(crate) fn for_javac(dir: &Path, toolchain: &Toolchain, quick: bool) -> Option<Share> {
         let (archive, aot) = javac_archive(dir, toolchain)?;
         if archive.is_file() {
-            return Some(Share::reading(&archive, aot));
+            return Some(Share::reading_javacs(dir, &archive, aot));
         }
         if !seen_before(&archive) || quick || !claim(&archive) {
             return None;
@@ -233,6 +254,7 @@ impl Share {
             return Share::at(dir, archive, true, None);
         }
         let temp = temporary(dir, &archive)?;
+        let classpath = dir.join(JAVAC_CLASSPATH);
         Some(Share {
             flags: Share::recording(&temp),
             dump: Some((temp, archive)),
@@ -240,11 +262,21 @@ impl Share {
             unassembled: None,
             assemble: Some(Assemble {
                 java: toolchain.java.clone(),
-                classpath: None,
+                classpath: Some(vec![classpath.clone()]),
                 flags: Vec::new(),
-                main: JAVAC_MAIN.iter().map(|f| (*f).to_string()).collect(),
+                main: Vec::new(),
             }),
+            classpath: Some(classpath),
         })
+    }
+
+    /// A run that maps `javac`'s archive under `dir`, `archive`: an AOT
+    /// cache when `aot` holds, with the class path it was trained on.
+    fn reading_javacs(dir: &Path, archive: &Path, aot: bool) -> Share {
+        Share {
+            classpath: aot.then(|| dir.join(JAVAC_CLASSPATH)),
+            ..Share::reading(archive, aot)
+        }
     }
 
     /// Whether a forked `javac` would map an archive under `dir` now.
@@ -258,9 +290,13 @@ impl Share {
     /// dynamic archive. The first worker of a command that finds none
     /// writes it, when `record` allows; the others in its pool map nothing
     /// ([`claim`]). The worker records it until it stops, and the cache is
-    /// assembled once it has exited.
+    /// assembled once it has exited. A worker that neither finds nor
+    /// records one maps `javac`'s AOT cache under `javac_dir`, when there
+    /// is one, with its program after the cache's class path
+    /// ([`Share::classpath`]).
     pub(crate) fn for_worker(
         dir: &Path,
+        javac_dir: &Path,
         toolchain: &Toolchain,
         main_class: &str,
         program: &Path,
@@ -271,7 +307,10 @@ impl Share {
             return Some(Share::reading(&archive, aot));
         }
         if !record || !claim(&archive) {
-            return None;
+            let (javacs, aot) = javac_archive(javac_dir, toolchain).filter(|(_, aot)| *aot)?;
+            return javacs
+                .is_file()
+                .then(|| Share::reading_javacs(javac_dir, &javacs, aot));
         }
         if !aot {
             return Share::at(dir, archive, true, None);
@@ -288,18 +327,22 @@ impl Share {
                 flags: Vec::new(),
                 main: Vec::new(),
             }),
+            classpath: None,
         })
     }
 
-    /// Whether a worker's JVM would map an archive under `dir` now.
+    /// Whether a worker's JVM would map an archive now: its own under
+    /// `dir`, or from JDK 25 `javac`'s under `javac_dir`.
     pub(crate) fn worker_ready(
         dir: &Path,
+        javac_dir: &Path,
         toolchain: &Toolchain,
         main_class: &str,
         program: &Path,
     ) -> bool {
-        worker_archive(dir, toolchain, main_class, program)
-            .is_some_and(|(archive, _)| archive.is_file())
+        worker_archive(dir, toolchain, main_class, program).is_some_and(|(archive, aot)| {
+            archive.is_file() || (aot && Share::javac_ready(javac_dir, toolchain))
+        })
     }
 
     /// A run that maps `archive`, an AOT cache when `aot` holds and a
@@ -323,6 +366,7 @@ impl Share {
             replaces: None,
             assemble: None,
             unassembled: None,
+            classpath: None,
         }
     }
 
@@ -397,6 +441,7 @@ impl Share {
                         main: Vec::new(),
                     }),
                     unassembled: Some(unassembled),
+                    classpath: None,
                 });
             }
         }
@@ -423,6 +468,7 @@ impl Share {
             replaces,
             assemble: None,
             unassembled: None,
+            classpath: None,
         })
     }
 
@@ -446,6 +492,13 @@ impl Share {
                 })
                 .map(Path::new),
         }
+    }
+
+    /// The class path the JVM's own has to begin with to map the archive:
+    /// for `javac`'s AOT cache, the empty directory it was trained on.
+    #[must_use]
+    pub fn classpath(&self) -> Option<&Path> {
+        self.classpath.as_deref()
     }
 
     /// Whether the archive is an AOT cache rather than a dynamic archive.
@@ -559,15 +612,49 @@ fn javac_archive(dir: &Path, toolchain: &Toolchain) -> Option<(PathBuf, bool)> {
         let archive = dynamic_archive(dir, &home, toolchain, "jdk.compiler", &[]);
         return Some((archive, false));
     }
+    if LAUNCHER_OPTIONS
+        .iter()
+        .any(|name| std::env::var_os(name).is_some_and(|v| !v.is_empty()))
+    {
+        return None;
+    }
     let home = usable(dir, toolchain, &[], false)?;
-    // The key an earlier jrs gave the cache of a `javac` started with the
-    // full JIT, so that cache stays in use.
+    let classpath = dir.join(JAVAC_CLASSPATH);
+    std::fs::create_dir_all(&classpath).ok()?;
+    // A cache the `javac` launcher trained, as an earlier jrs did, keys
+    // on no class path, so it is never taken for this one.
     let archive = dir.join(format!(
         "javac-jdk{}-{}.aot",
         toolchain.version,
-        key(&home, toolchain, "javac-aot\u{1}", &[])
+        key(&home, toolchain, "javac-aot\u{1}", &[classpath])
     ));
     Some((archive, true))
+}
+
+/// The program and the arguments before its own that run `javac` with
+/// `flags` for its JVM: `java` on the class path `classpath`, when it maps
+/// `javac`'s AOT cache ([`Share::classpath`]); otherwise the `javac`
+/// launcher, which takes JVM flags as `-J` options.
+pub(crate) fn javac_launch(
+    toolchain: &Toolchain,
+    flags: &[String],
+    classpath: Option<&Path>,
+) -> (PathBuf, Vec<String>) {
+    match classpath {
+        Some(classpath) => {
+            let mut args = flags.to_vec();
+            args.extend([
+                "-cp".to_string(),
+                classpath.display().to_string(),
+                JAVAC_MAIN_CLASS.to_string(),
+            ]);
+            (toolchain.java.clone(), args)
+        }
+        None => (
+            toolchain.javac.clone(),
+            flags.iter().map(|f| format!("-J{f}")).collect(),
+        ),
+    }
 }
 
 /// A worker JVM's archive under `dir`, and whether it is an AOT cache, or
@@ -701,20 +788,24 @@ pub(crate) fn train_javac(dir: &Path, toolchain: &Toolchain, always: bool) -> bo
     let Some(share) = Share::javac_recording(dir, toolchain, archive, aot) else {
         return false;
     };
-    let javac = toolchain.javac.clone();
+    let (program, launch) = javac_launch(toolchain, &share.flags, share.classpath());
     let dir = dir.to_path_buf();
     background(move || {
-        let ok = run_training(&javac, &dir, &share.flags);
+        let ok = run_training(&program, &launch, &dir);
         share.settle(ok);
     });
     true
 }
 
-/// Whether a worker's archive under `dir`, for `program` and its
-/// `main_class` on `toolchain`, is to be trained: there is none, and,
-/// unless `always`, no command before this one looked for it, nor this one
-/// started it already. A training that came to nothing is then not tried
-/// again by every build, only by `jrs fetch` and `jrs jdk install`.
+/// What of a worker's beside a build is due, for `program` and its
+/// `main_class` on `toolchain`, with its archive under `dir`. Before
+/// JDK 25, its archive: there is none, and, unless `always`, no command
+/// before this one looked for it, nor this one started it already; a
+/// training that came to nothing is then not tried again by every build,
+/// only by `jrs fetch` and `jrs jdk install`. From JDK 25, only its program
+/// (`specs/todo/BEATING_THE_DAEMON_4.md` §6), once a command until it is
+/// built: the worker maps `javac`'s cache, which `javac`'s training makes,
+/// but a worker whose program is not built is not started at all.
 pub(crate) fn worker_training_due(
     dir: &Path,
     toolchain: &Toolchain,
@@ -722,6 +813,14 @@ pub(crate) fn worker_training_due(
     program: &Path,
     always: bool,
 ) -> bool {
+    let first = |path: &Path| {
+        WORKERS_TRAINING
+            .lock()
+            .is_ok_and(|mut started| started.insert(path.to_path_buf()))
+    };
+    if toolchain.version >= JAVAC_AOT_SINCE {
+        return !program.is_file() && first(program);
+    }
     let Some((archive, _)) = worker_archive(dir, toolchain, main_class, program) else {
         return false;
     };
@@ -732,24 +831,22 @@ pub(crate) fn worker_training_due(
     // time, so a first command's marker stands for that look alone: a training that
     // built the program and then failed is tried once more, by a command
     // that finds the program there.
-    (!seen_before(&archive) || always)
-        && WORKERS_TRAINING
-            .lock()
-            .is_ok_and(|mut started| started.insert(archive))
+    (!seen_before(&archive) || always) && first(&archive)
 }
 
 /// `javac` over the training workload, in a scratch directory under `dir`
-/// that is gone once it returns, with `flags` for its JVM; whether it
-/// compiled. Nothing it says reaches the terminal.
-fn run_training(javac: &Path, dir: &Path, flags: &[String]) -> bool {
+/// that is gone once it returns, run as `program` with `launch` before its
+/// own arguments ([`javac_launch`]); whether it compiled. Nothing it says
+/// reaches the terminal.
+fn run_training(program: &Path, launch: &[String], dir: &Path) -> bool {
     let work = dir.join(format!(
         ".train-{}-{}",
         std::process::id(),
         TEMP_COUNTER.fetch_add(1, Ordering::Relaxed)
     ));
     let compiled = write_training(&work.join("src")).is_some_and(|sources| {
-        std::process::Command::new(javac)
-            .args(flags.iter().map(|f| format!("-J{f}")))
+        std::process::Command::new(program)
+            .args(launch)
             .arg("--release")
             .arg(TRAINING_RELEASE.to_string())
             .args(["-encoding", "UTF-8", "-d"])
@@ -1299,15 +1396,16 @@ mod tests {
         assert!(share.is_aot() && share.dumps());
         assert!(share.flags.contains(&"-XX:-DisplayVMOutput".to_string()));
         assert_eq!(share.archive(), Some(archive.as_path()));
+        let classpath = dir.join(JAVAC_CLASSPATH);
+        assert!(classpath.is_dir(), "an empty directory, there to be named");
+        assert_eq!(share.classpath(), Some(classpath.as_path()));
         let assemble = share.assemble.as_ref().unwrap();
         assert_eq!(
-            assemble.classpath, None,
-            "javac runs its module, not a classpath"
+            assemble.classpath,
+            Some(vec![classpath.clone()]),
+            "javac runs from a class path a worker can append to, not as its module"
         );
-        assert_eq!(
-            assemble.main.last().unwrap(),
-            "jdk.compiler/com.sun.tools.javac.Main"
-        );
+        assert!(assemble.main.is_empty());
         share.finish(false);
         assert!(marker.is_file(), "still to be written");
 
@@ -1320,7 +1418,30 @@ mod tests {
                 share.flags[0],
                 format!("-XX:AOTCache={}", archive.display())
             );
+            assert_eq!(share.classpath(), Some(classpath.as_path()));
         }
+    }
+
+    #[test]
+    fn javac_maps_its_aot_cache_through_java_and_its_archive_through_its_launcher() {
+        let tree = Tree::new("launch");
+        let jdk = tree.jdk(true);
+        let flags = ["-XX:AOTCache=c.aot".to_string()];
+        let classpath = tree.root.join("cds").join(JAVAC_CLASSPATH);
+        let (program, args) = javac_launch(&jdk, &flags, Some(&classpath));
+        assert_eq!(program, jdk.java);
+        assert_eq!(
+            args,
+            [
+                "-XX:AOTCache=c.aot".to_string(),
+                "-cp".to_string(),
+                classpath.display().to_string(),
+                "com.sun.tools.javac.Main".to_string(),
+            ]
+        );
+        let (program, args) = javac_launch(&jdk, &flags, None);
+        assert_eq!(program, jdk.javac);
+        assert_eq!(args, ["-J-XX:AOTCache=c.aot".to_string()]);
     }
 
     #[test]
@@ -1343,35 +1464,44 @@ mod tests {
     #[test]
     fn the_first_worker_records_an_aot_cache_of_its_own_only_when_allowed() {
         let tree = Tree::new("worker-aot");
-        let dir = tree.root.join("cds");
+        let dir = tree.root.join("worker/cds");
+        let javacs = tree.root.join("cds");
         let mut jdk = tree.jdk(true);
         jdk.version = JAVAC_AOT_SINCE;
         let program = tree.root.join("worker.jar");
         std::fs::write(&program, "jar").unwrap();
+        let worker =
+            |record| Share::for_worker(&dir, &javacs, &jdk, "JavacWorker", &program, record);
+        let ready = || Share::worker_ready(&dir, &javacs, &jdk, "JavacWorker", &program);
         let (archive, _) = worker_archive(&dir, &jdk, "JavacWorker", &program).unwrap();
-        assert_ne!(
-            Some(archive.clone()),
-            javac_archive(&dir, &jdk).map(|a| a.0)
-        );
-        assert!(
-            Share::for_worker(&dir, &jdk, "JavacWorker", &program, false).is_none(),
-            "a worker that may not record"
-        );
-        let share = Share::for_worker(&dir, &jdk, "JavacWorker", &program, true).unwrap();
+        assert!(worker(false).is_none(), "a worker that may not record");
+        let share = worker(true).unwrap();
         assert!(share.is_aot() && share.dumps(), "the first command's first");
+        assert_eq!(share.classpath(), None);
         let assemble = share.assemble.as_ref().unwrap();
         assert_eq!(assemble.classpath, Some(vec![program.clone()]));
-        assert!(
-            Share::for_worker(&dir, &jdk, "JavacWorker", &program, true).is_none(),
-            "and no other worker of the command"
-        );
+        assert!(worker(true).is_none(), "and no other worker of the command");
         share.finish(false);
+        assert!(!ready());
 
-        assert!(!Share::worker_ready(&dir, &jdk, "JavacWorker", &program));
+        // A worker without a cache of its own maps `javac`'s, after its
+        // class path.
+        let (javac, _) = javac_archive(&javacs, &jdk).unwrap();
+        std::fs::write(&javac, "cache").unwrap();
+        assert!(ready());
+        let share = worker(false).unwrap();
+        assert!(share.is_aot() && !share.dumps());
+        assert_eq!(share.archive(), Some(javac.as_path()));
+        assert_eq!(
+            share.classpath(),
+            Some(javacs.join(JAVAC_CLASSPATH).as_path())
+        );
+
         std::fs::write(&archive, "cache").unwrap();
-        assert!(Share::worker_ready(&dir, &jdk, "JavacWorker", &program));
-        let share = Share::for_worker(&dir, &jdk, "JavacWorker", &program, false).unwrap();
+        let share = worker(false).unwrap();
         assert!(share.is_aot() && !share.dumps(), "mapped by any worker");
+        assert_eq!(share.archive(), Some(archive.as_path()), "its own first");
+        assert_eq!(share.classpath(), None);
     }
 
     #[test]
@@ -1397,7 +1527,7 @@ mod tests {
             .unwrap()
             .flatten()
             .map(|e| e.file_name().to_string_lossy().into_owned())
-            .filter(|n| !n.ends_with(".seen"))
+            .filter(|n| !n.ends_with(".seen") && n != JAVAC_CLASSPATH)
             .collect();
         assert!(left.is_empty(), "{left:?}");
 
@@ -1423,8 +1553,7 @@ mod tests {
     fn a_workers_cache_is_trained_once_and_not_again_after_a_command_looked() {
         let tree = Tree::new("train-worker");
         let dir = tree.root.join("worker/cds");
-        let mut jdk = tree.jdk(true);
-        jdk.version = JAVAC_AOT_SINCE;
+        let jdk = tree.jdk(true);
         let program = tree.root.join("worker.jar");
         let due =
             |dir: &Path, always| worker_training_due(dir, &jdk, "JavacWorker", &program, always);
@@ -1444,18 +1573,47 @@ mod tests {
     }
 
     #[test]
+    fn from_jdk_25_only_the_workers_program_is_built_beside_the_build() {
+        let tree = Tree::new("train-program");
+        let dir = tree.root.join("worker/cds");
+        let mut jdk = tree.jdk(true);
+        jdk.version = JAVAC_AOT_SINCE;
+        let program = tree.root.join("worker.jar");
+        let due = || worker_training_due(&dir, &jdk, "JavacWorker", &program, false);
+        assert!(due(), "a program to build");
+        assert!(!due(), "once, though a build asks twice");
+        assert!(!dir.exists(), "and no cache of its own to train");
+
+        let built = tree.root.join("built.jar");
+        std::fs::write(&built, "jar").unwrap();
+        assert!(
+            !worker_training_due(&dir, &jdk, "JavacWorker", &built, true),
+            "nothing to build"
+        );
+    }
+
+    #[test]
     fn the_training_workload_compiles() {
         let Ok(toolchain) = Toolchain::discover() else {
             eprintln!("SKIPPED: no usable JDK");
             return;
         };
         let tree = Tree::new("workload");
-        assert!(run_training(&toolchain.javac, &tree.root, &[]));
-        assert_eq!(
-            std::fs::read_dir(&tree.root).unwrap().count(),
-            0,
-            "its scratch directory is gone"
-        );
+        let classpath = std::env::temp_dir().join(format!(
+            "jrs-share-workload-classpath-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&classpath).unwrap();
+        for classpath in [None, Some(classpath.as_path())] {
+            let (program, launch) = javac_launch(&toolchain, &[], classpath);
+            assert!(run_training(&program, &launch, &tree.root), "{program:?}");
+            assert_eq!(
+                std::fs::read_dir(&tree.root).unwrap().count(),
+                0,
+                "its scratch directory is gone"
+            );
+        }
+        let _ = std::fs::remove_dir(&classpath);
     }
 
     #[test]

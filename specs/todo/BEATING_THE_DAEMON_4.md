@@ -9,9 +9,9 @@ process outlives the command. The numbers are the fifth pass of
 taken the same evening on the same machine.
 
 Status: **§2, §3 and §4 built, not yet benchmarked; §5's training built
-and reverted on the ninth pass, its split dropped; §6 proposed.** What
-each built part's code does and what it measured are in each, under
-**Built**; §5's under **Reverted**.
+and reverted on the ninth pass, its split dropped; §6 built, not yet
+benchmarked.** What each built part's code does and what it measured are
+in each, under **Built**; §5's under **Reverted**.
 
 Every "measured" figure but §2's **Built** ones was taken outside the
 benchmark, with the jrs release binary of `56c0d97`, on the generated
@@ -426,7 +426,7 @@ worker's does. The measurements above stay as the record of what a larger
 workload buys outside the benchmark; any return to it waits on §6, so
 that the training no longer holds up the first command.
 
-## 6. `cold`
+## 6. `cold` ✅
 
 Not a daemon cell, which `cold` leads by 8–13×, but the price of
 BEATING_THE_DAEMON_3.md §2: on `wordstats`, `bookmarks` and `gen-300` the
@@ -447,6 +447,95 @@ by 1.7–2.1×; it led by 2.7–4.0× in the fourth pass.
    repeating it.
 
 **Measured by.** `cold` on every project, against `clean` and `abi`.
+
+**Measured: the training alone.** With the jrs release binary of `fa2d038`
+on `examples/wordstats` and `examples/bookmarks`, from a cache that held
+their jars and none, one or both of the compiler caches, five samples
+each (the benchmark's mirror no longer holds the examples' POMs, so the
+jars came from Maven Central once and every run was `--offline`):
+
+| `cold` | No training | `javac`'s alone | The worker's alone | Both (as built) |
+| --- | --- | --- | --- | --- |
+| `wordstats` | 337–346 ms | 0.99–1.07 s | 1.16–1.27 s | 1.24–1.29 s |
+| `bookmarks` | 368–372 ms | 1.01–1.04 s | 1.23–1.29 s | 1.28–1.34 s |
+
+The build is done by 430–510 ms; the rest is the wait. Each chain, by
+hand:
+
+- `javac`'s: the recording run, 640–710 ms, then the assembly, 330–380 ms.
+  Most of the recording is not the workload: one class records in
+  434–471 ms, against 351–371 ms for a plain compile of the whole
+  workload. So "make it less" buys about 200 ms at most.
+- The worker's: a cold `javac` of its program (about 210 ms), a recording
+  JVM over the workload (590–670 ms) and its assembly (300–330 ms). The
+  longest chain, and it runs on the same cores as the other.
+- §5's larger workload recorded for 1.6 s (§5's table); not measured
+  again.
+
+**Measured: one cache for both.** A cache recorded by the `javac`
+launcher names `jdk.compiler` as its main module, and the worker's JVM,
+which names none, cannot map its linked classes. Assembled without them
+(`-XX:-AOTClassLinking`) both could, at 296–304 ms a compile against 202–209
+ms. But a cache recorded by `java -cp <empty directory>
+com.sun.tools.javac.Main` maps for a `javac` started that way (203–205
+ms, the launcher on its own cache 207–209) and for the worker started
+with `-cp <empty directory>:worker.jar` (205–213 ms, on its own cache
+202): a JVM maps a cache whose class path its own begins with. Calling
+`com.sun.tools.javac.Main.compile` in the worker rather than through
+`ToolProvider` changed nothing.
+
+**Built.** "Make it less": one training, not two.
+
+1. From JDK 25 `javac`'s AOT cache is recorded, assembled and mapped by
+   `java -cp <cache>/cds/javac-classpath com.sun.tools.javac.Main`
+   (`share::javac_launch`), an empty directory for its class path, under
+   a new key, so a cache the launcher recorded is never taken for it. A
+   forked `javac` with no cache to map, and every `javac` before JDK 25,
+   keeps the launcher; so does one with `JDK_JAVAC_OPTIONS` or
+   `JDK_JAVA_OPTIONS` set, which only one of the two launchers reads.
+2. A `javac` worker without a cache of its own maps `javac`'s, its
+   program after that class path (`Share::for_worker`, `Share::classpath`).
+3. A single-module build no longer trains the worker's cache beside the
+   build from JDK 25, only compiles the worker's program there
+   (`share::worker_training_due`, `Worker::train_beside`): without the
+   program the rounds' worker is never started, and `abi`'s second round
+   forked, 160–176 ms against 91–97 ms, in the first try.
+4. A workspace's or `--watch`'s first worker still records the worker's own
+   cache, over its first compile. A first try that had every worker map
+   `javac`'s instead put `examples/ledger`'s first member at 171–173 ms
+   against 145–147 ms in every `clean`: that cache was trained on the
+   project's own first member, which then compiles faster than on jrs's
+   workload, while `ledger`'s `cold` gained only 70–120 ms.
+
+Measured as above, in the benchmark's order (`cold`, three `clean`s,
+three `abi`s, a public method added to the most-named class and taken
+away between them), before and after, the same session:
+
+| | `cold` before | `cold` after | `clean` | `abi` before | `abi` after |
+| --- | --- | --- | --- | --- | --- |
+| `wordstats` | 1.31–1.41 s | 1.02–1.09 s | level, 278–292 ms | 313–318 ms | 296–301 ms |
+| `bookmarks` | 1.32–1.39 s | 1.01–1.12 s | level, 271–295 ms | 351–353 ms | 331–338 ms |
+| `ledger` | 1.29–1.40 s | 1.31–1.35 s | level, 289–313 ms | | |
+
+`abi`'s first round is 13–15 ms faster on `java`'s launch with the cache.
+Then with the benchmark's jrs column alone (`JRS_BENCH_TOOLS=jrs`,
+`JRS_BENCH_PROJECTS=gen-300,gen-2000`, `cold`, `clean` and `abi`, five
+runs, one warm-up), the baseline from a worktree of `fa2d038`, the same
+session. Medians:
+
+| | `cold` before | `cold` after | `clean` before | `clean` after | `abi` before | `abi` after |
+| --- | --- | --- | --- | --- | --- | --- |
+| `gen-300` | 1.35 s | 1.06 s | 590 ms | 587 ms | 439 ms | 424 ms |
+| `gen-2000` | 1.79 s | 1.79 s | 1.52 s | 1.50 s | 753 ms | 738 ms |
+
+`cold` is 21–28% faster wherever the training was longer than the build;
+`gen-2000`'s own compile is longer, so nothing waited there before
+either. What is left of the wait is `javac`'s one chain, about 0.6 s
+beyond a 0.4–0.5 s build, most of it the recording's fixed cost and the
+assembly. "Start it sooner" has nothing left: it starts about 55 ms in,
+before the resolution. A richer workload (§5) would lengthen that chain
+again; with one chain instead of two it costs less than it did, and is
+still to be measured. The benchmark has not read it yet.
 
 ## 7. Out of scope
 

@@ -974,8 +974,14 @@ own.
   `cds/javac-jdk<n>-<key>.aot`, keyed by the JDK: its classes kept linked,
   and the method profiles of the run that recorded it (JEP 515). It is made
   as the test JVM's is below: a run records (`-XX:AOTMode=record`, quietly),
-  and jrs assembles the cache from that record once the run succeeded,
-  naming `javac`'s main module as the launcher did.
+  and jrs assembles the cache from that record once the run succeeded. A
+  `javac` that maps it, or records it, is started as
+  `java -cp <cache>/cds/javac-classpath com.sun.tools.javac.Main`, an empty
+  directory for its class path, rather than as the `javac` launcher, so
+  that the `javac` worker can map the same cache with its program after
+  that class path ([BEATING_THE_DAEMON_4.md](specs/todo/BEATING_THE_DAEMON_4.md)
+  §6). With `JDK_JAVAC_OPTIONS` or `JDK_JAVA_OPTIONS` set, which only one of
+  the two launchers reads, `javac` keeps its launcher and maps no cache.
 - `javac`'s archive is never made inside an edit. Only a whole-unit compile
   writes it; a file-by-file run maps it with its quick flags, which still
   save a one-file compile about a tenth over the full JIT with the same
@@ -1008,14 +1014,19 @@ own.
   workers at once as soon as the last member has compiled. A single-module
   build, which starts no worker to record it, trains it on a thread of its
   own beside `javac`'s, on the same embedded workload, the first time a
-  command finds it missing, and joins that thread before it exits.
+  command finds it missing, and joins that thread before it exits; from
+  JDK 25 it only builds the worker's program there, and a worker without a
+  cache of its own maps `javac`'s, since a second training held up the
+  first command by a quarter of a second
+  ([BEATING_THE_DAEMON_4.md](specs/todo/BEATING_THE_DAEMON_4.md) §6).
   `jrs fetch` and `jrs jdk install` train it too. A run over a few files
   is forked rather than sent to a one-command worker that would start
   without its archive, when the forked `javac` maps its own. A single-module compile that follows an API change
   into a second round sends the later rounds to a worker of its own, when
   that worker's archive is there, and starts it beside the first round when
   other sources name a class that round compiles; that worker never records
-  one, since its exit is on the build's path. The test JVM gets one only with `test.share-classes`, which
+  one, since its exit is on the build's path: without one, it maps
+  `javac`'s. The test JVM gets one only with `test.share-classes`, which
   moves the class directories off its `-cp` (§10.2): CDS refuses to dump a
   classpath with a non-empty class directory, and `target/classes` is one.
   A temporary dump a minute old that was never put in place — a `--watch`

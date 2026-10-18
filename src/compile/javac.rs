@@ -121,8 +121,10 @@ pub(super) fn run(
     Ok(())
 }
 
-/// `javac @argfile` in a JVM of its own. JVM flags reach it as `-J`
-/// options, which only its command line may hold, never an argfile.
+/// `javac @argfile` in a JVM of its own. JVM flags reach it on its command
+/// line, never in an argfile: as `-J` options to the `javac` launcher, or
+/// to `java` itself where it maps `javac`'s AOT cache
+/// ([`share::javac_launch`]).
 fn fork(
     toolchain: &Toolchain,
     unit: &CompileUnit,
@@ -134,16 +136,20 @@ fn fork(
         .share_dir
         .as_deref()
         .and_then(|dir| Share::for_javac(dir, toolchain, quick));
+    let classpath = share
+        .as_ref()
+        .and_then(Share::classpath)
+        .map(Path::to_path_buf);
     let quick: &[&str] = if quick { QUICK_JVM_FLAGS } else { &[] };
     share::run(share, CapturedOutput::ok, |shared| {
-        let mut args: Vec<String> = quick
+        let flags: Vec<String> = quick
             .iter()
             .map(|f| (*f).to_string())
             .chain(shared.iter().cloned())
-            .map(|f| format!("-J{f}"))
             .collect();
+        let (program, mut args) = share::javac_launch(toolchain, &flags, classpath.as_deref());
         args.push(format!("@{}", argfile.display()));
-        run_captured(ui, &toolchain.javac, &args)
+        run_captured(ui, &program, &args)
     })
 }
 

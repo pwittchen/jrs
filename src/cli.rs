@@ -1186,7 +1186,8 @@ impl<'a> Session<'a> {
     /// looked for it (`specs/todo/BEATING_THE_DAEMON_3.md` §2); and the
     /// `javac` worker's the same way, unless this session holds workers of
     /// its own, whose first one records it
-    /// (`specs/todo/BEATING_THE_DAEMON_4.md` §2).
+    /// (`specs/todo/BEATING_THE_DAEMON_4.md` §2). From JDK 25 that worker
+    /// maps `javac`'s cache instead, and only its program is built (§6).
     fn train_javac(&self, toolchain: &Toolchain, always: bool) {
         let Ok(cache) = Cache::discover() else {
             return;
@@ -1200,8 +1201,13 @@ impl<'a> Session<'a> {
         if self.worker.is_none()
             && Worker::train_beside(cache.root().join("worker"), toolchain, always)
         {
+            let what = if toolchain.version >= share::JAVAC_AOT_SINCE {
+                "building the javac worker's program"
+            } else {
+                "training the javac worker's class-data cache"
+            };
             self.ui.verbose(format!(
-                "training the javac worker's class-data cache for JDK {} beside the build",
+                "{what} for JDK {} beside the build",
                 toolchain.version
             ));
         }

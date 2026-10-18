@@ -705,7 +705,13 @@ its place, and `Running::stop` assembles it. A session with no workers of
 its own, a single-module build's, trains it beside the build instead,
 when `Session::train_javac` trains `javac`'s (`Worker::train_beside`,
 gated by `share::worker_training_due`;
-`specs/todo/BEATING_THE_DAEMON_4.md` §2). A workspace command starts its
+`specs/todo/BEATING_THE_DAEMON_4.md` §2) — before JDK 25. From JDK 25 it
+only builds the worker's program there, and a worker without a cache of
+its own maps `javac`'s (§6): `javac`'s AOT cache is recorded and mapped by
+`java -cp <cache>/cds/javac-classpath com.sun.tools.javac.Main`
+(`share::javac_launch`), not the `javac` launcher, and a JVM may map a
+cache whose class path its own begins with, so the worker's, that empty
+directory and then its program, does (`Share::classpath`). A workspace command starts its
 workers as it reads the graph (`Driver::warm_up`, `Worker::prestart`), as
 many as the member graph's widest level up to `--jobs`
 (`Workspace::widest_level`): the first primed with a one-class compile,
@@ -1336,6 +1342,8 @@ poisoning, which is documented under each function's `# Panics`.
  │                                the compiler JVMs, rewritten when pruned
  │   ├── javac-jdk<n>-<key>.aot   javac's AOT cache, from JDK 25 (and a .seen
  │   │                            marker, left by the command that trained it)
+ │   ├── javac-classpath/         empty: the class path that cache is trained
+ │   │                            on, which the javac worker's begins with
  │   ├── test-<project>-<deps>.jsa  the test JVM's, one per project and suite
  │   │                              (test.share-classes)
  │   └── entries/                 each jar's entry list, for the overlap check
