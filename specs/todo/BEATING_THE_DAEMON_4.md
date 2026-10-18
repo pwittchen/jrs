@@ -8,9 +8,9 @@ process outlives the command. The numbers are the fifth pass of
 2026-10-17, one run per cell, no warm-up), and the measurements below,
 taken the same evening on the same machine.
 
-Status: **§2, §3 and §4 built, not yet benchmarked; §6 proposed; §5's
-split dropped on its measurements, its training proposed.** What §2's,
-§3's and §4's code does and what it measured are in each, under **Built**.
+Status: **§2, §3, §4 and §5 built, not yet benchmarked; §6 proposed,
+and more pressing for §5's price.** What each built part's code does and
+what it measured are in each, under **Built**.
 
 Every "measured" figure but §2's **Built** ones was taken outside the
 benchmark, with the jrs release binary of `56c0d97`, on the generated
@@ -305,7 +305,7 @@ In `clean`, `model` went from 249 to 122 ms and the chain is now `core`
 range but not ahead of its best; what is left is `core`'s first compile.
 The benchmark has not read it yet.
 
-## 5. A large compile in a cold JIT
+## 5. A large compile in a cold JIT ✅
 
 **Now.** `gen-2000`'s `clean` is one forked `javac` of 2,000 sources
 (1,338 ms in the fifth pass) against the daemon's whole build in 1.21–1.27 s.
@@ -346,7 +346,7 @@ paths.
 
 1. ✅ **Drop the split** (BEATING_THE_DAEMON_2.md §6) on these numbers.
    Done: §7 lists it as out of scope.
-2. **Make the training workload a real compile's size**: a few hundred
+2. ✅ **Make the training workload a real compile's size**: a few hundred
    generated classes rather than one file and the workers' sources, the
    generator embedded in jrs as `Training.java` is. Measure the cache it
    makes against the one trained on `gen-2000`, and how long it takes.
@@ -357,6 +357,62 @@ paths.
 
 **Measured by.** `clean` and `abi` on `gen-2000` and `gen-300`; `cold` for
 the training's length (§6).
+
+**Built.** `compile/training.rs` generates 300 classes in packages of 20,
+each calling into the classes before it, in four shapes that take turns:
+a class with generic methods and streams, a record, an enum with constant
+bodies, and nested types with lambdas, an anonymous class and checked
+exceptions. The sources are fixed: the same on every machine and in every
+command. `share::write_training` adds them to `Training.java` and the
+workers' sources for `javac`'s own cache (`share::train_javac`, and
+`jrs fetch`/`jrs jdk install`); the worker's cache and a worker's prime
+(§4) keep the hand-written part alone.
+
+Measured first outside the benchmark: a cache recorded and assembled as
+jrs does it, on each workload, then three whole-unit `javac`s of
+`gen-2000`'s and `gen-300`'s main sources with it (without the
+dependency lines, so with nothing on the classpath):
+
+| Trained on | Recording | Assembly | `gen-2000` | `gen-300` |
+| --- | --- | --- | --- | --- |
+| The hand-written part | 664 ms | 338 ms | 1.11 s | 417–425 ms |
+| and 150 generated | 1.21 s | 380 ms | 974–1010 ms | 398–405 ms |
+| and 300 generated | 1.60 s | 390 ms | 934–945 ms | 399–408 ms |
+| and 600 generated | 2.03 s | 406 ms | 919–927 ms | 398–403 ms |
+| `gen-2000` itself | 1.48 s | 375 ms | 886–893 ms | 399–401 ms |
+
+300 classes take 165 of the 217 ms a cache trained on `gen-2000` itself
+takes, and all of `gen-300`'s; past them each class buys less. They take
+longer to record than `gen-2000`'s 2,000: each holds much more than one
+of the benchmark's classes does.
+
+Then with the benchmark's jrs column alone (`JRS_BENCH_TOOLS=jrs`, three
+runs, one warm-up), the baseline from a worktree of the commit before,
+the same session. Medians; "worker too" is the first try, which trained
+the worker's cache on the generated classes as well:
+
+| | Before | Worker too | Built |
+| --- | --- | --- | --- |
+| `gen-2000` `clean` | 1.51 s | 1.33 s | 1.33 s |
+| `gen-300` `clean` | 599 ms | 556 ms | 552 ms |
+| `gen-2000` `abi` | 747 ms | 724 ms | 755 ms |
+| `gen-300` `abi` | 438 ms | 447 ms | 438 ms |
+| `gen-2000` `cold` | 1.76 s | 2.59 s | 2.28 s |
+| `gen-300` `cold` | 1.34 s | 2.43 s | 2.19 s |
+
+`gen-2000`'s `clean` loses 180 ms, `gen-300`'s 47 ms: what the training
+was expected to bring, though `gen-2000` is still 0.06 s behind the
+daemon's best. `abi` does not move: its rounds are too short for the
+profiles to matter, and the worker's training on the generated classes
+bought 23 ms of `gen-2000`'s for 0.24–0.31 s of `cold`, so it was left
+out. `noop`, `incremental`, `test`, `run` and `package` did not move
+beyond the runs' spread in the first try. `wordstats` was not timed: the
+local mirror had lost a POM it needs.
+
+The price is `cold`, by 0.5 s on `gen-2000` and 0.85 s on `gen-300`: the
+command waits for a training that now records for 1.6 s. That makes §6
+the next step, not a later one; its "start it sooner, or make it less"
+has a measured choice of size above. The benchmark has not read it yet.
 
 ## 6. `cold`
 

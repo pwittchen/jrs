@@ -322,7 +322,7 @@ impl Worker {
         ));
         let argfile = scratch.join("prime.args");
         let sources = if training {
-            share::write_training(&scratch.join("src"))
+            share::write_training(&scratch.join("src"), false)
         } else {
             let source = scratch.join("Prime.java");
             (std::fs::create_dir_all(&scratch).is_ok() && std::fs::write(&source, PRIME).is_ok())
@@ -429,7 +429,7 @@ impl Worker {
         let scratch = self.dir.join(format!(".train-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&scratch);
         let argfile = scratch.join("train.args");
-        let written = share::write_training(&scratch.join("src")).is_some_and(|sources| {
+        let written = share::write_training(&scratch.join("src"), false).is_some_and(|sources| {
             let args = [
                 "--release".to_string(),
                 share::TRAINING_RELEASE.to_string(),

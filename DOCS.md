@@ -851,7 +851,8 @@ for each compiler on each JDK: `javac`, kotlinc, scalac and groovyc start
 faster from one (from JDK 25, `javac` and its worker get an AOT cache, which
 keeps method profiles too). The first compile after a new JDK or compiler
 writes it. For `javac`, the first command that finds none trains it on a
-small workload of jrs's own, beside the build rather than after it, and
+workload of jrs's own (a few hundred generated classes, so that the cache
+knows a large compile's hot paths), beside the build rather than after it, and
 the `javac` worker's alongside it; an edit's few files never write it; `jrs fetch` and `jrs jdk install` make
 `javac`'s caches too, at a moment you are waiting anyway. `prune` drops the
 directory like any other; the next build writes it again.
