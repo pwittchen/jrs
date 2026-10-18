@@ -1,6 +1,6 @@
 //! Warm compilers for `--watch` (SPEC §7.5): a `javac` worker, and a
 //! `kotlinc` one; and `javac` workers for a workspace command, which
-//! compiles member after member (`specs/todo/BEATING_THE_DAEMON.md` §6).
+//! compiles member after member (`specs/BEATING_THE_DAEMON.md` §6).
 //!
 //! A `--watch` session keeps one jrs process alive across rebuilds, and in
 //! it, worker JVMs per compiler: started the first time that compiler's
@@ -25,9 +25,9 @@
 //!
 //! The `javac` worker's JVM maps an archive of its own: from JDK 25 an AOT
 //! cache, which takes its first compile from twice a forked `javac`'s time
-//! to about a forked one's (`specs/todo/BEATING_THE_DAEMON_2.md` §3). It is
+//! to about a forked one's (`specs/BEATING_THE_DAEMON_2.md` §3). It is
 //! recorded by the first worker of the first command that finds none, and
-//! by no other worker in its pool (`specs/todo/BEATING_THE_DAEMON_3.md`
+//! by no other worker in its pool (`specs/BEATING_THE_DAEMON_3.md`
 //! §2). In a command that is not `--watch`, that worker records its first
 //! compile alone: it is then stopped, its JVM dumps and the cache is
 //! assembled on threads the command joins at its end, while a new worker
@@ -38,7 +38,7 @@
 //! compiled before the first member arrives (§3). Beside it, it starts one
 //! more for each member that can compile at the same time, primed with the
 //! training workload, which warms the compiler's hot paths while the first
-//! member compiles (`specs/todo/BEATING_THE_DAEMON_4.md` §4); a compile
+//! member compiles (`specs/BEATING_THE_DAEMON_4.md` §4); a compile
 //! takes the warmest idle worker. Once the last member has
 //! compiled, `jrs build` and `jrs run` stop the workers at once, rather than
 //! one after another as the command ends. A single-module build whose API
@@ -49,7 +49,7 @@
 //!
 //! A single-module build starts no worker to record that cache, so before
 //! JDK 25 it trains one beside the build ([`Worker::train_beside`],
-//! `specs/todo/BEATING_THE_DAEMON_4.md` §2). From JDK 25 it only compiles
+//! `specs/BEATING_THE_DAEMON_4.md` §2). From JDK 25 it only compiles
 //! the worker's program beside the build, and its worker maps `javac`'s AOT
 //! cache instead, with its program after the class path that cache was
 //! trained on (§6): a second training held the first command up by a
@@ -286,7 +286,7 @@ impl Worker {
     /// many as the members that can compile at once, the first is primed
     /// with one class, since the first member needs it at once, and the
     /// rest with the training workload, which they compile while the first
-    /// member does (`specs/todo/BEATING_THE_DAEMON_4.md` §4): no member
+    /// member does (`specs/BEATING_THE_DAEMON_4.md` §4): no member
     /// then waits for a JVM to start, or pays its first compile in full.
     ///
     /// # Panics
@@ -319,9 +319,9 @@ impl Worker {
 
     /// Send a worker a compile it answers while nothing waits on it, read
     /// before its first real request: one class
-    /// (`specs/todo/BEATING_THE_DAEMON_3.md` §3), or with `training` the
+    /// (`specs/BEATING_THE_DAEMON_3.md` §3), or with `training` the
     /// training workload, which warms the compiler's hot paths as well as
-    /// its classes (`specs/todo/BEATING_THE_DAEMON_4.md` §4). A prime that
+    /// its classes (`specs/BEATING_THE_DAEMON_4.md` §4). A prime that
     /// cannot be written is not sent.
     fn prime(&self, worker: &mut Running, ui: &Ui, training: bool) {
         let scratch = self.dir.join(format!(
@@ -384,7 +384,7 @@ impl Worker {
     /// Train the `javac` worker's cache under `dir` as [`Worker::train`]
     /// does, on a thread of its own that the command joins at its end, when
     /// there is none and, unless `always`, no command before this one looked
-    /// for it (`specs/todo/BEATING_THE_DAEMON_4.md` §2). A single-module
+    /// for it (`specs/BEATING_THE_DAEMON_4.md` §2). A single-module
     /// build starts no worker that would record it, and without it an API
     /// change's later rounds fork a cold `javac`. From JDK 25 it builds only
     /// the worker's program, whose JVM then maps `javac`'s cache, which
@@ -550,7 +550,7 @@ impl Worker {
                 .drain(..)
                 .partition(|r| r.key == launch.key && r.compilations < kind.restart_after());
             *pool = fresh;
-            // The warmest idle worker (`specs/todo/BEATING_THE_DAEMON_4.md`
+            // The warmest idle worker (`specs/BEATING_THE_DAEMON_4.md`
             // §4): members start longest remaining path first, so the
             // member on the critical path gets it.
             let warmest = (0..pool.len()).max_by_key(|i| pool[*i].warmth());

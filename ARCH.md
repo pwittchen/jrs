@@ -657,7 +657,7 @@ reference behind, since `javac` inlines it, so it compiles the unit whole.
 build's, byte for byte, and that the index they leave equals a whole build's.
 
 The index's bookkeeping grows with what a round compiled, not with the unit
-(`specs/todo/BEATING_THE_DAEMON_4.md` §3). After a round, `Tracker::record_round`
+(`specs/BEATING_THE_DAEMON_4.md` §3). After a round, `Tracker::record_round`
 takes every class the previous index holds for a source outside the round from
 that index, with the classes that source referred to, as long as its file was
 written before the round's `javac` started, less a slack for a file system
@@ -689,7 +689,7 @@ gives `javac` an AOT cache instead, `javac-jdk<n>-<key>.aot` keyed by the
 JDK, recorded and assembled as the test JVM's is (§10), the assembling JVM
 naming `javac`'s main module as the launcher does. One archive serves both
 kinds of run, and no edit records one. No build waits for it either
-(`specs/todo/BEATING_THE_DAEMON_3.md` §2): the first command that finds
+(`specs/BEATING_THE_DAEMON_3.md` §2): the first command that finds
 none trains it with `share::train_javac`, a `javac` over the workload
 embedded as `compile/Training.java` and the two workers' sources, on a
 thread started by `Session::build` (before the resolution, on a clean tree)
@@ -705,7 +705,7 @@ its place, and `Running::stop` assembles it. A session with no workers of
 its own, a single-module build's, trains it beside the build instead,
 when `Session::train_javac` trains `javac`'s (`Worker::train_beside`,
 gated by `share::worker_training_due`;
-`specs/todo/BEATING_THE_DAEMON_4.md` §2) — before JDK 25. From JDK 25 it
+`specs/BEATING_THE_DAEMON_4.md` §2) — before JDK 25. From JDK 25 it
 only builds the worker's program there, and a worker without a cache of
 its own maps `javac`'s (§6): `javac`'s AOT cache is recorded and mapped by
 `java -cp <cache>/cds/javac-classpath com.sun.tools.javac.Main`
@@ -719,7 +719,7 @@ the rest with the training workload, which they compile while the first
 member does. The pool hands a compile its warmest idle worker
 (`Running::warmth`: compiles answered, then age), and `Driver::at_once_until`
 starts the ready member with the most members after it first
-(`remaining_paths`; `specs/todo/BEATING_THE_DAEMON_4.md` §4). `jrs build` and `jrs run` retire
+(`remaining_paths`; `specs/BEATING_THE_DAEMON_4.md` §4). `jrs build` and `jrs run` retire
 the workers once the last member has compiled (`Worker::retire`), and
 `Drop for Worker` stops the rest at once. `jrs fetch` and `jrs jdk install`
 train both caches (`warm_compilers`, `Worker::train`). A quick `javac` run

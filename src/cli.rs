@@ -1183,10 +1183,10 @@ impl<'a> Session<'a> {
 
     /// Train `javac`'s AOT cache for `toolchain` on a thread of its own,
     /// when there is none and, unless `always`, no command before this one
-    /// looked for it (`specs/todo/BEATING_THE_DAEMON_3.md` §2); and the
+    /// looked for it (`specs/BEATING_THE_DAEMON_3.md` §2); and the
     /// `javac` worker's the same way, unless this session holds workers of
     /// its own, whose first one records it
-    /// (`specs/todo/BEATING_THE_DAEMON_4.md` §2). From JDK 25 that worker
+    /// (`specs/BEATING_THE_DAEMON_4.md` §2). From JDK 25 that worker
     /// maps `javac`'s cache instead, and only its program is built (§6).
     fn train_javac(&self, toolchain: &Toolchain, always: bool) {
         let Ok(cache) = Cache::discover() else {
@@ -4136,7 +4136,7 @@ impl<'a> Session<'a> {
             self.timings.since("compile main: api digest", digesting);
         }
         // An upstream API change compiles what uses the classes that changed
-        // (`specs/todo/BEATING_THE_DAEMON.md` §3).
+        // (`specs/BEATING_THE_DAEMON.md` §3).
         unit.tracked = self.upstream_dirs(Classpath::compiles);
         Ok(unit)
     }
@@ -6237,7 +6237,7 @@ fn is_java(source: &Path) -> bool {
 }
 
 /// Make the `javac` worker's cache for `toolchain` when there is none, and
-/// wait for every cache still being made (`specs/todo/BEATING_THE_DAEMON_3.md`
+/// wait for every cache still being made (`specs/BEATING_THE_DAEMON_3.md`
 /// §2): for `jrs fetch` and `jrs jdk install`, where the user already waits,
 /// so that the next build finds them.
 fn warm_compilers(ui: &Ui, toolchain: &Toolchain) {
@@ -6975,7 +6975,7 @@ fn print_block(ui: &Ui, title: &str, entries: &[String]) {
 /// starts a suite 17–20% faster than the dynamic archive
 /// (`specs/TEST_JVM_BENCHMARK.md` §7.2). Where it cannot be assembled,
 /// `Share::for_tests` falls back to the archive, so `true` cannot lose by
-/// it (`specs/todo/BEATING_THE_DAEMON_2.md` §7).
+/// it (`specs/BEATING_THE_DAEMON_2.md` §7).
 fn aot_tests(share: ShareClasses, toolchain: &Toolchain) -> bool {
     share == ShareClasses::Aot
         || (share == ShareClasses::On && toolchain.version >= share::JAVAC_AOT_SINCE)

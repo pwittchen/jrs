@@ -361,7 +361,7 @@ impl Workspace {
     /// How many of `members`, which are in build order with what they
     /// depend on among them, can compile at once at most: the most members
     /// at one depth of the graph, a member's depth being one more than its
-    /// deepest upstream member's (`specs/todo/BEATING_THE_DAEMON_4.md` §4).
+    /// deepest upstream member's (`specs/BEATING_THE_DAEMON_4.md` §4).
     #[must_use]
     pub fn widest_level(&self, members: &[usize]) -> usize {
         let mut depth: HashMap<usize, usize> = HashMap::new();

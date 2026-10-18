@@ -251,7 +251,7 @@ same file; the harness now deletes the copy's archives before each mode.
    therefore gets the shared layout's risk from `jrs test` and none of its
    gain. One fork (the first) could dump while the others read nothing.
    *Fixed since*: the first fork dumps the archive when there is none, and
-   every fork maps it from then on (`specs/todo/BEATING_THE_DAEMON.md` §7).
+   every fork maps it from then on (`specs/BEATING_THE_DAEMON.md` §7).
 4. **The test JVM works in jrs's own directory.** Run with
    `--manifest-path` from elsewhere, petclinic's `I18nPropertiesSyncTest`
    (`NoSuchFileException: src/main`) and `PostgresIntegrationTests` (its

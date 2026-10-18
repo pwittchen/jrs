@@ -94,7 +94,7 @@ pub(super) fn run(
     // cannot answer hands the step back to a forked one. A few files go to
     // a forked `javac` instead when it maps its AOT cache and the command's
     // worker would start cold, which costs a one-file compile twice what
-    // the fork does (`specs/todo/BEATING_THE_DAEMON_2.md` §3).
+    // the fork does (`specs/BEATING_THE_DAEMON_2.md` §3).
     let forked_is_faster = quick
         && unit
             .share_dir

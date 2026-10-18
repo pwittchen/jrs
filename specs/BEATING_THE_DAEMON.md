@@ -1,11 +1,11 @@
 # jrs — Beating Gradle's warm daemon
 
 Where a warm Gradle daemon still beats jrs in the benchmark of
-[BENCHMARKS.md](../BENCHMARKS.md), why, and what would close each gap. §2–§7
+[BENCHMARKS.md](BENCHMARKS.md), why, and what would close each gap. §2–§7
 stay within SPEC §1.2, which rules out a compiler daemon; §9 is the opt-in
 daemon to reach for only if they are not enough, and it needs a SPEC
 decision first. The numbers are the second pass of
-[BENCHMARKS_SUMMARY.md](../BENCHMARKS_SUMMARY.md) (jrs 0.12.0, 2026-10-15, one
+[BENCHMARKS_SUMMARY.md](BENCHMARKS_SUMMARY.md) (jrs 0.12.0, 2026-10-15, one
 run per cell).
 
 Status: **§2–§7 built, not yet measured in a full run; §9 proposed.** §9
@@ -243,7 +243,7 @@ maps no module classes. On a 60-file compile on JDK 25 it took a forked
 framework classes warm.
 
 **Proposal.** None new. `test.share-classes` and `"aot"`
-([TEST_JVM_BENCHMARK.md](../TEST_JVM_BENCHMARK.md)) are the levers already
+([TEST_JVM_BENCHMARK.md](TEST_JVM_BENCHMARK.md)) are the levers already
 built, held off by that document's findings 1–3. Fixing finding 3 (forked
 runs never write an archive) is what would make them reach a suite of this
 size.

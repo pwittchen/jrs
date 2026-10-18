@@ -979,14 +979,14 @@ own.
   `java -cp <cache>/cds/javac-classpath com.sun.tools.javac.Main`, an empty
   directory for its class path, rather than as the `javac` launcher, so
   that the `javac` worker can map the same cache with its program after
-  that class path ([BEATING_THE_DAEMON_4.md](specs/todo/BEATING_THE_DAEMON_4.md)
+  that class path ([BEATING_THE_DAEMON_4.md](specs/BEATING_THE_DAEMON_4.md)
   §6). With `JDK_JAVAC_OPTIONS` or `JDK_JAVA_OPTIONS` set, which only one of
   the two launchers reads, `javac` keeps its launcher and maps no cache.
 - `javac`'s archive is never made inside an edit. Only a whole-unit compile
   writes it; a file-by-file run maps it with its quick flags, which still
   save a one-file compile about a tenth over the full JIT with the same
   cache, and never records. Nor does any build wait for it
-  ([BEATING_THE_DAEMON_3.md](specs/todo/BEATING_THE_DAEMON_3.md) §2): the
+  ([BEATING_THE_DAEMON_3.md](specs/BEATING_THE_DAEMON_3.md) §2): the
   first command that finds no archive trains one on a thread of its own,
   started before the resolution when the tree is clean, by compiling a small
   workload embedded in jrs (the cache holds no project's data), and joins
@@ -1018,7 +1018,7 @@ own.
   JDK 25 it only builds the worker's program there, and a worker without a
   cache of its own maps `javac`'s, since a second training held up the
   first command by a quarter of a second
-  ([BEATING_THE_DAEMON_4.md](specs/todo/BEATING_THE_DAEMON_4.md) §6).
+  ([BEATING_THE_DAEMON_4.md](specs/BEATING_THE_DAEMON_4.md) §6).
   `jrs fetch` and `jrs jdk install` train it too. A run over a few files
   is forked rather than sent to a one-command worker that would start
   without its archive, when the forked `javac` maps its own. A single-module compile that follows an API change
@@ -2827,7 +2827,7 @@ produces something runnable.
 - ☑ jars that copy a dependency's deflated entries as they are, and deflate
   the rest on every core
 - The plan, and the opt-in daemon it keeps for last, are in
-  [BEATING_THE_DAEMON.md](specs/todo/BEATING_THE_DAEMON.md).
+  [BEATING_THE_DAEMON.md](specs/BEATING_THE_DAEMON.md).
 - ☑ `javac`'s archive made outside an edit and by the second command that
   finds none, the worker's own AOT cache, its first JVM started with the
   command, a worker for a single-module build's later rounds (§7.2, §7.5),
@@ -2839,9 +2839,9 @@ produces something runnable.
   workers stopped at once and early, the first worker primed, and the
   rounds' worker started beside the first round (§7.2, §7.5)
 - Its second step is in
-  [BEATING_THE_DAEMON_2.md](specs/todo/BEATING_THE_DAEMON_2.md), and its
+  [BEATING_THE_DAEMON_2.md](specs/BEATING_THE_DAEMON_2.md), and its
   third, the caches made where no build waits on them, in
-  [BEATING_THE_DAEMON_3.md](specs/todo/BEATING_THE_DAEMON_3.md).
+  [BEATING_THE_DAEMON_3.md](specs/BEATING_THE_DAEMON_3.md).
 
 Tick the corresponding README boxes as each lands — the README is the
 user-facing progress tracker, this document is the design behind it.

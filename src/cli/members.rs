@@ -80,7 +80,7 @@ pub(super) fn dispatch(
     }
     let member_uis: Vec<Ui> = workspace.members.iter().map(|_| ui.deferred()).collect();
     // A command that compiles member after member compiles in warm `javac`
-    // JVMs it holds until it exits (`specs/todo/BEATING_THE_DAEMON.md` §6):
+    // JVMs it holds until it exits (`specs/BEATING_THE_DAEMON.md` §6):
     // the JIT the first member warmed serves the rest.
     let compiles = matches!(
         cli.command,
@@ -305,12 +305,12 @@ impl<'a> Driver<'a> {
 
     /// Start the command's first `javac` worker, so that its JVM starts
     /// while the lockfile is read and the classpath assembled rather than
-    /// on the first member's compile (`specs/todo/BEATING_THE_DAEMON_2.md`
+    /// on the first member's compile (`specs/BEATING_THE_DAEMON_2.md`
     /// §3), and ask for as many as the members that can compile at once,
     /// up to `--jobs`, the rest to start beside the first member's compile
-    /// (`specs/todo/BEATING_THE_DAEMON_4.md` §4); and, when this JDK has no
+    /// (`specs/BEATING_THE_DAEMON_4.md` §4); and, when this JDK has no
     /// `javac` cache, train one beside the build
-    /// (`specs/todo/BEATING_THE_DAEMON_3.md` §2). On the first member's
+    /// (`specs/BEATING_THE_DAEMON_3.md` §2). On the first member's
     /// JDK, and only one already installed: one still to be downloaded is
     /// the member's own build's to report.
     fn warm_up(&self) {
@@ -347,7 +347,7 @@ impl<'a> Driver<'a> {
 
     /// Stop the command's `javac` workers now: it has nothing left for them
     /// to compile, and their exits, dumps and assemblies overlap the rest
-    /// of it (`specs/todo/BEATING_THE_DAEMON_3.md` §2).
+    /// of it (`specs/BEATING_THE_DAEMON_3.md` §2).
     fn retire_workers(&self) {
         if let Some(worker) = &self.worker {
             worker.retire();
@@ -1270,7 +1270,7 @@ impl<'a> Driver<'a> {
 /// position, in build order: the most members still to build on a path
 /// from it, itself counted. A ready member with more after it starts
 /// first, and so takes the warmest worker
-/// (`specs/todo/BEATING_THE_DAEMON_4.md` §4).
+/// (`specs/BEATING_THE_DAEMON_4.md` §4).
 fn remaining_paths(upstream: &[Vec<usize>]) -> Vec<usize> {
     let mut remaining = vec![1; upstream.len()];
     for k in (0..upstream.len()).rev() {

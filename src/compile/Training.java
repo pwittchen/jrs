@@ -19,7 +19,7 @@ import java.util.stream.Collectors;
 import java.util.stream.IntStream;
 
 /**
- * The workload jrs trains javac's AOT cache on (specs/todo/BEATING_THE_DAEMON_3.md
+ * The workload jrs trains javac's AOT cache on (specs/BEATING_THE_DAEMON_3.md
  * §2), compiled into a scratch directory and thrown away. It is never run: it only
  * has to make javac parse, attribute, check and write most of what a project's
  * sources hold — generics and their inference, lambdas, method references,

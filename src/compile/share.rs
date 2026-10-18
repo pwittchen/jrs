@@ -21,7 +21,7 @@
 //! gets no archive from jrs at all.
 //!
 //! From JDK 25, `javac` gets JEP 483's AOT cache instead
-//! (`specs/todo/BEATING_THE_DAEMON.md` §6): its classes kept loaded and
+//! (`specs/BEATING_THE_DAEMON.md` §6): its classes kept loaded and
 //! linked, and the method profiles of the run that trained it (JEP 515), in
 //! `<cache>/cds/javac-jdk<n>-<key>.aot`, one per JDK. It is made in the two
 //! steps the test JVM's is, below; what it holds is no project's, and it
@@ -30,14 +30,14 @@
 //! com.sun.tools.javac.Main` rather than through the `javac` launcher, so
 //! that the `javac` worker's JVM can map the same cache, with its program
 //! appended to that class path, which an AOT cache allows
-//! (`specs/todo/BEATING_THE_DAEMON_4.md` §6): a cache recorded by the
+//! (`specs/BEATING_THE_DAEMON_4.md` §6): a cache recorded by the
 //! launcher names a main module the worker's JVM does not, and one
 //! assembled without its classes linked, so that it could, costs a run
 //! about 95 ms. The worker's JVM also gets a cache of its own the same way,
 //! keyed by its program too, which it maps instead once there is one.
 //!
-//! Neither is made inside an edit (`specs/todo/BEATING_THE_DAEMON_2.md` §2),
-//! nor where a build waits on it (`specs/todo/BEATING_THE_DAEMON_3.md` §2).
+//! Neither is made inside an edit (`specs/BEATING_THE_DAEMON_2.md` §2),
+//! nor where a build waits on it (`specs/BEATING_THE_DAEMON_3.md` §2).
 //! The first command that finds no `javac` cache trains one on a thread of
 //! its own ([`train_javac`]): a `javac` over a small workload embedded in
 //! jrs, started as the command starts, so that it runs beside the
@@ -53,7 +53,7 @@
 //! one; a single-module build, which holds none, has its API changes' later
 //! rounds map `javac`'s cache from JDK 25, and before, trains the worker's
 //! archive beside `javac`'s ([`worker_training_due`],
-//! `specs/todo/BEATING_THE_DAEMON_4.md` §2): a second training would hold
+//! `specs/BEATING_THE_DAEMON_4.md` §2): a second training would hold
 //! up the command it started in by a quarter of a second (§6). `jrs fetch`
 //! and `jrs jdk install` train the caches too, at a moment the user already
 //! waits.
@@ -224,7 +224,7 @@ impl Share {
     }
 
     /// `javac`'s archive under `dir`, or `None` when it gets none: from
-    /// JDK 25 an AOT cache (`specs/todo/BEATING_THE_DAEMON.md` §6), keyed
+    /// JDK 25 an AOT cache (`specs/BEATING_THE_DAEMON.md` §6), keyed
     /// by the JDK; before, the dynamic archive [`Share::new`] gives any
     /// compiler. Like the test JVM's, the AOT cache is made in two steps:
     /// the first run records, and jrs assembles the cache from that record
@@ -771,7 +771,7 @@ pub fn join_background() {
 
 /// Train `javac`'s archive under `dir` on a thread of its own, when there is
 /// none and, unless `always`, no command before this one looked for it
-/// (`specs/todo/BEATING_THE_DAEMON_3.md` §2): a `javac` over the embedded
+/// (`specs/BEATING_THE_DAEMON_3.md` §2): a `javac` over the embedded
 /// [`TRAINING`] workload records it, and the cache is assembled from that.
 /// Whether a training started.
 pub(crate) fn train_javac(dir: &Path, toolchain: &Toolchain, always: bool) -> bool {
@@ -803,7 +803,7 @@ pub(crate) fn train_javac(dir: &Path, toolchain: &Toolchain, always: bool) -> bo
 /// before this one looked for it, nor this one started it already; a
 /// training that came to nothing is then not tried again by every build,
 /// only by `jrs fetch` and `jrs jdk install`. From JDK 25, only its program
-/// (`specs/todo/BEATING_THE_DAEMON_4.md` §6), once a command until it is
+/// (`specs/BEATING_THE_DAEMON_4.md` §6), once a command until it is
 /// built: the worker maps `javac`'s cache, which `javac`'s training makes,
 /// but a worker whose program is not built is not started at all.
 pub(crate) fn worker_training_due(

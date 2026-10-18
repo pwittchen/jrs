@@ -10,7 +10,7 @@
 //! API with the recorded one. A change that stops at method bodies ends
 //! there.
 //!
-//! One that reaches the API is followed in rounds (`specs/todo/BEATING_THE_DAEMON.md`
+//! One that reaches the API is followed in rounds (`specs/BEATING_THE_DAEMON.md`
 //! §2). A class that only gained members compiles, in the next round, the
 //! sources that refer to it or to one of its subtypes — whose inherited
 //! members changed with it, and a new overload can change which method a
@@ -76,7 +76,7 @@ const HEADER: &str = "jrs compile index 2";
 pub(super) const QUICK_SOURCES: usize = 100;
 
 /// A `javac` worker for the rounds after the first of a unit's compile
-/// (`specs/todo/BEATING_THE_DAEMON_2.md` §5), when the unit holds none of
+/// (`specs/BEATING_THE_DAEMON_2.md` §5), when the unit holds none of
 /// its own and the worker would start warm: one that starts cold costs
 /// its first round twice what a forked `javac` does. It lives in the
 /// shared cache beside the archives, as every other `javac` worker does.
@@ -663,7 +663,7 @@ impl Tracker {
         // this compile, when the unit has none of its own. It starts beside
         // the first round when other sources name a class that round
         // compiles, as an API change there would take a second
-        // (`specs/todo/BEATING_THE_DAEMON_3.md` §4).
+        // (`specs/BEATING_THE_DAEMON_3.md` §4).
         let mut later: Option<Option<Worker>> = None;
         if unit.worker.is_none() && is_named(previous, &first) {
             let worker = worker_for_rounds(unit, toolchain);
@@ -904,7 +904,7 @@ impl Tracker {
 
     /// [`Tracker::record`] after a `javac` run over `round` that started at
     /// `since`, reading only what that run may have written
-    /// (`specs/todo/BEATING_THE_DAEMON_4.md` §3): a class `base` records for
+    /// (`specs/BEATING_THE_DAEMON_4.md` §3): a class `base` records for
     /// a source outside `round`, whose file was last written before the
     /// run, is taken from `base` as it stands, with the classes that source
     /// referred to then. Every other class file is read.

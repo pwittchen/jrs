@@ -4,7 +4,7 @@ What is left after [BEATING_THE_DAEMON_3.md](BEATING_THE_DAEMON_3.md),
 whose §2–§4 and §6 are built and were read by the fifth pass, and what
 would close each remaining gap. Everything here stays within SPEC §1.2: no
 process outlives the command. The numbers are the fifth pass of
-[BENCHMARKS_SUMMARY.md](../BENCHMARKS_SUMMARY.md) (jrs 0.14.1, `56c0d97`,
+[BENCHMARKS_SUMMARY.md](BENCHMARKS_SUMMARY.md) (jrs 0.14.1, `56c0d97`,
 2026-10-17, one run per cell, no warm-up), and the measurements below,
 taken the same evening on the same machine.
 

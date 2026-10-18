@@ -3,7 +3,7 @@
 What is left after [BEATING_THE_DAEMON.md](BEATING_THE_DAEMON.md), whose
 §2–§7 are built, and what would close each remaining gap. Everything here
 stays within SPEC §1.2: no process outlives the command. The numbers are
-the third pass of [BENCHMARKS_SUMMARY.md](../BENCHMARKS_SUMMARY.md) (jrs
+the third pass of [BENCHMARKS_SUMMARY.md](BENCHMARKS_SUMMARY.md) (jrs
 0.13.0, `f52f4d6`, 2026-10-16, one run per cell, no warm-up).
 
 Status: **§2–§5 and §7 built, not yet benchmarked; §6 not built.** The
@@ -241,7 +241,7 @@ packages are.
 **Now.** `gen-2000`'s `test` is 856 ms (643 ms test JVM) against 802 ms,
 and `test-edit` 1.17 s (703 ms test JVM) against 1.06 s: 2–10% behind.
 
-**Proposal.** [TEST_JVM_BENCHMARK.md](../TEST_JVM_BENCHMARK.md) finds
+**Proposal.** [TEST_JVM_BENCHMARK.md](TEST_JVM_BENCHMARK.md) finds
 `test.share-classes = "aot"` 17–20% faster than the archive wherever it can
 be assembled, and it stays opt-in only because it never assembles on the
 Spring Boot projects. Use `"aot"` where it assembles and fall back to the
