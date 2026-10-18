@@ -10,9 +10,9 @@
 
 <p align="center">
   <a href="https://github.com/pwittchen/jrs/actions/workflows/rust.yml"><img src="https://github.com/pwittchen/jrs/actions/workflows/rust.yml/badge.svg" alt="Rust"></a>
-  <a href="https://github.com/pwittchen/jrs/actions/workflows/intellij.yml"><img src="https://github.com/pwittchen/jrs/actions/workflows/intellij.yml/badge.svg" alt="Rust"></a>
-  <a href="https://github.com/pwittchen/jrs/actions/workflows/corpus.yml"><img src="https://github.com/pwittchen/jrs/actions/workflows/corpus.yml/badge.svg" alt="Rust"></a>
-  <a href="https://github.com/pwittchen/jrs/actions/workflows/website.yml"><img src="https://github.com/pwittchen/jrs/actions/workflows/website.yml/badge.svg" alt="Rust"></a>
+  <a href="https://github.com/pwittchen/jrs/actions/workflows/intellij.yml"><img src="https://github.com/pwittchen/jrs/actions/workflows/intellij.yml/badge.svg" alt="IntelliJ"></a>
+  <a href="https://github.com/pwittchen/jrs/actions/workflows/corpus.yml"><img src="https://github.com/pwittchen/jrs/actions/workflows/corpus.yml/badge.svg" alt="Corpus"></a>
+  <a href="https://github.com/pwittchen/jrs/actions/workflows/website.yml"><img src="https://github.com/pwittchen/jrs/actions/workflows/website.yml/badge.svg" alt="Website"></a>
 </p>
 
 jrs builds, tests, runs and packages a Java project from one `jrs.toml`
