@@ -398,6 +398,94 @@ function renderLosses(host: HTMLElement): void {
   host.append(figure);
 }
 
+/**
+ * The cells jrs won against each Gradle mode and against all of them
+ * together, out of the cells both were timed in; a tie counts for neither.
+ */
+function tally(): HTMLElement {
+  const modes = TOOLS.map((tool, i) => ({ tool, i })).filter(({ tool }) => tool.id.startsWith("gradle"));
+  const count = (i: number) => {
+    let jrsWins = 0;
+    let theirs = 0;
+    let total = 0;
+    for (const project of RESULTS) {
+      for (const [, ...values] of project.rows) {
+        const jrs = values[0];
+        const value = values[i];
+        if (jrs === null || jrs === undefined || value === null || value === undefined) continue;
+        total++;
+        if (jrs < value) jrsWins++;
+        else if (value < jrs) theirs++;
+      }
+    }
+    return { jrsWins, theirs, total };
+  };
+  const counts = modes.map(({ tool, i }) => ({ name: tool.short, ...count(i) }));
+  const all = counts.reduce(
+    (sum, c) => ({ ...sum, jrsWins: sum.jrsWins + c.jrsWins, theirs: sum.theirs + c.theirs, total: sum.total + c.total }),
+    { name: "every Gradle mode", jrsWins: 0, theirs: 0, total: 0 },
+  );
+  const list = el("dl", "stats tally");
+  const host = el("div");
+  for (const c of [all, ...counts]) {
+    const tile = el("div");
+    const dd = el("dd");
+    dd.append(
+      el("span", "value", `${c.jrsWins} of ${c.total}`),
+      el("span", "versus", `jrs faster; Gradle in ${c.theirs}`),
+    );
+    tile.append(el("dt", undefined, `vs ${c.name}`), dd);
+    list.append(tile);
+  }
+  host.append(list, headToHead());
+  return host;
+}
+
+function median(xs: number[]): number {
+  const sorted = [...xs].sort((a, b) => a - b);
+  const mid = sorted.length >> 1;
+  return sorted.length % 2 ? sorted[mid]! : (sorted[mid - 1]! + sorted[mid]!) / 2;
+}
+
+/**
+ * jrs against a warm Gradle daemon, its plain, CC and --parallel columns
+ * together: the cells each side won, and the median of how many times
+ * faster it was in them.
+ */
+function headToHead(): HTMLElement {
+  const daemon = TOOLS.map((tool, i) => ({ tool, i })).filter(({ tool }) => tool.id !== "jrs" && tool.id !== "maven" && tool.id !== "gradleNoDaemon");
+  const jrsBy: number[] = [];
+  const theirsBy: number[] = [];
+  let total = 0;
+  for (const project of RESULTS) {
+    for (const [, ...values] of project.rows) {
+      const jrs = values[0];
+      if (jrs === null || jrs === undefined) continue;
+      for (const { i } of daemon) {
+        const value = values[i];
+        if (value === null || value === undefined) continue;
+        total++;
+        if (jrs < value) jrsBy.push(value / jrs);
+        else if (value < jrs) theirsBy.push(jrs / value);
+      }
+    }
+  }
+  const list = el("dl", "stats head-to-head");
+  const side = (label: string, by: number[], cls?: string) => {
+    const tile = el("div", cls);
+    const dd = el("dd");
+    dd.append(
+      el("span", "value", `${by.length} of ${total}`),
+      el("span", "versus", by.length ? `median ${median(by).toFixed(2)}× faster in those cells` : "never faster"),
+    );
+    tile.append(el("dt", undefined, label), dd);
+    list.append(tile);
+  };
+  side("jrs faster than a warm Gradle daemon", jrsBy);
+  side("Gradle daemon faster than jrs", theirsBy, "theirs");
+  return list;
+}
+
 function svgEl<K extends keyof SVGElementTagNameMap>(tag: K, attrs: Record<string, string | number> = {}): SVGElementTagNameMap[K] {
   const node = document.createElementNS(SVG, tag);
   for (const [k, v] of Object.entries(attrs)) node.setAttribute(k, String(v));
@@ -581,3 +669,4 @@ const tables = $<HTMLElement>("[data-tables]");
 if (tables) renderTables(tables);
 const losses = $<HTMLElement>("[data-losses]");
 if (losses) renderLosses(losses);
+$<HTMLElement>("[data-tally]")?.append(tally());

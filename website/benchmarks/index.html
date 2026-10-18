@@ -285,6 +285,8 @@
           in these same cells Gradle without a daemon took 2.5–5.6× as long as jrs. In the other
           cells on this page, jrs was faster than every Gradle mode.
         </p>
+        <h3>Where jrs was faster</h3>
+        <div data-tally></div>
         <dl class="phases">
           <div><dt>cold</dt><dd><code>build</code> with empty caches and no lockfile: resolution and every download, from a local mirror.</dd></div>
           <div><dt>clean</dt><dd><code>build</code> with warm caches and a clean tree.</dd></div>

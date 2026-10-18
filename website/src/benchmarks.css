@@ -60,7 +60,28 @@
   color: var(--text);
 }
 
-/* The reading of the Gradle-wins table: close under it, room before the glossary. */
+/* The count of cells won, after the Gradle-wins table's reading: room before the glossary. */
+.stats.tally {
+  margin-bottom: 0;
+  border-bottom-left-radius: 0;
+  border-bottom-right-radius: 0;
+}
+
+/* jrs against the warm daemon, one wide tile under the tally, split in
+   two: jrs's side in the accent, the daemon's in latte, as the losses are. */
+.stats.head-to-head {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  margin-bottom: 2.5rem;
+  border-top: 0;
+  border-top-left-radius: 0;
+  border-top-right-radius: 0;
+}
+
+.stats.head-to-head .theirs .value {
+  color: var(--latte);
+}
+
+/* The reading of the Gradle-wins table: close under it, room before the tally. */
 .caveat.losses-note {
   margin: 0 0 2.5rem;
   font-size: 0.95rem;
@@ -683,7 +704,8 @@
     padding-block: 2.5rem 0;
   }
 
-  .stats {
+  .stats,
+  .stats.head-to-head {
     grid-template-columns: minmax(0, 1fr);
   }
 
