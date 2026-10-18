@@ -4,7 +4,7 @@
 
 <h1 align="center">jrs</h1>
 
-<p align="center">A JVM build system, written in Rust.</p>
+<p align="center">A simple, fast JVM build system, written in Rust.</p>
 
 <p align="center"><a href="https://getjrs.dev"><strong>getjrs.dev</strong></a></p>
 
