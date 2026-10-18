@@ -103,9 +103,10 @@ Cheap work that lowers the cost of trying jrs:
 - **VS Code without a daemon**: Eclipse `.project` and `.classpath` files
   generated from the resolved project, which the Java extension's language
   server reads as they are.
-- **Package managers and the JetBrains Marketplace**: the Homebrew tap, the
-  Scoop bucket and winget, from the manifests each release already writes,
-  and the IntelliJ plugin published.
+- **Package managers and the JetBrains Marketplace**: the Scoop bucket and
+  winget, from the manifests each release already writes, and the IntelliJ
+  plugin published. The Homebrew tap is live (`brew install pwittchen/tap/jrs`,
+  `specs/HOMEBREW.md`); copying each release's formula into it is still by hand.
 - **A guide for coding agents** in `DOCS.md` and on the website.
 - **`jrs install`** into `~/.m2`, so a library can be shared between
   projects in different repositories: the smallest form of publishing, and

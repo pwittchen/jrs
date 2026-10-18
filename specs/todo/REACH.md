@@ -201,8 +201,8 @@ Rust code.
 
 ### 3.1 Homebrew
 
-- A tap repository, `pwittchen/homebrew-jrs`, holding `Formula/jrs.rb`, so
-  `brew install pwittchen/jrs/jrs` works. The formula `manifests.sh` writes
+- A tap repository, `pwittchen/homebrew-tap`, holding `Formula/jrs.rb`, so
+  `brew install pwittchen/tap/jrs` works. Done: `specs/HOMEBREW.md`. The formula `manifests.sh` writes
   already installs the binary, generates completions from `jrs completions`
   and tests `jrs --version`.
 - A `homebrew` job after `release`, which checks out the tap with a

@@ -88,6 +88,12 @@ or Linux:
 curl -fsSL https://getjrs.dev/install.sh | sh
 ```
 
+or with Homebrew:
+
+```
+brew install pwittchen/tap/jrs
+```
+
 or, with a Rust toolchain, from source:
 
 ```

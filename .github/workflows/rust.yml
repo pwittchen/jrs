@@ -340,8 +340,9 @@ jobs:
       run: sha256sum -- * > SHA256SUMS
 
     # The Homebrew formula, the Scoop manifest and the winget manifest for
-    # this release, from its checksums; publishing them to the tap, the
-    # bucket and winget-pkgs is a step the maintainer takes.
+    # this release, from its checksums; publishing them to the tap
+    # (pwittchen/homebrew-tap, as Formula/jrs.rb), the bucket and
+    # winget-pkgs is a step the maintainer takes.
     - uses: actions/checkout@v7
       with:
         path: source

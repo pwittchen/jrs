@@ -6,8 +6,11 @@ How to make jrs installable with
 brew install pwittchen/tap/jrs
 ```
 
-Status: **not started.** The formula is already written on every release;
-what is missing is the tap that serves it.
+Status: **done, for 0.14.6.** [`pwittchen/homebrew-tap`](https://github.com/pwittchen/homebrew-tap)
+serves `Formula/jrs.rb`, which passes `brew style`, `brew audit --strict`,
+`brew install` and `brew test`, and the docs list the install line. Each
+release's formula is still copied into the tap by hand (§4); automating it
+and homebrew-core (§5) are open.
 
 ## 1. What exists
 

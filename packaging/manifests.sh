@@ -6,7 +6,7 @@
 #
 # into <out-dir>:
 #
-#   homebrew/jrs.rb             the formula for a tap (pwittchen/homebrew-jrs)
+#   homebrew/jrs.rb             the formula for the tap (pwittchen/homebrew-tap)
 #   scoop/jrs.json              the manifest for a Scoop bucket
 #   winget/pwittchen.jrs*.yaml  the three files of a winget-pkgs manifest
 #
@@ -40,7 +40,6 @@ cat > "$out/homebrew/jrs.rb" <<EOF
 class Jrs < Formula
   desc "Java build system written in Rust"
   homepage "$HOMEPAGE"
-  version "$version"
   license "Apache-2.0"
 
   on_macos do

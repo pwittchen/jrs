@@ -218,6 +218,15 @@
 </p>
 <pre>curl -fsSL https://getjrs.dev/install.sh | sh -s -- --version-from jrs.toml</pre>
 
+<h3>Homebrew (macOS and Linux)</h3>
+<pre>brew install pwittchen/tap/jrs</pre>
+<p>
+  The formula, in the <a href="https://github.com/pwittchen/homebrew-tap">pwittchen/tap</a> tap,
+  installs the same prebuilt binaries, checked against their checksums, and the shell completions
+  for bash, zsh and fish. It does not install a JDK: <code>brew install openjdk</code> is one way to
+  get one. <code>brew upgrade jrs</code> takes the next release once the tap has it.
+</p>
+
 <h3>Prebuilt binaries by hand</h3>
 <p>Every tagged <a href="https://github.com/pwittchen/jrs/releases">release</a> ships a binary for each of these platforms:</p>
 <table>

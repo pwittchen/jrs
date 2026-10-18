@@ -80,6 +80,20 @@ tar -xf jrs-x86_64-pc-windows-msvc.zip jrs.exe
 then move `jrs.exe` to a directory on your `PATH`. Each release also carries a
 `SHA256SUMS` file for verifying the downloads.
 
+### Homebrew
+
+On macOS or Linux, from the [`pwittchen/tap`](https://github.com/pwittchen/homebrew-tap)
+tap:
+
+```
+brew install pwittchen/tap/jrs
+```
+
+The formula installs the same prebuilt binaries, checked against their
+checksums, and the shell completions for bash, zsh and fish. It does not
+install a JDK: `brew install openjdk` is one way to get one. `brew upgrade jrs`
+takes the next release once the tap has it.
+
 ### In GitHub Actions
 
 The [`setup-jrs`](https://github.com/pwittchen/setup-jrs) action, on the
