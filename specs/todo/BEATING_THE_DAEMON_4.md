@@ -8,9 +8,10 @@ process outlives the command. The numbers are the fifth pass of
 2026-10-17, one run per cell, no warm-up), and the measurements below,
 taken the same evening on the same machine.
 
-Status: **§2, §3, §4 and §5 built, not yet benchmarked; §6 proposed,
-and more pressing for §5's price.** What each built part's code does and
-what it measured are in each, under **Built**.
+Status: **§2, §3 and §4 built, not yet benchmarked; §5's training built
+and reverted on the ninth pass, its split dropped; §6 proposed.** What
+each built part's code does and what it measured are in each, under
+**Built**; §5's under **Reverted**.
 
 Every "measured" figure but §2's **Built** ones was taken outside the
 benchmark, with the jrs release binary of `56c0d97`, on the generated
@@ -305,7 +306,7 @@ In `clean`, `model` went from 249 to 122 ms and the chain is now `core`
 range but not ahead of its best; what is left is `core`'s first compile.
 The benchmark has not read it yet.
 
-## 5. A large compile in a cold JIT ✅
+## 5. A large compile in a cold JIT ❌
 
 **Now.** `gen-2000`'s `clean` is one forked `javac` of 2,000 sources
 (1,338 ms in the fifth pass) against the daemon's whole build in 1.21–1.27 s.
@@ -346,7 +347,7 @@ paths.
 
 1. ✅ **Drop the split** (BEATING_THE_DAEMON_2.md §6) on these numbers.
    Done: §7 lists it as out of scope.
-2. ✅ **Make the training workload a real compile's size**: a few hundred
+2. ❌ **Make the training workload a real compile's size**: a few hundred
    generated classes rather than one file and the workers' sources, the
    generator embedded in jrs as `Training.java` is. Measure the cache it
    makes against the one trained on `gen-2000`, and how long it takes.
@@ -412,7 +413,18 @@ local mirror had lost a POM it needs.
 The price is `cold`, by 0.5 s on `gen-2000` and 0.85 s on `gen-300`: the
 command waits for a training that now records for 1.6 s. That makes §6
 the next step, not a later one; its "start it sooner, or make it less"
-has a measured choice of size above. The benchmark has not read it yet.
+has a measured choice of size above.
+
+**Reverted.** The ninth pass (`specs/BENCHMARKS_SUMMARY.md`, jrs 0.14.5,
+`2934af2`) read it, and it made jrs slower: `cold` 37–67% slower on every
+project, behind Maven on `wordstats`, `bookmarks` and `gen-300`;
+`gen-2000`'s `javac` phase 115 ms faster but not its `clean`, and
+`gen-300`'s `clean` 9% slower; `gen-ws`'s `clean`, `test` and
+`test-edit` 18–38% slower. `compile/training.rs` is gone and
+`javac`'s cache trains on the hand-written workload alone again, as the
+worker's does. The measurements above stay as the record of what a larger
+workload buys outside the benchmark; any return to it waits on §6, so
+that the training no longer holds up the first command.
 
 ## 6. `cold`
 
@@ -422,7 +434,7 @@ command takes 980 ms–1.05 s where its `--timings` total is 451–840 ms,
 because it waits for the training it started. It still leads Maven there
 by 1.7–2.1×; it led by 2.7–4.0× in the fourth pass.
 
-§2 and §5 both make the training longer. Before choosing:
+§2 makes the training longer, and §5's reverted workload did. Before choosing:
 
 1. **Measure the training alone**: the embedded workload, §2's worker
    training, and §5's larger workload, each on its own thread.

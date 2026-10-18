@@ -31,11 +31,8 @@
 //! Neither is made inside an edit (`specs/todo/BEATING_THE_DAEMON_2.md` §2),
 //! nor where a build waits on it (`specs/todo/BEATING_THE_DAEMON_3.md` §2).
 //! The first command that finds no `javac` cache trains one on a thread of
-//! its own ([`train_javac`]): a `javac` over a workload embedded in jrs —
-//! `Training.java`, the workers' sources, and a project's worth of classes
-//! generated alike everywhere (`training.rs`,
-//! `specs/todo/BEATING_THE_DAEMON_4.md` §5), large enough for the method
-//! profiles to know a large compile's hot paths — started as the command starts, so that it runs beside the
+//! its own ([`train_javac`]): a `javac` over a small workload embedded in
+//! jrs, started as the command starts, so that it runs beside the
 //! resolution, the downloads and the compile rather than after them. The
 //! cache holds no project's data, so a synthetic compile trains it as well
 //! as a real one. That command leaves a marker beside where the cache goes,
@@ -146,10 +143,9 @@ static BACKGROUND: (Mutex<usize>, Condvar) = (Mutex::new(0), Condvar::new());
 /// supports, so that `javac` reads `ct.sym` as most projects' compiles do.
 pub(crate) const TRAINING_RELEASE: u32 = 17;
 
-/// The hand-written part of the training workload: sources `javac`
-/// compiles with nothing on the classpath, between them generics, lambdas,
-/// records, enums, nested classes and annotations, so that most of the
-/// compiler runs. [`write_training`] adds the generated part.
+/// The training workload: sources `javac` compiles with nothing on the
+/// classpath, between them generics, lambdas, records, enums, nested
+/// classes and annotations, so that most of the compiler runs.
 const TRAINING: &[(&str, &str)] = &[
     ("Training.java", include_str!("Training.java")),
     ("JavacWorker.java", include_str!("JavacWorker.java")),
@@ -751,7 +747,7 @@ fn run_training(javac: &Path, dir: &Path, flags: &[String]) -> bool {
         std::process::id(),
         TEMP_COUNTER.fetch_add(1, Ordering::Relaxed)
     ));
-    let compiled = write_training(&work.join("src"), true).is_some_and(|sources| {
+    let compiled = write_training(&work.join("src")).is_some_and(|sources| {
         std::process::Command::new(javac)
             .args(flags.iter().map(|f| format!("-J{f}")))
             .arg("--release")
@@ -769,23 +765,17 @@ fn run_training(javac: &Path, dir: &Path, flags: &[String]) -> bool {
     compiled
 }
 
-/// Write the training workload's sources under `dir`, and return them:
-/// with `generated`, the classes [`super::training`] generates too, which
-/// `javac`'s cache's training compiles and the worker's does not.
-pub(crate) fn write_training(dir: &Path, generated: bool) -> Option<Vec<PathBuf>> {
+/// Write the training workload's sources under `dir`, and return them.
+pub(crate) fn write_training(dir: &Path) -> Option<Vec<PathBuf>> {
     std::fs::create_dir_all(dir).ok()?;
-    let mut sources = TRAINING
+    TRAINING
         .iter()
         .map(|(name, source)| {
             let path = dir.join(name);
             std::fs::write(&path, source).ok()?;
             Some(path)
         })
-        .collect::<Option<Vec<_>>>()?;
-    if generated {
-        sources.extend(super::training::write(dir)?);
-    }
-    Some(sources)
+        .collect()
 }
 
 /// The marker that the AOT cache `archive` could not be assembled.

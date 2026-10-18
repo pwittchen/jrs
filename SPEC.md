@@ -982,11 +982,8 @@ own.
   cache, and never records. Nor does any build wait for it
   ([BEATING_THE_DAEMON_3.md](specs/todo/BEATING_THE_DAEMON_3.md) §2): the
   first command that finds no archive trains one on a thread of its own,
-  started before the resolution when the tree is clean, by compiling a
-  workload embedded in jrs (the cache holds no project's data): a
-  hand-written file and the workers' sources, and 300 generated classes,
-  so that its method profiles are a large compile's
-  ([BEATING_THE_DAEMON_4.md](specs/todo/BEATING_THE_DAEMON_4.md) §5), and joins
+  started before the resolution when the tree is clean, by compiling a small
+  workload embedded in jrs (the cache holds no project's data), and joins
   that thread before it exits. It leaves `<archive>.seen`, holding its
   process id; a command that finds the marker and still no archive records
   one in a whole-unit compile of its own instead. `jrs fetch` and
@@ -1010,7 +1007,7 @@ own.
   compiled nothing is killed at the end. `jrs build` and `jrs run` stop the
   workers at once as soon as the last member has compiled. A single-module
   build, which starts no worker to record it, trains it on a thread of its
-  own beside `javac`'s, on the embedded workload's hand-written part, the first time a
+  own beside `javac`'s, on the same embedded workload, the first time a
   command finds it missing, and joins that thread before it exits.
   `jrs fetch` and `jrs jdk install` train it too. A run over a few files
   is forked rather than sent to a one-command worker that would start

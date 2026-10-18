@@ -691,10 +691,7 @@ naming `javac`'s main module as the launcher does. One archive serves both
 kinds of run, and no edit records one. No build waits for it either
 (`specs/todo/BEATING_THE_DAEMON_3.md` §2): the first command that finds
 none trains it with `share::train_javac`, a `javac` over the workload
-embedded as `compile/Training.java` and the two workers' sources, and 300
-classes `compile/training.rs` generates, the same everywhere, so that the
-cache's method profiles know a large compile's hot paths
-(`specs/todo/BEATING_THE_DAEMON_4.md` §5), on a
+embedded as `compile/Training.java` and the two workers' sources, on a
 thread started by `Session::build` (before the resolution, on a clean tree)
 or `Driver::warm_up`. Should that come to nothing, the next command, which
 finds `<archive>.seen`, records it in a whole-unit compile. `share::claim`
@@ -706,8 +703,7 @@ keyed by its program, recorded by the first command's first worker: a
 one-command pool stops it after its first compile and starts another in
 its place, and `Running::stop` assembles it. A session with no workers of
 its own, a single-module build's, trains it beside the build instead,
-when `Session::train_javac` trains `javac`'s, on the hand-written part
-of the workload alone (`Worker::train_beside`,
+when `Session::train_javac` trains `javac`'s (`Worker::train_beside`,
 gated by `share::worker_training_due`;
 `specs/todo/BEATING_THE_DAEMON_4.md` §2). A workspace command starts its
 workers as it reads the graph (`Driver::warm_up`, `Worker::prestart`), as

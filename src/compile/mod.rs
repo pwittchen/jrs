@@ -25,7 +25,6 @@ mod incremental;
 pub mod javac;
 pub mod lang;
 pub mod share;
-mod training;
 pub mod worker;
 
 use std::collections::HashSet;

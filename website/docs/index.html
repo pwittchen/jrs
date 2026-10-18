@@ -3031,9 +3031,8 @@ jrs cache prune --unused-for 30       # drop what no build has used in 30 days</
   makes <code>javac</code>, kotlinc, scalac and groovyc start faster (on JDK 25 and later,
   <code>javac</code> gets an AOT cache, which also keeps its method profiles), and the test JVM's
   with <code>share-classes</code>. The first compile after a new JDK or compiler writes it — for
-  <code>javac</code> and its worker, the first command that finds none trains them on a
-  workload of jrs's own (for <code>javac</code>, a few hundred generated classes, so that the
-  cache knows a large compile's hot paths), beside the build rather than after it, and an edit's few files never
+  <code>javac</code> and its worker, the first command that finds none trains them on a small
+  workload of jrs's own, beside the build rather than after it, and an edit's few files never
   write them; <code>jrs fetch</code> and <code>jrs jdk install</code> make them too;
   <code>prune</code> drops it like anything else. The <a href="#build-cache">build cache</a> lives
   under <code>build/</code>: a plain <code>prune</code> drops all of it, <code>--unused-for</code>
