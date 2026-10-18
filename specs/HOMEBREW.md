@@ -64,6 +64,14 @@ projects later.
 Copy the new `homebrew/jrs.rb` from the release's `package-manifests`
 artifact over `Formula/jrs.rb` in the tap, and commit it.
 
+The Claude Code skill `/update-homebrew-tap [version] [tap checkout]`
+([`.claude/skills/update-homebrew-tap`](../.claude/skills/update-homebrew-tap/SKILL.md))
+does this end to end. It defaults to the latest release and `../homebrew-tap`,
+and writes the formula from the release's `SHA256SUMS` with the checkout's
+current `manifests.sh`. It checks the formula with `brew style`,
+`brew audit --strict`, `brew install` and `brew test` from a throwaway local
+tap, commits `jrs <version>` in the tap, and pushes only on a yes.
+
 Optionally automate it: a step at the end of `release` that clones the tap,
 copies the formula and pushes, with a fine-grained token that can write to
 `homebrew-tap` only, kept as a repository secret. Publishing is a manual
