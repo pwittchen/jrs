@@ -31,7 +31,7 @@ and a fixture in `tests/fixtures/migrate/`), **3** a non-goal in the way
 | 14 | ktor-serialization | `build` (classpath), `test` | 1 | open |
 | 15 | ktor-serialization, ktor-h2 | `build` (classpath versions, which the harness accepts from Gradle) | 3 | open |
 | 16 | petclinic-kotlin | `build` (classpath) | 3 | open |
-| 17 | petclinic-kotlin | `build` (classpath) | 2 | open |
+| 17 | petclinic-kotlin | `build` (classpath) | 2 | fixed |
 | 18 | petclinic (all three) | `build` (classpath) | 2 | open |
 | 19 | ktor-h2 | `run`, `package` | – | open |
 
@@ -313,6 +313,9 @@ the migrated `{}` takes Spring Boot's BOM's.
 
 **Fix:** migration writes a versionless `org.jetbrains.kotlin:kotlin-*`
 dependency at `[kotlin]`'s version, as it does `kotlin("reflect")`.
+
+**Fixed:** `kotlin-reflect` and `kotlin-test-junit5` in the
+`spring-boot-kotlin` fixture are written at `[kotlin]`'s version.
 
 ## 18. `spring-boot-devtools`
 

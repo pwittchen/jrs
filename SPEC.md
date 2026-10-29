@@ -2688,6 +2688,7 @@ What the builds already say about the other languages (§7.7) is translated too:
 | Source | Construct | Becomes |
 | --- | --- | --- |
 | Gradle | `kotlin("jvm") version "x"`, `id("org.jetbrains.kotlin.jvm") version "x"` | `[kotlin] version = "x"` |
+| Gradle | `kotlin("reflect")`, or a versionless `org.jetbrains.kotlin:kotlin-*` dependency | that library at `[kotlin]`'s version, as the Kotlin plugin gives its libraries, ahead of any BOM |
 | Gradle | `kotlin { jvmToolchain(n) }` | `java.jdk = n` |
 | Gradle | `id 'groovy'` / `id 'scala'` plus the library dependency | `[groovy]` / `[scala]`, at that dependency's version |
 | Maven | `kotlin-maven-plugin` at `${kotlin.version}` | `[kotlin]`; its `<jvmTarget>` → `java.source` when that is not set |

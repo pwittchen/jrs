@@ -801,7 +801,21 @@ fn read_declaration(
         return kotlin_dependency(text.trim(), &module, version.as_deref().or(kotlin), report);
     }
     let trimmed = text.trim();
-    let unversioned = |dep: Dependency, report: &mut Report| {
+    let unversioned = |mut dep: Dependency, report: &mut Report| {
+        // The Kotlin Gradle plugin gives its own libraries its version, before
+        // any BOM is asked: Spring Boot's would pick another kotlin-reflect.
+        if let Some(version) = kotlin
+            && dep.group == "org.jetbrains.kotlin"
+            && dep.artifact.starts_with("kotlin-")
+        {
+            version.clone_into(&mut dep.version);
+            report.migrated(format!(
+                "`{trimmed}` — {} at [kotlin]'s version, {version}, which the Kotlin \
+                 plugin gives its libraries that name none",
+                dep.key()
+            ));
+            return Some(dep);
+        }
         if managed {
             return Some(dep);
         }

@@ -39,7 +39,7 @@ non-goal, and one more can at least be reported:
   configuration, as finding 6 did for Checkstyle.
 - ✅ **Finding 13**: apply a BOM's exclusions to the managed dependency they
   are declared on. Today the classpath differs without an error.
-- ⬜ **Finding 17**: a versionless `org.jetbrains.kotlin` library takes the
+- ✅ **Finding 17**: a versionless `org.jetbrains.kotlin` library takes the
   Kotlin plugin's version on migration.
 - ⬜ **Finding 15**: the migration report names the dependencies where
   nearest-wins and Gradle's highest-wins pick different versions. Mediation

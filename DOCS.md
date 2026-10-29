@@ -1816,7 +1816,10 @@ keeps one.
 Kotlin, Scala and Groovy builds migrate too. The Kotlin Gradle plugin,
 `id 'groovy'` and `id 'scala'`, and Maven's `kotlin-maven-plugin`,
 `scala-maven-plugin` and `gmavenplus-plugin` become language tables. An
-explicit standard-library dependency is dropped, since it is implied now.
+explicit standard-library dependency is dropped, since it is implied now. A
+versionless `org.jetbrains.kotlin:kotlin-*` dependency, such as
+`kotlin-reflect`, takes `[kotlin]`'s version, as the Kotlin plugin gives it,
+rather than a BOM's.
 Kotlin compiler flags — Gradle's `freeCompilerArgs`, Maven's `<args>` —
 become `kotlinc-args` when they are literals, and so do the switches of
 `compilerOptions { }` (`javaParameters`, `allWarningsAsErrors`). The compiler

@@ -17,10 +17,10 @@ plugins = ["spring"]
 
 [dependencies]
 "org.springframework.boot:spring-boot-starter-webmvc" = {}
-"org.jetbrains.kotlin:kotlin-reflect" = {}
+"org.jetbrains.kotlin:kotlin-reflect" = "2.2.21"
 "tools.jackson.module:jackson-module-kotlin" = {}
 
 [dev-dependencies]
 "org.springframework.boot:spring-boot-starter-webmvc-test" = {}
-"org.jetbrains.kotlin:kotlin-test-junit5" = {}
+"org.jetbrains.kotlin:kotlin-test-junit5" = "2.2.21"
 "org.junit.platform:junit-platform-launcher" = {}

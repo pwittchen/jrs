@@ -3345,6 +3345,10 @@ jrs migrate                # write jrs.toml; the original build file is untouche
   pattern, their declarative subset, without running Gradle, and the report says so. Build the
   result, run the tests, and read the review list before deleting anything.
 </p>
+<p>
+  A versionless <code>org.jetbrains.kotlin:kotlin-*</code> dependency takes <code>[kotlin]</code>'s
+  version, as the Kotlin plugin gives it.
+</p>
 
 <h3>Multi-module builds</h3>
 <p>

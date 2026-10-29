@@ -615,6 +615,11 @@ fn the_spring_boot_kotlin_fixture_translates_exactly() {
     assert_eq!(migration.manifest.render(None), expected(&dir));
 
     let migrated = migration.report.migrated.join("\n");
+    // The Kotlin plugin's version, not the one Spring Boot's BOM manages.
+    assert!(
+        migrated.contains("org.jetbrains.kotlin:kotlin-reflect at [kotlin]'s version, 2.2.21"),
+        "{migrated}"
+    );
     assert!(
         migrated.contains(
             "project.main-class = com.example.demo.DemoApplicationKt (the @SpringBootApplication \
