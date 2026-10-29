@@ -605,7 +605,9 @@ Gradle's `platform()` and `constraints { }` are for:
 A managed version holds an artifact to that version wherever the graph
 reaches it, ahead of nearest-wins mediation, but it adds nothing to a
 classpath: an artifact nothing depends on stays out. `bom = true` imports a
-BOM's own managed versions instead. A dependency may then leave its version
+BOM's own managed versions instead, and an entry's `<exclusions>` with its
+version: Spring Boot's BOM keeps `protobuf-java` out from under
+`mysql-connector-j` wherever that is reached. A dependency may then leave its version
 out, as `{}` or as a long form without `version`, and upgrading the BOM
 upgrades it. A version written in `[dependencies]` still wins for that
 dependency. The table's own entries come before any BOM's, and an earlier BOM

@@ -868,7 +868,7 @@ fixtures = { path = "libs/test-fixtures.jar" }</pre>
 "com.fasterxml.jackson.core:jackson-databind" = {}           # versioned by [managed]</pre>
 <ul>
   <li><strong>A managed version holds an artifact to that version wherever the graph reaches it</strong>, ahead of nearest-wins mediation. It adds nothing to a classpath: an artifact nothing depends on stays out.</li>
-  <li><strong><code>bom = true</code></strong> imports a BOM's own managed versions instead of managing the BOM itself.</li>
+  <li><strong><code>bom = true</code></strong> imports a BOM's own managed versions instead of managing the BOM itself, and each entry's <code>&lt;exclusions&gt;</code> with its version: Spring Boot's BOM keeps <code>protobuf-java</code> out from under <code>mysql-connector-j</code> wherever that is reached.</li>
   <li><strong>A dependency may leave its version out</strong>, as <code>{}</code> or as a long form without <code>version</code>, and takes it from <code>[managed]</code>. Upgrading the BOM then upgrades it.</li>
   <li><strong>A version written in <code>[dependencies]</code> still wins</strong> for that dependency, as it does in Maven.</li>
   <li><strong>Order matters</strong>: the table's own entries come before any BOM's, and an earlier BOM before a later one. A managed version covers every classifier of its <code>group:artifact</code>.</li>

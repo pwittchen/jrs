@@ -1803,7 +1803,12 @@ Maven's `<dependencyManagement>` and Gradle's `platform()` and
   3). It puts nothing on a classpath: an artifact nothing depends on stays out.
 - `"group:artifact" = { version = "...", bom = true }` imports a BOM: that
   POM's `<dependencyManagement>`, its own imports folded in, applies the same
-  way. The BOM itself is not in the graph, and not in `jrs.lock`.
+  way. The BOM itself is not in the graph, and not in `jrs.lock`. A BOM
+  entry's `<exclusions>` come with its version: wherever the artifact is
+  reached, declared or transitive, what they name is not walked below it, as
+  Maven and Gradle's dependency management do (Spring Boot's BOM keeps
+  `protobuf-java` out from under `mysql-connector-j`). An entry the table
+  itself, or an earlier BOM, overrides brings no exclusions.
 - The table's own entries come first, then each BOM in declaration order, and
   the first to name an artifact wins, as the first import does in Maven. A key
   names no classifier: a managed version covers every classifier of its

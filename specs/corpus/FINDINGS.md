@@ -27,7 +27,7 @@ and a fixture in `tests/fixtures/migrate/`), **3** a non-goal in the way
 | 10 | service-rest | `build` | 2 | closed |
 | 11 | microservices | `build` | 3 | open |
 | 12 | service-rest | `test`, `run`, `package` | 2 | fixed |
-| 13 | petclinic (all three), service-rest | `build` (classpath) | 1 | open |
+| 13 | petclinic (all three), service-rest | `build` (classpath) | 1 | fixed |
 | 14 | ktor-serialization | `build` (classpath), `test` | 1 | open |
 | 15 | ktor-serialization, ktor-h2 | `build` (classpath versions, which the harness accepts from Gradle) | 3 | open |
 | 16 | petclinic-kotlin | `build` (classpath) | 3 | open |
@@ -257,6 +257,12 @@ takes only the version.
 **Fix:** carry a BOM entry's `<exclusions>` with its version in
 `resolve::managed_versions`, and apply them where `admissible` gives the
 managed version (SPEC §8.9).
+
+**Fixed:** `ManagedVersions` holds the exclusions of each BOM entry whose
+version wins, and every edge that reaches the artifact, a declared one
+included, adds them to what it excludes below it; a `[managed]` pin of its
+own overrides them (`a_bom_entrys_exclusions_apply_wherever_it_is_reached`).
+An existing `jrs.lock` keeps its graph until it is re-resolved.
 
 ## 14. A profile a dependency's POM activates by OS
 

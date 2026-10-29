@@ -346,7 +346,7 @@ fn resolve_walking(
     // With `every_path`: the exclusions each package's children were walked
     // with, and whether it was reached as a `pom`.
     let mut walked: HashMap<Ga, (Vec<Ga>, bool)> = HashMap::new();
-    let mut level: Vec<Pending> = seed(&dependencies, &dev_dependencies);
+    let mut level: Vec<Pending> = seed(&dependencies, &dev_dependencies, &managed);
 
     let root_ga =
         |d: &Dependency| Ga::new(&d.group, &d.artifact).with_classifier(d.classifier.clone());
@@ -466,6 +466,7 @@ fn resolve_walking(
                 else {
                     continue;
                 };
+                let ga = dep.ga();
                 next.push(Pending {
                     coord: child,
                     classpath: parent.classpath,
@@ -473,6 +474,7 @@ fn resolve_walking(
                     exclusions: {
                         let mut ex = parent.exclusions.clone();
                         ex.extend(dep.exclusions.iter().cloned());
+                        ex.extend(managed.exclusions(&ga.group, &ga.artifact).iter().cloned());
                         ex
                     },
                     parent: Some(parent_ga.clone()),
@@ -580,9 +582,14 @@ fn local_jars(manifest: &Manifest) -> Vec<LocalJar> {
 /// The versions `[managed]` decides (SPEC §8.9): its own entries first, then
 /// each BOM's `<dependencyManagement>` in declaration order, the first to name
 /// an artifact winning. They apply to every classifier of `group:artifact`.
+/// A BOM entry's `<exclusions>` come with its version, and apply wherever the
+/// artifact is reached, as Maven and Gradle's dependency management apply
+/// them: Spring Boot's BOM keeps `protobuf-java` out from under
+/// `mysql-connector-j` that way.
 #[derive(Debug, Clone, Default)]
 pub struct ManagedVersions {
     versions: HashMap<(String, String), String>,
+    exclusions: HashMap<(String, String), Vec<Ga>>,
 }
 
 impl ManagedVersions {
@@ -592,6 +599,14 @@ impl ManagedVersions {
         self.versions
             .get(&(group.to_string(), artifact.to_string()))
             .map(String::as_str)
+    }
+
+    /// What the entry managing `group:artifact` excludes from under it.
+    #[must_use]
+    pub fn exclusions(&self, group: &str, artifact: &str) -> &[Ga] {
+        self.exclusions
+            .get(&(group.to_string(), artifact.to_string()))
+            .map_or(&[], Vec::as_slice)
     }
 
     #[must_use]
@@ -617,6 +632,7 @@ pub fn managed_versions(manifest: &Manifest, fetcher: &Fetcher) -> Result<Manage
 
 fn managed_versions_with(manifest: &Manifest, ctx: &Context) -> Result<ManagedVersions> {
     let mut versions: HashMap<(String, String), String> = HashMap::new();
+    let mut exclusions: HashMap<(String, String), Vec<Ga>> = HashMap::new();
     for m in manifest.managed.iter().filter(|m| !m.bom) {
         versions
             .entry((m.group.clone(), m.artifact.clone()))
@@ -636,12 +652,21 @@ fn managed_versions_with(manifest: &Manifest, ctx: &Context) -> Result<ManagedVe
             if version.contains("${") || is_range(version) {
                 continue;
             }
-            versions
-                .entry((ga.group.clone(), ga.artifact.clone()))
-                .or_insert_with(|| version.clone());
+            let key = (ga.group.clone(), ga.artifact.clone());
+            // The entry that wins the version brings its exclusions; one a
+            // `[managed]` pin or an earlier BOM overrides brings none.
+            if let std::collections::hash_map::Entry::Vacant(slot) = versions.entry(key.clone()) {
+                slot.insert(version.clone());
+                if !entry.exclusions.is_empty() {
+                    exclusions.insert(key, entry.exclusions.clone());
+                }
+            }
         }
     }
-    Ok(ManagedVersions { versions })
+    Ok(ManagedVersions {
+        versions,
+        exclusions,
+    })
 }
 
 /// The lowest version a range admits, when it names one it includes:
@@ -729,7 +754,11 @@ pub fn resolve_tool_dependencies(
     resolve(&manifest, fetcher, jobs)
 }
 
-fn seed(dependencies: &[Dependency], dev_dependencies: &[Dependency]) -> Vec<Pending> {
+fn seed(
+    dependencies: &[Dependency],
+    dev_dependencies: &[Dependency],
+    managed: &ManagedVersions,
+) -> Vec<Pending> {
     let mut out = Vec::new();
     let mut push = |d: &Dependency, classpath: Classpath| {
         out.push(Pending {
@@ -747,6 +776,7 @@ fn seed(dependencies: &[Dependency], dev_dependencies: &[Dependency]) -> Vec<Pen
                 .exclusions
                 .iter()
                 .map(|e| Ga::new(&e.group, &e.artifact))
+                .chain(managed.exclusions(&d.group, &d.artifact).iter().cloned())
                 .collect(),
             parent: None,
             pom_only: false,
@@ -1720,6 +1750,56 @@ mod tests {
         .unwrap();
         assert_eq!(managed.get("g", "lib"), Some("3.0"));
         assert_eq!(managed.get("g", "other"), None);
+    }
+
+    #[test]
+    fn a_bom_entrys_exclusions_apply_wherever_it_is_reached() {
+        // Spring Boot's BOM manages mysql-connector-j without protobuf-java.
+        let repo = Repo::new("managed-exclusions");
+        repo.publish_pom_only(
+            "g:bom:1.0",
+            "<dependencyManagement><dependencies>\
+             <dependency><groupId>g</groupId><artifactId>driver</artifactId>\
+             <version>2.0</version><exclusions><exclusion><groupId>g</groupId>\
+             <artifactId>protobuf</artifactId></exclusion></exclusions></dependency>\
+             </dependencies></dependencyManagement>",
+        );
+        repo.publish(
+            "g:driver:2.0",
+            &dep(&format!(
+                "{}{}",
+                d("g:protobuf:1.0", ""),
+                d("g:util:1.0", "")
+            )),
+        );
+        repo.publish("g:protobuf:1.0", "");
+        repo.publish("g:util:1.0", "");
+        repo.publish("g:app:1.0", &dep(&d("g:driver:1.0", "")));
+
+        // Declared, versionless or not.
+        for declared in ["{}", "'2.0'"] {
+            let m = repo.manifest(&format!(
+                "[managed]\n'g:bom'={{version='1.0', bom=true}}\n\
+                 [dependencies]\n'g:driver'={declared}"
+            ));
+            let r = resolve(&m, &repo.fetcher(), 4).unwrap();
+            assert_eq!(names(&r), vec!["g:driver:2.0", "g:util:1.0"], "{declared}");
+        }
+
+        // Reached transitively.
+        let m = repo.manifest(
+            "[managed]\n'g:bom'={version='1.0', bom=true}\n[dependencies]\n'g:app'='1.0'",
+        );
+        let r = resolve(&m, &repo.fetcher(), 4).unwrap();
+        assert_eq!(names(&r), vec!["g:app:1.0", "g:driver:2.0", "g:util:1.0"]);
+
+        // A [managed] pin of its own overrides the BOM's entry, exclusions and all.
+        let m = repo.manifest(
+            "[managed]\n'g:bom'={version='1.0', bom=true}\n'g:driver'='2.0'\n\
+             [dependencies]\n'g:app'='1.0'",
+        );
+        let r = resolve(&m, &repo.fetcher(), 4).unwrap();
+        assert!(r.get(&Ga::new("g", "protobuf")).is_some());
     }
 
     #[test]
