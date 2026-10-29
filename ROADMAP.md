@@ -97,7 +97,7 @@ A `v*` tag builds and publishes everything, but two steps are still by hand:
 Cheap work that lowers the cost of trying jrs:
 
 - ⬜ **Scoop and winget**, from the manifests each release already writes.
-- ⬜ **The IntelliJ plugin on the JetBrains Marketplace.**
+- ✅ **The IntelliJ plugin on the JetBrains Marketplace.**
 - ⬜ **A guide for coding agents** in `DOCS.md` and on the website.
 - ⬜ **`jrs install`** into `~/.m2`, so a library can be shared between
   projects in different repositories: the smallest form of publishing, and
