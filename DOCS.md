@@ -1577,7 +1577,9 @@ javac-args = ["-proc:full"]        # needed from JDK 23 on
 Since JDK 23, `javac` only runs processors found on the classpath when given
 `-proc:full`. JDK 21 and 22 accept the flag and don't need it. JDK 17 rejects
 it, so leave it out there. `jrs migrate` translates `annotationProcessor` and
-`<annotationProcessorPaths>` into exactly this.
+`<annotationProcessorPaths>` into exactly this, from `maven-compiler-plugin`'s
+own configuration or its `default-compile` execution's; a `default-testCompile`
+execution's processors become dev-dependencies.
 
 ## Shell completions
 

@@ -321,11 +321,11 @@ fn read_spring_boot(pom: &Pom, boot_parent: Option<&str>, out: &mut Manifest, re
 
 fn read_java_settings(effective: &Effective, pom: &Pom, out: &mut Manifest, report: &mut Report) {
     let property = |key: &str| effective.properties.get(key).map(String::as_str);
-    let compiler = plugin(pom, "maven-compiler-plugin");
+    let compiler = compiler_configs(pom, "compile", true);
     let configured = |key: &str| {
         compiler
-            .and_then(|p| p.configuration.as_ref())
-            .and_then(|c| c.text_of(key))
+            .iter()
+            .find_map(|c| c.text_of(key))
             .map(|v| pom::interpolate(v, &effective.properties))
     };
 
@@ -363,10 +363,7 @@ fn read_java_settings(effective: &Effective, pom: &Pom, out: &mut Manifest, repo
         report.migrated(format!("java.encoding = {encoding}"));
     }
 
-    if let Some(args) = compiler
-        .and_then(|p| p.configuration.as_ref())
-        .and_then(|c| c.child("compilerArgs"))
-    {
+    if let Some(args) = compiler.iter().find_map(|c| c.child("compilerArgs")) {
         let flags: Vec<String> = args
             .children
             .iter()
@@ -1278,56 +1275,73 @@ fn read_forks(effective: &Effective, config: &Element, out: &mut Manifest, repor
     }
 }
 
+/// `maven-compiler-plugin`'s configuration for one of its goals, the most
+/// specific first: that of each execution running `goal` (`default-compile`
+/// and `default-testCompile` are the ones Maven binds the goals to), then,
+/// with `plugin`, the plugin's own, which every goal shares. Maven merges
+/// them element by element, so a key is read from the first that sets it.
+fn compiler_configs<'a>(pom: &'a Pom, goal: &str, plugin_level: bool) -> Vec<&'a Element> {
+    let Some(info) = plugin(pom, "maven-compiler-plugin") else {
+        return Vec::new();
+    };
+    let default_id = format!("default-{goal}");
+    let runs_goal = |e: &Element| {
+        e.text_of("id") == Some(default_id.as_str())
+            || e.list("goals", "goal")
+                .iter()
+                .any(|g| g.text.trim() == goal)
+    };
+    info.executions
+        .iter()
+        .filter(|e| runs_goal(e))
+        .filter_map(|e| e.child("configuration"))
+        .chain(info.configuration.iter().filter(|_| plugin_level))
+        .collect()
+}
+
 /// `<annotationProcessorPaths>`: jrs has no processor path (SPEC §1.2), but a
 /// processor on the compile classpath runs all the same, so each becomes a
 /// compile-only dependency. Since JDK 23 `javac` wants `-proc:full` for that.
+/// A `testCompile` execution's own processors become dev-dependencies, which
+/// only the test sources compile against; its `<compilerArgs>` cannot be
+/// kept apart from the main sources', so they are reported.
 fn read_annotation_processors(
     effective: &Effective,
     pom: &Pom,
     out: &mut Manifest,
     report: &mut Report,
 ) {
-    let Some(paths) = plugin(pom, "maven-compiler-plugin")
-        .and_then(|p| p.configuration.as_ref())
-        .and_then(|c| c.child("annotationProcessorPaths"))
-    else {
-        return;
-    };
-    let mut added = Vec::new();
-    for path in &paths.children {
-        let (Some(group), Some(artifact)) = (path.text_of("groupId"), path.text_of("artifactId"))
-        else {
-            continue;
-        };
-        let group = pom::interpolate(group, &effective.properties);
-        let artifact = pom::interpolate(artifact, &effective.properties);
-        let managed = effective
-            .managed
-            .get(&crate::resolve::coord::Ga::new(&group, &artifact))
-            .and_then(|m| m.version.clone());
-        let Some(version) = path
-            .text_of("version")
-            .map(|v| pom::interpolate(v, &effective.properties))
-            .or(managed)
-            .filter(|v| !v.contains("${"))
-        else {
-            report.skipped(format!(
-                "annotation processor {group}:{artifact} — no version could be read"
-            ));
-            continue;
-        };
-        if out
-            .dependencies
+    let main = compiler_configs(pom, "compile", true)
+        .into_iter()
+        .find_map(|c| c.child("annotationProcessorPaths"));
+    let test = compiler_configs(pom, "testCompile", false);
+    if let Some(args) = test.iter().find_map(|c| c.child("compilerArgs")) {
+        let flags: Vec<String> = args
+            .children
             .iter()
-            .any(|d| d.group == group && d.artifact == artifact)
-        {
-            added.push(format!("{group}:{artifact}"));
-            continue;
+            .map(|a| pom::interpolate(a.text.trim(), &effective.properties))
+            .filter(|a| !a.is_empty() && !out.java.javac_args.contains(a))
+            .collect();
+        if !flags.is_empty() {
+            report.skipped(format!(
+                "maven-compiler-plugin testCompile <compilerArgs> {flags:?} — jrs passes \
+                 one java.javac-args to the main and the test sources alike"
+            ));
         }
-        let mut dep = Dependency::new(&group, &artifact, version);
-        dep.compile_only = true;
-        added.push(dep.key());
-        out.dependencies.push(dep);
+    }
+    let test = test
+        .into_iter()
+        .find_map(|c| c.child("annotationProcessorPaths"));
+    let mut added = Vec::new();
+    let mut any_for_tests = false;
+    for (paths, for_tests) in [(main, false), (test, true)] {
+        let Some(paths) = paths else { continue };
+        for path in &paths.children {
+            if let Some(key) = annotation_processor(effective, path, for_tests, out, report) {
+                added.push(key);
+                any_for_tests |= for_tests;
+            }
+        }
     }
     if added.is_empty() {
         return;
@@ -1338,15 +1352,68 @@ fn read_annotation_processors(
     }
     report.review(format!(
         "annotation processors {} — put on the compile classpath as compile-only \
-         dependencies; javac from JDK 23 on runs them only with `-proc:full` in \
+         dependencies{}; javac from JDK 23 on runs them only with `-proc:full` in \
          java.javac-args{}",
         added.join(", "),
+        if any_for_tests {
+            " (a testCompile execution's as dev-dependencies)"
+        } else {
+            ""
+        },
         if out.java.javac_args.iter().any(|a| a == "-proc:full") {
             ", which was added"
         } else {
             ", which JDK 17 does not accept, so it was not added"
         }
     ));
+}
+/// One `<path>` of `<annotationProcessorPaths>` as a dependency, unless one
+/// is declared already. The key of the processor, or `None` when it has no
+/// version to read.
+fn annotation_processor(
+    effective: &Effective,
+    path: &Element,
+    for_tests: bool,
+    out: &mut Manifest,
+    report: &mut Report,
+) -> Option<String> {
+    let (Some(group), Some(artifact)) = (path.text_of("groupId"), path.text_of("artifactId"))
+    else {
+        return None;
+    };
+    let group = pom::interpolate(group, &effective.properties);
+    let artifact = pom::interpolate(artifact, &effective.properties);
+    let managed = effective
+        .managed
+        .get(&crate::resolve::coord::Ga::new(&group, &artifact))
+        .and_then(|m| m.version.clone());
+    let Some(version) = path
+        .text_of("version")
+        .map(|v| pom::interpolate(v, &effective.properties))
+        .or(managed)
+        .filter(|v| !v.contains("${"))
+    else {
+        report.skipped(format!(
+            "annotation processor {group}:{artifact} — no version could be read"
+        ));
+        return None;
+    };
+    let declared = |deps: &[Dependency]| {
+        deps.iter()
+            .any(|d| d.group == group && d.artifact == artifact)
+    };
+    if declared(&out.dependencies) || (for_tests && declared(&out.dev_dependencies)) {
+        return Some(format!("{group}:{artifact}"));
+    }
+    let mut dep = Dependency::new(&group, &artifact, version);
+    let key = dep.key();
+    if for_tests {
+        out.dev_dependencies.push(dep);
+    } else {
+        dep.compile_only = true;
+        out.dependencies.push(dep);
+    }
+    Some(key)
 }
 
 /// Split a command line on whitespace, keeping double-quoted runs together.
@@ -2506,6 +2573,44 @@ mod tests {
         assert_eq!(m.java.javac_args, vec!["-proc:full"]);
         let review = migration.report.needs_review.join("\n");
         assert!(review.contains("-proc:full"), "{review}");
+    }
+
+    #[test]
+    fn the_compiler_executions_configuration_is_read_over_the_plugins() {
+        let dir = Dir::new("compiler-executions");
+        let migration = dir.migrate(
+            "<project><groupId>g</groupId><artifactId>a</artifactId><version>1</version>\
+             <properties><mapstruct.version>1.6.3</mapstruct.version></properties>\
+             <build><plugins><plugin><artifactId>maven-compiler-plugin</artifactId>\
+             <configuration><release>17</release><compilerArgs><arg>-Xlint:all</arg>\
+             </compilerArgs></configuration><executions>\
+             <execution><id>default-compile</id><configuration><release>21</release>\
+             <annotationProcessorPaths><path><groupId>org.mapstruct</groupId>\
+             <artifactId>mapstruct-processor</artifactId><version>${mapstruct.version}</version>\
+             </path></annotationProcessorPaths><compilerArgs>\
+             <compilerArg>\n  -Amapstruct.defaultComponentModel=spring\n</compilerArg>\
+             </compilerArgs></configuration></execution>\
+             <execution><id>default-testCompile</id><configuration>\
+             <annotationProcessorPaths><path><groupId>org.immutables</groupId>\
+             <artifactId>value</artifactId><version>2.10.1</version></path>\
+             </annotationProcessorPaths><compilerArgs><arg>-Atest=1</arg></compilerArgs>\
+             </configuration></execution>\
+             </executions></plugin></plugins></build></project>",
+        );
+        let m = &migration.manifest;
+        // The execution's keys win; `<release>` and `<compilerArgs>` are
+        // replaced, not merged, as Maven does.
+        assert_eq!(m.java.source, Some(21));
+        assert_eq!(
+            m.java.javac_args,
+            vec!["-Amapstruct.defaultComponentModel=spring", "-proc:full"]
+        );
+        assert_eq!(m.dependencies[0].key(), "org.mapstruct:mapstruct-processor");
+        assert_eq!(m.dependencies[0].version, "1.6.3");
+        assert!(m.dependencies[0].compile_only);
+        assert_eq!(m.dev_dependencies[0].key(), "org.immutables:value");
+        let skipped = migration.report.not_migrated.join("\n");
+        assert!(skipped.contains("-Atest=1"), "{skipped}");
     }
 
     #[test]

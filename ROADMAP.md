@@ -35,7 +35,7 @@ no Eclipse `.project`/`.classpath` files, no VS Code support.
 findings 12–19. Three of them are gaps jrs can close without crossing a
 non-goal, and one more can at least be reported:
 
-- ⬜ **Finding 12**: read `maven-compiler-plugin`'s `<execution>`
+- ✅ **Finding 12**: read `maven-compiler-plugin`'s `<execution>`
   configuration, as finding 6 did for Checkstyle.
 - ⬜ **Finding 13**: apply a BOM's exclusions to the managed dependency they
   are declared on. Today the classpath differs without an error.

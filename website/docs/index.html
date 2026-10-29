@@ -2928,7 +2928,8 @@ javac-args = ["-proc:full"]        # needed from JDK 23 on
   Since JDK 23, <code>javac</code> only runs processors found on the classpath when given
   <code>-proc:full</code>. JDK 21 and 22 accept the flag and don't need it; JDK 17 rejects it, so
   leave it out there. <code>jrs migrate</code> translates <code>annotationProcessor</code> and
-  <code>&lt;annotationProcessorPaths&gt;</code> into exactly this. A unit with processors is always
+  <code>&lt;annotationProcessorPaths&gt;</code> into exactly this, from <code>maven-compiler-plugin</code>'s
+  own configuration or its <code>default-compile</code> execution's. A unit with processors is always
   compiled whole, since jrs cannot see what they generate.
 </p>
 </section>

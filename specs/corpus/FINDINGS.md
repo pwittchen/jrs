@@ -4,7 +4,9 @@ The ledger of [specs/CORPUS.md §6](../CORPUS.md#6-findings-and-triage):
 one entry per cause, not per project. `corpus.toml` maps a step that fails
 for a known cause to its entry (`known = { build = 6 }`), so the table
 prints `F6` there instead of `FAIL`; when a run after the fix shows the cell
-`ok`, the entry is closed and its mapping removed.
+`ok`, the entry is closed and its mapping removed. An entry whose fix has
+landed but that no run has confirmed yet is `fixed`, its mapping still in
+place.
 
 Bins: **1** a jrs bug (fixed with a regression test from a minimal
 reproduction in `tests/`), **2** a migration gap (a rule in `src/migrate/`
@@ -24,7 +26,7 @@ and a fixture in `tests/fixtures/migrate/`), **3** a non-goal in the way
 | 9 | ktor-h2 | `run` | 2 | closed |
 | 10 | service-rest | `build` | 2 | closed |
 | 11 | microservices | `build` | 3 | open |
-| 12 | service-rest | `test`, `run`, `package` | 2 | open |
+| 12 | service-rest | `test`, `run`, `package` | 2 | fixed |
 | 13 | petclinic (all three), service-rest | `build` (classpath) | 1 | open |
 | 14 | ktor-serialization | `build` (classpath), `test` | 1 | open |
 | 15 | ktor-serialization, ktor-h2 | `build` (classpath versions, which the harness accepts from Gradle) | 3 | open |
@@ -235,6 +237,12 @@ tests with it.
 **Fix:** read `maven-compiler-plugin`'s `default-compile` (and
 `default-testCompile`) execution configuration over the plugin's, as
 `read_checkstyle` does.
+
+**Fixed:** `compiler_configs` reads each execution running the goal, then the
+plugin's own configuration, key by key; `<release>`, `<compilerArgs>` and
+`<annotationProcessorPaths>` come from there. A `testCompile` execution's
+processors become dev-dependencies and its `<compilerArgs>` are reported
+(`the_compiler_executions_configuration_is_read_over_the_plugins`).
 
 ## 13. A BOM's exclusions on a managed dependency are not applied
 
