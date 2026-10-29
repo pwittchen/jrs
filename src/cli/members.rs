@@ -14,17 +14,24 @@
 //! one to a buffer, released in build order — so the transcript is line
 //! for line the one `--jobs 1` prints.
 
-use std::collections::HashSet;
+use std::cell::{OnceCell, RefCell};
+use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
-use std::time::Duration;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
-use super::{
-    Arc, CacheCommand, Cli, Command, Config, HashMap, Instant, JrsError, Language, MemberContext,
-    OnceCell, PackageArgs, Path, PathBuf, RefCell, ResolvedWithTools, Result, Session, TestArgs,
-    Timings, Ui, Worker, counted, deps_row, exit, junit, report, runner, timings, toolchain,
-    wait_for_change,
-};
+use super::session::{MemberContext, ResolvedWithTools, Session, deps_row};
+use super::watch::wait_for_change;
+use super::{CacheCommand, Cli, Command, PackageArgs, TestArgs, counted, report};
+use crate::compile::Language;
+use crate::compile::worker::Worker;
+use crate::config::Config;
+use crate::error::{JrsError, Result, exit};
+use crate::timings::{self, Timings};
+use crate::ui::Ui;
 use crate::workspace::Workspace;
+use crate::{runner, test as junit, toolchain};
 
 /// One command over a workspace.
 struct Driver<'a> {
@@ -182,7 +189,7 @@ impl<'a> Driver<'a> {
                 runtime_only,
             } => {
                 let i = self.editing("add")?;
-                super::add_to(
+                super::add::add_to(
                     cli,
                     self.ui,
                     &self.plain(i),
@@ -193,7 +200,7 @@ impl<'a> Driver<'a> {
             }
             Command::Remove { keys, dev } => {
                 let i = self.editing("remove")?;
-                super::remove_from(cli, self.ui, &self.plain(i), keys, *dev)
+                super::add::remove_from(cli, self.ui, &self.plain(i), keys, *dev)
             }
             Command::Init { .. }
             | Command::Migrate { .. }
@@ -1257,7 +1264,7 @@ impl<'a> Driver<'a> {
             });
             if exited.is_none() {
                 ui.phase("Stopping", format!("{main_class} to restart it"));
-                toolchain::stop(&mut child, super::RESTART_GRACE);
+                toolchain::stop(&mut child, super::watch::RESTART_GRACE);
             }
             driver = reopen(cli, ui, &path, worker.as_ref());
         }

@@ -41,7 +41,7 @@ it, never the other way round.
 | Document | What it is | Check it against |
 | --- | --- | --- |
 | `README.md` | A short overview: status, feature summary, quick install, a first project, links into `DOCS.md`. Keep it short — details belong in `DOCS.md`. | The feature summary against `DOCS.md`; the install commands against `website/install.sh`; every link and `DOCS.md#…` anchor resolves. |
-| `DOCS.md` | The user manual: install, manifest reference, commands, config, tests, tasks, languages, migration, development. | `cargo run -q -- --help` and `cargo run -q -- <cmd> --help` for every command; `src/manifest.rs` (accepted keys, defaults, validation), `src/config.rs` (user config), `src/cli.rs` (behaviour), `src/compile/lang.rs` (languages, default versions), `src/task.rs` (task keys, placeholders, env vars), `src/resolve/cache.rs` (cache location), `src/completions.rs` (shells), `.github/workflows/rust.yml` (release assets, targets). |
+| `DOCS.md` | The user manual: install, manifest reference, commands, config, tests, tasks, languages, migration, development. | `cargo run -q -- --help` and `cargo run -q -- <cmd> --help` for every command; `src/manifest/` (accepted keys, defaults, validation), `src/config.rs` (user config), `src/cli.rs` and `src/cli/` (behaviour), `src/compile/lang.rs` (languages, default versions), `src/task.rs` (task keys, placeholders, env vars), `src/resolve/cache.rs` (cache location), `src/completions.rs` (shells), `.github/workflows/rust.yml` (release assets, targets). |
 | `ARCH.md` | The architecture map: source map, module layers, `Session` spine, resolution, compile units, output layer, files on disk, invariants. | The `src/` tree (`find src -name '*.rs' \| sort`), `mod` declarations in `src/lib.rs` and each `mod.rs`, `use` statements (which module depends on which), the functions and types it names, the files actually written under `target/` and `target/.jrs/`, `tests/`. |
 | `CLAUDE.md` | Guidance for Claude Code: commands, CI, architecture summary, invariants, test layout, crate list. | `Cargo.toml` (dependencies, features, benches), `.github/workflows/rust.yml` (jobs, OSes, `paths-ignore`, release steps), `tests/*.rs` and `tests/fixtures/`, `benches/`, the `require_jdk!` macro. Keep it consistent with `ARCH.md`, which it summarises. |
 | `ROADMAP.md` | What is **left** to do, and nothing else — it keeps no list of what has landed. | Grep the code for each remaining item. An item that has been implemented is removed; don't mark it done in place or record it elsewhere in the roadmap. A landed piece of a larger item goes too, leaving only the context the open part needs. Adding new items is the user's call — suggest, don't add. |
@@ -81,7 +81,7 @@ Gather the facts the documents are checked against, once, before reading them:
   nested ones such as `cache`). This is the authority on commands and flags.
 - `find src tests benches -name '*.rs' | sort` and `ls tests/fixtures`.
 - `Cargo.toml` and `.github/workflows/rust.yml`.
-- The manifest keys `src/manifest.rs` accepts (search for the key strings and
+- The manifest keys `src/manifest/parse.rs` accepts (search for the key strings and
   the unknown-key warning), and the user config keys in `src/config.rs`.
 
 ## 3. Review the documents

@@ -149,7 +149,8 @@ jrs.toml ──parse──► Manifest ──► Project (layout, source globbin
 Project + Classpath ──► compile ──► target/classes ──► package | runner | test
 ```
 
-`cli.rs` owns dispatch. `Session` holds one command's manifest, UI and clock, and
+`cli.rs` owns dispatch, and `cli/` holds the commands by group. `Session`
+(`cli/session.rs`) holds one command's manifest, UI and clock, and
 `Session::build()` is the shared spine of `build`/`test`/`run`/`package`:
 `dependencies()` (lockfile or fresh resolution → cache lookup → downloads) then
 the compile unit with a staleness check, then a resource copy.
@@ -170,7 +171,7 @@ members' class directories, and runs the command member by member in build order
 
 User-defined tasks (`[tasks]`, `[hooks]`, SPEC §7.6) are planned in `task.rs`:
 ordering, cycle checks, placeholder expansion, the environment and fingerprints.
-`Session` in `cli.rs` fires the hooks at their fixed points and emits the
+`Session` (`cli/tasks.rs`) fires the hooks at their fixed points and emits the
 `Task`/`Fresh` phase lines. Tasks are subprocesses; nothing a user writes runs
 inside jrs, and the built-in phases cannot be reordered.
 
@@ -184,7 +185,7 @@ regression, not a style nit.
   and tests.
   This is what makes `--progress never` and the animated mode provably the same build,
   and what lets `tests/output.rs` snapshot the output without a TTY.
-- **Phase lines are emitted by `cli.rs`, unconditionally.** Live scopes (`ui.spinner`,
+- **Phase lines are emitted by `cli`, unconditionally.** Live scopes (`ui.spinner`,
   `ui.downloads`) only add motion on top; they never own a line that plain mode needs.
 - **Errors are values.** One `JrsError` enum (`error.rs`); library code never prints,
   and only the CLI layer renders. Exit codes: `0` ok, `1` build/test failure, `2` usage
@@ -227,7 +228,7 @@ regression, not a style nit.
   pools, and anything it cannot vouch for — a resource, an added class, a class
   only reflection could reach — runs the whole suite.
 - **Nearest-wins mediation, breadth-first by level** (`resolve/mod.rs`), ties broken on
-  manifest declaration order — which is why `manifest.rs` parses a `toml::Table` by
+  manifest declaration order — which is why `manifest/parse.rs` parses a `toml::Table` by
   hand instead of using a `serde` derive (order preservation, per-key diagnostics,
   unknown keys as warnings). Version ranges are rejected, never guessed at.
 - **Atomic, checksum-verified cache writes** (`resolve/cache.rs`): temp file in the

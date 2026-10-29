@@ -109,15 +109,20 @@ Cheap work that lowers the cost of trying jrs:
 
 [ARCH.md](ARCH.md)
 
-`cli.rs` is over 7,500 lines and `manifest.rs` over 5,800. A change to one
-command or one table means working in a file that holds all of them:
+`cli.rs` was over 7,500 lines and `manifest.rs` over 5,800. A change to one
+command or one table meant working in a file that held all of them:
 
-- ⬜ **`cli.rs`**: `Session` and its `build()` spine in a module of their
-  own, and the commands in `cli/` by group, beside `cli/members.rs`.
-- ⬜ **`manifest.rs`**: table parsing apart from validation and from
-  `effective_dependencies()`.
+- ✅ **`cli.rs`**: `Session` and its `build()` spine in `cli/session.rs`, and
+  the commands in `cli/` by group, beside `cli/members.rs`: `run`, `testing`,
+  `packaging`, `doc`, `deps`, `tasks`, `watch`, `add`, `init`, `migration`,
+  `cache`, `jdk` and `setup`. `cli.rs` keeps the clap definitions and
+  dispatch, under 1,300 lines.
+- ✅ **`manifest.rs`**: now `manifest/`, the types in `mod.rs`, table parsing
+  in `parse.rs` apart from validation in `validate.rs` and from
+  `effective_dependencies()` in `dependencies.rs`; rendering and templates in
+  modules of their own, and the tests in `tests.rs`.
 
 A refactor only: no behaviour, output or lockfile changes, with the
 integration suites as the check. `ARCH.md` follows the new layout.
 
-**Status: ⬜ to do.**
+**Status: ✅ done.**

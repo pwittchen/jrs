@@ -107,7 +107,7 @@ tone of their reasons.
 - Allow it when the length is the shape of the thing: one arm per command or
   table, a sequence of phases already delegated to helpers, one walk over
   shared state that splitting would thread through five parameters. The reason
-  says which (see `src/manifest.rs`, `src/cli.rs`, `src/resolve/mod.rs`).
+  says which (see `src/manifest/parse.rs`, `src/cli/session.rs`, `src/resolve/mod.rs`).
 - Never shorten a function by squeezing formatting, deleting comments or
   inlining helpers.
 

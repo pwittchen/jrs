@@ -76,12 +76,36 @@ so every phase can be driven from a test without spawning the binary.
 src/
 ├── main.rs            the five-line entry point
 ├── lib.rs             module list; re-exports JrsError and Result
-├── cli.rs             clap definitions, dispatch, Session (the build spine)
+├── cli.rs             clap definitions, dispatch
 ├── cli/
-│   └── members.rs     a workspace's commands: the aggregate session, one Session
-│                      per member, build order, -p
+│   ├── session.rs     Session: one command's state, the build() spine,
+│   │                  dependencies (lockfile, resolution, downloads), tools
+│   ├── members.rs     a workspace's commands: the aggregate session, one Session
+│   │                  per member, build order, -p
+│   ├── run.rs         jrs run: the application's JVM
+│   ├── testing.rs     jrs test: test units, selection, the test cache, JUnit
+│   ├── packaging.rs   jrs package: the jar and its extras
+│   ├── doc.rs         jrs doc
+│   ├── deps.rs        tree, classpath, update, outdated, licenses, audit,
+│   │                  verify, metadata, fetch
+│   ├── tasks.rs       jrs task, hooks, built-ins as steps, task tools
+│   ├── watch.rs       --watch for build, test, task and run
+│   ├── add.rs         jrs add / jrs remove
+│   ├── init.rs        jrs init and its starter sources
+│   ├── migration.rs   jrs migrate
+│   ├── cache.rs       jrs cache
+│   ├── jdk.rs         jrs jdk, and installing the pinned JDK
+│   └── setup.rs       jrs wrapper, jrs self, jrs completions
 ├── error.rs           JrsError, exit codes
-├── manifest.rs        jrs.toml: hand-parsed, ordered, per-key diagnostics
+├── manifest/
+│   ├── mod.rs         the jrs.toml types, and what reads them
+│   ├── parse.rs       each table, hand-parsed, ordered, per-key diagnostics
+│   ├── validate.rs    names, classes, packages, attributes, jrs-version,
+│   │                  versionless deps, the language tables
+│   ├── dependencies.rs effective_dependencies(): declared + implied runtimes
+│   ├── render.rs      a Manifest back out as jrs.toml
+│   ├── template.rs    ${...} templates and placeholders
+│   └── tests.rs
 ├── workspace.rs       [workspace]: members, inheritance, module edges, build order,
 │                      the aggregate manifest and each member's share of its graph
 ├── config.rs          the per-user config.toml: credentials, mirrors, proxy, jdks
@@ -267,7 +291,7 @@ What the layering buys:
 
 ## 5. The build spine: `Session`
 
-`Session` (`cli.rs`) holds one command's worth of state: the manifest, the
+`Session` (`cli/session.rs`) holds one command's worth of state: the manifest, the
 user configuration, the `Ui`, the clock, and memoised results. Every expensive
 step is behind a `OnceCell`, so however many hooks and `depends-on` lists reach
 it, it runs **at most once per invocation**.
@@ -759,7 +783,7 @@ the JDK's `release` file.
                ▼
              forget fingerprint + index; empty the output dir; extract;
              Tracker::record_all (the index); write the fingerprint
-               ─► Outcome::Restored, "Restored" (cli.rs)
+               ─► Outcome::Restored, "Restored" (cli/session.rs)
 
  compile_timed succeeded (whole or file by file) ─► store:
      collect output dir − resources-<unit>*.list ─► zip, sorted, 1980
@@ -857,7 +881,7 @@ JDWP agent and then the java agents (`runner::java_agents` looks each
 `group:artifact` up in the resolution: the test classpath for `test`, the
 runtime classpath for `run`) ahead of `jvm-args`. `run.env`, `test.env` and
 `run.cwd` are the tasks' `env` and `cwd`, parsed by the same code in
-`manifest.rs` and expanded by `task::jvm_env` / `task::jvm_cwd`, and
+`manifest/parse.rs` and expanded by `task::jvm_env` / `task::jvm_cwd`, and
 `toolchain::Environment` applies them to the process.
 
 When the launcher exits, `test_report.rs` reads its XML back: the per-engine
@@ -875,7 +899,7 @@ files up as `TEST-<engine>-fork-<k>.xml` beside the others.
         ▼                                      ▼                           ▼
  select(still failing):               Flaky lines, and the        index.html: a row
    --select-method Class#m(params)    Finished line's count       per class, failures
-   else --select-unique-id            (cli.rs)                    first with their
+   else --select-unique-id            (cli/testing.rs)            first with their
    else --select-class                                            traces, the rest
  for --rerun-failed and test.retries                              folded
 ```
@@ -1010,7 +1034,7 @@ launchers reuse `image.rs`'s quoting; `native-image` is found beside `javac`,
 and its absence means the JDK is not GraalVM, which is reported before the
 build starts.
 
-`--sbom` lives in `sbom.rs`: `cli.rs` takes the runtime packages, reads each
+`--sbom` lives in `sbom.rs`: `cli/packaging.rs` takes the runtime packages, reads each
 one's licences (`resolve::license::of_each`: the POM, or the nearest parent
 that declares any, `jobs` at a time) and its checksum (`jrs.lock`'s pin, or
 the jar's SHA-256), and `sbom::cyclonedx` turns them and the graph's edges
@@ -1047,7 +1071,7 @@ hooks fire at fixed points of the spine in [§5](#5-the-build-spine-session);
 they cannot reorder or replace the built-in phases.
 
 ```
-             ┌────────────────────── cli.rs (Session) ─────────────────────┐
+             ┌─────────────────── cli/tasks.rs (Session) ──────────────────┐
              │ hook(PreCompile) ─► task::plan(manifest, roots)             │
              │                       │  depends-on expanded, ordered,      │
              │                       │  built-ins (build/test/package/doc) │
@@ -1079,7 +1103,7 @@ they cannot reorder or replace the built-in phases.
 terminal: whole-manifest checks (unknown references, cycles, where a
 placeholder is available, generated output must be under `target-dir`),
 ordering, placeholder expansion, the environment and fingerprints. It is tested
-without a TTY; `cli.rs` decides when a task runs and what is printed around it.
+without a TTY; `cli/tasks.rs` decides when a task runs and what is printed around it.
 
 A task with `cache = true` (SPEC §7.6, TASK_OUTPUT_CACHE.md) is also a
 build-cache entry. `task::prepare` keeps what its key needs beside the
@@ -1102,7 +1126,7 @@ formatter and checker tasks `jrs init --check` / `--format` and
 runs inside jrs.
 
 A task's action is `run`, `shell`, `script` or `main`. `main` runs a class
-from the task's own `[tasks.<name>.dependencies]` (TASKS.md §8): `cli.rs`
+from the task's own `[tasks.<name>.dependencies]` (TASKS.md §8): `cli/tasks.rs`
 hands `task::prepare` their classpath, which it writes to
 `target/.jrs/tasks/<name>.tool.args` and passes as `java @<argfile> <class>`;
 a `script` with dependencies gets the same argfile ahead of its file.
@@ -1198,7 +1222,7 @@ a single render thread draws.
  │ test line reader │                   │        | Tests                  │
  └──────────────────┘                   │ tick: AtomicU64                 │
                                         │ renderer: Mutex<Renderer>       │
- cli.rs                                 └──────┬───────────────────┬──────┘
+ cli/                                   └──────┬───────────────────┬──────┘
  ┌──────────────────┐   phase()/warn()/        │                   │
  │ Session methods  │   error()/summary()      │ render thread,    │
  │                  │──────────────────────────┤ every 80 ms while │
@@ -1232,7 +1256,7 @@ The mode is decided once, at start-up:
                     not CI  ───────────► Animated, otherwise Plain
 ```
 
-Because phase lines are emitted by `cli.rs` in every mode and live scopes only
+Because phase lines are emitted by `cli` in every mode and live scopes only
 add motion, `--progress never` and the animated mode are provably the same
 build with the same transcript (SPEC §12.1, divergence 4). `Ui::captured`
 swaps the terminal for an in-memory `Capture`, a fixed geometry and a clock
@@ -1435,13 +1459,13 @@ design regression, not a style nit.
 | Invariant | Where it is enforced |
 | --- | --- |
 | Only `ui/` touches the terminal; no `println!` elsewhere | `ui/render.rs`, `Ui` |
-| Phase lines are emitted by `cli.rs` unconditionally; live scopes only add motion | `cli.rs`, `Ui::spinner` |
+| Phase lines are emitted by `cli` unconditionally; live scopes only add motion | `cli/`, `Ui::spinner` |
 | Errors are values; only the CLI renders them; exit codes 0 / 1 / 2 | `error.rs`, `cli::main` |
 | Dependency arrows point toward `cli`; `ui` depends on nothing | module imports |
 | `target/` is fully disposable | `project.rs`, `task.rs` checks |
 | Sorted traversal, sorted jar entries, fixed timestamps: byte-identical jars | `project.rs`, `package.rs` |
 | Sources and classpaths go through argfiles | `compile/`, `test.rs` |
-| Nearest-wins, breadth-first by level, ties on declaration order; no ranges | `resolve/mod.rs`, `manifest.rs` |
+| Nearest-wins, breadth-first by level, ties on declaration order; no ranges | `resolve/mod.rs`, `manifest/parse.rs` |
 | Atomic, checksum-verified cache writes | `resolve/cache.rs`, `resolve/repo.rs` |
 | A build-cache key holds no absolute path and no mtime; what cannot be keyed is compiled; no cache failure fails a build | `build_cache.rs`, `compile/mod.rs` |
 | The `javac` and `kotlinc` workers live no longer than their command — a `--watch` session, or a workspace command's `javac` pool — and any failure of one falls back to a forked compiler | `compile/worker.rs` |
@@ -1451,12 +1475,12 @@ design regression, not a style nit.
 | Toolchain output passed through verbatim | `compile/`, `test.rs`, `image.rs` |
 | `jrs.lock` holds no absolute paths; `manifest-checksum` triggers re-resolution | `lockfile.rs` |
 | `{os-classifier}` stays in the coordinate and `jrs.lock`; only file names expand it, and its jar is never pinned | `resolve::coord`, `lockfile.rs` |
-| Resolution reads `effective_dependencies()`, never `dependencies` alone | `manifest.rs`, `resolve/mod.rs` |
+| Resolution reads `effective_dependencies()`, never `dependencies` alone | `manifest/dependencies.rs`, `resolve/mod.rs` |
 | A managed version replaces what a POM asks for, before mediation; a declared version still wins for its own dependency | `resolve::admissible`, `resolve::with_managed_versions` |
 | A compiler's, a task's or the obfuscator's graph never meets the project's | `resolve::resolve_tool`, `resolve::resolve_tool_dependencies` |
-| Obfuscation runs after packaging, over the assembled jar, keeping the entry point and `ServiceLoader` names; it changes names, not behaviour or timing | `obfuscate.rs`, `cli.rs` |
+| Obfuscation runs after packaging, over the assembled jar, keeping the entry point and `ServiceLoader` names; it changes names, not behaviour or timing | `obfuscate.rs`, `cli/packaging.rs` |
 | A group a repository's `groups` claim is looked up nowhere else | `resolve::repo::repositories_for` |
-| Tasks are subprocesses at fixed points; built-in phases cannot be reordered | `task.rs`, `cli.rs` |
+| Tasks are subprocesses at fixed points; built-in phases cannot be reordered | `task.rs`, `cli/tasks.rs` |
 | A workspace resolves once; a member's graph is its share of that, never a resolution of its own | `workspace.rs`, `cli/members.rs`, `Session::gather` |
 | A single project's lockfile and model are byte for byte what they were; a workspace's lockfile is `version = 3` | `lockfile.rs`, `model.rs` |
 
