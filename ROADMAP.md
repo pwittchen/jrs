@@ -41,7 +41,7 @@ non-goal, and one more can at least be reported:
   are declared on. Today the classpath differs without an error.
 - ✅ **Finding 17**: a versionless `org.jetbrains.kotlin` library takes the
   Kotlin plugin's version on migration.
-- ⬜ **Finding 15**: the migration report names the dependencies where
+- ✅ **Finding 15**: the migration report names the dependencies where
   nearest-wins and Gradle's highest-wins pick different versions. Mediation
   itself stays nearest-wins (SPEC §13.6).
 
@@ -49,7 +49,8 @@ Each fix lands with a regression test in the fixture repo or a migration
 fixture, and the compatibility table in `DOCS.md` is updated from the next
 corpus run.
 
-**Status: ⬜ to do.**
+**Status: the four fixes have landed; the corpus run that confirms them and
+updates the compatibility table is still to do.**
 
 ## 2. Faster on large projects
 

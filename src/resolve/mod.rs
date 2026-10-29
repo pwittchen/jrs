@@ -274,6 +274,34 @@ struct Selected {
 /// If a worker thread panicked while holding the warnings or POM lock,
 /// poisoning it.
 pub fn resolve(manifest: &Manifest, fetcher: &Fetcher, jobs: usize) -> Result<Resolution> {
+    resolve_walking(manifest, fetcher, jobs, false).map(|(r, _)| r)
+}
+
+/// A package nearest-wins settled below a version the graph also asks for:
+/// where Gradle, which takes the highest, would put another jar on the
+/// classpath (SPEC §13.6).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Disagreement {
+    pub ga: Ga,
+    /// What nearest-wins picked.
+    pub nearest: String,
+    /// The highest version anything in the graph asks for.
+    pub highest: String,
+}
+
+/// [`resolve`], with every package where nearest-wins and highest-wins
+/// disagree, sorted by coordinate: for `jrs migrate` of a Gradle build to
+/// name them. Only the requests the nearest-wins graph walks are compared;
+/// what a higher version's own POM would bring in is never fetched.
+///
+/// # Errors
+///
+/// As for [`resolve`].
+pub fn resolve_comparing_highest(
+    manifest: &Manifest,
+    fetcher: &Fetcher,
+    jobs: usize,
+) -> Result<(Resolution, Vec<Disagreement>)> {
     resolve_walking(manifest, fetcher, jobs, false)
 }
 
@@ -292,7 +320,7 @@ pub fn resolve_workspace(
     fetcher: &Fetcher,
     jobs: usize,
 ) -> Result<Resolution> {
-    resolve_walking(manifest, fetcher, jobs, true)
+    resolve_walking(manifest, fetcher, jobs, true).map(|(r, _)| r)
 }
 
 #[allow(
@@ -305,7 +333,7 @@ fn resolve_walking(
     fetcher: &Fetcher,
     jobs: usize,
     every_path: bool,
-) -> Result<Resolution> {
+) -> Result<(Resolution, Vec<Disagreement>)> {
     // The runtime libraries the manifest's languages imply are resolved as
     // direct dependencies, declared last.
     let dependencies = manifest.effective_dependencies();
@@ -346,6 +374,8 @@ fn resolve_walking(
     // With `every_path`: the exclusions each package's children were walked
     // with, and whether it was reached as a `pom`.
     let mut walked: HashMap<Ga, (Vec<Ga>, bool)> = HashMap::new();
+    // The highest version each package is asked for, for highest-wins.
+    let mut highest: HashMap<Ga, String> = HashMap::new();
     let mut level: Vec<Pending> = seed(&dependencies, &dev_dependencies, &managed);
 
     let root_ga =
@@ -370,6 +400,16 @@ fn resolve_walking(
         let mut rewalk: Vec<Pending> = Vec::new();
         for item in &level {
             let ga = item.coord.ga();
+            match highest.get_mut(&ga) {
+                Some(top) => {
+                    if compare_versions(&item.coord.version, top) == std::cmp::Ordering::Greater {
+                        top.clone_from(&item.coord.version);
+                    }
+                }
+                None => {
+                    highest.insert(ga.clone(), item.coord.version.clone());
+                }
+            }
             if every_path
                 && selected.contains_key(&ga)
                 && let Some((before, pom_only)) = walked.get_mut(&ga)
@@ -517,6 +557,21 @@ fn resolve_walking(
         }
     }
 
+    let mut disagreements: Vec<Disagreement> = selected
+        .iter()
+        .filter_map(|(ga, s)| {
+            let top = highest.get(ga)?;
+            (compare_versions(top, &s.coord.version) == std::cmp::Ordering::Greater).then(|| {
+                Disagreement {
+                    ga: ga.clone(),
+                    nearest: s.coord.version.clone(),
+                    highest: top.clone(),
+                }
+            })
+        })
+        .collect();
+    disagreements.sort_by(|a, b| a.ga.cmp(&b.ga));
+
     let mut packages: Vec<ResolvedPackage> = selected
         .into_iter()
         .map(|(ga, s)| ResolvedPackage {
@@ -548,7 +603,7 @@ fn resolve_walking(
         local: local_jars(manifest),
     };
     attach_local(&mut resolution, &manifest.root)?;
-    Ok(resolution)
+    Ok((resolution, disagreements))
 }
 
 /// The manifest's local jars, not yet read: `[dependencies]` in declaration
@@ -1483,6 +1538,53 @@ mod tests {
             "{:?}",
             r.warnings
         );
+    }
+
+    #[test]
+    fn where_highest_wins_would_pick_another_version_is_named() {
+        let repo = Repo::new("highest");
+        // app -> shared:1.0       (nearest, so it wins)
+        // app -> a -> shared:3.0  (what highest-wins would take)
+        // app -> b -> shared:2.0
+        // app -> a -> lower:1.0, app -> lower:2.0 (both agree on 2.0)
+        repo.publish(
+            "g:a:1.0",
+            &dep(&format!(
+                "{}{}",
+                d("g:shared:3.0", ""),
+                d("g:lower:1.0", "")
+            )),
+        );
+        repo.publish("g:b:1.0", &dep(&d("g:shared:2.0", "")));
+        for gav in [
+            "g:shared:1.0",
+            "g:shared:2.0",
+            "g:shared:3.0",
+            "g:lower:1.0",
+        ] {
+            repo.publish(gav, "");
+        }
+        repo.publish("g:lower:2.0", "");
+
+        let m = repo.manifest(
+            "[dependencies]\n'g:a'='1.0'\n'g:b'='1.0'\n'g:shared'='1.0'\n'g:lower'='2.0'",
+        );
+        let (r, disagreements) = resolve_comparing_highest(&m, &repo.fetcher(), 4).unwrap();
+        assert_eq!(r.get(&Ga::new("g", "shared")).unwrap().coord.version, "1.0");
+        assert_eq!(
+            disagreements,
+            vec![Disagreement {
+                ga: Ga::new("g", "shared"),
+                nearest: "1.0".into(),
+                highest: "3.0".into(),
+            }]
+        );
+
+        // A [managed] version holds every request, so nothing disagrees.
+        let m =
+            repo.manifest("[managed]\n'g:shared'='1.0'\n[dependencies]\n'g:a'='1.0'\n'g:b'='1.0'");
+        let (_, disagreements) = resolve_comparing_highest(&m, &repo.fetcher(), 4).unwrap();
+        assert!(disagreements.is_empty(), "{disagreements:?}");
     }
 
     #[test]

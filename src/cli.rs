@@ -763,7 +763,7 @@ fn dispatch(cli: &Cli, ui: &Ui) -> Result<i32> {
             force,
             path,
         } => {
-            return migrate_command(ui, from.as_deref(), *dry_run, *force, path.as_deref());
+            return migrate_command(cli, ui, from.as_deref(), *dry_run, *force, path.as_deref());
         }
         Command::Completions { shell } => return completions_command(ui, shell),
         Command::Cache { action } => return cache_command(cli, ui, action),
@@ -6843,6 +6843,7 @@ fn init(
 // ---- migrate ---------------------------------------------------------------
 
 fn migrate_command(
+    cli: &Cli,
     ui: &Ui,
     from: Option<&str>,
     dry_run: bool,
@@ -6856,7 +6857,7 @@ fn migrate_command(
     if let Some(workspace) = migrate::plan_workspace(&root, source)? {
         return migrate_workspace(ui, &workspace, &root, dry_run, force);
     }
-    let migration = migrate::plan(&root, source)?;
+    let mut migration = migrate::plan(&root, source)?;
 
     ui.phase(
         "Migrating",
@@ -6866,6 +6867,9 @@ fn migrate_command(
             migration.source.as_str()
         ),
     );
+    if migration.source == migrate::Source::Gradle {
+        compare_with_highest_wins(cli, ui, &mut migration);
+    }
 
     // The report and the manifest are real output: they belong on stdout so they
     // can be piped, diffed or redirected.
@@ -6894,6 +6898,39 @@ fn migrate_command(
     ui.println_out("Next: `jrs build`, then `jrs tree` to compare the resolved graph");
     ui.println_out("against `mvn dependency:tree` / `gradle dependencies`.");
     Ok(exit::SUCCESS)
+}
+
+/// Resolve a migrated Gradle build once, so that the report names where
+/// jrs's nearest-wins and Gradle's highest-wins part ways (SPEC §13.6). A
+/// graph that does not resolve is said in the report and never fails the
+/// migration: `jrs build` says why in full.
+fn compare_with_highest_wins(cli: &Cli, ui: &Ui, migration: &mut migrate::Migration) {
+    let what = "the migrated graph, to compare it with Gradle's highest-wins";
+    ui.phase("Resolving", what);
+    let compared = Config::load().and_then(|config| {
+        for warning in &config.warnings {
+            ui.warn(warning);
+        }
+        let session = Session::new(cli, ui, migration.manifest.clone(), config);
+        let fetcher = session.fetcher()?;
+        let scope = ui.spinner("Resolving", what);
+        let compared =
+            resolve::resolve_comparing_highest(&session.manifest, &fetcher, session.jobs);
+        scope.finish();
+        compared
+    });
+    match compared {
+        Ok((_, disagreements)) => migration.report.highest_wins(&disagreements),
+        Err(e) => {
+            let e = e.to_string();
+            migration.report.review(format!(
+                "the migrated dependencies did not resolve ({}), so where jrs's \
+                 nearest-wins and Gradle's highest-wins pick different versions was \
+                 not checked",
+                e.lines().next().unwrap_or_default()
+            ));
+        }
+    }
 }
 
 /// `jrs migrate` of a multi-module build: the root's report, then a section

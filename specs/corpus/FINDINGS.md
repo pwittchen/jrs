@@ -29,7 +29,7 @@ and a fixture in `tests/fixtures/migrate/`), **3** a non-goal in the way
 | 12 | service-rest | `test`, `run`, `package` | 2 | fixed |
 | 13 | petclinic (all three), service-rest | `build` (classpath) | 1 | fixed |
 | 14 | ktor-serialization | `build` (classpath), `test` | 1 | open |
-| 15 | ktor-serialization, ktor-h2 | `build` (classpath versions, which the harness accepts from Gradle) | 3 | open |
+| 15 | ktor-serialization, ktor-h2 | `build` (classpath versions, which the harness accepts from Gradle) | 3 | fixed (reported) |
 | 16 | petclinic-kotlin | `build` (classpath) | 3 | open |
 | 17 | petclinic-kotlin | `build` (classpath) | 2 | fixed |
 | 18 | petclinic (all three) | `build` (classpath) | 2 | open |
@@ -289,6 +289,13 @@ finding 14.
 Bin 3, ROADMAP_ARCHIVE §5, "Highest-wins mediation (opt-in)", whose
 suggestion — the migration report flagging where the two disagree — would
 have named these.
+
+**Reported:** `jrs migrate` of a Gradle build resolves the migrated graph
+once (`resolve::resolve_comparing_highest`) and gives each disagreement a
+review line with the `[managed]` pin that settles it
+(`a_gradle_migration_names_where_highest_wins_disagrees`). Mediation stays
+nearest-wins (SPEC §13.6), so the classpath still differs until the pins are
+added.
 
 ## 16. Gradle Module Metadata's runtime variant
 

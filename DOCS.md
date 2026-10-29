@@ -1674,6 +1674,13 @@ blocks — what was migrated, what needs review, and what was skipped, each with
 reason. Gradle migration in particular reads the declarative subset of a build
 script by pattern rather than by running Gradle, and says so.
 
+A Gradle migration then resolves the migrated dependencies once (POMs only,
+into the cache; `--offline` keeps it there) and lists under "Needs review"
+each package where Gradle's highest-wins would take a higher version than
+jrs's nearest-wins, with the `[managed]` pin that settles it. Mediation
+itself stays nearest-wins. A graph that does not resolve is one review line,
+and the migration still succeeds.
+
 A multi-module build becomes a [workspace](#workspaces): a Maven aggregator's
 `<modules>` (walked recursively) or the projects a Gradle build's
 `settings.gradle` includes each get a `jrs.toml` of their own, and the root one

@@ -1016,3 +1016,79 @@ fn a_migrated_workspace_loads() {
         assert!(migrate::workspace::write(&migration, &root, false).is_err());
     }
 }
+
+/// `jrs migrate` of a Gradle build resolves the migrated graph once and
+/// names where Gradle's highest-wins would take another version than jrs's
+/// nearest-wins (SPEC §13.6); a graph that does not resolve is reported, and
+/// the migration still succeeds.
+#[test]
+fn a_gradle_migration_names_where_highest_wins_disagrees() {
+    let scratch = Scratch::new("migrate-highest-wins");
+    let fixture = FixtureRepo::new(&scratch);
+    // newer -> lib:2.0.0, below the project's own lib:1.0.0.
+    let newer = resolve::coord::Coord::new("org.example", "newer", "1.0.0");
+    fixture.publish_pom(
+        &newer,
+        "<project><groupId>org.example</groupId><artifactId>newer</artifactId>\
+         <version>1.0.0</version><dependencies><dependency><groupId>org.example</groupId>\
+         <artifactId>lib</artifactId><version>2.0.0</version></dependency>\
+         </dependencies></project>",
+    );
+    fixture.publish_jar(&newer, b"jar for newer");
+    let url = resolve::repo::file_url(&fixture.root);
+    let migrate = |name: &str, dependencies: &str, offline: bool| {
+        let root = scratch.write(
+            &format!("{name}/build.gradle"),
+            &format!(
+                "plugins {{ id 'java' }}\n\
+                 repositories {{\n    maven {{\n        url '{url}'\n    }}\n}}\n\
+                 dependencies {{\n{dependencies}}}\n"
+            ),
+        );
+        let root = root.parent().unwrap();
+        let output = std::process::Command::new(env!("CARGO_BIN_EXE_jrs"))
+            .args(["--progress", "never", "--color", "never"])
+            .args(offline.then_some("--offline"))
+            .args(["migrate", "--dry-run"])
+            .arg("--path")
+            .arg(root)
+            .env("JRS_CACHE_DIR", &fixture.cache)
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+        let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+        assert!(output.status.success(), "{stdout}\n{stderr}");
+        (stdout, stderr)
+    };
+
+    let (stdout, stderr) = migrate(
+        "conflict",
+        "  implementation 'org.example:lib:1.0.0'\n  implementation 'org.example:newer:1.0.0'\n",
+        false,
+    );
+    assert!(stderr.contains("Resolving"), "{stderr}");
+    assert!(
+        stdout.contains(
+            "org.example:lib — jrs's nearest-wins picks 1.0.0, Gradle's highest-wins takes 2.0.0"
+        ),
+        "{stdout}"
+    );
+
+    let (stdout, _) = migrate(
+        "agreeing",
+        "  implementation 'org.example:newer:1.0.0'\n",
+        false,
+    );
+    assert!(!stdout.contains("highest-wins takes"), "{stdout}");
+
+    // Offline, so that looking for it never reaches Maven Central.
+    let (stdout, _) = migrate(
+        "missing",
+        "  implementation 'org.example:absent:1.0.0'\n",
+        true,
+    );
+    assert!(
+        stdout.contains("the migrated dependencies did not resolve"),
+        "{stdout}"
+    );
+}

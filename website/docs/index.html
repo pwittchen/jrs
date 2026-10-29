@@ -3346,8 +3346,11 @@ jrs migrate                # write jrs.toml; the original build file is untouche
   result, run the tests, and read the review list before deleting anything.
 </p>
 <p>
-  A versionless <code>org.jetbrains.kotlin:kotlin-*</code> dependency takes <code>[kotlin]</code>'s
-  version, as the Kotlin plugin gives it.
+  A Gradle migration resolves the migrated dependencies once (POMs only, into the cache) and lists
+  under "Needs review" each package where Gradle's highest-wins would take a higher version than
+  jrs's nearest-wins, with the <code>[managed]</code> pin that settles it. A versionless
+  <code>org.jetbrains.kotlin:kotlin-*</code> dependency takes <code>[kotlin]</code>'s version, as the
+  Kotlin plugin gives it.
 </p>
 
 <h3>Multi-module builds</h3>

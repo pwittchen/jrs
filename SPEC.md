@@ -2669,7 +2669,12 @@ and the emitted manifest must be reviewed.
    graph against `mvn dependency:tree` / `gradle dependencies`.
 
 Migration never runs a build, never deletes files, and never writes outside the
-project root.
+project root. A Gradle migration resolves the migrated dependencies once,
+fetching POMs into the shared cache, so that the report can name each
+package where nearest-wins and Gradle's highest-wins pick different versions
+(§13.6), under **Needs review**, with the `[managed]` pin that holds it. Only
+the requests the nearest-wins graph walks are compared. A graph that does not
+resolve gets one review line, never a failed migration.
 
 ### 11.5 Testing
 
@@ -2926,7 +2931,8 @@ still the interesting part; the **decision** lines record what was settled on.
    nearest, Gradle does highest. Nearest is specified above; highest surprises
    users less in practice. Worth revisiting once real projects exercise it.
    **Decision:** nearest-wins, as specified, with a warning naming both
-   versions and the depth the winner came from.
+   versions and the depth the winner came from. `jrs migrate` of a Gradle
+   build names where the two disagree (§11.4).
 7. **Test engines beyond JUnit 5.** JUnit 4 and TestNG are still common —
    pluggable engine selection, or JUnit 5 only?
    **Decision:** the JUnit Platform only. JUnit 5 came first. JUnit 4 followed

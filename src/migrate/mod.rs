@@ -83,6 +83,20 @@ impl Report {
         self.needs_review.extend(other.needs_review);
         self.not_migrated.extend(other.not_migrated);
     }
+
+    /// A review line for each package where jrs's nearest-wins and Gradle's
+    /// highest-wins pick different versions (SPEC §13.6), from resolving
+    /// the migrated manifest once: the classpath differs from Gradle's there
+    /// without any error.
+    pub fn highest_wins(&mut self, disagreements: &[crate::resolve::Disagreement]) {
+        for d in disagreements {
+            self.review(format!(
+                "{} — jrs's nearest-wins picks {}, Gradle's highest-wins takes {}; pin \
+                 the one you want in [managed] (\"{}\" = \"{}\") to hold every path to it",
+                d.ga, d.nearest, d.highest, d.ga, d.highest
+            ));
+        }
+    }
 }
 
 /// A shading plugin's relocation → `[package.relocate]`, checked as the parser
