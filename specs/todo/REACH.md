@@ -1,18 +1,20 @@
 # jrs — Reaching more users
 
-Four pieces of work that each make jrs cheaper to try or to keep, and none of
-which changes how a build works: Eclipse project files so VS Code (and every
-other editor running the Eclipse JDT language server) understands a jrs
-project; jrs in the package managers and the plugin on the JetBrains
-Marketplace; a guide for coding agents; and `jrs install`, which puts a jar
-and a POM into `~/.m2` so another project can depend on it.
+Three pieces of work that each make jrs cheaper to try or to keep, and none
+of which changes how a build works: jrs in the package managers and the
+plugin on the JetBrains Marketplace; a guide for coding agents; and
+`jrs install`, which puts a jar and a POM into `~/.m2` so another project
+can depend on it.
 
-Status: **proposed**, as section 4 of [ROADMAP.md](../../ROADMAP.md). Two
-parts cross a line drawn in [SPEC §1.2](../../SPEC.md#12-non-goals): §2
-("IDE project file generation") and §5 ("Publishing artifacts to a
-repository"). Each section argues for the narrowing it needs, and §6 lists
-the SPEC.md edits. §3 and §4 need no spec decision at all. The four parts are
-independent and can land in any order; §7 suggests one.
+Status: **proposed**, as section 4 of [ROADMAP.md](../../ROADMAP.md). One
+part crosses a line drawn in [SPEC §1.2](../../SPEC.md#12-non-goals): §4
+("Publishing artifacts to a repository"). It argues for the narrowing it
+needs, and §5 lists the SPEC.md edits. §2 and §3 need no spec decision at
+all. The three parts are independent and can land in any order; §6 suggests
+one.
+
+Editor support beyond the IntelliJ plugin — Eclipse project files for
+VS Code and the other JDT language server clients — is not planned.
 
 ---
 
@@ -20,186 +22,31 @@ independent and can land in any order; §7 suggests one.
 
 The audiences [ROADMAP_ARCHIVE.md](../ROADMAP_ARCHIVE.md) names as the
 best fit for jrs (services, command-line tools, teams for whom the JVM is a
-guest language, coding agents) meet four obstacles before they meet the
+guest language, coding agents) meet three obstacles before they meet the
 build itself:
 
-1. **Their editor knows nothing about the project.** The IntelliJ plugin
-   covers IntelliJ. A team that works mostly in Rust, Go or TypeScript
-   edits in VS Code, and the Red Hat Java extension understands a Maven or
-   Gradle project and nothing else. Opened on a jrs project, it shows every
-   import as unresolved.
-2. **Installing jrs takes a `curl | sh`.** That is fine on a laptop and a
+1. **Installing jrs takes a `curl | sh`.** That is fine on a laptop and a
    reason to say no in many companies. `brew install`, `scoop install` and
    `winget install` are what people expect, and the release job already
    writes all three manifests (`packaging/manifests.sh`); nothing publishes
    them.
-3. **An agent has to discover how to drive jrs.** Everything it needs
+2. **An agent has to discover how to drive jrs.** Everything it needs
    exists — `--progress never`, `jrs metadata`, fixed exit codes — but it is
    spread over `DOCS.md` and written for people.
-4. **A library cannot be shared between two repositories.** A workspace
+3. **A library cannot be shared between two repositories.** A workspace
    reaches only its own members, under one root. Today the way to try a
    change to a library in the project that uses it is to build the jar,
    copy it into a Maven layout by hand, and point a `file://` repository
    at it with an absolute path that cannot be committed.
 
-## 2. Eclipse project files for VS Code and every JDT client
-
-### 2.1 Why Eclipse files
-
-The Red Hat Java extension for VS Code is a client of the Eclipse JDT
-language server (jdtls). So are nvim-jdtls, Emacs's lsp-java, Helix and
-Zed's Java support. jdtls imports a project in one of three ways: from a
-Maven build, from a Gradle build, or from Eclipse's own `.project` and
-`.classpath` files, which it reads as they are, with no build tool involved.
-Writing those two files is therefore the one change that makes jrs work in
-every one of those editors at once.
-
-The alternatives were weighed and rejected:
-
-| Option | Why not |
-| --- | --- |
-| A VS Code extension that feeds jdtls | jdtls has no API for an extension to hand it a classpath beyond `java.project.referencedLibraries`, which knows no source roots per scope, no test flag and no sources jars. It would also reach VS Code alone. |
-| A Build Server Protocol server | A long-lived JSON-RPC process: close to the daemon SPEC §1.2 rules out, and much more code (ROADMAP_ARCHIVE §5). |
-| A task running a generator over `jrs metadata` | Possible today, but every user would write the same generator. `jrs metadata` stays the interface for tools that want more (§2.8). |
-
-The non-goal "IDE project file generation" in SPEC §1.2 exists so that jrs
-does not grow a generator per IDE, each with its own settings to keep in
-step. This part narrows it to one format, chosen because it is the one that
-an editor-neutral language server reads; IntelliJ keeps its plugin, and no
-`.idea/` or `.vscode/` file is ever written.
-
-### 2.2 The command
-
-```text
-jrs eclipse [--clean]
-```
-
-Resolves the project as `jrs metadata` does (from `jrs.lock` when it
-matches; it never compiles) and writes, at the project root:
-
-- `.project` — the project's name and the Java nature;
-- `.classpath` — source roots, outputs, the JDK and every jar (§2.3);
-- `.settings/org.eclipse.jdt.core.prefs` — the `--release` level;
-- `.settings/org.eclipse.core.resources.prefs` — the source encoding.
-
-Each file begins with the comment `<!-- generated by jrs; jrs eclipse
---clean removes it -->` (`#` in the `.prefs` files). jrs overwrites only a
-file carrying that line, so an existing hand-written `.classpath` is an
-error (exit `2`) naming the file, never a silent overwrite. `--clean`
-removes the files that carry it and nothing else.
-
-`jrs init` and `jrs migrate` print a hint naming the command when they find
-a `.vscode/` directory; neither runs it. The files are written with `\n`
-line endings, sorted, and only when their content changes, so jdtls does
-not re-import on an unchanged run.
-
-### 2.3 What `.classpath` holds
-
-Every path is relative to the project root when it is under it, and
-absolute otherwise (the cache). An absolute cache path is why the files
-belong in `.gitignore`. `jrs init` writes none today; DOCS.md says to
-ignore the four names, and `jrs eclipse` prints the hint once when the
-project is a Git repository whose `.gitignore` does not name them.
-
-| Entry | Written as |
-| --- | --- |
-| A main source root (`main.sources`, `main.generated-sources`) | `kind="src" path="src/main/java" output="target/eclipse/classes"` |
-| A main resource root | `kind="src"` with `excluding="**/*.java"` and the same output |
-| A test source or resource root | `kind="src"`, `output="target/eclipse/test-classes"`, attribute `test="true"` |
-| A jar on the compile classpath | `kind="lib" path="<jar>" sourcepath="<sources jar>"` |
-| A jar only on the test classpath | the same, with attribute `test="true"` |
-| A local jar (`path = …`) | `kind="lib"` with its path relative to the root |
-| The JDK | `kind="con"` on `JRE_CONTAINER/…/StandardVMType/JavaSE-<release>` |
-| The default output | `kind="output" path="target/eclipse/classes"` |
-
-Three choices in that table matter:
-
-- **jdtls compiles into `target/eclipse/`, never `target/classes`.** jdtls
-  compiles on every keystroke. Writing into jrs's own output would defeat
-  the compile unit's fingerprint and the incremental index
-  (`target/.jrs/<unit>.index`) and make every `jrs build` a full one. Under
-  `target/` the output stays disposable: `jrs clean` removes it, jdtls
-  rebuilds it.
-- **Runtime-only jars are left out of the main entries.** Eclipse has no
-  runtime scope, so a `runtime-only` jar on the main classpath would let
-  the editor accept code that `javac` rejects. It is on the test entries,
-  as the test classpath holds it.
-- **Sources jars are named only when cached.** `metadata.rs` already gives
-  `sources` per entry, `null` until `jrs fetch --sources` downloaded it.
-  `jrs eclipse` downloads them itself, as `jrs fetch --sources` would, so
-  go-to-definition works on the first run; `--offline` skips that.
-
-A generated-source root that does not exist yet (`target/generated/sources`
-before a `pre-compile` task ran) is created empty, since jdtls reports a
-missing source folder as an error on the whole project.
-
-### 2.4 Workspaces
-
-In a workspace (SPEC §1.2, [WORKSPACES.md](../WORKSPACES.md)) `jrs eclipse`
-writes one Eclipse project per member, in the member's directory, named by
-the member's `project.name`, plus a `.project` at a root that has no
-`[project]` of its own, with no nature, so jdtls opens the whole tree. A
-module dependency becomes a project reference,
-`kind="src" path="/<member>" combineaccessrules="false"`, in the scope the
-dependency has, so the editor follows a call into a sibling's sources
-rather than its jar. The jars are each member's share of the one graph, as
-`jrs metadata` gives them. `-p` narrows the members written as for every
-other command.
-
-### 2.5 Kotlin, Scala, Groovy and annotation processors
-
-jdtls is a Java language server. For a unit with another language:
-
-- The other language's source roots are not written: jdtls would report
-  every `.kt` file as a non-Java file in a Java source folder.
-- The unit's jrs output directory (`target/classes`, `target/test-classes`)
-  is added as a `kind="lib"` entry after the source entries, so Java code
-  that calls into Kotlin or Scala resolves once `jrs build` ran. The Java
-  sources come first, so their own classes win.
-- A processor on the compile classpath (Lombok, MapStruct, SPEC §7.3)
-  is not written as a `.factorypath`. The Java extension bundles Lombok
-  support of its own; other processors are open question 2.
-
-The Kotlin, Scala and Groovy editor stories stay what they are today:
-their own language servers, which read neither format.
-
-### 2.6 Staying fresh
-
-The files describe a resolution, so they go stale when `jrs.toml` or
-`jrs.lock` changes. Any command that resolves rewrites them, if
-`.classpath` exists and carries the generated line, after the lockfile is
-written — `jrs build`, `add`, `remove`, `update` and the rest. jdtls watches
-`.classpath` and re-imports on its own, so the edit–build loop in VS Code is
-the one in a terminal: change `jrs.toml`, run anything. A project that never
-ran `jrs eclipse` gets no files from any other command.
-
-### 2.7 Tests
-
-- Unit tests in `src/eclipse.rs` for each row of §2.3, against the
-  `Resolution` fixtures `model.rs`'s tests already build.
-- An integration test in `tests/build.rs` that runs `jrs eclipse` on a
-  fixture project, checks the files, edits the manifest, runs `jrs build`
-  and checks the rewrite; another that refuses a hand-written `.classpath`.
-- A workspace case in `tests/workspace.rs` for the project references.
-- No test runs jdtls. Its reading of the files is checked by hand against
-  `examples/` on VS Code, once per format change, and recorded in the PR.
-
-### 2.8 What stays out
-
-`.launch` files, run configurations, `.vscode/settings.json`,
-`.vscode/tasks.json`, Eclipse IDE builders (the files are written for
-jdtls; the Eclipse IDE will read them but jrs is not tested against it),
-and any other IDE's format. A VS Code extension giving run buttons and a
-test tree on top is a later question (open question 4).
-
-## 3. Package managers and the JetBrains Marketplace
+## 2. Package managers and the JetBrains Marketplace
 
 The release job (`rust.yml`, `release`) writes the Homebrew formula, the
 Scoop manifest and the three winget files from `SHA256SUMS`, and keeps them
 as the `package-manifests` artifact. This part publishes them. It changes no
 Rust code.
 
-### 3.1 Homebrew
+### 2.1 Homebrew
 
 - A tap repository, `pwittchen/homebrew-tap`, holding `Formula/jrs.rb`, so
   `brew install pwittchen/tap/jrs` works. Done: `specs/HOMEBREW.md`. The formula `manifests.sh` writes
@@ -214,14 +61,14 @@ Rust code.
   source and a project with some notability, neither of which is the first
   release's problem.
 
-### 3.2 Scoop
+### 2.2 Scoop
 
 A bucket repository, `pwittchen/scoop-jrs`, holding `bucket/jrs.json`
 (`scoop bucket add jrs https://github.com/pwittchen/scoop-jrs`), updated by
-a `scoop` job exactly as §3.1, with its own scoped token. The manifest
+a `scoop` job exactly as §2.1, with its own scoped token. The manifest
 already names `jrs.exe` and carries both architectures.
 
-### 3.3 winget
+### 2.3 winget
 
 winget publishes through pull requests to `microsoft/winget-pkgs`. A
 `winget` job runs `wingetcreate submit` on the three files `manifests.sh`
@@ -231,7 +78,7 @@ hand, since a new package goes through manual review; the job takes over
 from the second release. The manifest's `NestedInstallerType: portable`
 already puts `jrs` on `PATH`.
 
-### 3.4 JetBrains Marketplace
+### 2.4 JetBrains Marketplace
 
 `plugins/intellij` builds with the IntelliJ Platform Gradle Plugin, which has
 `publishPlugin` and `signPlugin`. The plugin's ID is already
@@ -248,7 +95,7 @@ already puts `jrs` on `PATH`.
 - The first upload, which needs the vendor profile and the listing text, is
   done by hand. The listing reuses the plugin's README and screenshot.
 
-### 3.5 Failure policy
+### 2.5 Failure policy
 
 None of the publishing jobs may fail a release. They run after `release`,
 each on its own, and a failure is a red job the maintainer retries; the
@@ -256,7 +103,7 @@ GitHub release, the binaries and `install.sh` are already out. That keeps
 the asset names, which `setup-jrs`, `install.sh` and `manifests.sh` depend
 on, the one contract.
 
-## 4. A guide for coding agents
+## 3. A guide for coding agents
 
 A section "For coding agents and scripts" in `DOCS.md`, mirrored in
 `website/docs/index.html`, with a short `AGENTS.md` snippet a project can
@@ -292,9 +139,9 @@ Writing it is also an audit: anything an agent needs that the guide has to
 explain around (a JSON form of test results beyond JUnit XML, say) goes on
 the roadmap as a finding, not into the guide as a workaround.
 
-## 5. `jrs install`
+## 4. `jrs install`
 
-### 5.1 What it crosses
+### 4.1 What it crosses
 
 SPEC §1.2 rules out "publishing artifacts to a repository". The reasons
 behind it — credentials, signing, staging repositories, the many plugins
@@ -307,13 +154,13 @@ rest: installing into a local Maven repository. It is what Maven's
 in one repository usable from a project in another without a reactor or a
 composite build (ROADMAP_ARCHIVE §5).
 
-### 5.2 The command
+### 4.2 The command
 
 ```text
 jrs install [--repo <dir>] [--sources] [--javadoc]
 ```
 
-Runs `jrs package` and copies the thin jar, a POM (§5.4) and, with the
+Runs `jrs package` and copies the thin jar, a POM (§4.4) and, with the
 flags, the sources and Javadoc jars (`--sources`, `--javadoc` as for
 `jrs package`) into `<repo>/<group path>/<artifact>/<version>/`, default
 `~/.m2/repository`. Each file is written as the cache writes one: to a
@@ -326,7 +173,7 @@ Maven does, listing the installed versions, so `jrs outdated` and Maven's
 own resolver see them. `_remote.repositories` is not written; Maven treats
 its absence as "installed locally", which is the truth.
 
-### 5.3 A group
+### 4.3 A group
 
 `[project]` has no group: a jrs project was never something another
 project depends on. `jrs install` needs one, so `[project]` gains
@@ -334,7 +181,7 @@ project depends on. `jrs install` needs one, so `[project]` gains
 key when missing). `jrs migrate` writes it from `<groupId>` or Gradle's
 `group`. The artifact ID is `project.name`.
 
-### 5.4 The POM
+### 4.4 The POM
 
 Written with `quick-xml`, in a fixed order, as the project's dependencies
 were resolved, not as they were declared:
@@ -356,16 +203,16 @@ what this jar was built and tested against; a consumer's own mediation
 decides the rest. Writing each version concretely means a consumer does not
 need the producer's `[managed]` to resolve it.
 
-### 5.5 Workspaces
+### 4.5 Workspaces
 
 `jrs install` at a workspace root installs every member (narrowed by `-p`),
 each with its own POM. A module dependency on another member becomes a
 dependency on that member's `group:name:version`, so installing a member
 installs the members it depends on first, as `-p` builds them. A member's
 `group` falls back to the root's `[project] group` when the root has one;
-open question 3 asks whether a pure aggregator may give one.
+open question 1 asks whether a pure aggregator may give one.
 
-### 5.6 The consumer, the lockfile and snapshots
+### 4.6 The consumer, the lockfile and snapshots
 
 A consumer reaches the local repository through `[repositories]`. Since a
 `file://` URL with an absolute home directory cannot be committed,
@@ -395,85 +242,63 @@ else. What follows is the resolver's behaviour today, unchanged:
 `jrs install` reads the producer's `jrs.lock` as any build does and never
 writes the consumer's.
 
-### 5.7 What stays out
+### 4.7 What stays out
 
 Deploying to a remote repository, credentials, signing, Gradle Module
 Metadata (`.module`), the `maven-metadata.xml` of a remote layout and
 timestamped snapshot names. Each of those is the publishing the narrowed
 non-goal still rules out.
 
-### 5.8 Tests
+### 4.8 Tests
 
 `tests/build.rs`: install a fixture library into a scratch repository,
 check the files and the POM byte for byte; a consumer fixture resolves it
 through `file://~/` with `HOME` pointed at the scratch directory; a
 snapshot reinstall is picked up by the consumer's next build; a release
 reinstall with different bytes fails it. Unit tests for the POM table in
-§5.4, and `tests/workspace.rs` for a member depending on a member.
+§4.4, and `tests/workspace.rs` for a member depending on a member.
 
-## 6. Changes elsewhere
+## 5. Changes elsewhere
 
-- **SPEC.md §1.2.** "IDE project file generation" becomes "IDE project
-  file generation, apart from Eclipse's `.project` and `.classpath` for the
-  JDT language server (REACH.md §2)". "Publishing artifacts to a
-  repository" becomes "Publishing artifacts to a remote repository; `jrs
-  install` writes to a local one (REACH.md §5)".
+- **SPEC.md §1.2.** "Publishing artifacts to a repository" becomes
+  "Publishing artifacts to a remote repository; `jrs install` writes to a
+  local one (REACH.md §4)".
 - **SPEC.md §4.** `project.group`; `file://~/` in `[repositories]`.
-- **SPEC.md §5.1.** Rows for `jrs eclipse` and `jrs install`, and §5.4
-  gains a sentence that `jrs eclipse` is written from the same model.
-- **DOCS.md.** "Editors and IntelliJ IDEA" loses "jrs generates no IDE
-  project files" and gains a VS Code subsection; the command table gains
-  both commands; `[project]` gains `group`; `[repositories]` shows the
-  local repository; the new agent section (§4); Installation lists `brew`,
-  `scoop` and `winget` once they work.
+- **SPEC.md §5.1.** A row for `jrs install`.
+- **DOCS.md.** The command table gains `jrs install`; `[project]` gains
+  `group`; `[repositories]` shows the local repository; the new agent
+  section (§3); Installation lists `brew`, `scoop` and `winget` once
+  they work.
 - **website/docs/index.html** in step with each, and the home page's
   install block offers `brew install` beside `curl | sh`.
 - **website/install.sh** mentions `scoop` and `winget` when run on
   Windows.
-- **ARCH.md.** `src/eclipse.rs` and `src/install.rs` in the module map,
-  `target/eclipse/` in the on-disk layout.
+- **ARCH.md.** `src/install.rs` in the module map.
 - **CLAUDE.md.** The release paragraph names the publishing jobs and their
   secrets.
-- **`jrs completions`.** Both commands and their flags.
+- **`jrs completions`.** `jrs install` and its flags.
 - **The IntelliJ plugin** needs nothing; `jrs install` could be a tool
   window action later.
 
-## 7. Order
+## 6. Order
 
-1. **§4, the agent guide.** Documentation only; a day.
-2. **§3, package managers.** CI and two new repositories; the first
+1. **§3, the agent guide.** Documentation only; a day.
+2. **§2, package managers.** CI and two new repositories; the first
    winget and Marketplace submissions by hand.
-3. **§2, Eclipse files.** One module, about the size of `model.rs`, and
-   the SPEC change.
-4. **§5, `jrs install`.** A POM writer, a manifest key, `~` in
+3. **§4, `jrs install`.** A POM writer, a manifest key, `~` in
    repository URLs, and the SPEC change. It is the one that most needs
    [CORPUS.md](../CORPUS.md)'s evidence: a corpus project that depends on a
    sibling library in another repository would show its value best.
 
-## 8. Open questions
+## 7. Open questions
 
-1. **`jrs eclipse` or `jrs metadata --eclipse`?** A command of its own is
-   proposed because it writes files and keeps them fresh (§2.6), which
-   `metadata` (stdout only) never does. The name ties the command to a
-   format; `jrs ide` with one subcommand would leave room for nothing jrs
-   means to add.
-2. **Annotation processors in jdtls.** A `.factorypath` naming the
-   processors on the compile classpath would make MapStruct's generated
-   mappers visible in the editor. jrs cannot tell a processor jar from a
-   library without opening it for `META-INF/services/javax.annotation.processing.Processor`;
-   `compile/abi.rs` and `compile/incremental.rs` already look for that
-   service file, so it may be cheap.
-3. **A workspace-wide `group`.** `[project]` is not a shared table
+1. **A workspace-wide `group`.** `[project]` is not a shared table
    (WORKSPACES.md §3). Letting a pure aggregator carry `[workspace] group`
    is the smallest way to write the group once.
-4. **A VS Code extension on top.** Run and debug buttons, `jrs test` from
-   the gutter, `jrs.toml` completion — what the IntelliJ plugin does. It
-   would sit on the files §2 writes, not replace them, and it is a second
-   plugin to maintain and publish (VS Code Marketplace and Open VSX).
-5. **Honouring `settings.xml`'s `<localRepository>`** and `-Dmaven.repo.local`
+2. **Honouring `settings.xml`'s `<localRepository>`** and `-Dmaven.repo.local`
    for `jrs install`'s default. jrs reads no Maven configuration today;
    `--repo` covers the case, and reading `settings.xml` would be the first
    time it does.
-6. **Should the agent guide ship as a file `jrs init` writes?** An
+3. **Should the agent guide ship as a file `jrs init` writes?** An
    `AGENTS.md` in every new project is convenient and also opinionated
    about a file that is the user's.
