@@ -1,6 +1,6 @@
 # jrs — The real-project corpus
 
-The plan for [ROADMAP §1](../ROADMAP.md#1-hardening-against-real-projects):
+The plan for [ROADMAP_ARCHIVE §1](ROADMAP_ARCHIVE.md#1-hardening-against-real-projects):
 a fixed list of open-source Spring Boot and Ktor projects, a harness that
 takes each one through `jrs migrate`, `build`, `test`, `run` and `package`
 and checks the result against the project's own Maven or Gradle build, and
@@ -217,7 +217,7 @@ findings do not explain yet is `FAIL` and the run exits 1. A failed
 `reference` is `FAIL` too, and leaves the row out of the headline numbers:
 the list needs fixing, not jrs. A step `known` maps that now passes is `ok`,
 and the report's notes say to close its finding. The two headline
-numbers at the bottom are the measures ROADMAP §1 tracks: **end to end**
+numbers at the bottom are the measures ROADMAP_ARCHIVE §1 tracks: **end to end**
 (every step `ok` or `skip`) and **migrate first try** (`migrate` and `build`
 both `ok`). Every step's log and both classpath lists stay under the run's
 directory for whoever triages.
@@ -285,7 +285,7 @@ projects" row links to it, replacing what the page says today.
 
 ## 9. Done
 
-ROADMAP §1 is done when:
+ROADMAP_ARCHIVE §1 is done when:
 
 - every corpus project is `ok` end to end, or each non-`ok` cell is a
   bin-3 finding cited in ROADMAP_ARCHIVE §5;
@@ -295,7 +295,7 @@ ROADMAP §1 is done when:
 
 The corpus is not frozen there: new projects are added when a user reports
 one that fails, which is cheaper than any other way of finding the next
-bug. The ROADMAP §2 benchmarks take their projects from it, and
+bug. The ROADMAP_ARCHIVE §2 benchmarks take their projects from it, and
 TEST_JVM_BENCHMARK §3's corpus becomes this one.
 
 ## 10. Changes this implies

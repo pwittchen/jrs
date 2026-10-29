@@ -1,6 +1,6 @@
 # jrs — Benchmarks against Maven and Gradle
 
-The plan for [ROADMAP §2](../ROADMAP.md#2-benchmarks-against-maven-and-gradle):
+The plan for [ROADMAP_ARCHIVE §2](ROADMAP_ARCHIVE.md#2-benchmarks-against-maven-and-gradle):
 jrs, Maven and Gradle building, testing, running and packaging the same
 projects, checked to be the same build before anything is timed, with the
 results written up in a report anyone can regenerate.
@@ -372,7 +372,7 @@ a warm second compile) splits it further; the report links that bench's
 command and does not run it.
 
 **The test JVM.** TEST_JVM_BENCHMARK.md §4 sends its results to "a section
-of the ROADMAP §2 benchmark report"; that section is a copy of its latest
+of the ROADMAP_ARCHIVE §2 benchmark report"; that section is a copy of its latest
 §7 table, kept here so the two reports do not need reading together.
 
 ## 7. Where it runs
@@ -418,7 +418,7 @@ reference machine, named in its header, so successive reports compare.
 - **CLAUDE.md**, Commands: `cargo bench --bench compare` beside the other
   three benches.
 - **FASTER_BUILDS.md §9.1** and **TEST_JVM_BENCHMARK.md §4**: their
-  "ROADMAP §2" references point at this document's scenario ids.
+  "ROADMAP_ARCHIVE §2" references point at this document's scenario ids.
 
 ## 10. Open questions
 

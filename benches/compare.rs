@@ -1,4 +1,4 @@
-//! jrs against Maven and Gradle (specs/BENCHMARKS.md, ROADMAP §2): the
+//! jrs against Maven and Gradle (specs/BENCHMARKS.md, ROADMAP_ARCHIVE §2): the
 //! same projects built, tested, run and packaged by each tool, checked to be
 //! the same build before anything is timed, from a local mirror of Maven
 //! Central, with the results written to `benchmarks/REPORT.md` and every

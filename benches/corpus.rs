@@ -1,4 +1,4 @@
-//! The real-project corpus (specs/CORPUS.md, ROADMAP §1): every project
+//! The real-project corpus (specs/CORPUS.md, ROADMAP_ARCHIVE §1): every project
 //! in `specs/corpus/corpus.toml`, cloned at its pinned commit, taken through
 //! `jrs migrate`, `build`, `test`, `run` and `package` with no hand edits,
 //! and checked against the project's own Maven or Gradle build — the same

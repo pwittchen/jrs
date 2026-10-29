@@ -1,98 +1,93 @@
 # jrs — Roadmap
 
 Every milestone in [SPEC §12](SPEC.md#12-roadmap) has landed, and so have
-workspaces and the IntelliJ plugin. What jrs lacks now is not features but
-evidence: that it builds the projects people bring to it, and that it is
-faster than Gradle where it says it is. This roadmap is four items, in order.
-Each has a spec in [`specs/todo/`](specs/todo/) that says what to build and
-when it counts as done.
+workspaces, the IntelliJ plugin, the corpus, the benchmarks against Maven
+and Gradle and the gaps they showed. What is left is the last few projects
+the corpus cannot take end to end, the cells where Gradle still wins, the
+release steps still done by hand and the cost of lowering the bar to try
+jrs. This roadmap is five items, in order.
 
 The roadmap before this one, with the positioning ("Where jrs is aimed"), the
 IntelliJ plugin's open items and the table of ideas that need a spec decision
 first, is kept in [specs/ROADMAP_ARCHIVE.md](specs/ROADMAP_ARCHIVE.md). Its
 open items are still open; they are just not next.
 
+**Legend.** ✅ done · ⬜ to do
+
 **Order of work.** Section 1 comes first because a user whose first project
-does not migrate never sees anything else. Section 2 runs on the projects
-section 1 makes build, and its numbers decide which parts of section 3 are
-worth their code. Section 4 needs little code and can go alongside.
+does not migrate never sees anything else. Section 2 needs a measurement
+before it gets code. Sections 3 and 4 need little code and can go alongside;
+section 5 changes no behaviour and fits between the others.
 
 **What waits.** New packaging formats, more JVM languages, a Build Server
-Protocol server and any daemon. Each adds surface nobody has asked for yet,
-and none of it helps the comparison with Gradle until sections 1 and 2 are
-done.
+Protocol server and any daemon. Each adds surface nobody has asked for yet.
+
+**What is not planned.** Editor integration beyond the IntelliJ plugin:
+no Eclipse `.project`/`.classpath` files, no VS Code support.
 
 ---
 
-## 1. Hardening against real projects
+## 1. The rest of the corpus
 
-[specs/CORPUS.md](specs/CORPUS.md)
+[specs/corpus/FINDINGS.md](specs/corpus/FINDINGS.md)
 
-A pinned corpus of open-source Spring Boot and Ktor projects, on Maven and
-on Gradle, and a harness that takes each through `jrs migrate`, `build`,
-`test`, `run` and `package` and compares the result with the project's own
-build: the same runtime classpath, the same tests run and passed. Every
-failure is fixed with a regression test, added as a migration rule, or cited
-as a non-goal. The measure is how often `jrs migrate` works on the first
-try, published as a compatibility table in `DOCS.md` and on the website.
+10 of 11 corpus projects get past `build`, but six stop short of `ok` on
+findings 12–19. Three of them are gaps jrs can close without crossing a
+non-goal, and one more can at least be reported:
 
-The harness, the list and the ledger have landed (`cargo bench --bench
-corpus`, [`specs/corpus/`](specs/corpus/)). The first run took 4 of 11 projects end to
-end; the other seven stopped at `build` on six findings, five of them
-migration gaps. The plan for those,
-[specs/CORPUS_FIXES.md](specs/CORPUS_FIXES.md), is **done**: it closed
-them, and 10 of 11 now get past `build`. What keeps six of them from `ok`
-is findings 12–19 in
-[specs/corpus/FINDINGS.md](specs/corpus/FINDINGS.md): a BOM's exclusions, a dependency's
-OS profiles, two more migration gaps, and differences from Gradle's
-resolution that are non-goals.
+- ⬜ **Finding 12**: read `maven-compiler-plugin`'s `<execution>`
+  configuration, as finding 6 did for Checkstyle.
+- ⬜ **Finding 13**: apply a BOM's exclusions to the managed dependency they
+  are declared on. Today the classpath differs without an error.
+- ⬜ **Finding 17**: a versionless `org.jetbrains.kotlin` library takes the
+  Kotlin plugin's version on migration.
+- ⬜ **Finding 15**: the migration report names the dependencies where
+  nearest-wins and Gradle's highest-wins pick different versions. Mediation
+  itself stays nearest-wins (SPEC §13.6).
 
-**Status: ✅ done.** The harness, the corpus and the ledger are in place, and
-the remaining findings are tracked in
-[specs/corpus/FINDINGS.md](specs/corpus/FINDINGS.md).
+Each fix lands with a regression test in the fixture repo or a migration
+fixture, and the compatibility table in `DOCS.md` is updated from the next
+corpus run.
 
-## 2. Benchmarks against Maven and Gradle
+**Status: ⬜ to do.**
 
-[specs/BENCHMARKS.md](specs/BENCHMARKS.md)
+## 2. Faster on large projects
 
-The same projects built by jrs, Maven and Gradle (warm daemon and
-`--no-daemon`), checked to be the same build before anything is timed:
-clean builds with a cold and a warm cache, a no-op build, a one-file
-incremental build, `test`, `run` and `package`. Medians and spread, from a
-local mirror, in a generated `benchmarks/REPORT.md` that says where jrs is
-slower. The Why page and the README link to it once it exists.
+[specs/BENCHMARKS_SUMMARY.md](specs/BENCHMARKS_SUMMARY.md)
 
-The harness has landed (`cargo bench --bench compare`, the parity set's
-Maven and Gradle builds in [`benchmarks/projects/`](benchmarks/projects/),
-run locally only). What is left is the first report from the reference
-machine, and the links to it.
+The 0.14.7 pass leaves Gradle's warm daemon ahead in a handful of cells,
+all on the large project or the workspace:
 
-**Status: ✅ done.** The comparison harness and the parity set are in place. The summary is in
-[specs/BENCHMARKS_SUMMARY.md](specs/BENCHMARKS_SUMMARY.md), and the results are on the
-website at [getjrs.dev/benchmarks](https://getjrs.dev/benchmarks/).
+- ⬜ **`clean` on `gen-2000`**: 1.79 s against 1.50–1.56 s, 1,368 ms of it
+  `javac`. Measure what the `javac` invocation's JVM flags and splitting
+  the sources into parallel batches would save.
+- ⬜ **`abi` on `gen-2000` and `gen-ws`**: 779 ms against 631–640 ms. Count
+  how many sources a round of "compile its users" recompiles against how
+  many a change actually reaches.
+- ⬜ **`test` on `gen-2000`**: 911 ms against 779–825 ms, 682 ms of it the
+  test JVM. A full run (seven measured runs per cell) first, to tell a
+  regression from a one-off.
+- ⬜ **Corpus numbers for the parallel members and the `kotlinc` worker**,
+  still to be taken ([GRADLE_GAPS.md §9](specs/GRADLE_GAPS.md#9-what-was-built)).
 
-## 3. Closing the gaps where Gradle wins
+Nothing here gets code until a measurement says where the time goes.
 
-[specs/GRADLE_GAPS.md](specs/GRADLE_GAPS.md)
+**Status: ⬜ to do.**
 
-Four gaps, each judged by the section 2 numbers before it gets code:
+## 3. Releases without manual steps
 
-- **Workspace members built in parallel**, with each member's output
-  buffered and printed in build order, as Gradle's `--parallel` does.
-- **Kotlin compile cost**: measuring what `kotlinc`'s JVM start-up costs a
-  Ktor build, and a `kotlinc` worker for `--watch` if it is felt.
-- **JDK provisioning**: a pinned JDK that is not installed is downloaded,
-  as Gradle's toolchains do, unpacked by the system `tar` so no crate is
-  added.
-- **Pinning jrs itself**: what Gradle's wrapper gives a team, from
-  `project.jrs-version` and `setup-jrs`.
+[CLAUDE.md](CLAUDE.md), [specs/HOMEBREW.md](specs/HOMEBREW.md)
 
-**Status: ✅ done.** Members build at once with a transcript that reads as one
-at a time, `kotlinc` has a warm worker under `--watch`, `jrs jdk install`
-and an opt-in `[jdk] download` fetch a pinned JDK, and `jrs wrapper`,
-`jrs self update --to` and `setup-jrs`'s `version: manifest` pin jrs. The
-benchmarks that judge the first two are in place; their corpus numbers are
-still to be taken ([§9](specs/GRADLE_GAPS.md#9-what-was-built)).
+A `v*` tag builds and publishes everything, but two steps are still by hand:
+
+- ⬜ **The Homebrew tap updated by the release**: `release` commits
+  `Formula/jrs.rb` to `pwittchen/homebrew-tap` from the checksums it
+  already has, instead of copying it over by hand.
+- ⬜ **The IntelliJ plugin's version from the tag**: `bump` writes
+  `pluginVersion` in `plugins/intellij/gradle.properties` too, or the reason
+  it stays independent is written down.
+
+**Status: ⬜ to do.**
 
 ## 4. Reaching more users
 
@@ -100,14 +95,28 @@ still to be taken ([§9](specs/GRADLE_GAPS.md#9-what-was-built)).
 
 Cheap work that lowers the cost of trying jrs:
 
-- **VS Code without a daemon**: Eclipse `.project` and `.classpath` files
-  generated from the resolved project, which the Java extension's language
-  server reads as they are.
-- **Package managers and the JetBrains Marketplace**: the Scoop bucket and
-  winget, from the manifests each release already writes, and the IntelliJ
-  plugin published. The Homebrew tap is live (`brew install pwittchen/tap/jrs`,
-  `specs/HOMEBREW.md`); copying each release's formula into it is still by hand.
-- **A guide for coding agents** in `DOCS.md` and on the website.
-- **`jrs install`** into `~/.m2`, so a library can be shared between
+- ⬜ **Scoop and winget**, from the manifests each release already writes.
+- ⬜ **The IntelliJ plugin on the JetBrains Marketplace.**
+- ⬜ **A guide for coding agents** in `DOCS.md` and on the website.
+- ⬜ **`jrs install`** into `~/.m2`, so a library can be shared between
   projects in different repositories: the smallest form of publishing, and
   a SPEC §1.2 decision.
+
+**Status: ⬜ to do.**
+
+## 5. Splitting the two largest modules
+
+[ARCH.md](ARCH.md)
+
+`cli.rs` is over 7,500 lines and `manifest.rs` over 5,800. A change to one
+command or one table means working in a file that holds all of them:
+
+- ⬜ **`cli.rs`**: `Session` and its `build()` spine in a module of their
+  own, and the commands in `cli/` by group, beside `cli/members.rs`.
+- ⬜ **`manifest.rs`**: table parsing apart from validation and from
+  `effective_dependencies()`.
+
+A refactor only: no behaviour, output or lockfile changes, with the
+integration suites as the check. `ARCH.md` follows the new layout.
+
+**Status: ⬜ to do.**

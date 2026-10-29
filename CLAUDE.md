@@ -89,9 +89,9 @@ cargo bench --bench resolution                      # SPEC §12 M5: network vs j
 cargo bench --bench incremental                     # SPEC §7.2: rebuild time after one edit, javac's share
 JRS_BENCH_PROJECT=<path> cargo bench --bench test_jvm  # SPEC §10.2: share-classes off/true/"aot" on a real project
 JRS_BENCH_PROJECT=<path> cargo bench --bench kotlinc   # GRADLE_GAPS §3.1: kotlinc vs its floor vs a warm compiler
-JRS_CORPUS=all cargo bench --bench corpus       # ROADMAP §1: real projects vs their own Maven/Gradle build
-JRS_BENCH_RECORD=1 cargo bench --bench compare  # ROADMAP §2: fill the local mirror the comparison reads
-cargo bench --bench compare                     # ROADMAP §2: jrs vs Maven vs Gradle, into benchmarks/REPORT.md
+JRS_CORPUS=all cargo bench --bench corpus       # ROADMAP_ARCHIVE §1: real projects vs their own Maven/Gradle build
+JRS_BENCH_RECORD=1 cargo bench --bench compare  # ROADMAP_ARCHIVE §2: fill the local mirror the comparison reads
+cargo bench --bench compare                     # ROADMAP_ARCHIVE §2: jrs vs Maven vs Gradle, into benchmarks/REPORT.md
 ```
 
 Only the corpus (`specs/corpus/corpus.toml`, `specs/CORPUS.md`),

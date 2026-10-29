@@ -1418,7 +1418,7 @@ can never lose user data, and task-generated sources must live under
                            the outcome changed (specs/TEST_JVM_BENCHMARK.md)
 
  cargo bench --bench compare
- └── benches/compare.rs    ROADMAP §2: jrs, Maven and Gradle (daemon, daemon
+ └── benches/compare.rs    ROADMAP_ARCHIVE §2: jrs, Maven and Gradle (daemon, daemon
                            with the configuration cache, no daemon) on the
                            parity set (benchmarks/projects/, generated
                            projects) and the corpus, from a local mirror

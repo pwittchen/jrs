@@ -335,7 +335,7 @@ subprocess as today's.
 | T3 | Remote task entries behind `[build-cache] tasks` and `--verify-cache` over tasks (§4.6) | a CI clean build with a warm remote |
 
 T1 is what most projects need; T2 and T3 wait for a project in the corpus
-of ROADMAP §1 that needs them.
+of ROADMAP_ARCHIVE §1 that needs them.
 
 ### 8.2 Tests
 

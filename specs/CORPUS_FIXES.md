@@ -1,7 +1,7 @@
 # jrs — Fixing the first corpus run's findings
 
 The plan for the findings of the first run of the real-project corpus
-([CORPUS.md](CORPUS.md), ROADMAP §1): 4 of 11 projects went from
+([CORPUS.md](CORPUS.md), ROADMAP_ARCHIVE §1): 4 of 11 projects went from
 `jrs migrate` to a running fat jar with no hand edits, and the other seven
 stopped at `jrs build` on six causes, recorded in
 [`specs/corpus/FINDINGS.md`](corpus/FINDINGS.md). Five of them are gaps in

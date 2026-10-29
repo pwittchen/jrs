@@ -113,12 +113,12 @@ For every project × JDK:
 3. For every marked outcome: rerun once to rule out a flaky test, then find
    the test that differs and its cause — a registry order, a shadowed
    resource, a `java.class.path` reader — and file it as a jrs finding with a
-   minimal reproduction, as ROADMAP §1 asks for any failure.
+   minimal reproduction, as ROADMAP_ARCHIVE §1 asks for any failure.
 4. For every "not shared" line: record the name that overlapped. A pattern
    (Logback's `logback-test.xml` in a test jar, say) may be one jrs should
    treat as harmless, which is a SPEC change of its own.
 
-The results go into a section of the ROADMAP §2 benchmark report:
+The results go into a section of the ROADMAP_ARCHIVE §2 benchmark report:
 `benchmarks/REPORT.md`'s "The test JVM" copies §7 below
 ([BENCHMARKS.md §6](BENCHMARKS.md#6-the-report)), next to its `test`
 scenario, which times the same kind of suite against Maven's and Gradle's.

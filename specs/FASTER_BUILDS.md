@@ -57,7 +57,7 @@ What Gradle still has over jrs comes down to four things:
    in-process and hot across builds.
 
 Every part below is judged by the benchmarks of
-[ROADMAP §2](../ROADMAP.md#2-benchmarks-against-maven-and-gradle), the
+[ROADMAP_ARCHIVE §2](ROADMAP_ARCHIVE.md#2-benchmarks-against-maven-and-gradle), the
 scenarios of [BENCHMARKS.md §4](BENCHMARKS.md#4-scenarios). A part
 whose benchmark does not show a gain worth its code is not merged.
 
@@ -188,7 +188,7 @@ share-classes = true    # default false
 ```
 
 Opt-in at first, since §3.2's ordering change cannot be fully checked from
-names. The default flips once the corpus of ROADMAP §1 runs green with it on.
+names. The default flips once the corpus of ROADMAP_ARCHIVE §1 runs green with it on.
 `jrs migrate` writes nothing for it.
 
 ### 3.5 The JDK 24+ AOT cache
@@ -263,7 +263,7 @@ region takes over with what is left, as if it had just started. Under
 
 Only a cold or partly cold cache gains anything; with everything cached,
 both waves are a `locate_cached` pass and the thread is not started. The
-benchmark is the `cold` scenario of ROADMAP §2
+benchmark is the `cold` scenario of ROADMAP_ARCHIVE §2
 ([BENCHMARKS.md §4](BENCHMARKS.md#4-scenarios)), against a local mirror. The change is in `cli.rs` (`dependencies`, `download`, the join
 points) and `resolve::fetch_jars`, which gains a variant taking a subset of
 the packages.
@@ -540,7 +540,7 @@ Each part changes SPEC.md before its code lands:
 
 ### 9.1 Milestones
 
-In order of value per line of code, each with its benchmark from ROADMAP §2,
+In order of value per line of code, each with its benchmark from ROADMAP_ARCHIVE §2,
 by the scenario ids of [BENCHMARKS.md §4](BENCHMARKS.md#4-scenarios).
 That benchmark runs every tool without its build cache (its §5), so the rows
 that need the cache on wait for its open question 3:
