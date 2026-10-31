@@ -837,3 +837,91 @@ fn an_upstream_api_change_compiles_only_what_uses_the_changed_class() {
     assert_eq!(code, 1, "{err}");
     assert!(err.contains("Main.java"), "{err}");
 }
+
+#[test]
+fn install_writes_each_member_with_siblings_as_dependencies() {
+    if jrs::toolchain::Toolchain::discover().is_err() {
+        eprintln!("SKIPPED install_writes_each_member: no usable JDK");
+        return;
+    }
+    let scratch = Scratch::new("ws-install");
+    let root = workspace(&scratch);
+    scratch.write(
+        "ws/jrs.toml",
+        "[workspace]\nmembers = [\"app\", \"core\", \"tool\"]\ngroup = \"com.acme\"\n\n\
+         [java]\nsource = 17\n",
+    );
+    let repo = scratch.join("m2");
+    let repo_arg = repo.display().to_string();
+
+    // `-p app` takes `core`, which it depends on, and leaves `tool` alone.
+    let (code, _, err) = jrs(
+        &scratch,
+        &root,
+        &[
+            "-p",
+            "app",
+            "install",
+            "--repo",
+            &repo_arg,
+            "--no-build-cache",
+        ],
+    );
+    assert_eq!(code, 0, "{err}");
+    assert!(
+        line_of(&err, "Installed com.acme:core:") < line_of(&err, "Installed com.acme:app:"),
+        "{err}"
+    );
+    assert!(!repo.join("com/acme/tool").exists(), "{err}");
+
+    let pom = std::fs::read_to_string(repo.join("com/acme/app/2.0.0/app-2.0.0.pom")).unwrap();
+    assert!(
+        pom.contains("<artifactId>core</artifactId>")
+            && pom.contains("<groupId>com.acme</groupId>\n      <artifactId>core"),
+        "{pom}"
+    );
+    assert!(repo.join("com/acme/core/1.0.0/core-1.0.0.jar").is_file());
+}
+
+#[test]
+fn a_member_group_beats_the_workspace_and_the_root_project_gives_one() {
+    let scratch = Scratch::new("ws-group");
+    let root = scratch.write(
+        "ws/jrs.toml",
+        "[workspace]\nmembers = [\"a\", \"b\"]\n\n\
+         [project]\nname = \"root\"\nversion = \"1\"\ngroup = \"com.root\"\n",
+    );
+    scratch.write(
+        "ws/a/jrs.toml",
+        "[project]\nname = \"a\"\nversion = \"1\"\n",
+    );
+    scratch.write(
+        "ws/b/jrs.toml",
+        "[project]\nname = \"b\"\nversion = \"1\"\ngroup = \"com.own\"\n",
+    );
+    let text = std::fs::read_to_string(&root).unwrap();
+    let table: toml::Table = text.parse().unwrap();
+    let workspace = jrs::workspace::Workspace::load(&root, &table).unwrap();
+    let group = |name: &str| {
+        workspace
+            .members
+            .iter()
+            .find(|m| m.manifest.name == name)
+            .and_then(|m| m.manifest.group.clone())
+    };
+    assert_eq!(group("a").as_deref(), Some("com.root"));
+    assert_eq!(group("b").as_deref(), Some("com.own"));
+}
+
+#[test]
+fn a_workspace_group_must_be_a_group() {
+    let scratch = Scratch::new("ws-bad-group");
+    let root = workspace(&scratch);
+    scratch.write(
+        "ws/jrs.toml",
+        "[workspace]\nmembers = [\"app\", \"core\", \"tool\"]\ngroup = \"../up\"\n",
+    );
+    let (code, _, err) = jrs(&scratch, &root, &["build"]);
+    assert_eq!(code, 2, "{err}");
+    assert!(err.contains("workspace.group"), "{err}");
+}

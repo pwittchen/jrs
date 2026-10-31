@@ -241,6 +241,10 @@ regression, not a style nit.
 - **Atomic, checksum-verified cache writes** (`resolve/cache.rs`): temp file in the
   destination directory, then rename, so an interrupted run cannot leave a truncated
   jar for the next build to link against.
+- **An installed jar has no `Class-Path`** (`cli/install.rs`). `jrs package`'s
+  thin jar names this machine's cache, and on a consumer's classpath those jars
+  would load beside the versions the consumer's own mediation chose, so
+  `jrs install` writes a jar of its own into `target/.jrs/install/`.
 - **Fat-jar merge rules** (`package.rs`): `META-INF/services/*` entries are
   concatenated, not overwritten — getting this wrong breaks `ServiceLoader` silently.
   Spring's registries get the same care — `spring.factories` merged key by key,

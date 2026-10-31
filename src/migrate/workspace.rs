@@ -293,7 +293,7 @@ fn link_maven_siblings(members: &mut [(String, Migration)], report: &mut Report)
         .iter()
         .map(|(dir, m)| {
             (
-                m.group.clone().unwrap_or_default(),
+                m.manifest.group.clone().unwrap_or_default(),
                 m.manifest.name.clone(),
                 dir.clone(),
                 m.manifest.name.clone(),

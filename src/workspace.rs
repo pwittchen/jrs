@@ -16,6 +16,7 @@ use std::path::{Component, Path, PathBuf};
 use crate::error::{IoResultExt, JrsError, Result};
 use crate::manifest::{
     self, Dependency, Hook, JavaAgent, MANIFEST_FILE, Manifest, ModuleDependency, TaskRef,
+    check_project_group,
 };
 use crate::resolve::coord::Ga;
 use crate::resolve::{Classpath, LocalJar, Resolution, ResolvedPackage};
@@ -25,7 +26,7 @@ const SHARED: &[&str] = &["java", "repositories", "managed"];
 /// The language tables, whose keys a member inherits only when it turns the
 /// language on itself: whether a member is Kotlin is its own business.
 const SHARED_LANGUAGES: &[&str] = &["kotlin", "scala", "groovy"];
-const WORKSPACE_KEYS: &[&str] = &["members", "parallel-tests"];
+const WORKSPACE_KEYS: &[&str] = &["members", "parallel-tests", "group"];
 
 /// A loaded workspace: the root and every member's manifest.
 #[derive(Debug)]
@@ -67,6 +68,7 @@ pub struct Member {
 pub struct Upstream {
     pub name: String,
     pub version: String,
+    pub group: Option<String>,
     /// Its manifest's directory, absolute.
     pub root: PathBuf,
     pub classes_dir: PathBuf,
@@ -75,6 +77,32 @@ pub struct Upstream {
     /// Whether the dependent names it itself, rather than through another
     /// member.
     pub direct: bool,
+}
+
+/// A member without a `project.group` takes the workspace's: `[workspace]
+/// group`, the one place a pure aggregator has for it, or else the root's
+/// own `project.group`.
+fn inherit_group(members: &mut [Member], section: &toml::Table) -> Result<()> {
+    let declared = match section.get("group") {
+        None => None,
+        Some(value) => {
+            let group = value
+                .as_str()
+                .ok_or_else(|| JrsError::manifest("`workspace.group` must be a string"))?;
+            check_project_group(group, "workspace.group")?;
+            Some(group.to_string())
+        }
+    };
+    let group = declared.or_else(|| {
+        members
+            .iter()
+            .find(|m| m.dir == ".")
+            .and_then(|m| m.manifest.group.clone())
+    });
+    for member in members.iter_mut().filter(|m| m.manifest.group.is_none()) {
+        member.manifest.group.clone_from(&group);
+    }
+    Ok(())
 }
 
 impl Workspace {
@@ -271,6 +299,7 @@ impl Workspace {
                 )));
             }
         }
+        inherit_group(&mut members, section)?;
         let edges = module_edges(&members)?;
         for (member, modules) in members.iter_mut().zip(edges) {
             member.modules = modules;
@@ -420,6 +449,7 @@ impl Workspace {
                 Upstream {
                     name: m.name.clone(),
                     version: m.version.clone(),
+                    group: m.group.clone(),
                     root: m.root.clone(),
                     classes_dir: project.classes_dir(),
                     jar_path: project.jar_path(),

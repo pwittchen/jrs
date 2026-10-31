@@ -1,6 +1,7 @@
 [project]
 name = "scala-tool"
 version = "0.2.0"
+group = "com.example"
 
 [java]
 source = 17

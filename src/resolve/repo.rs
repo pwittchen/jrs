@@ -840,8 +840,20 @@ pub fn digest_as(pin: &str, bytes: &[u8]) -> Option<String> {
 }
 
 /// The filesystem root behind a `file://` URL, if that is what this is.
+///
+/// `file://~/x` is `x` in the user's home directory, so that a manifest can
+/// name `~/.m2/repository` and still be committed. That is the whole of the
+/// shell's syntax it takes: no `~user`, no variables.
 pub(crate) fn local_repo_root(url: &str) -> Option<PathBuf> {
     let rest = url.strip_prefix("file://")?;
+    if let Some(home) = std::env::home_dir() {
+        if rest == "~" {
+            return Some(home);
+        }
+        if let Some(relative) = rest.strip_prefix("~/") {
+            return Some(home.join(relative));
+        }
+    }
     // `file:///C:/x` names the drive path `C:/x`, not `/C:/x`.
     let bytes = rest.as_bytes();
     if bytes.len() >= 3 && bytes[0] == b'/' && bytes[1].is_ascii_alphabetic() && bytes[2] == b':' {
@@ -1312,6 +1324,15 @@ mod tests {
             Some(PathBuf::from("C:/Users/ci/repo"))
         );
         assert_eq!(local_repo_root("https://x"), None);
+        assert_eq!(
+            local_repo_root("file://~/.m2/repository"),
+            Some(std::env::home_dir().unwrap().join(".m2/repository"))
+        );
+        assert_eq!(
+            local_repo_root("file://~alice/repo"),
+            Some(PathBuf::from("~alice/repo")),
+            "only the user's own home directory is expanded"
+        );
     }
 
     fn publish_snapshot(fx: &Fixture, build: u32, bytes: &[u8]) {

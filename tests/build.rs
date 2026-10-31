@@ -923,7 +923,7 @@ fn jrs(root: &Path, args: &[&str]) -> (i32, String, String) {
     // projects must not restore each other's classes from its build cache.
     if matches!(
         args.first(),
-        Some(&("build" | "test" | "run" | "package" | "task"))
+        Some(&("build" | "test" | "run" | "package" | "install" | "task"))
     ) {
         argv.insert(4, "--no-build-cache".to_string());
     }
@@ -5468,4 +5468,270 @@ fn fail_fast_stops_at_the_first_failure_on_either_launcher_line() {
             "{launcher}: a launcher stopped by jrs writes no XML, so there is no page"
         );
     }
+}
+
+// ---- jrs install (specs/REACH.md §4) ------------------------------------------
+
+/// The jrs binary with a home directory of its own, so that `~/.m2` is the
+/// scratch directory's, and with `cache` as its dependency cache.
+fn jrs_at_home(
+    scratch: &Scratch,
+    cache: &str,
+    root: &Path,
+    args: &[&str],
+) -> (i32, String, String) {
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_jrs"))
+        .arg("--manifest-path")
+        .arg(root)
+        .args(["--progress", "never", "--color", "never"])
+        .args(args)
+        .env("HOME", scratch.join("home"))
+        .env("USERPROFILE", scratch.join("home"))
+        .env("JRS_CACHE_DIR", scratch.join(cache))
+        .env("JRS_CONFIG", scratch.join("no-config.toml"))
+        .env("JRS_BUILD_CACHE", "off")
+        .output()
+        .unwrap();
+    (
+        output.status.code().unwrap_or(-1),
+        String::from_utf8_lossy(&output.stdout).into_owned(),
+        String::from_utf8_lossy(&output.stderr).into_owned(),
+    )
+}
+
+/// A library in the group `com.acme` whose one method returns `greeting`.
+fn greeter(scratch: &Scratch, version: &str, greeting: &str) -> PathBuf {
+    scratch.write(
+        "greeter/jrs.toml",
+        &format!(
+            "[project]\nname = \"greeter\"\nversion = \"{version}\"\ngroup = \"com.acme\"\n\n\
+             [java]\nsource = 17\n"
+        ),
+    );
+    scratch.write(
+        "greeter/src/main/java/com/acme/Greeter.java",
+        &format!(
+            "package com.acme;\n\npublic final class Greeter {{\n    \
+             public static String greet() {{\n        return \"{greeting}\";\n    }}\n}}\n"
+        ),
+    );
+    scratch.join("greeter")
+}
+
+/// An application that prints what the installed library returns, reaching
+/// it the way REACH.md §4.6 has a project reach `~/.m2`.
+fn consumer(scratch: &Scratch, version: &str) -> PathBuf {
+    scratch.write(
+        "consumer/jrs.toml",
+        &format!(
+            "[project]\nname = \"consumer\"\nversion = \"1.0.0\"\n\
+             main-class = \"app.Main\"\n\n[java]\nsource = 17\n\n\
+             [repositories]\nlocal = {{ url = \"file://~/.m2/repository\", \
+             groups = [\"com.acme\"] }}\n\n\
+             [dependencies]\n\"com.acme:greeter\" = \"{version}\"\n"
+        ),
+    );
+    scratch.write(
+        "consumer/src/main/java/app/Main.java",
+        "package app;\n\npublic class Main {\n    public static void main(String[] a) {\n        \
+         System.out.println(com.acme.Greeter.greet());\n    }\n}\n",
+    );
+    scratch.join("consumer")
+}
+
+#[test]
+fn install_writes_a_maven_layout_with_a_pom_of_what_was_built() {
+    let _toolchain = require_jdk!();
+    let scratch = Scratch::new("install-layout");
+    let fixture = FixtureRepo::new(&scratch);
+    // javac reads what is on the classpath, so these are real, empty jars.
+    let mut empty = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+    empty
+        .add_directory("META-INF/", zip::write::SimpleFileOptions::default())
+        .unwrap();
+    let empty = empty.finish().unwrap().into_inner();
+    fixture.publish_jar(&Coord::new("org.example", "lib", "2.0.0"), &empty);
+    fixture.publish_jar(&Coord::new("org.example", "core", "1.0.0"), &empty);
+    let root = greeter(&scratch, "1.0.0", "hello");
+    let repositories = fixture.manifest_section();
+    let manifest = std::fs::read_to_string(root.join("jrs.toml")).unwrap();
+    scratch.write(
+        "greeter/jrs.toml",
+        &format!(
+            "{manifest}\n{repositories}\n[managed]\n\"org.example:lib\" = \"2.0.0\"\n\n\
+             [dependencies]\n\"org.example:lib\" = {{}}\n\n\
+             [dev-dependencies]\n\"org.example:core\" = \"1.0.0\"\n"
+        ),
+    );
+    let repo = scratch.join("elsewhere");
+    let (code, _, stderr) = jrs_at_home(
+        &scratch,
+        "cache",
+        &root,
+        &[
+            "install",
+            "--repo",
+            &repo.display().to_string(),
+            "--sources",
+        ],
+    );
+    assert_eq!(code, 0, "{stderr}");
+    let dir = repo.join("com/acme/greeter/1.0.0");
+    assert!(
+        stderr.contains("Installed com.acme:greeter:1.0.0 to "),
+        "{stderr}"
+    );
+
+    assert_eq!(
+        std::fs::read_to_string(dir.join("greeter-1.0.0.pom")).unwrap(),
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
+         <project xmlns=\"http://maven.apache.org/POM/4.0.0\">\n  \
+         <modelVersion>4.0.0</modelVersion>\n  \
+         <groupId>com.acme</groupId>\n  \
+         <artifactId>greeter</artifactId>\n  \
+         <version>1.0.0</version>\n  \
+         <packaging>jar</packaging>\n  \
+         <dependencies>\n    \
+         <dependency>\n      \
+         <groupId>org.example</groupId>\n      \
+         <artifactId>lib</artifactId>\n      \
+         <version>2.0.0</version>\n      \
+         <scope>compile</scope>\n    \
+         </dependency>\n  \
+         </dependencies>\n\
+         </project>\n",
+        "the managed version written out, and no dev dependency"
+    );
+    for file in [
+        "greeter-1.0.0.jar",
+        "greeter-1.0.0.jar.sha1",
+        "greeter-1.0.0.pom.sha1",
+        "greeter-1.0.0-sources.jar",
+    ] {
+        assert!(dir.join(file).is_file(), "{file}");
+    }
+    assert!(
+        std::fs::read_to_string(repo.join("com/acme/greeter/maven-metadata-local.xml"))
+            .unwrap()
+            .contains("<version>1.0.0</version>")
+    );
+
+    let jar = std::fs::read(dir.join("greeter-1.0.0.jar")).unwrap();
+    let mut archive = zip::ZipArchive::new(std::io::Cursor::new(jar)).unwrap();
+    let mut jar_manifest = String::new();
+    std::io::Read::read_to_string(
+        &mut archive.by_name("META-INF/MANIFEST.MF").unwrap(),
+        &mut jar_manifest,
+    )
+    .unwrap();
+    assert!(
+        !jar_manifest.contains("Class-Path"),
+        "a consumer's classpath must not pick up this machine's jars:\n{jar_manifest}"
+    );
+}
+
+#[test]
+fn install_follows_a_repository_moved_in_settings_xml() {
+    let _toolchain = require_jdk!();
+    let scratch = Scratch::new("install-settings");
+    let library = greeter(&scratch, "1.0.0", "hello");
+    scratch.write(
+        "home/.m2/settings.xml",
+        "<settings><localRepository>${user.home}/moved</localRepository></settings>",
+    );
+    let jar = "com/acme/greeter/1.0.0/greeter-1.0.0.jar";
+
+    let (code, _, stderr) = jrs_at_home(&scratch, "cache", &library, &["install"]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(scratch.join("home/moved").join(jar).is_file(), "{stderr}");
+    assert!(!scratch.join("home/.m2/repository").exists(), "{stderr}");
+
+    let flag = scratch.join("flag");
+    let (code, _, stderr) = jrs_at_home(
+        &scratch,
+        "cache",
+        &library,
+        &["install", "--repo", &flag.display().to_string()],
+    );
+    assert_eq!(code, 0, "{stderr}");
+    assert!(flag.join(jar).is_file(), "--repo beats the settings file");
+}
+
+#[test]
+fn install_says_what_it_needs_before_it_builds() {
+    let scratch = Scratch::new("install-refused");
+    let no_group = scratch.write("a/jrs.toml", "[project]\nname = \"a\"\nversion = \"1\"\n");
+    let (code, _, stderr) = jrs_at_home(&scratch, "cache", &no_group, &["install"]);
+    assert_eq!(code, 2, "{stderr}");
+    assert!(stderr.contains("project.group"), "{stderr}");
+    assert!(!scratch.join("a/target").exists(), "nothing was built");
+
+    let local = scratch.write(
+        "b/jrs.toml",
+        "[project]\nname = \"b\"\nversion = \"1\"\ngroup = \"g\"\n\n\
+         [dependencies]\nx = { path = \"libs/x.jar\" }\n",
+    );
+    scratch.write("b/libs/x.jar", "not read");
+    let (code, _, stderr) = jrs_at_home(&scratch, "cache", &local, &["install"]);
+    assert_eq!(code, 2, "{stderr}");
+    assert!(stderr.contains("libs/x.jar"), "{stderr}");
+}
+
+#[test]
+fn a_consumer_links_a_reinstalled_snapshot_on_its_next_build() {
+    let _toolchain = require_jdk!();
+    let scratch = Scratch::new("install-snapshot");
+    let library = greeter(&scratch, "1.0.0-SNAPSHOT", "first");
+    let (code, _, stderr) = jrs_at_home(&scratch, "cache", &library, &["install"]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(
+        scratch
+            .join("home/.m2/repository/com/acme/greeter/1.0.0-SNAPSHOT/greeter-1.0.0-SNAPSHOT.jar")
+            .is_file(),
+        "~/.m2/repository is the default"
+    );
+
+    let app = consumer(&scratch, "1.0.0-SNAPSHOT");
+    let (code, stdout, stderr) = jrs_at_home(&scratch, "cache", &app, &["run"]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stdout.contains("first"), "{stdout}");
+    assert!(!stderr.contains("not verified"), "{stderr}");
+
+    greeter(&scratch, "1.0.0-SNAPSHOT", "second");
+    let (code, _, stderr) = jrs_at_home(&scratch, "cache", &library, &["install"]);
+    assert_eq!(code, 0, "{stderr}");
+    let (code, stdout, stderr) = jrs_at_home(&scratch, "cache", &app, &["run"]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stdout.contains("second"), "{stdout}");
+}
+
+#[test]
+fn different_bytes_under_a_release_warn_and_fail_a_pinned_consumer() {
+    let _toolchain = require_jdk!();
+    let scratch = Scratch::new("install-release");
+    let library = greeter(&scratch, "1.0.0", "first");
+    let (code, _, stderr) = jrs_at_home(&scratch, "cache", &library, &["install"]);
+    assert_eq!(code, 0, "{stderr}");
+    let app = consumer(&scratch, "1.0.0");
+    let (code, _, stderr) = jrs_at_home(&scratch, "cache", &app, &["build"]);
+    assert_eq!(code, 0, "{stderr}");
+
+    // The same bytes again are nothing to warn about.
+    let (code, _, stderr) = jrs_at_home(&scratch, "cache", &library, &["install"]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(!stderr.contains("warning"), "{stderr}");
+
+    greeter(&scratch, "1.0.0", "second");
+    let (code, _, stderr) = jrs_at_home(&scratch, "cache", &library, &["install"]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stderr.contains("-SNAPSHOT"), "{stderr}");
+
+    // A consumer with the old jar in its cache keeps the bytes it pinned; one
+    // that has to fetch the jar is stopped by the pin.
+    let (code, stdout, stderr) = jrs_at_home(&scratch, "cache", &app, &["run"]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stdout.contains("first"), "{stdout}");
+    let (code, _, stderr) = jrs_at_home(&scratch, "other-cache", &app, &["build"]);
+    assert_eq!(code, 1, "{stderr}");
+    assert!(stderr.contains("checksum"), "{stderr}");
 }

@@ -1,6 +1,7 @@
 [project]
 name = "variables-kts-app"
 version = "1.4.0"
+group = "com.example"
 main-class = "com.example.VariablesApp"
 
 [java]

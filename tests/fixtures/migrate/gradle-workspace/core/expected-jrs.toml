@@ -1,6 +1,7 @@
 [project]
 name = "core"
 version = "2.3.0"
+group = "com.example.shop"
 
 [dependencies]
 "com.google.guava:guava" = {}

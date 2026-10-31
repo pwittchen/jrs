@@ -1,6 +1,7 @@
 [project]
 name = "pets"
 version = "1.0.0"
+group = "com.example"
 
 [java]
 source = 17

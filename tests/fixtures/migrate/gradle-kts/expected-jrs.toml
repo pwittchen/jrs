@@ -1,6 +1,7 @@
 [project]
 name = "kts-app"
 version = "2.1.0"
+group = "com.example"
 main-class = "com.example.App"
 
 [java]

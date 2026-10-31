@@ -1,6 +1,7 @@
 [project]
 name = "spock-app"
 version = "0.3.0"
+group = "com.example"
 
 [java]
 source = 21

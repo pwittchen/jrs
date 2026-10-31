@@ -25,6 +25,7 @@ mod cache;
 mod deps;
 mod doc;
 mod init;
+mod install;
 mod jdk;
 mod members;
 mod migration;
@@ -242,6 +243,10 @@ pub enum Command {
 
     /// Build, then produce target/<name>-<version>.jar.
     Package(PackageArgs),
+
+    /// Build, then put the jar and a POM into a local Maven repository, where
+    /// a project in another repository can depend on it.
+    Install(InstallArgs),
 
     /// Generate API documentation into target/doc with javadoc.
     Doc,
@@ -579,6 +584,22 @@ pub struct PackageArgs {
     pub no_build_cache: bool,
 }
 
+#[derive(Debug, Default, Clone, Args)]
+pub struct InstallArgs {
+    /// The repository to install into, instead of ~/.m2/repository.
+    #[arg(long, value_name = "DIR")]
+    pub repo: Option<PathBuf>,
+    /// Also install the sources jar `jrs package --sources` writes.
+    #[arg(long)]
+    pub sources: bool,
+    /// Also install the Javadoc jar `jrs package --javadoc` writes.
+    #[arg(long)]
+    pub javadoc: bool,
+    /// Neither restore from nor store into the build cache.
+    #[arg(long)]
+    pub no_build_cache: bool,
+}
+
 #[derive(Debug, Subcommand)]
 pub enum CacheCommand {
     /// Print where the cache is.
@@ -646,7 +667,7 @@ impl Command {
     }
 
     /// Whether the command was given `--no-build-cache`, which `build`,
-    /// `test`, `run`, `package` and `task` take.
+    /// `test`, `run`, `package`, `install` and `task` take.
     #[must_use]
     pub fn no_build_cache(&self) -> bool {
         match self {
@@ -655,6 +676,7 @@ impl Command {
             }
             Command::Test(args) => args.no_build_cache,
             Command::Package(args) => args.no_build_cache,
+            Command::Install(args) => args.no_build_cache,
             Command::Task(args) => args.no_build_cache,
             _ => false,
         }
@@ -798,6 +820,7 @@ fn dispatch(cli: &Cli, ui: &Ui) -> Result<i32> {
         Command::Test(args) => session.test_command(args),
         Command::Run { args, debug, .. } => session.run_command(args, debug.as_ref()),
         Command::Package(args) => session.package_command(args),
+        Command::Install(args) => session.install_command(args),
         Command::Doc => session.doc_command(),
         Command::Task(args) => session.task_command(args),
         Command::Clean => session.clean_command(),

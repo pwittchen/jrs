@@ -28,7 +28,7 @@ mod validate;
 pub use parse::{jar_attribute, parse_toml, relocation};
 pub use render::dependency_entry;
 pub use template::{Placeholder, Segment, Template, free_port};
-pub use validate::{RELEASES_URL, check_jrs_version, valid_group_pattern};
+pub use validate::{RELEASES_URL, check_jrs_version, check_project_group, valid_group_pattern};
 
 pub const MANIFEST_FILE: &str = "jrs.toml";
 pub const LOCK_FILE: &str = "jrs.lock";
@@ -847,6 +847,9 @@ pub struct Manifest {
 
     pub name: String,
     pub version: String,
+    /// `project.group`: the Maven group `jrs install` writes the project
+    /// under, which nothing else needs.
+    pub group: Option<String>,
     pub main_class: Option<String>,
 
     pub source_dir: PathBuf,
@@ -916,6 +919,7 @@ pub const RESERVED_TASK_NAMES: &[&str] = &[
     "self",
     "jdk",
     "wrapper",
+    "install",
 ];
 
 impl Manifest {
@@ -972,6 +976,22 @@ impl Manifest {
             JrsError::manifest(format!(
                 "`jrs {command}` needs a main class\n\n\
                  add it to {}:\n\n    [project]\n    main-class = \"com.example.Main\"",
+                self.path.display()
+            ))
+        })
+    }
+
+    /// `project.group`, for a command that cannot go on without one.
+    ///
+    /// # Errors
+    ///
+    /// [`JrsError::Manifest`] naming the key when the project has none.
+    pub fn require_group(&self, command: &str) -> Result<&str> {
+        self.group.as_deref().ok_or_else(|| {
+            JrsError::manifest(format!(
+                "`jrs {command}` needs `project.group`, the Maven group to write `{}` under\n\n\
+                 add it to {}:\n\n    [project]\n    group = \"com.example\"",
+                self.name,
                 self.path.display()
             ))
         })
@@ -1036,6 +1056,7 @@ pub fn blank(name: &str, version: &str, root: &Path) -> Manifest {
         root: root.to_path_buf(),
         name: name.to_string(),
         version: version.to_string(),
+        group: None,
         main_class: None,
         source_dir: PathBuf::from("src/main/java"),
         test_dir: PathBuf::from("src/test/java"),

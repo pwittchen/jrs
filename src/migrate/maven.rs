@@ -82,12 +82,13 @@ pub fn migrate(pom_path: &Path, root: &Path) -> Result<Migration> {
     read_the_rest(pom, &translated, &mut report);
     report.append(profiles);
 
+    out.group = Some(effective.coord.group.clone());
+    report.migrated(format!("project.group = {}", effective.coord.group));
     Ok(Migration {
         source: Source::Maven,
         source_file: pom_path.to_path_buf(),
         manifest: out,
         report,
-        group: Some(effective.coord.group.clone()),
     })
 }
 

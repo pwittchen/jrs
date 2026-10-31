@@ -80,6 +80,10 @@ internal = "https://nexus.example.com/repository/maven-public/"
 - **`parallel-tests`**, `false` by default, lets `jrs test` run the members'
   test JVMs at once, up to `--jobs` (§6.2). It is off unless asked for: two
   suites that share a port, a database or a fixed file would race.
+- **`group`** is the Maven group of every member without a `project.group` of
+  its own, which `jrs install` alone reads. The root's own `project.group`
+  does the same when `group` is left out; a pure aggregator has only this key
+  to write it once.
 - **A root without `[project]` is a pure aggregator**: it has no sources and
   builds nothing itself. A root with `[project]` is a member too, the first
   one, and its own `[dependencies]`, `[tasks]` and the rest apply to it as to

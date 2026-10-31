@@ -20,6 +20,7 @@ published at [getjrs.dev/docs](https://getjrs.dev/docs/).
 - [Kotlin, Scala and Groovy](#kotlin-scala-and-groovy)
 - [Tasks and hooks](#tasks-and-hooks)
 - [Workspaces](#workspaces)
+- [Sharing a library between repositories](#sharing-a-library-between-repositories)
 - [Annotation processors](#annotation-processors)
 - [Shell completions](#shell-completions)
 - [Editors and IntelliJ IDEA](#editors-and-intellij-idea)
@@ -269,6 +270,7 @@ javac-args = ["-Xlint:all", "-Werror"]
 | --- | --- | --- |
 | `name` | — | Required. Also names the packaged jar. |
 | `version` | — | Required. |
+| `group` | — | The Maven group `jrs install` writes the project under; nothing else needs it. |
 | `main-class` | — | Entry point for `run` and `package --fat`. |
 | `source-dir` | `src/main/java` | Production sources. |
 | `test-dir` | `src/test/java` | Test sources. |
@@ -642,6 +644,17 @@ your internal groups (dependency confusion), and saves a request per artifact
 to repositories that cannot have it. Mirrors and credentials work as they do
 for any repository.
 
+A local repository is a `file://` URL. `file://~/` starts at your home directory,
+so the line can be committed; no other shell syntax is read:
+
+```toml
+[repositories]
+local = { url = "file://~/.m2/repository", groups = ["com.acme"] }
+```
+
+`groups` keeps a stale `~/.m2` from answering for anything else. See
+[Sharing a library between repositories](#sharing-a-library-between-repositories).
+
 `jrs.toml` is committed, so credentials for a private repository never go in it
 — see [User configuration](#user-configuration).
 
@@ -663,6 +676,7 @@ for any repository.
 | `jrs package --native-image` | Also build a native executable in `target/native` with GraalVM's `native-image`. |
 | `jrs package --obfuscate` | Obfuscate the packaged jar with ProGuard; needs an `[obfuscate]` table. |
 | `jrs package --sbom` | Also write a CycloneDX SBOM of the runtime dependencies, `target/<name>-<version>-cyclonedx.json`. |
+| `jrs install [--repo <dir>] [--sources] [--javadoc]` | `package` + put the jar and a POM into a local Maven repository: `--repo`, or `<localRepository>` in `~/.m2/settings.xml`, or `~/.m2/repository`. See [Sharing a library between repositories](#sharing-a-library-between-repositories). |
 | `jrs doc` | Generate API docs into `target/doc`: Javadoc, or Scaladoc / Groovydoc for Scala and Groovy code. |
 | `jrs clean` | Remove `target/`. |
 | `jrs tree [--depth <n>] [--why <artifact>] [--tool <name>] [--task <name>]` | Print the resolved dependency graph, every path that leads to one artifact, a compiler's own graph (`kotlin-compiler`, `scala-compiler`, `groovy-compiler`), the obfuscator's (`obfuscator`), or a task's. |
@@ -687,7 +701,7 @@ for any repository.
 | `jrs metadata [--no-deps]` | Print the project model as JSON, for editors and tools. |
 | `jrs fetch [--sources]` | Download the dependencies into the cache without building, and make the `javac` caches for the project's JDK; with `--sources`, also their `-sources.jar`s. |
 
-`--no-build-cache` on `build`, `test`, `run`, `package` and `task` leaves the
+`--no-build-cache` on `build`, `test`, `run`, `package`, `install` and `task` leaves the
 [build cache](#build-cache) alone for that command.
 
 `--watch` keeps one `javac` JVM running for the session and hands it every
@@ -906,7 +920,7 @@ JVM. `--all` runs them anyway.
 
 Entries live in the dependency cache's directory, under `build/`. A plain
 `jrs cache prune` drops them all; `--unused-for` drops those no build has hit
-in that long. `--no-build-cache` on `build`, `test`, `run`, `package` or
+in that long. `--no-build-cache` on `build`, `test`, `run`, `package`, `install` or
 `task`, `JRS_BUILD_CACHE=off`, or `enabled = false` under `[build-cache]` in
 the [user configuration](#user-configuration) turns the cache off.
 
@@ -1560,6 +1574,74 @@ depends-on = ["core:generate"]
 The other task runs in its own member, once per command, before this member's
 command reaches it.
 [specs/WORKSPACES.md](specs/WORKSPACES.md) has the design.
+
+## Sharing a library between repositories
+
+A workspace reaches only its own members. For a library in one repository and
+a project in another, `jrs install` puts the library into a local Maven
+repository, as `mvn install` and Gradle's `publishToMavenLocal` do. It needs a
+group:
+
+```toml
+[project]
+name = "greeter"
+version = "1.2.0-SNAPSHOT"
+group = "com.acme"
+```
+
+```
+jrs install                  # into ~/.m2/repository
+jrs install --repo ./m2      # or another directory
+jrs install --sources --javadoc
+```
+
+Without `--repo`, a `<localRepository>` in `~/.m2/settings.xml` is followed, since
+that is where `mvn` looks; `${user.home}` is the one property expanded there. A
+consumer names that directory in its own `[repositories]`.
+
+That runs `jrs package`, then writes the jar, a POM and, with the flags, the
+sources and Javadoc jars into
+`<repo>/com/acme/greeter/1.2.0-SNAPSHOT/`, and lists the version in
+`maven-metadata-local.xml`, which `jrs outdated` and Maven both read. The
+installed jar has no `Class-Path`: the one in `target/` names this machine's
+cache.
+
+The POM states what the jar was built against, each version written out, so a
+consumer needs none of the library's `[managed]`:
+
+| In `jrs.toml` | In the POM |
+| --- | --- |
+| `[dependencies]` entry, a language's runtime library | scope `compile` |
+| `compile-only = true` | scope `provided` |
+| `runtime-only = true` | scope `runtime` |
+| `classifier`, `exclusions` | `<classifier>`, `<exclusions>` |
+| `[dev-dependencies]` | left out |
+| a local jar (`path = ...`) | refused, with exit code `2`: nothing could resolve it |
+
+The project that uses the library names the repository and depends on it:
+
+```toml
+[repositories]
+local = { url = "file://~/.m2/repository", groups = ["com.acme"] }
+
+[dependencies]
+"com.acme:greeter" = "1.2.0-SNAPSHOT"
+```
+
+A `-SNAPSHOT` is the development loop: a snapshot from a `file://` repository is
+checked on every build, so after `jrs install` the next build links the new jar.
+A release is pinned by checksum in the consumer's `jrs.lock`. Installing other
+bytes under the same release warns, since a consumer that has to fetch the jar
+then fails on the checksum, and one with the old jar in its cache keeps building
+against that.
+
+At a workspace root, `jrs install` installs every member, or those `-p` names and
+what they depend on, upstream members first. A dependency on a member becomes a
+dependency on its `group:name:version`. A member without a `group` takes the
+`group` under `[workspace]`, or else the root's `project.group`.
+
+Installing is the only publishing jrs does. Deploying to a remote repository
+is not planned, with its credentials and signing.
 
 ## Annotation processors
 

@@ -23,6 +23,22 @@ pub fn valid_group_pattern(pattern: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'))
 }
 
+/// A group `jrs install` can write under: a directory per dot, so nothing a
+/// `..` or a separator could turn into another path. `key` is how the
+/// message names the value.
+///
+/// # Errors
+///
+/// [`JrsError::Manifest`] when `group` is not a Maven group.
+pub fn check_project_group(group: &str, key: &str) -> Result<()> {
+    if valid_group_pattern(group) && !group.ends_with(".*") {
+        return Ok(());
+    }
+    Err(JrsError::manifest(format!(
+        "`{key}`: `{group}` is not a Maven group; write one such as `com.example`"
+    )))
+}
+
 /// What the language tables mean for the rest of the manifest: the source
 /// encoding kotlinc can read, the `javac-args` Groovy's joint `javac` can be
 /// handed, and a declared runtime library at another version than its

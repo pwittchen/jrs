@@ -32,6 +32,9 @@ impl Manifest {
         let _ = writeln!(s, "[project]");
         let _ = writeln!(s, "name = {}", quote(&self.name));
         let _ = writeln!(s, "version = {}", quote(&self.version));
+        if let Some(group) = &self.group {
+            let _ = writeln!(s, "group = {}", quote(group));
+        }
         if let Some(mc) = &self.main_class {
             let _ = writeln!(s, "main-class = {}", quote(mc));
         }

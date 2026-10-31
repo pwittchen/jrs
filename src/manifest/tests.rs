@@ -1825,3 +1825,21 @@ fn the_jvm_environment_is_checked_like_a_tasks() {
         m.warnings
     );
 }
+
+#[test]
+fn project_group_round_trips_and_is_checked() {
+    let parsed = |group: &str| {
+        parse(&format!(
+            "[project]\nname = \"a\"\nversion = \"1\"\ngroup = \"{group}\"\n"
+        ))
+    };
+    let m = parsed("com.acme-labs").unwrap();
+    assert_eq!(m.group.as_deref(), Some("com.acme-labs"));
+    assert!(m.warnings.is_empty(), "{:?}", m.warnings);
+    assert!(m.render(None).contains("group = \"com.acme-labs\"\n"));
+    for bad in ["", "../up", "com/acme", "com.*", "com..acme"] {
+        let error = parsed(bad).unwrap_err();
+        assert_eq!(error.exit_code(), 2, "{bad}");
+        assert!(error.to_string().contains("project.group"), "{error}");
+    }
+}

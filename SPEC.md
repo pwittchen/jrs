@@ -41,7 +41,9 @@ in [§12.1](#121-where-the-implementation-diverges), and the decisions taken on
   root `jrs.toml`, sharing its defaults and one lockfile. A member
   configuring another, build logic at the root, per-module lockfiles and
   composite builds across repositories stay out.
-- Publishing artifacts to a repository (`deploy`/`publish`).
+- Publishing artifacts to a remote repository (`deploy`/`publish`). `jrs install`
+  writes to a local one (§5.1, `specs/REACH.md` §4): a directory on the
+  developer's machine has no credentials, signing or staging.
 - JVM languages beyond Java, Kotlin, Scala and Groovy; and for those three,
   anything off the JVM (Multiplatform, JS, Native, Android), compiler
   plugins, kapt/KSP, incremental compilation and compiler daemons (§7.7).
@@ -207,6 +209,7 @@ post-package = ["checksum"]
 | --- | --- | --- | --- |
 | `project.name` | yes | — | Used for the jar file name. Must be a valid file name. |
 | `project.version` | yes | — | Free-form string; used in the jar name. |
+| `project.group` | no | — | The Maven group `jrs install` writes the project under; required by that command alone. A workspace member without one takes `workspace.group`, or the root's `project.group`. |
 | `project.main-class` | no | — | Fully-qualified class name. Required by `run` and `package --fat`. |
 | `project.source-dir` | no | `src/main/java` | Override for flat layouts. |
 | `project.test-dir` | no | `src/test/java` | |
@@ -244,7 +247,7 @@ post-package = ["checksum"]
 | `dependencies.*` | no | `{}` | Key is `group:artifact` or `group:artifact:classifier` (`{os-classifier}` in a classifier is the host's platform, §8.10); value is a version, or a table with `version` and optionally `classifier`, `exclusions` (`group:artifact` patterns, `*` allowed), and `compile-only` or `runtime-only`. A table without `version`, `{}` at its shortest, takes the version `[managed]` gives it (§8.9). A table with `path` instead is a local jar: the key is a name, the path is relative to the project root, and only `compile-only` / `runtime-only` go with it (§8.8). |
 | `dev-dependencies.*` | no | `{}` | Test classpath only; never packaged. Same forms, without `compile-only` or `runtime-only`. |
 | `managed.*` | no | `{}` | `group:artifact` → a version the artifact is held to wherever it turns up in the graph, or `{ version, bom = true }`, a BOM whose managed versions apply the same way (§8.9). |
-| `repositories.*` | no | Central | Name → base URL, or `{ url, groups }` to confine the repository to those groups (§8.7). |
+| `repositories.*` | no | Central | Name → base URL, or `{ url, groups }` to confine the repository to those groups (§8.7). `file://~/x` is `x` in the user's home directory, the one piece of shell syntax it takes, so that `file://~/.m2/repository` can be committed. |
 | `tasks.<name>.*` | no | `{}` | A user-defined task: one action (`run`, `shell`, `script` or `main`) or none, plus `description`, `args`, `depends-on`, `env`, `cwd`, `inputs`, `outputs`, `source-outputs`, `resource-outputs`, `cache` (keep the outputs in the build cache, default `false`), and `[tasks.<name>.dependencies]` for a `main` or `script` (§7.6). |
 | `hooks.*` | no | `{}` | Lifecycle point (`pre-compile`, `post-compile`, `pre-test`, `post-test`, `post-package`, `pre-run`) → list of task names (§7.6). |
 
@@ -367,6 +370,7 @@ jrs <command> [options]
 | `jrs package --obfuscate` | Obfuscate the packaged jar with ProGuard; needs `[obfuscate]` (§9.8). |
 | `jrs package --sbom` | Also a CycloneDX SBOM of the runtime graph, `target/<name>-<version>-cyclonedx.json` (§9.10). |
 | `jrs doc` | Generate Javadoc into `target/doc` (§7.4). |
+| `jrs install [--repo dir] [--sources] [--javadoc]` | Run `jrs package`, then write a jar without a `Class-Path`, a POM of what was built, and with the flags the sources and Javadoc jars, into `<repo>/<group path>/<artifact>/<version>/`, and list the version in `maven-metadata-local.xml`. The repository is `--repo`, or `<localRepository>` in `~/.m2/settings.xml`, the one piece of Maven's configuration jrs reads, or `~/.m2/repository`. Needs `project.group`; a local jar in `[dependencies]` is refused (exit `2`). At a workspace root, every member, upstream members first (`specs/REACH.md` §4). |
 | `jrs clean` | Remove `target/`. |
 | `jrs tree [--depth n] [--why artifact] [--tool name] [--task name]` | Print the resolved dependency graph, `n` levels deep, inverted from one artifact to the manifest, a compiler's own graph (§7.7), or a task's (§7.6). |
 | `jrs classpath [--test \| --runtime]` | Print the resolved classpath to stdout. |
@@ -388,7 +392,7 @@ jrs <command> [options]
 | `jrs task <name> --watch` | The same, repeated on every change to the task's inputs, the manifest or the source trees (§7.5). |
 | `jrs task --list` | List the tasks, their descriptions and the hooks that run them, to stdout. |
 | `jrs build --verify-cache` | Compile every unit and run every cached task even when it is up to date, and fail (exit `1`) if the build cache holds other classes or outputs under the same key (§7.8). |
-| `--no-build-cache` on `build`, `test`, `run`, `package`, `task` | Neither restore from nor store into the build cache (§7.8). |
+| `--no-build-cache` on `build`, `test`, `run`, `package`, `install`, `task` | Neither restore from nor store into the build cache (§7.8). |
 | `--timings` on `build`, `test`, `run`, `package` | Report the wall time of each phase after the summary, with a copy in `target/.jrs/timings.txt` (§5.3.9). |
 | `jrs metadata [--no-deps]` | Print the project model as versioned JSON on stdout, for editors and tools; resolves but never compiles (§5.4). |
 | `jrs fetch [--sources]` | Resolve and download the dependencies, the compilers, the tasks' tools and the test launcher into the cache without building, and make the `javac` caches (§7.2); `--sources` adds each dependency's `-sources.jar` (§5.4). |

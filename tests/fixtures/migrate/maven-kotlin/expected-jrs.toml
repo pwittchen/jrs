@@ -1,6 +1,7 @@
 [project]
 name = "kotlin-service"
 version = "1.4.0"
+group = "com.example"
 main-class = "com.example.ServiceKt"
 
 [java]

@@ -85,6 +85,7 @@ src/
 │   ├── run.rs         jrs run: the application's JVM
 │   ├── testing.rs     jrs test: test units, selection, the test cache, JUnit
 │   ├── packaging.rs   jrs package: the jar and its extras
+│   ├── install.rs     jrs install: the package, copied into a local repository
 │   ├── doc.rs         jrs doc
 │   ├── deps.rs        tree, classpath, update, outdated, licenses, audit,
 │   │                  verify, metadata, fetch
@@ -147,6 +148,7 @@ src/
 ├── image.rs           jdeps, jlink, jpackage
 ├── dist.rs            --dist: launch scripts, the staged directory, the zip
 ├── native_image.rs    --native-image: GraalVM's native-image, by argfile
+├── install.rs         jrs install: POM, maven-metadata-local.xml, the Maven layout
 ├── obfuscate.rs       --obfuscate: ProGuard over the assembled jar, by config file
 ├── relocate.rs        [package.relocate]: a fat jar's packages moved, constant pools rewritten
 ├── sbom.rs            --sbom: the runtime graph as a CycloneDX document

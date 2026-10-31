@@ -1,6 +1,7 @@
 [project]
 name = "extras"
 version = "0.9.0"
+group = "com.example"
 
 [java]
 source = 21

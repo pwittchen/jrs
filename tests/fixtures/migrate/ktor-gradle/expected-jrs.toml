@@ -1,6 +1,7 @@
 [project]
 name = "ktor-sample"
 version = "0.0.1"
+group = "io.ktor.samples"
 main-class = "io.ktor.samples.ApplicationKt"
 
 [kotlin]

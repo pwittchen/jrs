@@ -1,6 +1,7 @@
 [project]
 name = "greeter"
 version = "0.5.0"
+group = "com.example"
 main-class = "com.example.MainKt"
 
 [java]

@@ -162,9 +162,6 @@ pub struct Migration {
     pub source_file: PathBuf,
     pub manifest: Manifest,
     pub report: Report,
-    /// The project's `groupId`, when the build says (Maven): what a
-    /// sibling's dependency on it names.
-    pub group: Option<String>,
 }
 
 impl Migration {

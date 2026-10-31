@@ -1,6 +1,7 @@
 [project]
 name = "web"
 version = "2.3.0"
+group = "com.example.shop"
 main-class = "com.example.shop.web.Main"
 
 [dependencies]

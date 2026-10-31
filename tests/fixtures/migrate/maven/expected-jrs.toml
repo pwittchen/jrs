@@ -1,6 +1,7 @@
 [project]
 name = "legacy-app"
 version = "2.3.1"
+group = "com.example"
 main-class = "com.example.Legacy"
 
 [java]

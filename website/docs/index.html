@@ -140,7 +140,7 @@
     defaults and one lockfile. A module cannot configure another, and there are no composite
     builds across repositories.
   </li>
-  <li><strong>No publishing</strong> to a repository (<code>deploy</code> / <code>publish</code>).</li>
+  <li><strong>No publishing</strong> to a remote repository (<code>deploy</code> / <code>publish</code>). <a href="#cmd-install"><code>jrs install</code></a> writes to a local one.</li>
   <li>
     No Android, no JPMS module-descriptor configuration, no annotation-processor path (processors
     still work from the classpath, see <a href="#annotation-processors">Annotation processors</a>),
@@ -649,6 +649,7 @@ jrs --manifest-path /work/api/jrs.toml test</pre>
   <tbody>
     <tr><td><code>name</code></td><td>required</td><td>The project's name. Also names the jar, <code>target/&lt;name&gt;-&lt;version&gt;.jar</code>, so it must be a valid file name.</td></tr>
     <tr><td><code>version</code></td><td>required</td><td>A free-form version string, used in the jar name and available to tasks as <code>{project.version}</code>.</td></tr>
+    <tr><td><code>group</code></td><td>none</td><td>The Maven group <a href="#cmd-install"><code>jrs install</code></a> writes the project under; nothing else needs it.</td></tr>
     <tr><td><code>main-class</code></td><td>none</td><td>Fully qualified entry point. Required by <code>jrs run</code>, <code>package --fat</code>, <code>--jlink</code>, <code>--jpackage</code>, <code>--dist</code> and <code>--native-image</code>.</td></tr>
     <tr><td><code>source-dir</code></td><td><code>src/main/java</code></td><td>Production Java sources.</td></tr>
     <tr><td><code>test-dir</code></td><td><code>src/test/java</code></td><td>Test Java sources.</td></tr>
@@ -889,7 +890,11 @@ fixtures = { path = "libs/test-fixtures.jar" }</pre>
 </p>
 <pre data-lang="toml">[repositories]
 internal = "https://repo.example.com/maven2"
-local-m2 = "file:///home/me/.m2/repository"</pre>
+local-m2 = "file://~/.m2/repository"</pre>
+<p>
+  <code>file://~/</code> starts at your home directory, so the line can be committed. No other
+  shell syntax is read.
+</p>
 
 <h3>Confining a repository to its groups</h3>
 <p>The long form names the groups a repository serves:</p>
@@ -1245,6 +1250,7 @@ checksum = "sha1:…"</pre>
     <tr><td><a href="#cmd-run"><code>run</code></a></td><td>Build, then run the main class.</td></tr>
     <tr><td><a href="#cmd-test"><code>test</code></a></td><td>Build, compile the tests, run them.</td></tr>
     <tr><td><a href="#cmd-package"><code>package</code></a></td><td>Build, then write jars, images, distributions or native executables.</td></tr>
+    <tr><td><a href="#cmd-install"><code>install</code></a></td><td>Package, then put the jar and a POM into a local Maven repository.</td></tr>
     <tr><td><a href="#cmd-doc"><code>doc</code></a></td><td>Generate API docs into <code>target/doc</code>.</td></tr>
     <tr><td><a href="#cmd-clean"><code>clean</code></a></td><td>Remove <code>target/</code>.</td></tr>
     <tr><td><a href="#cmd-task"><code>task</code></a></td><td>Run a task from <code>jrs.toml</code>, or list them.</td></tr>
@@ -1440,6 +1446,27 @@ jrs package --dist                         # zip with bin/ launchers, no JRE
 jrs package --sources --javadoc            # the jars a repository wants
 jrs package --sbom                         # plus a CycloneDX SBOM</pre>
 <p>See <a href="#packaging">Packaging</a> and <a href="#images">Runtime images and distributions</a>.</p>
+</section>
+
+<section id="cmd-install">
+<h2><code>jrs install</code></h2>
+<pre data-lang="plain">jrs install [--repo DIR] [--sources] [--javadoc]</pre>
+<p>
+  Runs <code>jrs package</code>, then writes a jar, a POM and, with the flags, the sources and
+  Javadoc jars into <code>&lt;repo&gt;/&lt;group path&gt;/&lt;name&gt;/&lt;version&gt;/</code>, and
+  lists the version in <code>maven-metadata-local.xml</code>. The repository is
+  <code>--repo</code>, or a <code>&lt;localRepository&gt;</code> in
+  <code>~/.m2/settings.xml</code>, where <code>${user.home}</code> is the one property expanded,
+  or <code>~/.m2/repository</code>. It is how a library in
+  one repository reaches a project in another; the guide is
+  <a href="#sharing-libraries">Sharing a library between repositories</a>.
+</p>
+<p>
+  It needs <code>project.group</code>, and refuses a project with a local jar in
+  <code>[dependencies]</code>, since nothing could resolve that from the POM. Both are exit code
+  <code>2</code>, before anything is built. The installed jar has no <code>Class-Path</code>: the
+  one in <code>target/</code> names this machine's cache.
+</p>
 </section>
 
 <section id="cmd-doc">
@@ -2908,6 +2935,58 @@ jrs -p core add com.google.guava:guava</pre>
 <pre data-lang="toml">[tasks.check]
 script = "Check.java"
 depends-on = ["core:generate"]</pre>
+</section>
+
+<section id="sharing-libraries">
+<h2>Sharing a library between repositories</h2>
+<p>
+  A workspace reaches only its own members. For a library in one repository and a project in
+  another, <code>jrs install</code> puts the library into a local Maven repository, as
+  <code>mvn install</code> and Gradle's <code>publishToMavenLocal</code> do. It needs a group:
+</p>
+<pre data-lang="toml">[project]
+name = "greeter"
+version = "1.2.0-SNAPSHOT"
+group = "com.acme"</pre>
+<pre>jrs install                  # into ~/.m2/repository
+jrs install --repo ./m2      # or another directory
+jrs install --sources --javadoc</pre>
+<p>
+  The POM states what the jar was built against, each version written out, so a consumer needs
+  none of the library's <code>[managed]</code>:
+</p>
+<table>
+  <thead><tr><th>In <code>jrs.toml</code></th><th>In the POM</th></tr></thead>
+  <tbody>
+    <tr><td><code>[dependencies]</code> entry, a language's runtime library</td><td>scope <code>compile</code></td></tr>
+    <tr><td><code>compile-only = true</code></td><td>scope <code>provided</code></td></tr>
+    <tr><td><code>runtime-only = true</code></td><td>scope <code>runtime</code></td></tr>
+    <tr><td><code>classifier</code>, <code>exclusions</code></td><td><code>&lt;classifier&gt;</code>, <code>&lt;exclusions&gt;</code></td></tr>
+    <tr><td><code>[dev-dependencies]</code></td><td>left out</td></tr>
+    <tr><td>a local jar (<code>path = ...</code>)</td><td>refused, with exit code <code>2</code></td></tr>
+  </tbody>
+</table>
+<p>The project that uses the library names the repository and depends on it:</p>
+<pre data-lang="toml">[repositories]
+local = { url = "file://~/.m2/repository", groups = ["com.acme"] }
+
+[dependencies]
+"com.acme:greeter" = "1.2.0-SNAPSHOT"</pre>
+<p>
+  <code>groups</code> keeps a stale <code>~/.m2</code> from answering for anything else. A
+  <code>-SNAPSHOT</code> is the development loop: a snapshot from a <code>file://</code> repository
+  is checked on every build, so after <code>jrs install</code> the next build links the new jar. A
+  release is pinned by checksum in the consumer's <code>jrs.lock</code>. Installing other bytes
+  under the same release warns, since a consumer that has to fetch the jar then fails on the
+  checksum, and one with the old jar in its cache keeps building against that.
+</p>
+<p>
+  At a workspace root, <code>jrs install</code> installs every member, or those <code>-p</code>
+  names and what they depend on, upstream members first. A dependency on a member becomes a
+  dependency on its <code>group:name:version</code>. A member without a <code>group</code> takes
+  the <code>group</code> under <code>[workspace]</code>, or else the root's
+  <code>project.group</code>.
+</p>
 </section>
 
 <section id="annotation-processors">

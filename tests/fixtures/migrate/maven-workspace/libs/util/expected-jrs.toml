@@ -1,6 +1,7 @@
 [project]
 name = "shop-util"
 version = "2.3.0"
+group = "com.example.shop"
 
 [dev-dependencies]
 "org.junit.jupiter:junit-jupiter" = {}

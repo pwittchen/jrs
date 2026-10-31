@@ -21,6 +21,7 @@ pub mod edit;
 pub mod error;
 pub mod expand;
 pub mod image;
+pub mod install;
 pub mod jdk;
 pub mod lockfile;
 pub mod manifest;

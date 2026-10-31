@@ -23,7 +23,7 @@ use std::time::{Duration, Instant};
 
 use super::session::{MemberContext, ResolvedWithTools, Session, deps_row};
 use super::watch::wait_for_change;
-use super::{CacheCommand, Cli, Command, PackageArgs, TestArgs, counted, report};
+use super::{CacheCommand, Cli, Command, InstallArgs, PackageArgs, TestArgs, counted, report};
 use crate::compile::Language;
 use crate::compile::worker::Worker;
 use crate::config::Config;
@@ -31,7 +31,7 @@ use crate::error::{JrsError, Result, exit};
 use crate::timings::{self, Timings};
 use crate::ui::Ui;
 use crate::workspace::Workspace;
-use crate::{runner, test as junit, toolchain};
+use crate::{install, runner, test as junit, toolchain};
 
 /// One command over a workspace.
 struct Driver<'a> {
@@ -95,6 +95,7 @@ pub(super) fn dispatch(
             | Command::Test(_)
             | Command::Run { .. }
             | Command::Package(_)
+            | Command::Install(_)
             | Command::Doc
             | Command::Task(_)
     );
@@ -142,6 +143,7 @@ impl<'a> Driver<'a> {
             } => self.run_watch(args, debug.as_ref()),
             Command::Run { args, debug, .. } => self.run(args, debug.as_ref()),
             Command::Package(args) => self.package(args),
+            Command::Install(args) => self.install(args),
             Command::Doc => self.doc(),
             Command::Clean => {
                 for i in self.selected()? {
@@ -936,6 +938,44 @@ impl<'a> Driver<'a> {
         summary.push(("time", self.elapsed()));
         self.ui.summary(&summary);
         self.report_timings("package", &members)?;
+        Ok(exit::SUCCESS)
+    }
+
+    /// `jrs install`: every chosen member and what it depends on, each with
+    /// its own POM, upstream members first. Whatever would refuse a member
+    /// refuses the command before anything is built.
+    fn install(&self, args: &InstallArgs) -> Result<i32> {
+        let members = self.workspace.with_upstream(&self.selected()?);
+        for &i in &members {
+            install::check(&self.workspace.members[i].manifest)?;
+        }
+        let repo = install::repository(args.repo.as_deref())?;
+        let installed = self.at_once(&members, &|session| {
+            let classes = session.build()?.classes;
+            let rows: Vec<(&'static str, String)> = session
+                .install(args, &repo)?
+                .into_iter()
+                .filter(|(key, _)| !matches!(*key, "build" | "deps"))
+                .collect();
+            Ok((classes, rows))
+        })?;
+        let classes: usize = installed.iter().map(|(classes, _)| classes).sum();
+        let rows = installed.into_iter().flat_map(|(_, rows)| rows);
+        self.ui
+            .phase("Finished", format!("install in {}", self.elapsed()));
+        let mut summary = vec![
+            (
+                "build",
+                format!(
+                    "ok      {classes} classes in {}",
+                    counted(members.len(), "module")
+                ),
+            ),
+            ("deps", deps_row(&self.graph()?.0)),
+        ];
+        summary.extend(rows);
+        summary.push(("time", self.elapsed()));
+        self.ui.summary(&summary);
         Ok(exit::SUCCESS)
     }
 

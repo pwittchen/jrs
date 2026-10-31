@@ -1,6 +1,7 @@
 [project]
 name = "parallel-suite"
 version = "3.0.0"
+group = "com.example"
 
 [java]
 source = 21

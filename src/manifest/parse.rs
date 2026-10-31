@@ -16,7 +16,7 @@ use super::{
     Exclusion, Hook, Hooks, JAR_ATTRIBUTES_OWNED, JavaAgent, JavaConfig, LanguageConfig,
     MANIFEST_FILE, Managed, Manifest, ModuleDependency, ObfuscateConfig, PackageConfig,
     RESERVED_TASK_NAMES, Relocation, Repository, ResourcesConfig, RunConfig, ShareClasses, TaskDef,
-    TaskRef, TestConfig, TestSuite, is_module_path,
+    TaskRef, TestConfig, TestSuite, check_project_group, is_module_path,
 };
 use crate::compile::lang::Language;
 use crate::error::{IoResultExt, JrsError, Result};
@@ -27,6 +27,7 @@ const OBFUSCATE_KEYS: &[&str] = &["version", "keep", "proguard-args"];
 const PROJECT_KEYS: &[&str] = &[
     "name",
     "version",
+    "group",
     "main-class",
     "source-dir",
     "test-dir",
@@ -253,6 +254,10 @@ impl Manifest {
         if version.trim().is_empty() {
             return Err(JrsError::manifest("`project.version` must not be empty"));
         }
+        let group = optional_string(project, "group", "project")?;
+        if let Some(group) = &group {
+            check_project_group(group, "project.group")?;
+        }
         let main_class = optional_string(project, "main-class", "project")?;
         if let Some(mc) = &main_class {
             validate_class_name(mc, "project.main-class")?;
@@ -393,6 +398,7 @@ impl Manifest {
             root: root.to_path_buf(),
             name,
             version,
+            group,
             main_class,
             source_dir,
             test_dir,

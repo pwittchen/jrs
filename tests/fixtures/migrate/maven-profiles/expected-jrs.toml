@@ -1,6 +1,7 @@
 [project]
 name = "profiled-service"
 version = "1.4.0"
+group = "com.example"
 
 [java]
 source = 21

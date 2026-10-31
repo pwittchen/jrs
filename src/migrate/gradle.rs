@@ -126,6 +126,7 @@ pub(super) fn migrate_with(
 
     let mut out = manifest::blank(&name, &version, root);
     report.migrated(format!("project.name = {name}"));
+    out.group = read_group(&script, &vars, &mut report);
 
     let plugins = read_plugins(&script, &catalog, &mut vars);
     read_java(&script, &mut out, &mut report);
@@ -192,7 +193,6 @@ pub(super) fn migrate_with(
         source_file: build_file.to_path_buf(),
         manifest: out,
         report,
-        group: None,
     })
 }
 
@@ -219,6 +219,32 @@ fn read_version(script: &str, vars: &Variables, report: &mut Report) -> String {
             );
             "0.1.0".to_string()
         }
+    }
+}
+
+/// `group = ...`, which `jrs install` needs and nothing else does: a build
+/// without one has nothing to report, and one worked out when Gradle runs is
+/// left for the user to write down.
+fn read_group(script: &str, vars: &Variables, report: &mut Report) -> Option<String> {
+    match assignment_expression(script, "group").map(|e| vars.evaluate(&e)) {
+        Some(Ok((group, _))) if manifest::check_project_group(&group, "project.group").is_ok() => {
+            report.migrated(format!("project.group = {group}"));
+            Some(group)
+        }
+        Some(Ok((group, _))) => {
+            report.review(format!(
+                "project.group — `{group}` is not a Maven group; set it in jrs.toml \
+                 if the project is installed"
+            ));
+            None
+        }
+        Some(Err(why)) => {
+            report.review(format!(
+                "project.group — {why}; set it in jrs.toml if the project is installed"
+            ));
+            None
+        }
+        None => None,
     }
 }
 

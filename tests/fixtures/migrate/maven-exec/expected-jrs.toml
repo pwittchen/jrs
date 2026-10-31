@@ -1,6 +1,7 @@
 [project]
 name = "exec-app"
 version = "2.1.0"
+group = "com.example"
 
 [java]
 source = 21

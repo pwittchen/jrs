@@ -1,6 +1,7 @@
 [project]
 name = "demo"
 version = "0.0.1-SNAPSHOT"
+group = "com.example"
 main-class = "com.example.demo.DemoApplicationKt"
 
 [java]
