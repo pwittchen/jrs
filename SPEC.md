@@ -907,7 +907,12 @@ own.
   rounds. A class that only gained members — the same header (flags,
   supertypes, signature, annotations, nesting), and every member it had —
   compiles, in the next run, the sources that refer to it or to one of its
-  subtypes, which inherit what it gained; those whose own API is then
+  subtypes, which inherit what it gained. When all it gained is methods with
+  a body, only the sources that hold a subtype of it or a new name in a
+  constant pool: overload resolution looks only at methods of the name
+  called, so any other source compiles to the same bytes. A field, an abstract
+  method, which breaks a lambda that never names it, or a nested class is not
+  told apart this way. Those whose own API is then
   unchanged end the walk, and those whose API changed start the next round.
   Any other API change — a member removed or changed, a new header, a nested
   class gone — and a walk past four rounds compile every source that refers
@@ -920,8 +925,9 @@ own.
   upstream members' for a member. Their index also records each class there
   the sources refer to, with its supertypes there, as it was when they were
   compiled against it. When that API changes, the unit compiles the sources
-  that refer to a changed class — and what reaches those, for a change more
-  than an addition — and goes on in rounds, instead of compiling whole; a
+  that refer to a changed class, narrowed by name as above — and what reaches
+  those, for a change more than an addition — and goes on in rounds, instead
+  of compiling whole; a
   top-level class appearing in or going from those directories, a changed
   constant there, or a processor or Groovy AST transformation among their
   classes compiles it whole, as before.

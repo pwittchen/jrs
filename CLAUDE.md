@@ -224,7 +224,9 @@ regression, not a style nit.
   The same rule governs file-by-file compilation inside a Java-only unit
   (`compile/incremental.rs`, `target/.jrs/<unit>.index`): a body change compiles
   its own source, an addition to a class's API compiles its users and its
-  subtypes' users round by round until a round changes no API, any other API
+  subtypes' users round by round until a round changes no API — narrowed, when
+  all it added is methods with a body, to the sources with a subtype of it and
+  those whose constant pools hold a new name — any other API
   change also compiles everything that transitively refers to it, and anything
   the index cannot account for — a new or deleted
   source, a changed constant, a processor, another language — compiles the unit whole.

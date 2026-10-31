@@ -259,8 +259,10 @@ fingerprint holds `compile::api_digest` of every upstream member's classes it
 compiles against, beside its jars, the way the test unit already holds the
 main classes'. A body change in `core` recompiles `core` alone; a change to
 what another unit's `javac` can see makes the members that see it stale, and
-each compiles only its sources that refer to a class whose API changed —
-following the change in rounds from there, as inside one unit — rather than
+each compiles only its sources that refer to a class whose API changed, and
+of those, when all it gained is methods with a body, only the ones with a
+subtype of it or a new name in their constant pools — following the change in
+rounds from there, as inside one unit — rather than
 compiling whole (SPEC §7.2): its index records which of the upstream classes
 its sources refer to, as they were. A member none of whose sources refers to
 one is only re-indexed, and its own API, so its downstream members, stay as

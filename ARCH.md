@@ -638,7 +638,8 @@ otherwise.
 `compile/incremental.rs` keeps `target/.jrs/<unit>.index`, written after every
 successful Java-only build. It records each source's size, mtime and hash, the
 classes it compiled to (tied to it by their `SourceFile` attribute), each
-class's API, header, member and constants digests and its supertypes
+class's API, header, member and constants digests, with the name of a method
+that has a body beside its digest, and its supertypes
 (`abi::class_info`), and the unit's classes it refers to. A unit with
 `tracked` class directories — the tests' `target/classes`, a member's
 upstream members' — also records each class there its sources refer to, with
@@ -661,7 +662,9 @@ classes there. With unchanged settings the next build works from it:
       │ API unchanged ─► write index, done
       ▼
  only added members ──► next round: the sources that refer to a changed class
-      │                 or a subtype of one, less this round's; compare again
+      │                 or a subtype of one, less this round's — only methods
+      │                 with a body: less those with no subtype of one and no
+      │                 new name in their constant pools; compare again
       │                 (at most 4 rounds)
  anything else, or past the rounds
       ▼

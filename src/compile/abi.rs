@@ -43,6 +43,7 @@ use crate::project;
 use crate::resolve::repo::sha256_hex;
 
 const ACC_PRIVATE: u16 = 0x0002;
+const ACC_ABSTRACT: u16 = 0x0400;
 const ACC_SYNTHETIC: u16 = 0x1000;
 const ACC_MODULE: u16 = 0x8000;
 
@@ -258,8 +259,9 @@ pub(super) struct ClassInfo {
     /// The same as `api` when the class counts by its bytes.
     pub header: String,
     /// A short digest of each visible member, sorted: a class whose header
-    /// is unchanged and which kept every member it had only gained some.
-    /// Empty when the class counts by its bytes.
+    /// is unchanged and which kept every member it had only gained some. A
+    /// [plain method](Visible::plain_method) has its name after the digest,
+    /// `<digest>.<name>`. Empty when the class counts by its bytes.
     pub members: Vec<String>,
     /// Its superclass and interfaces, by name.
     pub supers: Vec<String>,
@@ -288,7 +290,13 @@ pub(super) fn class_info(bytes: &[u8]) -> Option<ClassInfo> {
             let mut members: Vec<String> = parsed
                 .members
                 .iter()
-                .map(|m| sha256_hex(m)[..16].to_string())
+                .map(|member| {
+                    let digest = &sha256_hex(&member.rendered)[..16];
+                    match member.plain_method {
+                        Some(name) => format!("{digest}.{}", String::from_utf8_lossy(name)),
+                        None => digest.to_string(),
+                    }
+                })
                 .collect();
             members.sort();
             (sha256_hex(&parsed.header), members)
@@ -308,6 +316,23 @@ pub(super) fn class_info(bytes: &[u8]) -> Option<ClassInfo> {
         members,
         supers: parsed.supers,
     })
+}
+
+/// Whether the constant pool of the class in `bytes` holds one of `names`,
+/// as a string of any use: a method called through a reference, a lambda's,
+/// and whatever else happens to read the same, which costs a recompile at
+/// most. `None` if the pool cannot be read.
+pub(super) fn mentions(bytes: &[u8], names: &BTreeSet<String>) -> Option<bool> {
+    let mut r = Reader::new(bytes);
+    if r.u4()? != 0xCAFE_BABE {
+        return None;
+    }
+    let _version = r.u4()?;
+    let pool = constant_pool(&mut r)?;
+    Some(pool.iter().any(|entry| match entry {
+        Const::Utf8(text) => std::str::from_utf8(text).is_ok_and(|text| names.contains(text)),
+        _ => false,
+    }))
 }
 
 /// A class name in each `L<name>;` or `L<name><` of a descriptor or
@@ -462,8 +487,18 @@ struct Parsed<'a> {
     /// `rendered` without its members.
     header: Vec<u8>,
     /// Each visible member as `rendered` holds it.
-    members: Vec<Vec<u8>>,
+    members: Vec<Visible<'a>>,
     supers: Vec<String>,
+}
+
+/// A member other classes can see.
+struct Visible<'a> {
+    rendered: Vec<u8>,
+    /// The name of a method with a body, when it needs no quoting in the
+    /// index: all another class can do with one it never names is compile
+    /// as before. An abstract method is not one: a lambda for its interface
+    /// breaks without naming it.
+    plain_method: Option<&'a [u8]>,
 }
 
 fn parse(bytes: &[u8]) -> Option<Parsed<'_>> {
@@ -532,7 +567,7 @@ fn parse(bytes: &[u8]) -> Option<Parsed<'_>> {
     for kind in [&b"field"[..], &b"method"[..]] {
         let (members, constant_members) = class.members(&mut r, kind, &mut verdict)?;
         for member in members {
-            out.extend(&member);
+            out.extend(&member.rendered);
             visible.push(member);
         }
         for member in constant_members {
@@ -566,6 +601,15 @@ fn parse(bytes: &[u8]) -> Option<Parsed<'_>> {
 
 /// Members, each rendered on its own.
 type Rendered = Vec<Vec<u8>>;
+
+/// A method name that can sit in the index's space-separated list: not
+/// `<init>`, which every class's pool holds, or a name quoted from Kotlin.
+fn plain_name(name: &[u8]) -> bool {
+    !name.is_empty()
+        && name
+            .iter()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'$'))
+}
 
 struct Class<'a> {
     pool: Vec<Const<'a>>,
@@ -607,7 +651,7 @@ impl<'a> Class<'a> {
         r: &mut Reader<'a>,
         kind: &[u8],
         verdict: &mut Verdict,
-    ) -> Option<(Rendered, Rendered)> {
+    ) -> Option<(Vec<Visible<'a>>, Rendered)> {
         let count = r.u2()?;
         let mut members = Vec::new();
         let mut constant_members = Vec::new();
@@ -630,10 +674,14 @@ impl<'a> Class<'a> {
                 if self.constant.get() {
                     constant_members.push(member.clone());
                 }
-                members.push(member);
+                let plain = kind == b"method" && flags & ACC_ABSTRACT == 0 && plain_name(name);
+                members.push(Visible {
+                    rendered: member,
+                    plain_method: plain.then_some(name),
+                });
             }
         }
-        members.sort();
+        members.sort_by(|a, b| a.rendered.cmp(&b.rendered));
         constant_members.sort();
         Some((members, constant_members))
     }
@@ -1357,6 +1405,39 @@ mod tests {
         .unwrap();
         assert_eq!(kotlin.header, kotlin.api, "a class counted by its bytes");
         assert!(kotlin.members.is_empty());
+    }
+
+    #[test]
+    fn a_plain_method_keeps_its_name_beside_its_digest() {
+        let info = class_info(&calc(
+            &[0x1a, 0xac],
+            1,
+            &[
+                member(PUBLIC | ACC_ABSTRACT, "run", "()V"),
+                member(PUBLIC, "plain", "()V"),
+                member(PUBLIC, "<init>", "()V"),
+                member(PUBLIC, "quoted name", "()V"),
+            ],
+            0,
+        ))
+        .unwrap();
+        let named: BTreeSet<&str> = info
+            .members
+            .iter()
+            .filter_map(|m| m.split_once('.'))
+            .map(|(_, name)| name)
+            .collect();
+        assert_eq!(named, BTreeSet::from(["add", "plain"]));
+        assert!(info.members.iter().all(|m| !m.contains(' ')));
+    }
+
+    #[test]
+    fn a_class_mentions_what_its_pool_holds_and_nothing_else() {
+        let bytes = calc(&[0x1a, 0xac], 1, &[], 0);
+        let names = |name: &str| BTreeSet::from([name.to_string()]);
+        assert_eq!(mentions(&bytes, &names("add")), Some(true));
+        assert_eq!(mentions(&bytes, &names("addAll")), Some(false));
+        assert_eq!(mentions(b"not a class", &names("add")), None);
     }
 
     #[test]

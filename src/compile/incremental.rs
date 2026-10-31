@@ -14,7 +14,11 @@
 //! §2). A class that only gained members compiles, in the next round, the
 //! sources that refer to it or to one of its subtypes — whose inherited
 //! members changed with it, and a new overload can change which method a
-//! caller of either picks. A round's classes whose own API is then unchanged
+//! caller of either picks. When all it gained is methods with a body, that
+//! narrows to the sources with a subtype of it and those whose constant
+//! pools hold one of the new names: overload resolution only ever looks at
+//! methods of the name called, so a source that calls none compiles to the
+//! same bytes. A round's classes whose own API is then unchanged
 //! end the walk; those whose API changed start the next round. A change that
 //! is more than an addition — a member removed or changed, a supertype, a
 //! flag, an annotation — breaks what was compiled against it in ways the
@@ -67,7 +71,7 @@ use crate::resolve::repo::sha256_hex;
 use crate::toolchain::Toolchain;
 use crate::ui::Ui;
 
-const HEADER: &str = "jrs compile index 2";
+const HEADER: &str = "jrs compile index 3";
 
 /// The most sources a file-by-file `javac` run may hold and still start its
 /// JVM with [`javac::QUICK_JVM_FLAGS`]. Measured on JDK 25, C1 and the serial
@@ -151,7 +155,7 @@ struct Class {
     constants: String,
     /// [`ClassInfo::header`].
     header: String,
-    /// [`ClassInfo::members`].
+    /// [`ClassInfo::members`], sorted.
     members: Vec<String>,
     /// Its superclass and interfaces.
     supers: Vec<String>,
@@ -227,6 +231,12 @@ struct Changes {
     added: BTreeSet<String>,
     /// Classes whose API changed otherwise, or that went away.
     broken: BTreeSet<String>,
+    /// The names of the [plain methods](abi::ClassInfo::members) the classes
+    /// in `added` gained.
+    methods: BTreeSet<String>,
+    /// Whether a class in `added` gained anything else: a field, an abstract
+    /// method, a nested class, which a source can feel without naming it.
+    wide: bool,
 }
 
 impl Changes {
@@ -237,6 +247,59 @@ impl Changes {
     fn all(&self) -> BTreeSet<String> {
         self.added.union(&self.broken).cloned().collect()
     }
+
+    /// Record that `after`, a later build of `before`, only gained members.
+    fn gained(&mut self, before: &Class, after: &Class) {
+        self.added.insert(before.name.clone());
+        let new = after
+            .members
+            .iter()
+            .filter(|m| before.members.binary_search(m).is_err());
+        let mut any = false;
+        for member in new {
+            any = true;
+            match member.split_once('.') {
+                Some((_, name)) => {
+                    self.methods.insert(name.to_string());
+                }
+                None => self.wide = true,
+            }
+        }
+        // The API moved and no member says how: nothing to narrow it by.
+        self.wide |= !any;
+    }
+
+    /// A class another source can name that was not there before.
+    fn appeared(&mut self, class: &Class) {
+        self.added.insert(class.name.clone());
+        self.wide = true;
+    }
+
+    /// Whether the sources an addition reaches can be told by the names they
+    /// use: it is a method with a body and nothing else.
+    fn by_name(&self) -> bool {
+        !self.wide && !self.methods.is_empty()
+    }
+}
+
+/// Whether `source` can compile differently now that a class in `reached`
+/// gained the methods `names`: one of its classes is a subtype there, whose
+/// members those may clash with, or holds one of the names, as the caller of
+/// an overload does. A class that cannot be read counts as one that does.
+fn feels_new_methods(
+    output_dir: &Path,
+    source: &Source,
+    reached: &BTreeSet<String>,
+    names: &BTreeSet<String>,
+) -> bool {
+    source.classes.iter().any(|class| {
+        reached.contains(&class.name)
+            || class.supers.iter().any(|name| reached.contains(name))
+            || std::fs::read(class_path(output_dir, &class.name))
+                .ok()
+                .and_then(|bytes| abi::mentions(&bytes, names))
+                .unwrap_or(true)
+    })
 }
 
 fn index_path(unit: &CompileUnit) -> PathBuf {
@@ -645,7 +708,7 @@ impl Tracker {
             index.save(unit)?;
             return Ok(Some(0));
         }
-        first.extend(reached_from_upstream(previous, &upstream));
+        first.extend(reached_from_upstream(unit, previous, &upstream, ui));
         if first.is_empty() {
             // No source here uses what changed: only what was seen moves.
             let indexing = Instant::now();
@@ -699,6 +762,10 @@ impl Tracker {
         let classes = || after.sources.iter().flat_map(|s| &s.classes);
         let added = inheriting(classes(), &upstream.added);
         let broken = inheriting(classes(), &upstream.broken);
+        if !added.is_empty() {
+            changes.methods.extend(upstream.methods.iter().cloned());
+            changes.wide |= upstream.wide;
+        }
         changes.added.extend(added);
         changes.broken.extend(broken);
 
@@ -727,10 +794,11 @@ impl Tracker {
                 break;
             }
             let reached = subtypes(&after, &changes.added);
-            let next: Vec<usize> = direct_users(&after, &reached)
+            let users: Vec<usize> = direct_users(&after, &reached)
                 .difference(&just)
                 .copied()
                 .collect();
+            let next = users_of_addition(unit, &after, users, &reached, &changes, ui);
             if next.is_empty() {
                 break;
             }
@@ -827,7 +895,7 @@ impl Tracker {
             }
             if after.api != before.api || after.kind != before.kind {
                 if after.only_adds_to(before) {
-                    changes.added.insert(before.name.clone());
+                    changes.gained(before, &after);
                 } else {
                     changes.broken.insert(before.name.clone());
                 }
@@ -1114,32 +1182,65 @@ impl Tracker {
 }
 
 /// The sources a change to the tracked classes reaches first: those that
-/// refer to a changed class, and, for a break, whatever refers to their
-/// classes too, transitively.
-fn reached_from_upstream(index: &Index, upstream: &Changes) -> BTreeSet<usize> {
-    let users: BTreeSet<usize> = (0..index.sources.len())
-        .filter(|&i| {
-            let ext = &index.sources[i].ext;
-            upstream
-                .added
-                .iter()
-                .chain(&upstream.broken)
-                .any(|c| ext.contains(c))
-        })
-        .collect();
-    let broken: BTreeSet<String> = users
+/// refer to a changed class — when all it gained is methods with a body,
+/// those that [can feel them](feels_new_methods) — and, for a break, whatever
+/// refers to their classes too, transitively.
+fn reached_from_upstream(
+    unit: &CompileUnit,
+    index: &Index,
+    upstream: &Changes,
+    ui: &Ui,
+) -> BTreeSet<usize> {
+    let refers = |i: usize, classes: &BTreeSet<String>| {
+        classes.iter().any(|c| index.sources[i].ext.contains(c))
+    };
+    let (broken, added): (BTreeSet<usize>, BTreeSet<usize>) = (0..index.sources.len())
+        .filter(|&i| refers(i, &upstream.added) || refers(i, &upstream.broken))
+        .partition(|&i| refers(i, &upstream.broken));
+    let added = users_of_addition(
+        unit,
+        index,
+        added.into_iter().collect(),
+        &upstream.added,
+        upstream,
+        ui,
+    );
+    let broken_classes: BTreeSet<String> = broken
         .iter()
-        .filter(|&&i| {
-            upstream
-                .broken
-                .iter()
-                .any(|c| index.sources[i].ext.contains(c))
-        })
         .flat_map(|&i| index.sources[i].classes.iter().map(|c| c.name.clone()))
         .collect();
-    let mut reached = users;
-    reached.extend(dependents(index, &broken, &BTreeSet::new()));
+    let mut reached = broken;
+    reached.extend(added);
+    reached.extend(dependents(index, &broken_classes, &BTreeSet::new()));
     reached
+}
+
+/// Of `users`, the sources that refer to a class in `reached`, those an
+/// addition described by `changes` can compile differently: every one,
+/// unless it is [told apart by name](Changes::by_name).
+fn users_of_addition(
+    unit: &CompileUnit,
+    index: &Index,
+    users: Vec<usize>,
+    reached: &BTreeSet<String>,
+    changes: &Changes,
+    ui: &Ui,
+) -> Vec<usize> {
+    if !changes.by_name() || users.is_empty() {
+        return users;
+    }
+    let total = users.len();
+    let output_dir = unit.output_dir.as_path();
+    let kept: Vec<usize> = users
+        .into_par_iter()
+        .filter(|&i| feels_new_methods(output_dir, &index.sources[i], reached, &changes.methods))
+        .collect();
+    ui.verbose(format!(
+        "{} unit: {} of {total} sources that refer to what changed can feel it",
+        unit.label,
+        kept.len()
+    ));
+    kept
 }
 
 /// Delete every class in the output directory that a source outside
@@ -1191,7 +1292,7 @@ fn compare(old: &[Class], new: &[Class], changes: &mut Changes) -> bool {
             }
             if after.api != before.api || after.kind != before.kind {
                 if after.only_adds_to(before) {
-                    changes.added.insert(before.name.clone());
+                    changes.gained(before, after);
                 } else {
                     changes.broken.insert(before.name.clone());
                 }
@@ -1213,7 +1314,7 @@ fn compare(old: &[Class], new: &[Class], changes: &mut Changes) -> bool {
             return false;
         }
         if after.kind != Kind::Hidden {
-            changes.added.insert(after.name.clone());
+            changes.appeared(after);
         }
     }
     true
@@ -1429,6 +1530,37 @@ mod tests {
         ));
         assert_eq!(names(&changes.added), ["p/A", "p/A$In"]);
         assert!(changes.broken.is_empty());
+    }
+
+    #[test]
+    fn an_addition_of_plain_methods_alone_is_told_apart_by_name() {
+        let gained = |members: &[&str]| {
+            let mut changes = Changes::default();
+            assert!(compare(
+                &[shaped("p/A", "h", &["a.kept"], &[])],
+                &[shaped("p/A", "h", members, &[])],
+                &mut changes
+            ));
+            changes
+        };
+        let plain = gained(&["a.kept", "b.fresh", "c.other"]);
+        assert!(plain.by_name(), "{plain:?}");
+        assert_eq!(
+            plain.methods,
+            BTreeSet::from(["fresh".to_string(), "other".to_string()])
+        );
+        assert!(
+            !gained(&["a.kept", "b.fresh", "c"]).by_name(),
+            "a member with no name beside it is not a plain method"
+        );
+
+        let mut nested = Changes::default();
+        assert!(compare(
+            &[top("p/A")],
+            &[top("p/A"), class("p/A$B", Kind::Nested, "b", "-")],
+            &mut nested
+        ));
+        assert!(!nested.by_name(), "{nested:?}");
     }
 
     #[test]

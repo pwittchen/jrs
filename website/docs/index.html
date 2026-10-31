@@ -1975,7 +1975,7 @@ jrs tree --why org.checkerframework:checker-qual   # who brings this in?</pre>
 </p>
 <ul>
   <li>A change inside method bodies compiles <strong>that one source</strong>.</li>
-  <li>A class that only <strong>gained members</strong> also compiles the sources that refer to it or to a subclass of it; those whose own API stays the same end it there, and the others go on to their own users, round by round.</li>
+  <li>A class that only <strong>gained members</strong> also compiles the sources that refer to it or to a subclass of it; those whose own API stays the same end it there, and the others go on to their own users, round by round. When all it gained is methods with a body, only subclasses and the sources that use one of the new names compile: nothing else can pick a method it never names.</li>
   <li>Any other change to a class's API — a member removed or changed, a new supertype or annotation — compiles every source that refers to it, transitively, since a subclass passes an inherited change on to its own users.</li>
   <li>The classes are the ones a whole build would have written, byte for byte.</li>
 </ul>

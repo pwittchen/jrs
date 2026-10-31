@@ -802,8 +802,28 @@ fn an_upstream_api_change_compiles_only_what_uses_the_changed_class() {
     assert_eq!(code, 0, "{err}");
     assert!(err.contains("Compiling app v2.0.0"), "{err}");
     assert!(
-        err.contains("main unit: compiled 1 of 2 source files"),
-        "only Main uses Greeter:\n{err}"
+        err.contains("main unit: compiled 0 of 2 source files"),
+        "Main uses Greeter, but no method named `answer`:\n{err}"
+    );
+    assert!(
+        err.contains("main unit: 0 of 1 sources that refer to what changed can feel it"),
+        "{err}"
+    );
+
+    // A new method by a name Main calls may be what it picks now.
+    let with_overload = std::fs::read_to_string(&greeter).unwrap().replace(
+        "public class Greeter {",
+        "public class Greeter {\n    public static String greet(Object who) { return \"?\"; }",
+    );
+    bump_mtime();
+    std::fs::write(&greeter, &with_overload).unwrap();
+    let (code, _, err) = jrs(&scratch, &root, &["-v", "build", "--no-build-cache"]);
+    assert_eq!(code, 0, "{err}");
+    assert_eq!(
+        err.matches("main unit: compiled 1 of 2 source files")
+            .count(),
+        2,
+        "Greeter in core, and in app only Main, which uses it:\n{err}"
     );
 
     // A class app never names changes: app is stale, compiles nothing, and

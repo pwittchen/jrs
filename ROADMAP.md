@@ -59,20 +59,32 @@ The 0.14.7 pass leaves Gradle's warm daemon ahead in a handful of cells,
 all on the large project or the workspace:
 
 - ⬜ **`clean` on `gen-2000`**: 1.79 s against 1.50–1.56 s, 1,368 ms of it
-  `javac`. Measure what the `javac` invocation's JVM flags and splitting
-  the sources into parallel batches would save.
-- ⬜ **`abi` on `gen-2000` and `gen-ws`**: 779 ms against 631–640 ms. Count
-  how many sources a round of "compile its users" recompiles against how
-  many a change actually reaches.
+  `javac`. Splitting the sources and the JVM flags were already measured in
+  [BEATING_THE_DAEMON_4.md §5](specs/BEATING_THE_DAEMON_4.md#5-a-large-compile-in-a-cold-jit-)
+  and do not pay, so `javac` itself stays as it is. A clean tree's sources,
+  and the jars' processor check, are now read in parallel, which only reaches
+  the part outside `javac`. Built; the next pass says what it brought.
+- ⬜ **`abi` on `gen-2000` and `gen-ws`**: 779 ms against 631–640 ms. A round
+  compiled every user of a class that gained a method. When all it gained is
+  methods with a body, it now compiles the sources with a subtype of it and
+  those whose constant pools hold a new name (`compile/incremental.rs`): a
+  source that names none of them compiles to the same bytes. `-v` prints the
+  count the roadmap asked for, `<n> of <m> sources that refer to what changed
+  can feel it`. The benchmark's edit is a method nothing calls, so its second
+  round should go. Built; the next pass says what it brought.
 - ⬜ **`test` on `gen-2000`**: 911 ms against 779–825 ms, 682 ms of it the
-  test JVM. A full run (seven measured runs per cell) first, to tell a
-  regression from a one-off.
+  test JVM. A full run (seven measured runs per cell) is still what tells a
+  regression from a one-off. Outside the JVM, the main classes' API digest
+  (55–64 ms) is kept under the classes' sizes and times
+  (`compile::api_digest_remembered`), an up-to-date check no longer stats
+  every class, and the first hash of the class directories runs in parallel.
 - ⬜ **Corpus numbers for the parallel members and the `kotlinc` worker**,
   still to be taken ([GRADLE_GAPS.md §9](specs/GRADLE_GAPS.md#9-what-was-built)).
 
-Nothing here gets code until a measurement says where the time goes.
+The changes above went in ahead of a pass, on earlier passes' measurements,
+so each still has to show in the numbers.
 
-**Status: ⬜ to do.**
+**Status: built, the next benchmark pass and the corpus numbers to do.**
 
 ## 3. Releases without manual steps
 

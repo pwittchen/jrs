@@ -616,11 +616,11 @@ fn an_added_method_stops_at_the_callers_whose_api_did_not_change() {
     let text = std::fs::read_to_string(&base).unwrap();
     assert_eq!(rebuild(&toolchain, &root).unwrap(), 4);
 
-    // A new method: Base, then Middle, which calls it; Middle's own API is
-    // the same, so Top is not compiled.
+    // A new overload of what Middle calls: Base, then Middle, which may now
+    // pick it; Middle's own API is the same, so Top is not compiled.
     let added = text.replace(
         "    public int unused()",
-        "    public int three() {\n        return 3;\n    }\n\n    public int unused()",
+        "    public int one(int n) {\n        return n;\n    }\n\n    public int unused()",
     );
     std::fs::write(&base, &added).unwrap();
     age_classes(&root);
@@ -639,6 +639,135 @@ fn an_added_method_stops_at_the_callers_whose_api_did_not_change() {
         rebuild(&toolchain, &root).unwrap(),
         3,
         "Base, Middle and Top"
+    );
+    assert_matches_a_whole_build(&toolchain, &root);
+}
+
+/// `Api` with callers of different kinds: `Caller` passes an `int` to
+/// `pick(long)`, `Bystander` only calls `one`, `Sub` and `Anon` extend it,
+/// `ViaSub` calls an overload through `Sub`, and `Lambda` implements
+/// `Action` without naming its method.
+fn callers(scratch: &Scratch) -> PathBuf {
+    for (path, text) in [
+        (
+            "callers/src/p/Api.java",
+            "package p;\n\npublic class Api {\n    public long pick(long n) {\n        \
+             return n;\n    }\n\n    public int one() {\n        return 1;\n    }\n}\n",
+        ),
+        (
+            "callers/src/p/Caller.java",
+            "package p;\n\npublic class Caller {\n    public long call() {\n        \
+             return new Api().pick(1);\n    }\n}\n",
+        ),
+        (
+            "callers/src/p/Bystander.java",
+            "package p;\n\npublic class Bystander {\n    public int call() {\n        \
+             return new Api().one();\n    }\n}\n",
+        ),
+        (
+            "callers/src/p/Sub.java",
+            "package p;\n\npublic class Sub extends Api {\n}\n",
+        ),
+        (
+            "callers/src/p/Anon.java",
+            "package p;\n\npublic class Anon {\n    public Api make() {\n        \
+             return new Api() {\n        };\n    }\n}\n",
+        ),
+        (
+            "callers/src/p/ViaSub.java",
+            "package p;\n\npublic class ViaSub {\n    public long call() {\n        \
+             return new Sub().pick(2);\n    }\n}\n",
+        ),
+        (
+            "callers/src/p/Action.java",
+            "package p;\n\npublic interface Action {\n    void run();\n}\n",
+        ),
+        (
+            "callers/src/p/Lambda.java",
+            "package p;\n\npublic class Lambda {\n    public Action make() {\n        \
+             return () -> {\n        };\n    }\n}\n",
+        ),
+    ] {
+        scratch.write(path, text);
+    }
+    scratch.join("callers")
+}
+
+#[test]
+fn a_new_method_compiles_the_sources_that_can_feel_it_and_no_others() {
+    let toolchain = require_jdk!();
+    let scratch = Scratch::new("build-new-method");
+    let root = callers(&scratch);
+    let api = root.join("src/p/Api.java");
+    let text = std::fs::read_to_string(&api).unwrap();
+    assert_eq!(rebuild(&toolchain, &root).unwrap(), 8);
+
+    // No source names it: the class alone and what extends it. Sub compiles
+    // and passes nothing on, its own API being the same.
+    let unused = text.replace(
+        "    public int one()",
+        "    public int nobodyCalls() {\n        return 0;\n    }\n\n    public int one()",
+    );
+    std::fs::write(&api, &unused).unwrap();
+    age_classes(&root);
+    assert_eq!(rebuild(&toolchain, &root).unwrap(), 3, "Api, Sub and Anon");
+    assert_matches_a_whole_build(&toolchain, &root);
+
+    // A closer overload: its callers pick it, through a subtype too. Whole
+    // builds agree only if they were compiled.
+    let overload = unused.replace(
+        "    public int one()",
+        "    public long pick(int n) {\n        return n + 1;\n    }\n\n    public int one()",
+    );
+    std::fs::write(&api, &overload).unwrap();
+    age_classes(&root);
+    assert_eq!(
+        rebuild(&toolchain, &root).unwrap(),
+        5,
+        "Api, Sub, Anon, Caller and ViaSub"
+    );
+    assert_matches_a_whole_build(&toolchain, &root);
+}
+
+#[test]
+fn a_new_abstract_method_or_field_reaches_every_user() {
+    let toolchain = require_jdk!();
+    let scratch = Scratch::new("build-new-abstract");
+    let root = callers(&scratch);
+    let api = root.join("src/p/Api.java");
+    let action = root.join("src/p/Action.java");
+    assert_eq!(rebuild(&toolchain, &root).unwrap(), 8);
+
+    // `Lambda` never names `stop`, and no longer compiles.
+    let two = "package p;\n\npublic interface Action {\n    void run();\n\n    \
+               void stop();\n}\n";
+    std::fs::write(&action, two).unwrap();
+    age_classes(&root);
+    let error = rebuild(&toolchain, &root).unwrap_err();
+    assert_eq!(error.exit_code(), 1, "{error}");
+    std::fs::write(
+        &action,
+        "package p;\n\npublic interface Action {\n    void run();\n}\n",
+    )
+    .unwrap();
+    assert_eq!(rebuild(&toolchain, &root).unwrap(), 2, "Action and Lambda");
+    assert_matches_a_whole_build(&toolchain, &root);
+
+    // A field is not told apart by name: everything that refers to Api.
+    let text = std::fs::read_to_string(&api).unwrap();
+    std::fs::write(
+        &api,
+        text.replace(
+            "    public int one()",
+            "    public int count;\n\n    public int one()",
+        ),
+    )
+    .unwrap();
+    age_classes(&root);
+    assert_eq!(
+        rebuild(&toolchain, &root).unwrap(),
+        6,
+        "Api, Caller, Bystander, Sub, Anon, and ViaSub through Sub"
     );
     assert_matches_a_whole_build(&toolchain, &root);
 }
