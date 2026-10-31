@@ -44,7 +44,7 @@ jobs:
 
     # For a project without a wrapper; every project in the first set has one.
     - name: Set up Maven
-      uses: stCarolas/setup-maven@v5
+      uses: stCarolas/setup-maven@v5.1
       with:
         maven-version: '3.9.11'
 
