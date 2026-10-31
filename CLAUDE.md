@@ -51,9 +51,8 @@ and ARM64) from that commit, `plugin` builds the IntelliJ plugin from it (at the
 `pluginVersion` in `plugins/intellij/gradle.properties`, which is set by hand:
 `bump` leaves it alone, for the reason in `plugins/intellij/README.md`),
 and `release` publishes them, the plugin as `jrs-intellij.zip`, and writes the
-Homebrew, Scoop and winget manifests from their checksums
-(`packaging/manifests.sh`, kept as the `package-manifests` artifact; publishing
-the Scoop and winget ones is manual). `homebrew` then dispatches the tap's
+Homebrew formula from their checksums (`packaging/manifests.sh`, kept as the
+`package-manifests` artifact). `homebrew` then dispatches the tap's
 Update formulae workflow, which commits `Formula/jrs.rb` to
 `pwittchen/homebrew-tap`; it needs the `HOMEBREW_TAP_TOKEN` secret, and a
 failure there leaves the release in place (`specs/HOMEBREW.md` §4). The tag

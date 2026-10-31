@@ -339,16 +339,14 @@ jobs:
       working-directory: dist
       run: sha256sum -- * > SHA256SUMS
 
-    # The Homebrew formula, the Scoop manifest and the winget manifest for
-    # this release, from its checksums. `homebrew` below gets the formula into
-    # the tap; publishing the other two to a bucket and to winget-pkgs is a
-    # step the maintainer takes.
+    # The Homebrew formula for this release, from its checksums. `homebrew`
+    # below gets it into the tap.
     - uses: actions/checkout@v7
       with:
         path: source
         sparse-checkout: packaging
 
-    - name: Write the package manager manifests
+    - name: Write the Homebrew formula
       run: sh source/packaging/manifests.sh "${GITHUB_REF_NAME#v}" dist/SHA256SUMS manifests
 
     - uses: actions/upload-artifact@v7

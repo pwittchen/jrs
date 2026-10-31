@@ -56,7 +56,7 @@ projects later.
   `rust.yml` name the tap `pwittchen/homebrew-jrs`; rename it to
   `pwittchen/homebrew-tap`.
 - Document `brew install pwittchen/tap/jrs` in `README.md`, `DOCS.md` and
-  `website/docs/index.html`, beside `install.sh`, Scoop and winget.
+  `website/docs/index.html`, beside `install.sh`.
 
 ## 4. Each release
 

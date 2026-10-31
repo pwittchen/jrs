@@ -209,9 +209,10 @@ package managers look:
   that `brew install pwittchen/jrs/jrs` works; then a job that commits each
   release's formula there, with a token scoped to that repository.
 - **A Scoop bucket** the same way, and a pull request to `winget-pkgs` per
-  release (`wingetcreate` can open it from the manifests).
-- **DOCS.md and the website's install section** list the three commands once
-  they work, and `website/install.sh` mentions them for Windows.
+  release (`wingetcreate` can open it from the manifests). Dropped: nothing
+  publishes to either, and `packaging/manifests.sh` writes the formula alone.
+- **DOCS.md and the website's install section** list the commands once they
+  work.
 
 ## 4. The IntelliJ plugin
 
