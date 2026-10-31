@@ -507,9 +507,7 @@ pub fn zip_with_modes<S: std::hash::BuildHasher>(
         .iter()
         .map(|(n, b)| (n.as_str(), b.as_slice()))
         .collect();
-    let options = zip::write::SimpleFileOptions::default()
-        .compression_method(zip::CompressionMethod::Deflated)
-        .last_modified_time(crate::package::fixed_timestamp());
+    let options = crate::package::entry_options();
     let fail = |e: &dyn std::fmt::Display| JrsError::build(format!("build cache entry: {e}"));
     let mut writer = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
     for (name, bytes) in sorted {

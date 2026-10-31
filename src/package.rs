@@ -37,11 +37,16 @@ pub(crate) fn fixed_timestamp() -> zip::DateTime {
     zip::DateTime::from_date_and_time(1980, 1, 1, 0, 0, 0).expect("a valid fixed timestamp")
 }
 
-fn entry_options() -> SimpleFileOptions {
+/// An entry of everything jrs writes, a jar or a zip. The creating system is
+/// named, not left to the crate's default of the machine running it: an entry
+/// made by DOS reads back with no Unix mode of its own, on any machine, so a
+/// zip written on Windows would lose its execute bits.
+pub(crate) fn entry_options() -> SimpleFileOptions {
     SimpleFileOptions::default()
         .compression_method(zip::CompressionMethod::Deflated)
         .last_modified_time(fixed_timestamp())
         .unix_permissions(0o644)
+        .system(zip::System::Unix)
 }
 
 fn directory_options() -> SimpleFileOptions {
@@ -49,6 +54,7 @@ fn directory_options() -> SimpleFileOptions {
         .compression_method(zip::CompressionMethod::Stored)
         .last_modified_time(fixed_timestamp())
         .unix_permissions(0o755)
+        .system(zip::System::Unix)
 }
 
 /// Every directory the entry names imply, with their trailing slash, sorted.
@@ -1232,7 +1238,8 @@ mod tests {
             .compression_method(zip::CompressionMethod::Deflated)
             .compression_level(Some(1))
             .last_modified_time(zip::DateTime::from_date_and_time(2020, 5, 6, 7, 8, 10).unwrap())
-            .unix_permissions(0o600);
+            .unix_permissions(0o600)
+            .system(zip::System::Unix);
         w.start_file("org/dep/data.txt", options).unwrap();
         w.write_all(text.as_bytes()).unwrap();
         let stored = options

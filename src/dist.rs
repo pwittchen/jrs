@@ -17,11 +17,9 @@ use std::fmt::Write as _;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
-use zip::write::SimpleFileOptions;
-
 use crate::error::{IoResultExt, JrsError, Result};
 use crate::image::{App, bat_quote, is_sh_safe, sh_quote};
-use crate::package::fixed_timestamp;
+use crate::package::entry_options;
 use crate::project;
 
 /// What [`write_dist`] produced.
@@ -118,12 +116,11 @@ fn write_zip(dir: &Path, prefix: &str, executable: &str, output: &Path) -> Resul
         |e: zip::result::ZipError| JrsError::build(format!("{}: {e}", output.display()));
     for (name, path) in &files {
         let mode = if name == executable { 0o755 } else { 0o644 };
-        let options = SimpleFileOptions::default()
-            .compression_method(zip::CompressionMethod::Deflated)
-            .last_modified_time(fixed_timestamp())
-            .unix_permissions(mode);
         writer
-            .start_file(format!("{prefix}/{name}").as_str(), options)
+            .start_file(
+                format!("{prefix}/{name}").as_str(),
+                entry_options().unix_permissions(mode),
+            )
             .map_err(zip_error)?;
         let bytes = std::fs::read(path).path(path)?;
         writer.write_all(&bytes).path(output)?;
