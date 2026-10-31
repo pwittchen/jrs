@@ -34,6 +34,8 @@ use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
+use rayon::prelude::*;
+
 use super::abi;
 use crate::error::{IoResultExt, Result};
 use crate::project;
@@ -192,9 +194,15 @@ pub fn select(
         .flat_map(|p| &p.files)
         .map(|e| (e.path.as_path(), e))
         .collect();
-    let mut files = Vec::new();
+    let mut paths = Vec::new();
     for dir in class_dirs {
-        for path in project::find_all(dir)? {
+        paths.extend(project::find_all(dir)?);
+    }
+    // With no earlier run every file is hashed, each apart from the others;
+    // they come back in the order they were walked.
+    let files = paths
+        .into_par_iter()
+        .map(|path| {
             let meta = std::fs::metadata(&path).path(&path)?;
             let size = meta.len();
             let modified = meta
@@ -206,14 +214,14 @@ pub fn select(
                 Some(e) if (e.size, e.modified) == (size, modified) => e.hash.clone(),
                 _ => sha256_hex(&std::fs::read(&path).path(&path)?),
             };
-            files.push(Entry {
+            Ok(Entry {
                 path,
                 size,
                 modified,
                 hash,
-            });
-        }
-    }
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
     let snapshot = Snapshot {
         settings,
         files,

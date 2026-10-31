@@ -443,8 +443,8 @@ fn allowed(unit: &CompileUnit) -> bool {
     args.iter().any(|a| a == "-proc:none")
         || !unit
             .classpath
-            .iter()
-            .chain([&unit.output_dir])
+            .par_iter()
+            .chain([&unit.output_dir].into_par_iter())
             .any(|entry| registers_processor(entry))
 }
 
@@ -563,22 +563,27 @@ impl Tracker {
                 && unit.output_dir.is_dir()
         });
         let known = previous.as_ref().map(Index::by_path).unwrap_or_default();
-        let mut current = Vec::with_capacity(unit.sources.len());
-        for path in &unit.sources {
-            let (size, modified) = stat(path).unwrap_or_default();
-            let hash = match known.get(path.as_path()) {
-                Some(s) if !s.hash.is_empty() && (s.size, s.modified) == (size, modified) => {
-                    s.hash.clone()
-                }
-                _ => sha256_hex(&std::fs::read(path).path(path)?),
-            };
-            current.push(Current {
-                path: path.clone(),
-                size,
-                modified,
-                hash,
-            });
-        }
+        // A clean tree has every source to read and hash, each apart from
+        // the others.
+        let current = unit
+            .sources
+            .par_iter()
+            .map(|path| {
+                let (size, modified) = stat(path).unwrap_or_default();
+                let hash = match known.get(path.as_path()) {
+                    Some(s) if !s.hash.is_empty() && (s.size, s.modified) == (size, modified) => {
+                        s.hash.clone()
+                    }
+                    _ => sha256_hex(&std::fs::read(path).path(path)?),
+                };
+                Ok(Current {
+                    path: path.clone(),
+                    size,
+                    modified,
+                    hash,
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
         Ok(Some(Tracker {
             settings,
             current,

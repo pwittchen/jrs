@@ -407,7 +407,10 @@ impl Session<'_> {
         // Compile avoidance: the tests see the main classes' API, not their
         // bytes, so a changed method body leaves them fresh (SPEC §7.2).
         let digesting = Instant::now();
-        let mut api = compile::api_digest(&project.classes_dir())?;
+        let mut api = compile::api_digest_remembered(
+            &project.classes_dir(),
+            &project.work_dir().join("main.api"),
+        )?;
         if let Some(upstream) = self.upstream_api(|_| true)? {
             api.push('\n');
             api.push_str(&upstream);

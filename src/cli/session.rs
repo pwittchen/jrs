@@ -248,7 +248,10 @@ impl<'a> Session<'a> {
                 api,
                 "{} {}",
                 upstream.name,
-                compile::api_digest(&upstream.classes_dir)?
+                compile::api_digest_remembered(
+                    &upstream.classes_dir,
+                    &upstream.classes_dir.with_file_name(".jrs").join("main.api")
+                )?
             );
         }
         Ok((!api.is_empty()).then_some(api))

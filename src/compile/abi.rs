@@ -32,7 +32,9 @@
 
 use std::cell::Cell;
 use std::collections::BTreeSet;
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use rayon::prelude::*;
 
@@ -43,6 +45,10 @@ use crate::resolve::repo::sha256_hex;
 const ACC_PRIVATE: u16 = 0x0002;
 const ACC_SYNTHETIC: u16 = 0x1000;
 const ACC_MODULE: u16 = 0x8000;
+
+/// How old a file stamped in whole seconds must be for a rewrite to show in
+/// its time: FAT keeps every other second.
+const WHOLE_SECONDS_SLACK: Duration = Duration::from_secs(2);
 
 /// Service files that register code a compiler runs while it compiles.
 const COMPILER_SERVICES: [&str; 2] = [
@@ -57,12 +63,64 @@ const COMPILER_SERVICES: [&str; 2] = [
 ///
 /// [`crate::JrsError::Io`] if the tree or a file in it cannot be read. A class
 /// file that cannot be parsed is not an error: it counts by its bytes.
+pub fn api_digest(dir: &Path) -> Result<String> {
+    digest_of(api_files(dir)?)
+}
+
+/// [`api_digest`], kept in the file `memo` under the size and time of every
+/// file it read, so that a command that finds those as they were reads no
+/// class: on a large project that digest is most of what a `jrs test` with
+/// nothing to compile does before its JVM. It is kept only when a rewrite
+/// must show in those times, unlike a time in whole seconds (HFS+, FAT) on
+/// a file written just now: a class that keeps its size can hold another
+/// API. A memo that cannot be read or written costs the reading it saves.
+///
+/// # Errors
+///
+/// As for [`api_digest`].
+pub fn api_digest_remembered(dir: &Path, memo: &Path) -> Result<String> {
+    let files = api_files(dir)?;
+    let now = SystemTime::now();
+    let mut stamps = String::new();
+    let mut settled = true;
+    for (relative, path) in &files {
+        let meta = std::fs::metadata(path).path(path)?;
+        let modified = meta.modified().path(path)?;
+        let since_epoch = modified.duration_since(UNIX_EPOCH).unwrap_or_default();
+        settled &= since_epoch.subsec_nanos() != 0
+            || modified
+                .checked_add(WHOLE_SECONDS_SLACK)
+                .is_some_and(|stamped| stamped < now);
+        let _ = writeln!(
+            stamps,
+            "{relative} {} {}",
+            meta.len(),
+            since_epoch.as_nanos()
+        );
+    }
+    let stamp = sha256_hex(stamps.as_bytes());
+    if let Ok(text) = std::fs::read_to_string(memo)
+        && let Some((held, digest)) = text.split_once(' ')
+        && held == stamp
+        && digest.len() == stamp.len()
+    {
+        return Ok(digest.to_string());
+    }
+    let digest = digest_of(files)?;
+    if settled {
+        let _ = std::fs::write(memo, format!("{stamp} {digest}"));
+    }
+    Ok(digest)
+}
+
+/// The files under `dir` [`api_digest`] reads, by their `/`-separated path
+/// from it and in path order.
 #[allow(
     clippy::case_sensitive_file_extension_comparisons,
     reason = "the compilers write and look up `.class` and `.tasty` exactly; `Foo.CLASS` is not a class"
 )]
-pub fn api_digest(dir: &Path) -> Result<String> {
-    let wanted: Vec<(String, PathBuf)> = project::find_all(dir)?
+fn api_files(dir: &Path) -> Result<Vec<(String, PathBuf)>> {
+    Ok(project::find_all(dir)?
         .into_iter()
         .map(|path| (relative(dir, &path), path))
         .filter(|(relative, _)| {
@@ -70,7 +128,15 @@ pub fn api_digest(dir: &Path) -> Result<String> {
                 || relative.ends_with(".tasty")
                 || relative.starts_with("META-INF/services/")
         })
-        .collect();
+        .collect())
+}
+
+/// The digest of `wanted`, [`api_files`]' list.
+#[allow(
+    clippy::case_sensitive_file_extension_comparisons,
+    reason = "the compilers write and look up `.class` exactly; `Foo.CLASS` is not a class"
+)]
+fn digest_of(wanted: Vec<(String, PathBuf)>) -> Result<String> {
     // Each file reads apart from every other, so they read in parallel, and
     // come back in path order.
     let entries: Vec<(String, String, Api)> = wanted
@@ -1291,6 +1357,42 @@ mod tests {
         .unwrap();
         assert_eq!(kotlin.header, kotlin.api, "a class counted by its bytes");
         assert!(kotlin.members.is_empty());
+    }
+
+    #[test]
+    fn a_remembered_digest_is_the_digest_and_follows_the_files() {
+        let tree = Tree::new("remembered");
+        let memo = tree.0.join("api.digest");
+        let dir = tree.0.join("classes");
+        std::fs::create_dir_all(&dir).unwrap();
+        let class = dir.join("Calc.class");
+        std::fs::write(&class, calc(&[0x1a, 0xac], 1, &[], 0)).unwrap();
+        let digest = api_digest(&dir).unwrap();
+        assert_eq!(api_digest_remembered(&dir, &memo).unwrap(), digest);
+
+        // Not read again while the files stand as they were, so a memo
+        // planted under the same stamp answers.
+        let text = std::fs::read_to_string(&memo).unwrap();
+        let (stamp, _) = text.split_once(' ').unwrap();
+        let planted = "0".repeat(digest.len());
+        std::fs::write(&memo, format!("{stamp} {planted}")).unwrap();
+        assert_eq!(api_digest_remembered(&dir, &memo).unwrap(), planted);
+
+        // A file that moved is read, whatever the memo says.
+        std::fs::write(&class, calc(&[0x1a, 0xac], 2, &[], 0)).unwrap();
+        assert_eq!(
+            api_digest_remembered(&dir, &memo).unwrap(),
+            api_digest(&dir).unwrap()
+        );
+
+        // One cut short is no answer.
+        let text = std::fs::read_to_string(&memo).unwrap();
+        let (stamp, _) = text.split_once(' ').unwrap();
+        std::fs::write(&memo, format!("{stamp} 00")).unwrap();
+        assert_eq!(
+            api_digest_remembered(&dir, &memo).unwrap(),
+            api_digest(&dir).unwrap()
+        );
     }
 
     #[test]

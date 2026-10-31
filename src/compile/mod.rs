@@ -33,7 +33,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-pub use abi::api_digest;
+use rayon::prelude::*;
+
+pub use abi::{api_digest, api_digest_remembered};
 pub use doc::{ForeignDoc, document};
 pub use javac::{DocUnit, javadoc};
 pub use lang::{DocTool, Language};
@@ -283,11 +285,15 @@ impl CompileUnit {
             let _ = writeln!(s, "main-api {api}");
         }
         let known = incremental::known_hashes(self);
-        for source in &self.sources {
-            let hash = match known.get(source) {
-                Some(hash) => hash.clone(),
-                None => sha256_hex(&std::fs::read(source).path(source)?),
-            };
+        let hashes = self
+            .sources
+            .par_iter()
+            .map(|source| match known.get(source) {
+                Some(hash) => Ok(hash.clone()),
+                None => Ok(sha256_hex(&std::fs::read(source).path(source)?)),
+            })
+            .collect::<Result<Vec<String>>>()?;
+        for (source, hash) in self.sources.iter().zip(hashes) {
             let _ = writeln!(
                 s,
                 "source {hash} {}",
@@ -474,12 +480,12 @@ pub fn is_stale(unit: &CompileUnit) -> Result<bool> {
     if previous != unit.fingerprint() {
         return Ok(true);
     }
+    if let Some(index) = incremental::Index::load(unit) {
+        return Ok(!project::holds_a_file(&unit.output_dir) || !index.holds(&unit.sources));
+    }
     let Some(newest_class) = project::newest_mtime_under(&unit.output_dir) else {
         return Ok(true);
     };
-    if let Some(index) = incremental::Index::load(unit) {
-        return Ok(!index.holds(&unit.sources));
-    }
     let Some(newest_source) = project::newest_mtime(&unit.sources) else {
         return Ok(true);
     };

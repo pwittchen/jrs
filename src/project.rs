@@ -568,6 +568,18 @@ pub fn newest_mtime(paths: &[PathBuf]) -> Option<SystemTime> {
         .max()
 }
 
+/// Whether any file lies under `dir`, at whatever depth: stops at the first.
+#[must_use]
+pub fn holds_a_file(dir: &Path) -> bool {
+    std::fs::read_dir(dir).is_ok_and(|entries| {
+        entries.flatten().any(|entry| {
+            entry
+                .file_type()
+                .is_ok_and(|kind| kind.is_file() || (kind.is_dir() && holds_a_file(&entry.path())))
+        })
+    })
+}
+
 /// The most recent mtime of any file under `dir`.
 #[must_use]
 pub fn newest_mtime_under(dir: &Path) -> Option<SystemTime> {

@@ -1336,6 +1336,7 @@ poisoning, which is documented under each function's `# Panics`.
          ├── javac-main.args  javac-test.args  kotlinc-main.args  …
          ├── main.fingerprint  test.fingerprint
          ├── main.index  test.index  per source: classes, API digests, references
+         ├── main.api               the main classes' api_digest, under their sizes and times
          ├── test.tested  suite-<name>.tested   class dirs as the last run left them,
          │                          and the test classes to run again
          │   test-shard-<i>-of-<n>.tested  …  the same, for one --shard
