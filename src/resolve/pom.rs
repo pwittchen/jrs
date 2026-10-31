@@ -9,7 +9,7 @@
 
 use std::collections::BTreeMap;
 
-use quick_xml::events::Event;
+use quick_xml::events::{BytesRef, Event};
 
 use super::coord::{Coord, Ga, Scope};
 use crate::error::{JrsError, Result};
@@ -112,7 +112,7 @@ pub fn parse_xml(bytes: &[u8]) -> Result<Element> {
             // one wants the character, not the reference.
             Event::GeneralRef(r) => {
                 if let Some(top) = stack.last_mut() {
-                    top.text.push_str(&r.xml10_content());
+                    top.text.push_str(&resolve_reference(&r));
                 }
             }
             Event::End(_) => {
@@ -619,9 +619,38 @@ pub fn interpolate(text: &str, props: &BTreeMap<String, String>) -> String {
     out
 }
 
+/// The text a reference in XML stands for: `&#65;`, or one of the five XML
+/// predefines. An entity a DTD would have to define stands for nothing.
+pub(crate) fn resolve_reference(r: &BytesRef<'_>) -> String {
+    if let Ok(Some(c)) = r.resolve_char_ref() {
+        return c.to_string();
+    }
+    match &**r {
+        "lt" => "<",
+        "gt" => ">",
+        "amp" => "&",
+        "quot" => "\"",
+        "apos" => "'",
+        _ => "",
+    }
+    .to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn references_in_text_become_their_characters() {
+        let root = parse_xml(
+            b"<a><b>x&amp;y &lt;z&gt; &quot;q&quot; &apos;r&apos;</b><c>&#65;&#x42;</c>\
+              <d>before&unknown;after</d></a>",
+        )
+        .unwrap();
+        assert_eq!(root.text_of("b"), Some("x&y <z> \"q\" 'r'"));
+        assert_eq!(root.text_of("c"), Some("AB"));
+        assert_eq!(root.text_of("d"), Some("beforeafter"));
+    }
 
     const CHILD: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
 <project xmlns="http://maven.apache.org/POM/4.0.0">

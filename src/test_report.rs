@@ -20,9 +20,10 @@ use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
 use quick_xml::XmlVersion;
-use quick_xml::events::{BytesRef, BytesStart, Event};
+use quick_xml::events::{BytesStart, Event};
 
 use crate::error::{IoResultExt, JrsError, Result};
+use crate::resolve::pom::resolve_reference;
 
 /// The page written beside the XML.
 pub const INDEX: &str = "index.html";
@@ -382,22 +383,6 @@ fn attribute(e: &BytesStart<'_>, name: &str) -> Result<Option<String>> {
         }
     }
     Ok(None)
-}
-
-/// `&lt;` and friends, and character references, in text.
-fn resolve_reference(r: &BytesRef<'_>) -> String {
-    if let Ok(Some(c)) = r.resolve_char_ref() {
-        return c.to_string();
-    }
-    match &**r {
-        "lt" => "<",
-        "gt" => ">",
-        "amp" => "&",
-        "quot" => "\"",
-        "apos" => "'",
-        _ => "",
-    }
-    .to_string()
 }
 
 /// `0.031` seconds as 31 milliseconds, without going through a float.
