@@ -12,8 +12,9 @@
 #
 # Each points at the release's own assets, by tag, with their checksums. The
 # `release` job in .github/workflows/rust.yml runs it and keeps the result as
-# the `package-manifests` artifact; publishing them to the tap, the bucket and
-# winget-pkgs stays a step the maintainer takes.
+# the `package-manifests` artifact. The tap runs this script itself, at the
+# release's tag, when the `homebrew` job there asks it to; publishing to a
+# Scoop bucket and to winget-pkgs stays a step the maintainer takes.
 
 set -eu
 

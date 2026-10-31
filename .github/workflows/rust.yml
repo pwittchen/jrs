@@ -174,9 +174,9 @@ jobs:
   # A version tag sets the crate version: `v1.2.3` writes `version = "1.2.3"` to
   # Cargo.toml and Cargo.lock, and commits that to master, so the release is
   # built from sources that report its version. The IntelliJ plugin keeps the
-  # `pluginVersion` its gradle.properties holds: for now it is versioned by
-  # hand, apart from the crate. The tag itself is left where it
-  # was pushed, so a local clone never holds a stale copy of it.
+  # `pluginVersion` its gradle.properties holds: it is versioned apart from
+  # the crate, for the reason in plugins/intellij/README.md. The tag itself is
+  # left where it was pushed, so a local clone never holds a stale copy of it.
   # Pushes made with the workflow's own token do not trigger further runs.
   bump:
     if: startsWith(github.ref, 'refs/tags/v')
@@ -340,9 +340,9 @@ jobs:
       run: sha256sum -- * > SHA256SUMS
 
     # The Homebrew formula, the Scoop manifest and the winget manifest for
-    # this release, from its checksums; publishing them to the tap
-    # (pwittchen/homebrew-tap, as Formula/jrs.rb), the bucket and
-    # winget-pkgs is a step the maintainer takes.
+    # this release, from its checksums. `homebrew` below gets the formula into
+    # the tap; publishing the other two to a bucket and to winget-pkgs is a
+    # step the maintainer takes.
     - uses: actions/checkout@v7
       with:
         path: source
@@ -361,6 +361,27 @@ jobs:
       env:
         GH_TOKEN: ${{ github.token }}
       run: gh release create "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME" --generate-notes --verify-tag
+
+  # Has the tap (pwittchen/homebrew-tap) take this release: its Update formulae
+  # workflow writes Formula/jrs.rb, checks it against SHA256SUMS and commits
+  # `jrs <version>`, so there is one way into the tap and this repository
+  # needs no write access to it. HOMEBREW_TAP_TOKEN is a fine-grained token
+  # for that one repository, with Actions read and write. The release is out
+  # by now and nothing waits on this job: a failure, here or in the tap's run,
+  # is a red job to retry, and a retry of either changes nothing once the
+  # formula is at this version.
+  homebrew:
+    if: github.repository == 'pwittchen/jrs' && startsWith(github.ref, 'refs/tags/v')
+    needs: release
+    runs-on: ubuntu-24.04
+
+    permissions: {}
+
+    steps:
+    - name: Update the formula in the tap
+      env:
+        GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+      run: gh workflow run update-formulae.yml --repo pwittchen/homebrew-tap --ref master -f formula=jrs -f version="${GITHUB_REF_NAME#v}"
 
   # The website shows the crate version, and the version commit pushed by
   # `bump` triggers no workflow of its own, so the site is republished from it

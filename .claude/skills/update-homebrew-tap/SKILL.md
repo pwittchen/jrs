@@ -8,7 +8,10 @@ allowed-tools: Bash(gh auth status:*), Bash(gh release view:*), Bash(gh release 
 # Update the Homebrew tap
 
 Put a jrs release's formula into the tap, so `brew install pwittchen/tap/jrs`
-and `brew upgrade jrs` get it (`specs/HOMEBREW.md` §4). The tap is
+and `brew upgrade jrs` get it (`specs/HOMEBREW.md` §4). A release does this by
+itself, through the `homebrew` job in `rust.yml`; this skill is for what that
+does not cover: a release it missed, and the full `brew` checks after a change
+to `packaging/manifests.sh`. The tap is
 `github.com/pwittchen/homebrew-tap`; its one jrs file is `Formula/jrs.rb`,
 which `packaging/manifests.sh` writes from a release's `SHA256SUMS`. Nothing in
 the jrs repository changes.

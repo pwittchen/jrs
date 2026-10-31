@@ -3,9 +3,8 @@
 Every milestone in [SPEC §12](SPEC.md#12-roadmap) has landed, and so have
 workspaces, the IntelliJ plugin, the corpus, the benchmarks against Maven
 and Gradle and the gaps they showed. What is left is the last few projects
-the corpus cannot take end to end, the cells where Gradle still wins, the
-release steps still done by hand and the cost of lowering the bar to try
-jrs. This roadmap is five items, in order.
+the corpus cannot take end to end, the cells where Gradle still wins and the
+cost of lowering the bar to try jrs. This roadmap is five items, in order.
 
 The roadmap before this one, with the positioning ("Where jrs is aimed"), the
 IntelliJ plugin's open items and the table of ideas that need a spec decision
@@ -79,16 +78,16 @@ Nothing here gets code until a measurement says where the time goes.
 
 [CLAUDE.md](CLAUDE.md), [specs/HOMEBREW.md](specs/HOMEBREW.md)
 
-A `v*` tag builds and publishes everything, but two steps are still by hand:
+A `v*` tag builds and publishes everything, and two steps were still by hand:
 
-- ⬜ **The Homebrew tap updated by the release**: `release` commits
-  `Formula/jrs.rb` to `pwittchen/homebrew-tap` from the checksums it
-  already has, instead of copying it over by hand.
-- ⬜ **The IntelliJ plugin's version from the tag**: `bump` writes
-  `pluginVersion` in `plugins/intellij/gradle.properties` too, or the reason
-  it stays independent is written down.
+- ✅ **The Homebrew tap updated by the release**: the `homebrew` job, after
+  `release`, dispatches the tap's Update formulae workflow, which commits
+  `Formula/jrs.rb` to `pwittchen/homebrew-tap` after checking it against the
+  release's checksums. It needs the `HOMEBREW_TAP_TOKEN` secret.
+- ✅ **The IntelliJ plugin's version**: it stays independent of the tag, and
+  [its README](plugins/intellij/README.md) says why.
 
-**Status: ⬜ to do.**
+**Status: ✅ done.**
 
 ## 4. Reaching more users
 

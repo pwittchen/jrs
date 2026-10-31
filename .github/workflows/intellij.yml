@@ -7,7 +7,8 @@ name: IntelliJ plugin
 # inspection is tested against. The release pipeline in rust.yml calls it with
 # the version commit and `upload: true`, and the archive it keeps becomes the
 # release's `jrs-intellij.zip`. The plugin's version is `pluginVersion` in its
-# gradle.properties, set by hand: a release does not change it.
+# gradle.properties, set by hand: a release does not change it, for the reason
+# in the plugin's README.
 on:
   push:
     branches: [ "master" ]

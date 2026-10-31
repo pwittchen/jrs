@@ -6,11 +6,10 @@ How to make jrs installable with
 brew install pwittchen/tap/jrs
 ```
 
-Status: **done, for 0.14.6.** [`pwittchen/homebrew-tap`](https://github.com/pwittchen/homebrew-tap)
+Status: **done.** [`pwittchen/homebrew-tap`](https://github.com/pwittchen/homebrew-tap)
 serves `Formula/jrs.rb`, which passes `brew style`, `brew audit --strict`,
 `brew install` and `brew test`, and the docs list the install line. Each
-release's formula is still copied into the tap by hand (§4); automating it
-and homebrew-core (§5) are open.
+release updates the tap (§4); homebrew-core (§5) is open.
 
 ## 1. What exists
 
@@ -61,21 +60,45 @@ projects later.
 
 ## 4. Each release
 
-Copy the new `homebrew/jrs.rb` from the release's `package-manifests`
-artifact over `Formula/jrs.rb` in the tap, and commit it.
+Nothing by hand. The `homebrew` job in `rust.yml` runs after `release`, only
+on a `v*` tag and only in `pwittchen/jrs`, and dispatches the tap's **Update
+formulae** workflow for the tag's version:
 
-The Claude Code skill `/update-homebrew-tap [version] [tap checkout]`
-([`.claude/skills/update-homebrew-tap`](../.claude/skills/update-homebrew-tap/SKILL.md))
-does this end to end. It defaults to the latest release and `../homebrew-tap`,
-and writes the formula from the release's `SHA256SUMS` with the checkout's
-current `manifests.sh`. It checks the formula with `brew style`,
-`brew audit --strict`, `brew install` and `brew test` from a throwaway local
-tap, commits `jrs <version>` in the tap, and pushes only on a yes.
+```sh
+gh workflow run update-formulae.yml --repo pwittchen/homebrew-tap \
+  --ref master -f formula=jrs -f version=<version>
+```
 
-Optionally automate it: a step at the end of `release` that clones the tap,
-copies the formula and pushes, with a fine-grained token that can write to
-`homebrew-tap` only, kept as a repository secret. Publishing is a manual
-step today on purpose, so this is a decision, not a fix.
+That workflow (`scripts/update-formulae.sh` in the tap) writes the formula with
+the tag's `manifests.sh`, checks every URL and checksum against the release's
+`SHA256SUMS`, runs `brew style`, commits `jrs <version>` and pushes. The tap
+stays the one place that writes to itself, whether the run came from a release
+or from its Actions tab, and jrs holds no write access to its contents.
+
+The secret is `HOMEBREW_TAP_TOKEN`: a fine-grained token for
+`pwittchen/homebrew-tap` alone, with the repository permission **Actions: read
+and write**. It expires, and the job fails until it is replaced.
+
+Nothing depends on the job, as [REACH §2.5](todo/REACH.md#25-failure-policy)
+asks: the GitHub release, its assets and `install.sh` are out before it starts,
+and the website does not wait for it. A failure is a red job to retry, in this
+repository if the dispatch failed and in the tap if its run did; the job
+returns as soon as the run is dispatched, so a run that fails in the tap shows
+red there and not here. A retry changes nothing once the formula is at the
+version. The tap's script takes `X.Y.Z` only, so a tag such as `v1.0.0-rc.1`
+leaves the formula where it is, and a red run in the tap.
+
+The release run checks less than a person does: `brew audit --strict`,
+`brew install` and `brew test` are not part of it. A release changes only the
+version and the checksums, so that is enough until `manifests.sh` changes. After
+a change to the formula's content, or to backfill a release, use the Claude Code
+skill `/update-homebrew-tap [version] [tap checkout]`
+([`.claude/skills/update-homebrew-tap`](../.claude/skills/update-homebrew-tap/SKILL.md)).
+It defaults to the latest release and `../homebrew-tap`, and writes the formula
+from the release's `SHA256SUMS` with the checkout's current `manifests.sh`. It
+checks the formula with `brew style`, `brew audit --strict`, `brew install` and
+`brew test` from a throwaway local tap, commits `jrs <version>` in the tap, and
+pushes only on a yes.
 
 ## 5. Later: homebrew-core
 

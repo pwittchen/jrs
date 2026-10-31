@@ -48,9 +48,18 @@ uses the [IntelliJ Platform Gradle Plugin](https://plugins.jetbrains.com/docs/in
 2.x and Kotlin.
 
 Each jrs release carries the plugin as `jrs-intellij.zip`, built by CI
-(`.github/workflows/intellij.yml`) at the version `pluginVersion` holds. A
-release does not change that version; it is bumped by hand. The same
-workflow runs `test` and `buildPlugin` on every change to the plugin.
+(`.github/workflows/intellij.yml`) at the version `pluginVersion` holds. The
+same workflow runs `test` and `buildPlugin` on every change to the plugin.
+
+`pluginVersion` is bumped by hand, in the change that needs a new version of
+the plugin, and a release leaves it alone. It says when the plugin changed, and
+most releases of jrs do not change it: 0.11.0 to 0.14.8 all shipped the same
+plugin as 0.2.0. The plugin works with those releases because it reads
+`jrs metadata` and calls the `jrs` on the machine; it is not built against
+them. A version on the JetBrains Marketplace is an upload by hand, too, so taking
+the tag's version would either publish identical plugins or leave the
+Marketplace behind the zip. The release pipeline did write the tag's version
+once, and 0.10.0 took the plugin from 0.1.1 to 0.10.0 with nothing else changed.
 
 ## Installing
 

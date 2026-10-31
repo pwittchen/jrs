@@ -52,11 +52,11 @@ Rust code.
   `brew install pwittchen/tap/jrs` works. Done: `specs/HOMEBREW.md`. The formula `manifests.sh` writes
   already installs the binary, generates completions from `jrs completions`
   and tests `jrs --version`.
-- A `homebrew` job after `release`, which checks out the tap with a
-  fine-grained token scoped to that one repository (secret
-  `HOMEBREW_TAP_TOKEN`), copies the formula in and commits
-  `jrs <version>`. The job runs only on a `v*` tag and only from
-  `pwittchen/jrs`, never from a fork.
+- A `homebrew` job after `release`, which dispatches the tap's own Update
+  formulae workflow with a fine-grained token scoped to that one repository
+  (secret `HOMEBREW_TAP_TOKEN`); that workflow commits `jrs <version>`. The job
+  runs only on a `v*` tag and only from `pwittchen/jrs`, never from a fork.
+  Done: `specs/HOMEBREW.md` §4.
 - `homebrew-core` is a later step: it wants the formula to build from
   source and a project with some notability, neither of which is the first
   release's problem.
@@ -65,7 +65,8 @@ Rust code.
 
 A bucket repository, `pwittchen/scoop-jrs`, holding `bucket/jrs.json`
 (`scoop bucket add jrs https://github.com/pwittchen/scoop-jrs`), updated by
-a `scoop` job exactly as §2.1, with its own scoped token. The manifest
+a `scoop` job with its own scoped token, which checks out the bucket, copies
+the manifest in and commits it. The manifest
 already names `jrs.exe` and carries both architectures.
 
 ### 2.3 winget
