@@ -96,7 +96,7 @@
 
 .stats {
   display: grid;
-  /* The five wins on one line, hence the smaller type than the losses'. */
+  /* The tally's five on one line, hence the smaller type than the tiles'. */
   grid-template-columns: repeat(5, minmax(0, 1fr));
   gap: 1px;
   margin: 0;
@@ -135,25 +135,26 @@
   font-variant-numeric: tabular-nums;
 }
 
-/* The losses, as prominent as the wins, told apart by more than colour:
-   their own heading, and three tiles to the wins' five. */
+/* The wins in two rows of three, and the losses, as prominent, under them:
+   told apart by more than colour, with a heading of their own. */
+.stats.wins,
 .stats.slower {
   grid-template-columns: repeat(3, minmax(0, 1fr));
 }
 
-.stats:not(.slower) > div {
+.stats:not(.wins, .slower) > div {
   padding: 1.1rem 0.9rem 1.2rem;
 }
 
-.stats:not(.slower) dt {
+.stats:not(.wins, .slower) dt {
   font-size: 0.74rem;
 }
 
-.stats:not(.slower) .value {
+.stats:not(.wins, .slower) .value {
   font-size: 1.6rem;
 }
 
-.stats:not(.slower) .versus {
+.stats:not(.wins, .slower) .versus {
   font-size: 0.76rem;
 }
 
@@ -694,6 +695,7 @@
 
 @media (max-width: 52rem) {
   .verdicts,
+  .stats.wins,
   .stats.slower {
     grid-template-columns: minmax(0, 1fr);
   }
