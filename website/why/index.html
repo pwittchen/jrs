@@ -309,9 +309,7 @@ tasks.withType&lt;AbstractArchiveTask&gt;().configureEach {
         <h2 id="stay">When to stay with Maven or Gradle</h2>
         <p class="section-lede">
           jrs is <strong class="experimental">experimental</strong> and deliberately narrow. These
-          are the cases it does not cover today; the
-          <a href="https://github.com/pwittchen/jrs/blob/master/ROADMAP.md">roadmap</a> says which
-          of them may change.
+          are the cases it does not cover today.
         </p>
         <ul class="limits">
           <li><strong>Modules that configure each other.</strong> Multi-module projects build as workspaces of declared members; <code>subprojects { }</code> code, build logic at the root and composite builds across repositories have no counterpart.</li>

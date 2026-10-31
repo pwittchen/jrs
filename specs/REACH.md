@@ -5,7 +5,7 @@ of which changes how a build works: jrs in Homebrew and the plugin on the
 JetBrains Marketplace; a guide for coding agents; and `jrs install`, which
 puts a jar and a POM into `~/.m2` so another project can depend on it.
 
-Status: **done**, as section 4 of [ROADMAP.md](../ROADMAP.md). One part
+Status: **done**, as section 8.4 of [ROADMAP_ARCHIVE.md](ROADMAP_ARCHIVE.md). One part
 crossed a line drawn in [SPEC §1.2](../SPEC.md#12-non-goals): §4 ("Publishing
 artifacts to a repository"), which argues for the narrowing it needed. Scoop
 and winget were part of this plan and were dropped: `packaging/manifests.sh`
