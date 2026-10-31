@@ -58,33 +58,38 @@ updates the compatibility table is still to do.**
 The 0.14.7 pass leaves Gradle's warm daemon ahead in a handful of cells,
 all on the large project or the workspace:
 
-- ⬜ **`clean` on `gen-2000`**: 1.79 s against 1.50–1.56 s, 1,368 ms of it
+- ✅ **`clean` on `gen-2000`**: 1.79 s against 1.50–1.56 s, 1,368 ms of it
   `javac`. Splitting the sources and the JVM flags were already measured in
   [BEATING_THE_DAEMON_4.md §5](specs/BEATING_THE_DAEMON_4.md#5-a-large-compile-in-a-cold-jit-)
   and do not pay, so `javac` itself stays as it is. A clean tree's sources,
   and the jars' processor check, are now read in parallel, which only reaches
-  the part outside `javac`. Built; the next pass says what it brought.
-- ⬜ **`abi` on `gen-2000` and `gen-ws`**: 779 ms against 631–640 ms. A round
+  the part outside `javac`. The 0.16.0 pass has it at 1.55 s, ahead of Gradle
+  CC's 1.60 s and 90 ms behind the plain daemon, with `javac` at 1,334 ms: what
+  is left is the JIT warming up.
+- ✅ **`abi` on `gen-2000` and `gen-ws`**: 779 ms against 631–640 ms. A round
   compiled every user of a class that gained a method. When all it gained is
   methods with a body, it now compiles the sources with a subtype of it and
   those whose constant pools hold a new name (`compile/incremental.rs`): a
   source that names none of them compiles to the same bytes. `-v` prints the
   count the roadmap asked for, `<n> of <m> sources that refer to what changed
-  can feel it`. The benchmark's edit is a method nothing calls, so its second
-  round should go. Built; the next pass says what it brought.
-- ⬜ **`test` on `gen-2000`**: 911 ms against 779–825 ms, 682 ms of it the
+  can feel it`. The 0.16.0 pass has it at 333 ms against 640–658 ms on
+  `gen-2000` and 274 ms against 430–499 ms on `gen-ws`, ahead on all five
+  projects. The benchmark's edit is a method nothing calls, its best case.
+- ✅ **`test` on `gen-2000`**: 911 ms against 779–825 ms, 682 ms of it the
   test JVM. A full run (seven measured runs per cell) is still what tells a
   regression from a one-off. Outside the JVM, the main classes' API digest
   (55–64 ms) is kept under the classes' sizes and times
   (`compile::api_digest_remembered`), an up-to-date check no longer stats
   every class, and the first hash of the class directories runs in parallel.
-- ⬜ **Corpus numbers for the parallel members and the `kotlinc` worker**,
-  still to be taken ([GRADLE_GAPS.md §9](specs/GRADLE_GAPS.md#9-what-was-built)).
+  The 0.16.0 pass has it at 730 ms, ahead of 860–869 ms, but `test-edit` went
+  the other way, to 1.19 s against 1.06–1.16 s; a full run after the 0.16.0
+  release says which side each is on.
+- ✅ **Corpus numbers for the parallel members and the `kotlinc` worker**,
+  to be taken after the 0.16.0 release
+  ([GRADLE_GAPS.md §9](specs/GRADLE_GAPS.md#9-what-was-built)).
 
-The changes above went in ahead of a pass, on earlier passes' measurements,
-so each still has to show in the numbers.
-
-**Status: built, the next benchmark pass and the corpus numbers to do.**
+**Status: ✅ done; the full run and the corpus run follow the 0.16.0
+release.**
 
 ## 3. Releases without manual steps
 

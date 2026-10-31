@@ -88,21 +88,21 @@
       </section>
 
       <section class="wrap section" aria-labelledby="fast">
-        <h2 id="fast">Fast, as of 0.14.7</h2>
+        <h2 id="fast">Fast, as of 0.16.0</h2>
         <p class="section-lede">
           jrs is one native binary that keeps nothing running between builds, and the newest
           release is faster than Maven and a warm Gradle daemon wherever a working day spends
-          most of its time: a no-op build of a Spring Boot app in 62&nbsp;ms against the
-          daemon's 464&nbsp;ms and Maven's 1.07&nbsp;s, a one-file edit in 2000 classes in
-          383&nbsp;ms against 588&nbsp;ms and 2.63&nbsp;s, and a Spring Boot fat jar in
-          170&nbsp;ms against 499&nbsp;ms and 1.57&nbsp;s. A cold build, from an empty cache,
-          takes 1.0&ndash;1.8&nbsp;s against Gradle's 12&ndash;15&nbsp;s. Against Gradle without
+          most of its time: a no-op build of a Spring Boot app in 61&nbsp;ms against the
+          daemon's 445&nbsp;ms and Maven's 862&nbsp;ms, a one-file edit in 2000 classes in
+          347&nbsp;ms against 589&nbsp;ms and 5.16&nbsp;s, and a Spring Boot fat jar in
+          155&nbsp;ms against 504&nbsp;ms and 1.98&nbsp;s. A cold build, from an empty cache,
+          takes 1.0&ndash;1.7&nbsp;s against Gradle's 13&ndash;18&nbsp;s. Against Gradle without
           a daemon and against Maven, which is what CI sees, it is faster in every case measured.
         </p>
         <p class="note">
-          It is not faster everywhere: an API change or a clean build in a large project or a
-          workspace, and the full test suite of a 2000-class project, are still a little
-          quicker on a warm Gradle daemon. The
+          It is not faster everywhere: a clean build in a large project or a workspace, and the
+          tests after an edit in a 2000-class project, are still a little quicker on a warm
+          Gradle daemon. The
           <a href="../benchmarks/">benchmarks</a> have every number, release by release, the
           losses included.
         </p>
@@ -337,8 +337,8 @@ jrs package --fat</code></pre>
           <button class="copy" type="button">Copy</button>
         </div>
         <p class="note">
-          On the same projects, a no-op build takes jrs 60&ndash;90&nbsp;ms against a warm
-          Gradle daemon's 320&ndash;460 and Maven's 1.1&ndash;1.5&nbsp;s. The <a href="../benchmarks/">benchmarks</a> have every
+          On the same projects, a no-op build takes jrs 60&ndash;80&nbsp;ms against a warm
+          Gradle daemon's 310&ndash;450 and Maven's 0.9&ndash;1.6&nbsp;s. The <a href="../benchmarks/">benchmarks</a> have every
           number, the cases where jrs is slower included.
         </p>
         <div class="cta">
