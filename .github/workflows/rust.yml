@@ -34,71 +34,12 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  build:
-    if: github.event_name != 'push' || startsWith(github.ref, 'refs/tags/') || !contains(github.event.head_commit.message, '#no-deploy')
-
-    # Classpath separators, `.exe` suffixes, `%LOCALAPPDATA%` and drive-letter
-    # paths are only exercised where they occur, so every platform jrs ships a
-    # binary for runs the whole suite.
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ ubuntu-24.04, macos-latest, windows-latest ]
-
-    runs-on: ${{ matrix.os }}
-
-    defaults:
-      run:
-        shell: bash
-
-    steps:
-    - uses: actions/checkout@v7
-
-    # The integration tests build fixture Java projects, so they need a JDK.
-    # jrs itself requires 17 or newer.
-    - name: Set up the JDK
-      uses: actions/setup-java@v6
-      with:
-        distribution: temurin
-        java-version: '21'
-
-    # setup-java registers problem matchers that turn javac and JVM error lines
-    # into annotations. Here those lines only come from test fixtures that fail
-    # on purpose, so the annotations are noise on a green build.
-    - name: Drop the Java problem matchers
-      run: |
-        echo "::remove-matcher owner=javac::"
-        echo "::remove-matcher owner=java::"
-        echo "::remove-matcher owner=maven-javac::"
-
-    # Formatting does not depend on the platform; checking it once is enough.
-    - name: Check formatting
-      if: runner.os == 'Linux'
-      run: cargo fmt --check
-
-    - name: Lint
-      run: cargo clippy --all-targets -- -D warnings
-
-    - name: Build
-      run: cargo build --verbose
-
-    # The default test run is hermetic: dependency resolution is exercised
-    # against a file:// repository fixture, not Maven Central.
-    - name: Run tests
-      run: cargo test --verbose
-
-    # The tests that do reach Maven Central are gated behind a feature flag.
-    # They exercise the network, not the platform, so Linux alone runs them.
-    - name: Run the network tests
-      if: runner.os == 'Linux'
-      run: cargo test --verbose --features network-tests --test network
-
   # Byte-identical jars are load-bearing, and unit tests only see jrs's own
   # writer. Each example — Java, Kotlin, Scala, Groovy and a Spring Boot
   # service, with the real compilers — is built twice, from two checkouts at
   # different paths and without the build cache, and everything `jrs package`
   # writes is compared byte for byte: a compiler that records a path or a
-  # time fails here.
+  # time fails here. The first job of the pipeline: everything else waits on it.
   reproducible:
     if: github.event_name != 'push' || startsWith(github.ref, 'refs/tags/') || !contains(github.event.head_commit.message, '#no-deploy')
     runs-on: ubuntu-24.04
@@ -170,6 +111,85 @@ jobs:
           failed=$((failed | differ))
         done
         exit "$failed"
+
+  # Known vulnerabilities in Cargo.lock, from the RustSec advisory database. It
+  # reads the database as it is today, so an advisory published since the last
+  # run fails an unchanged commit: that is the point, and `cargo update` on the
+  # crate it names is the usual fix. Nothing that builds or releases runs until
+  # this has passed.
+  audit:
+    if: github.event_name != 'push' || startsWith(github.ref, 'refs/tags/') || !contains(github.event.head_commit.message, '#no-deploy')
+    needs: reproducible
+    runs-on: ubuntu-24.04
+
+    steps:
+    - uses: actions/checkout@v7
+
+    - name: Install cargo-audit
+      run: cargo install cargo-audit --locked
+
+    - name: Audit the dependencies
+      run: cargo audit
+
+  build:
+    if: github.event_name != 'push' || startsWith(github.ref, 'refs/tags/') || !contains(github.event.head_commit.message, '#no-deploy')
+    needs: audit
+
+    # Classpath separators, `.exe` suffixes, `%LOCALAPPDATA%` and drive-letter
+    # paths are only exercised where they occur, so every platform jrs ships a
+    # binary for runs the whole suite.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ ubuntu-24.04, macos-latest, windows-latest ]
+
+    runs-on: ${{ matrix.os }}
+
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+    - uses: actions/checkout@v7
+
+    # The integration tests build fixture Java projects, so they need a JDK.
+    # jrs itself requires 17 or newer.
+    - name: Set up the JDK
+      uses: actions/setup-java@v6
+      with:
+        distribution: temurin
+        java-version: '21'
+
+    # setup-java registers problem matchers that turn javac and JVM error lines
+    # into annotations. Here those lines only come from test fixtures that fail
+    # on purpose, so the annotations are noise on a green build.
+    - name: Drop the Java problem matchers
+      run: |
+        echo "::remove-matcher owner=javac::"
+        echo "::remove-matcher owner=java::"
+        echo "::remove-matcher owner=maven-javac::"
+
+    # Formatting does not depend on the platform; checking it once is enough.
+    - name: Check formatting
+      if: runner.os == 'Linux'
+      run: cargo fmt --check
+
+    - name: Lint
+      run: cargo clippy --all-targets -- -D warnings
+
+    - name: Build
+      run: cargo build --verbose
+
+    # The default test run is hermetic: dependency resolution is exercised
+    # against a file:// repository fixture, not Maven Central.
+    - name: Run tests
+      run: cargo test --verbose
+
+    # The tests that do reach Maven Central are gated behind a feature flag.
+    # They exercise the network, not the platform, so Linux alone runs them.
+    - name: Run the network tests
+      if: runner.os == 'Linux'
+      run: cargo test --verbose --features network-tests --test network
 
   # A version tag sets the crate version: `v1.2.3` writes `version = "1.2.3"` to
   # Cargo.toml and Cargo.lock, and commits that to master, so the release is

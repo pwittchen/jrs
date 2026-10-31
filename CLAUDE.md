@@ -33,11 +33,15 @@ warnings, fix them — in the code where the lint has a point, or with a local
 `#[allow(..., reason = "...")]` where the code is deliberate — and run it again
 until it is clean. Only then mark the task as done.
 
-CI (`.github/workflows/rust.yml`) runs exactly those four on Linux, macOS and
-Windows (`fmt` on Linux only), plus the network tests on Linux, on push and PR
-against `master`. Its `reproducible` job packages every `examples/` project
-from two checkouts at different paths and compares what was written byte for
-byte: a compiler or writer that records a path or a time fails there. Changes that only touch `*.md`, `specs/`, `LICENSE` or `website/` are
+CI (`.github/workflows/rust.yml`) goes `reproducible` → `audit` → `build`, each
+needing the one before, so a failure in any of them skips the rest and fails the
+run, on push and PR against `master`. `reproducible` packages every `examples/`
+project from two checkouts at different paths and compares what was written byte
+for byte: a compiler or writer that records a path or a time fails there.
+`audit` runs `cargo audit` against today's advisory database, so an advisory
+published since the last run fails an unchanged commit, and a tag too. `build`
+runs exactly those four on Linux, macOS and Windows (`fmt` on Linux only), plus
+the network tests on Linux. Changes that only touch `*.md`, `specs/`, `LICENSE` or `website/` are
 excluded via `paths-ignore` — they cannot break the build, so they do not run it;
 neither do changes under `plugins/`. A branch push whose last commit message
 contains `#no-deploy` runs no job in `rust.yml`, `intellij.yml` or `website.yml`;
