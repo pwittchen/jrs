@@ -433,7 +433,7 @@ fn exercise(root: &Path, jar: &str, expected_output: &str, tests: &str) -> Vec<S
 
     let mut archive = zip::ZipArchive::new(std::fs::File::open(&jar).unwrap()).unwrap();
     (0..archive.len())
-        .map(|i| archive.by_index(i).unwrap().name().to_string())
+        .map(|i| archive.by_index(i).unwrap().name().unwrap().to_string())
         .collect()
 }
 

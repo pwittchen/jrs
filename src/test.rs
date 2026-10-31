@@ -639,11 +639,13 @@ fn jar_entries(jar: &Path, dir: &Path) -> std::result::Result<Vec<String>, Strin
     }
     let file = std::fs::File::open(jar).map_err(|e| format!("{}: {e}", jar.display()))?;
     let archive = zip::ZipArchive::new(file).map_err(|e| format!("{}: {e}", jar.display()))?;
-    let names: Vec<String> = archive
-        .file_names()
-        .filter(|n| shadows(n))
-        .map(str::to_string)
-        .collect();
+    let mut names = Vec::new();
+    for name in archive.file_names() {
+        let name = name.map_err(|e| format!("{}: {e}", jar.display()))?;
+        if shadows(&name) {
+            names.push(name.into_owned());
+        }
+    }
     let mut text = format!("{stamp}\n");
     for name in &names {
         text.push_str(name);

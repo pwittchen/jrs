@@ -428,7 +428,7 @@ fn jar_entries(jar: &Path) -> Vec<String> {
     let file = std::fs::File::open(jar).unwrap();
     let mut archive = zip::ZipArchive::new(file).unwrap();
     (0..archive.len())
-        .map(|i| archive.by_index(i).unwrap().name().to_string())
+        .map(|i| archive.by_index(i).unwrap().name().unwrap().to_string())
         .collect()
 }
 

@@ -389,7 +389,7 @@ fn unzip(archive: &Path, into: &Path) -> Result<()> {
         let Some(relative) = entry.enclosed_name() else {
             return Err(bad(&format!(
                 "the entry {} escapes the archive",
-                entry.name()
+                entry.name().unwrap_or_default()
             )));
         };
         let path = into.join(relative);

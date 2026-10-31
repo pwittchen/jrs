@@ -256,7 +256,7 @@ mod tests {
                 let mut entry = archive.by_index(i).unwrap();
                 let mut text = String::new();
                 entry.read_to_string(&mut text).unwrap();
-                (entry.name().to_string(), entry.unix_mode(), text)
+                (entry.name().unwrap().to_string(), entry.unix_mode(), text)
             })
             .collect()
     }

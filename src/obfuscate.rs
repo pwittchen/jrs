@@ -109,7 +109,9 @@ pub fn service_classes(jar: &Path) -> Result<Vec<String>> {
         let entry = archive
             .by_index(i)
             .map_err(|e| JrsError::build(format!("{}: {e}", jar.display())))?;
-        let name = entry.name();
+        let name = entry
+            .name()
+            .map_err(|e| JrsError::build(format!("{}: {e}", jar.display())))?;
         if !name.starts_with("META-INF/services/") || name.ends_with('/') {
             continue;
         }

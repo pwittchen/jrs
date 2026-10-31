@@ -2550,7 +2550,7 @@ fn a_remote_serves_task_entries_only_when_told_to() {
                 let mut file = archive.by_index(i).unwrap();
                 let mut bytes = Vec::new();
                 std::io::Read::read_to_end(&mut file, &mut bytes).unwrap();
-                let name = file.name().to_string();
+                let name = file.name().unwrap().to_string();
                 if name.ends_with("client.txt") {
                     bytes = b"forged".to_vec();
                 }
@@ -4004,7 +4004,7 @@ fn a_project_needing_a_newer_jrs_stops_before_any_warning() {
 fn zip_names(path: &Path) -> Vec<String> {
     let mut archive = zip::ZipArchive::new(std::fs::File::open(path).unwrap()).unwrap();
     (0..archive.len())
-        .map(|i| archive.by_index(i).unwrap().name().to_string())
+        .map(|i| archive.by_index(i).unwrap().name().unwrap().to_string())
         .collect()
 }
 

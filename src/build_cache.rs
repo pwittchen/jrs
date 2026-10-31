@@ -535,7 +535,7 @@ pub fn executables(bytes: &[u8]) -> Option<HashSet<String>> {
     for i in 0..archive.len() {
         let file = archive.by_index_raw(i).ok()?;
         if file.unix_mode().is_some_and(|m| m & 0o111 != 0) {
-            out.insert(file.name().to_string());
+            out.insert(file.name().ok()?.to_string());
         }
     }
     Some(out)
@@ -552,7 +552,7 @@ pub fn unzip(bytes: &[u8]) -> Option<Entries> {
         if file.is_dir() {
             continue;
         }
-        let name = file.name().to_string();
+        let name = file.name().ok()?.to_string();
         let safe = !name.is_empty()
             && !name.starts_with('/')
             && !name.contains('\\')

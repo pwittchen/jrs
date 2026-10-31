@@ -325,7 +325,10 @@ pub fn write_fat_jar(
             if entry.is_dir() {
                 continue;
             }
-            let name = entry.name().to_string();
+            let name = entry
+                .name()
+                .map_err(|e| JrsError::build(format!("{}: {e}", jar.display())))?
+                .to_string();
             if is_dropped(&name) {
                 continue;
             }
@@ -787,7 +790,7 @@ fn write_jar<R: Read + Seek>(
             let source = archives[*archive]
                 .by_index_raw(*index)
                 .map_err(build_error)?;
-            if source.name() == name.as_str()
+            if source.name().is_ok_and(|n| n == name.as_str())
                 && source.compression() == zip::CompressionMethod::Deflated
                 && !source.encrypted()
             {
@@ -1020,7 +1023,7 @@ mod tests {
         let mut out = BTreeMap::new();
         for i in 0..archive.len() {
             let mut entry = archive.by_index(i).unwrap();
-            let name = entry.name().to_string();
+            let name = entry.name().unwrap().to_string();
             let mut bytes = Vec::new();
             entry.read_to_end(&mut bytes).unwrap();
             out.insert(name, bytes);
@@ -1032,7 +1035,7 @@ mod tests {
         let file = std::fs::File::open(path).unwrap();
         let mut archive = zip::ZipArchive::new(file).unwrap();
         (0..archive.len())
-            .map(|i| archive.by_index(i).unwrap().name().to_string())
+            .map(|i| archive.by_index(i).unwrap().name().unwrap().to_string())
             .collect()
     }
 
@@ -1136,7 +1139,7 @@ mod tests {
         for i in 0..archive.len() {
             let entry = archive.by_index(i).unwrap();
             if entry.is_dir() {
-                directories.push(entry.name().to_string());
+                directories.push(entry.name().unwrap().to_string());
             }
         }
         assert_eq!(
