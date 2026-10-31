@@ -2989,6 +2989,69 @@ local = { url = "file://~/.m2/repository", groups = ["com.acme"] }
 </p>
 </section>
 
+<section id="agents">
+<h2>For coding agents and scripts</h2>
+<p>Everything here is what jrs already does; none of it needs a special mode.</p>
+<h3>The loop</h3>
+<p>
+  <code>jrs build</code>, then <code>jrs test</code>, then <code>jrs run -- &lt;args&gt;</code>.
+  While fixing something, <code>jrs test --filter &lt;regex&gt;</code>,
+  <code>--method &lt;class#method&gt;</code> and <code>--rerun-failed</code> narrow the run.
+  <code>jrs test</code> runs only the test classes a change since the last run reaches, so fewer
+  classes than exist can be correct; <code>jrs test --all</code> runs every one.
+</p>
+<h3>Output</h3>
+<p>
+  Animation and colour are already off when stderr is not a terminal, or when
+  <code>NO_COLOR</code> or <code>TERM=dumb</code> is set, and a CI variable such as
+  <code>CI</code> turns the animation off; <code>--progress never --color never</code> says so
+  outright. Phase lines go to stderr. What a command reports goes to stdout:
+  <code>classpath</code>, <code>metadata</code>, <code>tree</code>, <code>outdated</code>,
+  <code>licenses</code>, <code>task --list</code>, the JUnit tree and the program
+  <code>jrs run</code> starts.
+</p>
+<h3>Exit codes</h3>
+<table>
+  <thead><tr><th>Code</th><th>Meaning</th><th>What to do</th></tr></thead>
+  <tbody>
+    <tr><td><code>0</code></td><td>Success</td><td></td></tr>
+    <tr><td><code>1</code></td><td>A build or test failed</td><td>Fix the code</td></tr>
+    <tr><td><code>2</code></td><td>Usage or manifest error</td><td>Fix the command or <code>jrs.toml</code></td></tr>
+    <tr><td><code>101</code></td><td>A bug in jrs</td><td>Report it</td></tr>
+  </tbody>
+</table>
+<p><code>jrs run</code> and <code>jrs task &lt;name&gt;</code> return the program's own code.</p>
+<h3>Errors</h3>
+<p>
+  jrs prints <code>error: ...</code>. The toolchain's output comes through verbatim,
+  <code>javac</code>'s <code>File.java:12: error:</code> lines and the JUnit tree, so the usual
+  parsers work. JUnit's XML is in <code>target/test-reports</code>.
+</p>
+<h3>Changing dependencies and reading the project</h3>
+<p>
+  Use <code>jrs add</code> and <code>jrs remove</code> rather than editing <code>jrs.toml</code>:
+  they keep its order and comments, and re-resolve. Run <code>jrs tree --why &lt;artifact&gt;</code>
+  before adding an exclusion. <code>jrs metadata --no-deps</code> gives the roots and outputs
+  without touching the network, and <code>jrs metadata</code> adds the classpaths. Its
+  <code>version</code> goes up only when a key changes meaning or goes away.
+</p>
+<h3>What not to do</h3>
+<p>
+  Don't edit <code>jrs.lock</code> by hand or delete it to fix resolution: <code>jrs update</code>
+  exists. Don't run <code>java</code> or <code>javac</code> against paths in <code>target/</code>:
+  use <code>jrs run</code>, <code>jrs test</code>, or <code>jrs classpath</code> for an ad-hoc run.
+</p>
+<h3>For your AGENTS.md</h3>
+<pre data-lang="plain">This project builds with jrs (https://getjrs.dev/docs/).
+
+- Build: `jrs build`. Test: `jrs test`; `jrs test --all` runs every class, since
+  `jrs test` alone runs only what a change reaches. Run: `jrs run -- &lt;args&gt;`.
+- Exit code 1 means fix the code; 2 means fix the command or `jrs.toml`.
+- Change dependencies with `jrs add` and `jrs remove`, and re-resolve with
+  `jrs update`. Never edit `jrs.lock`.
+- `jrs metadata --no-deps` prints the project's layout as JSON.</pre>
+</section>
+
 <section id="annotation-processors">
 <h2>Annotation processors</h2>
 <p>

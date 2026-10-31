@@ -79,7 +79,7 @@ The secret is `HOMEBREW_TAP_TOKEN`: a fine-grained token for
 `pwittchen/homebrew-tap` alone, with the repository permission **Actions: read
 and write**. It expires, and the job fails until it is replaced.
 
-Nothing depends on the job, as [REACH §2.5](todo/REACH.md#25-failure-policy)
+Nothing depends on the job, as [REACH §2.3](REACH.md#23-failure-policy)
 asks: the GitHub release, its assets and `install.sh` are out before it starts,
 and the website does not wait for it. A failure is a red job to retry, in this
 repository if the dispatch failed and in the tap if its run did; the job

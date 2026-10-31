@@ -1,17 +1,15 @@
 # jrs — Reaching more users
 
 Three pieces of work that each make jrs cheaper to try or to keep, and none
-of which changes how a build works: jrs in the package managers and the
-plugin on the JetBrains Marketplace; a guide for coding agents; and
-`jrs install`, which puts a jar and a POM into `~/.m2` so another project
-can depend on it.
+of which changes how a build works: jrs in Homebrew and the plugin on the
+JetBrains Marketplace; a guide for coding agents; and `jrs install`, which
+puts a jar and a POM into `~/.m2` so another project can depend on it.
 
-Status: **proposed**, as section 4 of [ROADMAP.md](../../ROADMAP.md). One
-part crosses a line drawn in [SPEC §1.2](../../SPEC.md#12-non-goals): §4
-("Publishing artifacts to a repository"). It argues for the narrowing it
-needs, and §5 lists the SPEC.md edits. §2 and §3 need no spec decision at
-all. The three parts are independent and can land in any order; §6 suggests
-one.
+Status: **done**, as section 4 of [ROADMAP.md](../ROADMAP.md). One part
+crossed a line drawn in [SPEC §1.2](../SPEC.md#12-non-goals): §4 ("Publishing
+artifacts to a repository"), which argues for the narrowing it needed. Scoop
+and winget were part of this plan and were dropped: `packaging/manifests.sh`
+writes the Homebrew formula alone.
 
 Editor support beyond the IntelliJ plugin — Eclipse project files for
 VS Code and the other JDT language server clients — is not planned.
@@ -20,16 +18,15 @@ VS Code and the other JDT language server clients — is not planned.
 
 ## 1. Problem
 
-The audiences [ROADMAP_ARCHIVE.md](../ROADMAP_ARCHIVE.md) names as the
+The audiences [ROADMAP_ARCHIVE.md](ROADMAP_ARCHIVE.md) names as the
 best fit for jrs (services, command-line tools, teams for whom the JVM is a
 guest language, coding agents) meet three obstacles before they meet the
 build itself:
 
 1. **Installing jrs takes a `curl | sh`.** That is fine on a laptop and a
-   reason to say no in many companies. `brew install`, `scoop install` and
-   `winget install` are what people expect, and the release job already
-   writes all three manifests (`packaging/manifests.sh`); nothing publishes
-   them.
+   reason to say no in many companies. `brew install` is what people
+   expect, and the release job writes the formula
+   (`packaging/manifests.sh`).
 2. **An agent has to discover how to drive jrs.** Everything it needs
    exists — `--progress never`, `jrs metadata`, fixed exit codes — but it is
    spread over `DOCS.md` and written for people.
@@ -41,10 +38,9 @@ build itself:
 
 ## 2. Package managers and the JetBrains Marketplace
 
-The release job (`rust.yml`, `release`) writes the Homebrew formula, the
-Scoop manifest and the three winget files from `SHA256SUMS`, and keeps them
-as the `package-manifests` artifact. This part publishes them. It changes no
-Rust code.
+The release job (`rust.yml`, `release`) writes the Homebrew formula from
+`SHA256SUMS`, and keeps it as the `package-manifests` artifact. This part
+publishes it. It changes no Rust code.
 
 ### 2.1 Homebrew
 
@@ -61,25 +57,7 @@ Rust code.
   source and a project with some notability, neither of which is the first
   release's problem.
 
-### 2.2 Scoop
-
-A bucket repository, `pwittchen/scoop-jrs`, holding `bucket/jrs.json`
-(`scoop bucket add jrs https://github.com/pwittchen/scoop-jrs`), updated by
-a `scoop` job with its own scoped token, which checks out the bucket, copies
-the manifest in and commits it. The manifest
-already names `jrs.exe` and carries both architectures.
-
-### 2.3 winget
-
-winget publishes through pull requests to `microsoft/winget-pkgs`. A
-`winget` job runs `wingetcreate submit` on the three files `manifests.sh`
-writes, with a classic token that can fork and open pull requests
-(`WINGET_TOKEN`). The first version of `pwittchen.jrs` is submitted by
-hand, since a new package goes through manual review; the job takes over
-from the second release. The manifest's `NestedInstallerType: portable`
-already puts `jrs` on `PATH`.
-
-### 2.4 JetBrains Marketplace
+### 2.2 JetBrains Marketplace
 
 `plugins/intellij` builds with the IntelliJ Platform Gradle Plugin, which has
 `publishPlugin` and `signPlugin`. The plugin's ID is already
@@ -96,7 +74,7 @@ already puts `jrs` on `PATH`.
 - The first upload, which needs the vendor profile and the listing text, is
   done by hand. The listing reuses the plugin's README and screenshot.
 
-### 2.5 Failure policy
+### 2.3 Failure policy
 
 None of the publishing jobs may fail a release. They run after `release`,
 each on its own, and a failure is a red job the maintainer retries; the
@@ -116,10 +94,12 @@ What it covers:
   `jrs test` may run fewer classes than exist (test selection, SPEC §10.2)
   and how `--all` turns that off.
 - **Stable output.** `--progress never --color never`, and that both are
-  already the default when stderr is not a TTY, when `CI` or another CI
-  variable is set (`ui::in_ci`), or when `NO_COLOR` or `TERM=dumb` is set.
-  Phase lines go to stderr; only `jrs classpath`, `jrs metadata`,
-  `jrs task --list` and `jrs completions` write stdout.
+  already the default when stderr is not a TTY or when `NO_COLOR` or
+  `TERM=dumb` is set; a CI variable (`ui::in_ci`) turns the animation off and
+  leaves colour to the terminal. Phase lines go to stderr. What a command
+  reports goes to stdout: `classpath`, `metadata`, `tree`, `outdated`,
+  `licenses`, `task --list`, `completions`, `cache path`, `migrate`, the
+  JUnit tree and the program `jrs run` starts.
 - **Exit codes.** `0`, `1` build or test failure, `2` usage or manifest
   error, `101` a jrs bug. An agent retrying on `1` is fixing code; on `2`
   it is fixing `jrs.toml` or the command.
@@ -161,13 +141,27 @@ composite build (ROADMAP_ARCHIVE §5).
 jrs install [--repo <dir>] [--sources] [--javadoc]
 ```
 
-Runs `jrs package` and copies the thin jar, a POM (§4.4) and, with the
-flags, the sources and Javadoc jars (`--sources`, `--javadoc` as for
-`jrs package`) into `<repo>/<group path>/<artifact>/<version>/`, default
-`~/.m2/repository`. Each file is written as the cache writes one: to a
-temporary file in the destination directory, then renamed (SPEC §8.6), so
-a consumer resolving at the same moment never reads half a jar. The phase
-line is `Installed <group>:<artifact>:<version> → <dir>`.
+Runs `jrs package`, then writes a jar without a `Class-Path`, and copies it,
+a POM (§4.4) and, with the flags, the sources and Javadoc jars (`--sources`,
+`--javadoc` as for `jrs package`) into
+`<repo>/<group path>/<artifact>/<version>/`. The repository is `--repo`, or
+`<localRepository>` in `~/.m2/settings.xml`, or `~/.m2/repository`. A
+repository moved there is where `mvn` looks, so an install anywhere else would
+reach nobody; this is the one piece of Maven's configuration jrs reads.
+`${user.home}` is the one property expanded, and a settings file that cannot
+be understood stops the command and names `--repo`. `-Dmaven.repo.local` is a
+flag on one `mvn` command, and `--repo` is its counterpart here. The jar
+`jrs package` wrote cannot go as it is: its `Class-Path` names this
+machine's cache, and on a consumer's classpath those jars would load beside
+the versions the consumer's own mediation chose. The jar for the repository
+is written to `target/.jrs/install/`.
+
+Each file is written as the cache writes one: to a temporary file in the
+destination directory, then renamed (SPEC §8.6), so a consumer resolving at
+the same moment never reads half a jar, and the jar and the POM get a `.sha1`
+beside them, without which a consumer warns that it could not verify them. The
+phase line is `Installed <group>:<artifact>:<version> to <dir>`. It also takes
+`--no-build-cache`, as every command that builds does.
 
 It also writes `maven-metadata-local.xml` beside the version directory, as
 Maven does, listing the installed versions, so `jrs outdated` and Maven's
@@ -179,8 +173,10 @@ its absence as "installed locally", which is the truth.
 `[project]` has no group: a jrs project was never something another
 project depends on. `jrs install` needs one, so `[project]` gains
 `group`, optional, required by `jrs install` alone (exit `2` naming the
-key when missing). `jrs migrate` writes it from `<groupId>` or Gradle's
-`group`. The artifact ID is `project.name`.
+key when missing). `jrs migrate` writes it from `<groupId>` or a literal
+Gradle `group = ...`. The artifact ID is `project.name`. `install` also
+becomes a reserved task name, like every command: a manifest with a
+`[tasks.install]` has to rename it.
 
 ### 4.4 The POM
 
@@ -202,7 +198,9 @@ were resolved, not as they were declared:
 No `<dependencyManagement>`, no `<parent>`, no BOM import. The POM states
 what this jar was built and tested against; a consumer's own mediation
 decides the rest. Writing each version concretely means a consumer does not
-need the producer's `[managed]` to resolve it.
+need the producer's `[managed]` to resolve it. The exclusions a BOM declares
+on a managed dependency (SPEC §8.9) are not written: they are not in the
+manifest, and a consumer that wants them imports the BOM.
 
 ### 4.5 Workspaces
 
@@ -210,8 +208,8 @@ need the producer's `[managed]` to resolve it.
 each with its own POM. A module dependency on another member becomes a
 dependency on that member's `group:name:version`, so installing a member
 installs the members it depends on first, as `-p` builds them. A member's
-`group` falls back to the root's `[project] group` when the root has one;
-open question 1 asks whether a pure aggregator may give one.
+`group` falls back to `[workspace] group`, then to the root's `[project]
+group`.
 
 ### 4.6 The consumer, the lockfile and snapshots
 
@@ -236,9 +234,10 @@ else. What follows is the resolver's behaviour today, unchanged:
   downstream.
 - **A release version** is pinned by checksum in the consumer's
   `jrs.lock`. Installing different bytes under the same release version
-  fails the consumer's next build with a checksum mismatch, which is the
-  right outcome; `jrs install` warns when it overwrites a release version
-  whose jar differs, and suggests a `-SNAPSHOT`.
+  fails a consumer that has to fetch the jar with a checksum mismatch, which
+  is the right outcome; a consumer with the old jar in its cache goes on
+  building against the bytes it pinned. `jrs install` warns when it
+  overwrites a release version whose jar differs, and suggests a `-SNAPSHOT`.
 
 `jrs install` reads the producer's `jrs.lock` as any build does and never
 writes the consumer's.
@@ -259,47 +258,7 @@ snapshot reinstall is picked up by the consumer's next build; a release
 reinstall with different bytes fails it. Unit tests for the POM table in
 §4.4, and `tests/workspace.rs` for a member depending on a member.
 
-## 5. Changes elsewhere
+## 5. Decided
 
-- **SPEC.md §1.2.** "Publishing artifacts to a repository" becomes
-  "Publishing artifacts to a remote repository; `jrs install` writes to a
-  local one (REACH.md §4)".
-- **SPEC.md §4.** `project.group`; `file://~/` in `[repositories]`.
-- **SPEC.md §5.1.** A row for `jrs install`.
-- **DOCS.md.** The command table gains `jrs install`; `[project]` gains
-  `group`; `[repositories]` shows the local repository; the new agent
-  section (§3); Installation lists `brew`, `scoop` and `winget` once
-  they work.
-- **website/docs/index.html** in step with each, and the home page's
-  install block offers `brew install` beside `curl | sh`.
-- **website/install.sh** mentions `scoop` and `winget` when run on
-  Windows.
-- **ARCH.md.** `src/install.rs` in the module map.
-- **CLAUDE.md.** The release paragraph names the publishing jobs and their
-  secrets.
-- **`jrs completions`.** `jrs install` and its flags.
-- **The IntelliJ plugin** needs nothing; `jrs install` could be a tool
-  window action later.
-
-## 6. Order
-
-1. **§3, the agent guide.** Documentation only; a day.
-2. **§2, package managers.** CI and two new repositories; the first
-   winget and Marketplace submissions by hand.
-3. **§4, `jrs install`.** A POM writer, a manifest key, `~` in
-   repository URLs, and the SPEC change. It is the one that most needs
-   [CORPUS.md](../CORPUS.md)'s evidence: a corpus project that depends on a
-   sibling library in another repository would show its value best.
-
-## 7. Open questions
-
-1. **A workspace-wide `group`.** `[project]` is not a shared table
-   (WORKSPACES.md §3). Letting a pure aggregator carry `[workspace] group`
-   is the smallest way to write the group once.
-2. **Honouring `settings.xml`'s `<localRepository>`** and `-Dmaven.repo.local`
-   for `jrs install`'s default. jrs reads no Maven configuration today;
-   `--repo` covers the case, and reading `settings.xml` would be the first
-   time it does.
-3. **Should the agent guide ship as a file `jrs init` writes?** An
-   `AGENTS.md` in every new project is convenient and also opinionated
-   about a file that is the user's.
+`jrs init` does not write an `AGENTS.md`: the file is the user's, so the guide
+gives them a snippet to paste instead.

@@ -91,18 +91,20 @@ A `v*` tag builds and publishes everything, and two steps were still by hand:
 
 ## 4. Reaching more users
 
-[specs/todo/REACH.md](specs/todo/REACH.md)
+[specs/REACH.md](specs/REACH.md)
 
 Cheap work that lowers the cost of trying jrs:
 
-- ⬜ **Scoop and winget**, from the manifests each release already writes.
 - ✅ **The IntelliJ plugin on the JetBrains Marketplace.**
-- ⬜ **A guide for coding agents** in `DOCS.md` and on the website.
-- ⬜ **`jrs install`** into `~/.m2`, so a library can be shared between
+- ✅ **A guide for coding agents** in `DOCS.md` and on the website.
+- ✅ **`jrs install`** into `~/.m2`, so a library can be shared between
   projects in different repositories: the smallest form of publishing, and
   a SPEC §1.2 decision.
 
-**Status: ⬜ to do.**
+Scoop and winget were dropped: `brew` and `install.sh` stay the ways to
+install jrs, and on Windows the release's zip.
+
+**Status: ✅ done.**
 
 ## 5. Splitting the two largest modules
 

@@ -24,6 +24,7 @@ published at [getjrs.dev/docs](https://getjrs.dev/docs/).
 - [Annotation processors](#annotation-processors)
 - [Shell completions](#shell-completions)
 - [Editors and IntelliJ IDEA](#editors-and-intellij-idea)
+- [For coding agents and scripts](#for-coding-agents-and-scripts)
 - [Migrating an existing project](#migrating-an-existing-project)
 - [Compatibility](#compatibility)
 - [Development](#development)
@@ -1739,6 +1740,63 @@ it.
 
 For an IDE without jrs support, point its project at the source roots and add
 the jars `jrs classpath --test` prints as libraries.
+
+## For coding agents and scripts
+
+Everything below is what jrs already does; none of it needs a special mode.
+
+**The loop.** `jrs build`, then `jrs test`, then `jrs run -- <args>`. While
+fixing something, `jrs test --filter <regex>`, `--method <class#method>` and
+`--rerun-failed` narrow the run. `jrs test` runs only the test classes a change
+since the last run reaches, so fewer classes than exist can be correct;
+`jrs test --all` runs every one.
+
+**Output.** Animation and colour are already off when stderr is not a terminal,
+or when `NO_COLOR` or `TERM=dumb` is set, and a CI variable such as `CI` turns the
+animation off; `--progress never --color never` says so outright. Phase lines go
+to stderr. What a command reports goes to stdout: `classpath`, `metadata`, `tree`,
+`outdated`, `licenses`, `task --list`, the JUnit tree and the program `jrs run`
+starts.
+
+**Exit codes.**
+
+| Code | Meaning | What to do |
+| --- | --- | --- |
+| `0` | Success | |
+| `1` | A build or test failed | Fix the code |
+| `2` | Usage or manifest error | Fix the command or `jrs.toml` |
+| `101` | A bug in jrs | Report it |
+
+`jrs run` and `jrs task <name>` return the program's own code.
+
+**Errors.** jrs prints `error: ...`. The toolchain's output comes through
+verbatim, `javac`'s `File.java:12: error:` lines and the JUnit tree, so the usual
+parsers work. JUnit's XML is in `target/test-reports`.
+
+**Changing dependencies.** Use `jrs add` and `jrs remove` rather than editing
+`jrs.toml`: they keep its order and comments, and re-resolve. Run
+`jrs tree --why <artifact>` before adding an exclusion.
+
+**Reading the project.** `jrs metadata --no-deps` gives the roots and outputs
+without touching the network, and `jrs metadata` adds the classpaths. Its
+`version` goes up only when a key changes meaning or goes away.
+
+**What not to do.** Don't edit `jrs.lock` by hand or delete it to fix resolution:
+`jrs update` exists. Don't run `java` or `javac` against paths in `target/`: use
+`jrs run`, `jrs test`, or `jrs classpath` for an ad-hoc run.
+
+A project can paste this into its own `AGENTS.md`:
+
+```markdown
+This project builds with jrs (https://getjrs.dev/docs/).
+
+- Build: `jrs build`. Test: `jrs test`; `jrs test --all` runs every class, since
+  `jrs test` alone runs only what a change reaches. Run: `jrs run -- <args>`.
+- Exit code 1 means fix the code; 2 means fix the command or `jrs.toml`.
+- Change dependencies with `jrs add` and `jrs remove`, and re-resolve with
+  `jrs update`. Never edit `jrs.lock`.
+- `jrs metadata --no-deps` prints the project's layout as JSON.
+```
 
 ## Migrating an existing project
 
