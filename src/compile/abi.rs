@@ -1459,8 +1459,17 @@ mod tests {
         std::fs::write(&memo, format!("{stamp} {planted}")).unwrap();
         assert_eq!(api_digest_remembered(&dir, &memo).unwrap(), planted);
 
-        // A file that moved is read, whatever the memo says.
+        // A file that moved is read, whatever the memo says. It keeps its
+        // size, and a write this soon can land in the same clock tick (15 ms
+        // on Windows), so its time is moved by hand.
+        let written = std::fs::metadata(&class).unwrap().modified().unwrap();
         std::fs::write(&class, calc(&[0x1a, 0xac], 2, &[], 0)).unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&class)
+            .unwrap()
+            .set_modified(written + Duration::from_secs(1))
+            .unwrap();
         assert_eq!(
             api_digest_remembered(&dir, &memo).unwrap(),
             api_digest(&dir).unwrap()
